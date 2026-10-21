@@ -375,6 +375,12 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - 控制台提交：submitted_by=admin（会话固定）；node 帧提交：submitted_by=node_id（hub 按连接身份覆盖）
 - submitted_by 仅作显示与审计标签，鉴权依据是会话/令牌本身
 
+### A2A 兼容端点（P3 收尾，2026-10-22）
+
+- `GET /.well-known/agent.json`（免鉴权，A2A 发现惯例）：AgentCard（对齐 A2A v0.2.x），skills 由全网 exposed 目录聚合（id=`node_id/agent`）；只含能力元数据，ExecProfile/令牌/工作区互斥键一概不出
+- `POST /a2a/rpc`（Bearer PAT `smsw_` 或会话 cookie，与现有同一鉴权）：JSON-RPC 2.0 手写分发（零新依赖）；`message/send` 等价 POST /api/v1/tasks（submitted_by=a2a，messageId 映射幂等键 `a2a:<id>`）、`tasks/get` 等价 GET /tasks/{id}；未知方法 -32601、任务不存在 -32001。外部协议兼容层本身即 agent 调用面（与 MCP 同位），故不另设六.六工具行
+- 状态映射（七态→A2A TaskState）：submitted/offered/acknowledged→submitted、running→working、completed→completed、failed→failed、needs_review→input-required（原始状态保留于 metadata.swarmmind_status）；已知偏差清单见 internal/hub/api/a2a.go 头注
+
 ## 六.六、MCP 服务（agent 统一入口，2026-10-21 立）
 
 > 定位：MCP 与 REST 管理面、双端控制台同为**一等公民接口面**。此后所有面向管理面的新功能，
