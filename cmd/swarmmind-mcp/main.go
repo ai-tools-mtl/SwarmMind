@@ -177,8 +177,9 @@ func tools() []toolDef {
 			"group_id": s("群 ID"),
 			"since":    n("已见最大 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
 		}, "group_id")},
-		{Name: "swarmmind_group_close", Description: "结束协作群：置 concluded 终态（不可回退、不再收消息）；重复关闭幂等", InputSchema: obj(map[string]any{
+		{Name: "swarmmind_group_close", Description: "结束协作群：置 concluded 终态（不可回退、不再收消息）；重复关闭幂等。关闭者默认记为 mcp，可传 by 自定义审计署名", InputSchema: obj(map[string]any{
 			"group_id": s("群 ID"),
+			"by":       s("关闭者标识（可选，默认 mcp；记入群审计 closed_by，重复关闭不改写首次记录）"),
 		}, "group_id")},
 	}
 }
@@ -1050,7 +1051,13 @@ func toolGroupClose(args map[string]any) (string, error) {
 	if gid == "" {
 		return "", fmt.Errorf("group_id 必填")
 	}
-	code, data, err := hubAPI("POST", "/api/v1/groups/"+gid+"/close", map[string]any{"by": "mcp"})
+	// 审计粒度：by 可选（缺省 mcp）——谁关的群记谁，不再硬编码。
+	by, _ := args["by"].(string)
+	by = strings.TrimSpace(by)
+	if by == "" {
+		by = "mcp"
+	}
+	code, data, err := hubAPI("POST", "/api/v1/groups/"+gid+"/close", map[string]any{"by": by})
 	if err != nil {
 		return "", err
 	}

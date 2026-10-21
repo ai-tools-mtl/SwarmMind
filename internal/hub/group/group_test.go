@@ -2,6 +2,8 @@ package group
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -234,6 +236,20 @@ func TestBodyLimit(t *testing.T) {
 	if _, err := s.PostMessage(g.ID, "admin", KindUser, over); !errors.Is(err, ErrBodyTooLarge) {
 		t.Fatalf("%d 字节应 ErrBodyTooLarge, got %v", MaxBodyBytes+1, err)
 	}
+
+	// 中文多字节边界（UTF-8 每汉字 3 字节）：证明 len() 是字节口径而非字符数——
+	// 2730 字=8190 字节恰好放行，2731 字=8193 字节拒绝。
+	hin := strings.Repeat("汉", 2730)
+	if got := len(hin); got != MaxBodyBytes-2 {
+		t.Fatalf("用例自检: 2730 汉字应 %d 字节, got %d", MaxBodyBytes-2, got)
+	}
+	if _, err := s.PostMessage(g.ID, "admin", KindUser, hin); err != nil {
+		t.Fatalf("%d 字节中文应放行: %v", len(hin), err)
+	}
+	hout := strings.Repeat("汉", 2731)
+	if _, err := s.PostMessage(g.ID, "admin", KindUser, hout); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("%d 字节中文应 ErrBodyTooLarge, got %v", len(hout), err)
+	}
 }
 
 // TestPersistRestartRecovery 覆盖：重启（重开 store）后群/消息/seq 完整恢复，
@@ -306,6 +322,56 @@ func TestInvalidMessages(t *testing.T) {
 		if _, err := s.PostMessage(g.ID, tc.from, tc.kind, tc.body); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("(%q,%q,%q) 应 ErrInvalid, got %v", tc.from, tc.kind, tc.body, err)
 		}
+	}
+}
+
+// TestLoadNormalizesBadBudget 覆盖：手改快照把 max_rounds 改成 0/负值后重开
+// store，加载时归一为默认 20——预算不被误判为立即耗尽（首条 agent 消息可发）；
+// 归一后的预算随先写后见落盘覆盖手改值。
+func TestLoadNormalizesBadBudget(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := `{
+  "groups": {
+    "g-zero": {"group_id": "g-zero", "goal": "零预算", "status": "discussing", "host": "admin", "members": [], "budget": {"max_rounds": 0}, "created_at": "2026-10-22T00:00:00Z"},
+    "g-neg":  {"group_id": "g-neg",  "goal": "负预算", "status": "discussing", "host": "admin", "members": [], "budget": {"max_rounds": -5}, "created_at": "2026-10-22T00:00:01Z"}
+  },
+  "messages": {"g-zero": [], "g-neg": []},
+  "seqs": {"g-zero": 0, "g-neg": 0}
+}`
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(snapshot), 0o644); err != nil {
+		t.Fatalf("写手改快照: %v", err)
+	}
+
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开手改快照: %v", err)
+	}
+	defer s.Close()
+	for _, gid := range []string{"g-zero", "g-neg"} {
+		g, ok := s.GetGroup(gid)
+		if !ok {
+			t.Fatalf("%s 应可查", gid)
+		}
+		if g.Budget.MaxRounds != DefaultMaxRounds {
+			t.Fatalf("%s 预算应归一为 %d, got %d", gid, DefaultMaxRounds, g.Budget.MaxRounds)
+		}
+		// 行为验证：0/负预算不会被立即判耗尽，agent 消息可发
+		if _, err := s.PostMessage(gid, "a", KindAgent, "first"); err != nil {
+			t.Fatalf("%s 首条 agent 消息应放行, got %v", gid, err)
+		}
+	}
+	// 归一随变更落盘：重启后手改值已被覆盖
+	if err := s.Close(); err != nil {
+		t.Fatalf("关闭 store: %v", err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重开 store: %v", err)
+	}
+	defer s2.Close()
+	g, _ := s2.GetGroup("g-zero")
+	if g.Budget.MaxRounds != DefaultMaxRounds {
+		t.Fatalf("落盘后预算应保持 %d, got %d", DefaultMaxRounds, g.Budget.MaxRounds)
 	}
 }
 
