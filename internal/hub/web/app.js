@@ -109,6 +109,9 @@ const SKIPS = {
 };
 const BATCH_STATES = { creating: '收尾中 · creating', complete: '已完成 · complete' };
 const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
+/* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
+const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
+const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
 
 /* ---------- 全局状态 ---------- */
 const S = {
@@ -122,6 +125,11 @@ const S = {
   C: freshControl(),           // 运维控制页状态
   tokens: [],                  // 访问令牌列表
   newToken: null,              // 刚创建的令牌明文（仅展示一次）
+  groups: [],                  // 群聊列表（GROUP-RFC 六）
+  groupMsgCounts: {},          // group_id → 消息数（列表端点不返回，进群聊页时补拉计数）
+  groupId: '',                 // hash 路由 #/groups/{id} 的群 ID；空为群列表视图
+  groupView: null,             // 群详情消息缓存 {id, lastSeq, msgs[]}；lastSeq 是增量拉取锚点
+  groupsOff: false,            // hub 未接线群存储（端点 503）
 };
 function freshControl() {
   return { view: 'form', stage: 'idle', agent: '', targets: {}, stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null,
@@ -158,7 +166,7 @@ function errLine(data) {
 }
 function sessionExpired() {
   if (!S.authed) { S.authed = false; route(); return; }
-  S.authed = false; S.loaded = false; S.drawer = null; S.C = freshControl();
+  S.authed = false; S.loaded = false; S.drawer = null; S.C = freshControl(); S.groupView = null;
   render();
   location.hash = '#/login';
   toast('登录会话已失效 · 请重新登录');
@@ -183,6 +191,29 @@ function byCreatedDesc(a, b) {
   const x = a.created_at || '', y = b.created_at || '';
   return x < y ? 1 : x > y ? -1 : (a.id < b.id ? -1 : 1);
 }
+function byGroupCreatedDesc(a, b) {
+  const x = a.created_at || '', y = b.created_at || '';
+  return x < y ? 1 : x > y ? -1 : (a.group_id < b.group_id ? -1 : 1);
+}
+/* ---------- 群聊数据加载（GROUP-RFC 六）：进群聊页时拉取（同 tokens 页模式） ---------- */
+async function loadGroups() {
+  const r = await api('GET', '/api/v1/groups').catch(() => null);
+  if (!r || r.code !== 200) {
+    if (r && r.code === 503) S.groupsOff = true;   // hub 未接线群存储
+    return;
+  }
+  S.groupsOff = false;
+  S.groups = (r.data?.groups || []).slice().sort(byGroupCreatedDesc);
+  /* 列表端点不返回消息数：按群并发补拉一次计数。seq 自 1 单调递增且消息
+   * 只追加不删除，末条 seq 即消息总数。 */
+  await Promise.all(S.groups.map(async g => {
+    const m = await api('GET', `/api/v1/groups/${encodeURIComponent(g.group_id)}/messages?since=0`).catch(() => null);
+    if (m && m.code === 200) {
+      const list = m.data?.messages || [];
+      S.groupMsgCounts[g.group_id] = list.length ? list[list.length - 1].seq : 0;
+    }
+  }));
+}
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   try {
@@ -195,21 +226,27 @@ async function pollTick() {
      * 下拉选择与输入——「选择能力时经常刷新」根因）。数据静默更新。 */
     if (changed) {
       if (S.page === 'control' && S.C.view === 'form') return;
+      if (S.page === 'groups' && S.groupId) return;   // 群详情由 3s 增量追加维护，整页重绘会清空发言输入与滚动位置
       render();
     }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'policy', 'tokens'];
+const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'policy', 'tokens', 'groups'];
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [p, arg] = h.split('/');
   if (!S.authed) { S.page = 'login'; render(); return; }
   if (p === 'tasks' && arg && STATES[arg]) { S.f = { status: arg, trace: '', by: '', error: '', from: '', to: '' }; }
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
+  S.groupId = S.page === 'groups' && arg ? arg : '';
   render();
   if (S.authed && S.page === 'tokens') loadTokens().then(() => { if (S.page === 'tokens') render(); });
+  if (S.authed && S.page === 'groups') {
+    loadGroups().then(() => { if (S.page === 'groups') { render(); if (S.groupId) scrollMsgToBottom(); } });
+    if (S.groupId) enterGroupView();
+  }
   window.scrollTo(0, 0);
 }
 function go(p, status = '') {
@@ -247,7 +284,7 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置']];
+  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
@@ -263,7 +300,7 @@ function head(title, desc, action = '') {
   return `<div class="page-head"><div><h1>${title}</h1><p class="muted">${desc}</p></div><div class="actions">${action}</div></div>`;
 }
 function metric(label, value, desc, cls = '') { return `<div class="card${cls ? ' ' + cls : ''}"><small>${label}</small><div class="metric">${value}</div><small>${desc}</small></div>`; }
-function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || s)}</span>`; }
+function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || GROUP_STATES[s] || s)}</span>`; }
 function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线' : '离线'}</span>`; }
 function warnNotice(title, body) { return `<div class="notice warn"><b>${title}</b><br>${body}</div>`; }
 const fmtTime = s => (s && !String(s).startsWith('0001-01-01')) ? String(s).replace('T', ' ').slice(0, 16) : '';
@@ -837,6 +874,166 @@ async function submitToken(form) {
   } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
 }
 
+/* ---------- 群聊（GROUP-RFC 六 MVP）：列表 + 详情时间线 ---------- */
+function groupsPage() {
+  return S.groupId ? groupDetailPage() : groupListPage();
+}
+function summarize(s, n = 64) {
+  s = String(s || '');
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function groupListPage() {
+  return head('群聊', '人与智能体的协作空间：建群讨论目标，代理发言有轮数预算，你可以随时插话与决策。', button('＋ 新建协作群', 'group-new', 'primary'))
+    + (S.groupsOff ? `<div class="notice warn spaced"><b>群聊功能未启用</b>：当前 hub 未接线群存储，请联系管理员升级 hub 配置。</div>` : '')
+    + `<section class="card${S.groupsOff ? ' spaced' : ''}">
+    ${S.groups.length ? `<div class="group-list">${S.groups.map(groupCard).join('')}</div>`
+    : `<div class="empty"><h2>还没有协作群</h2><p class="muted">创建一个群，把协作目标和成员智能体拉进来讨论；代理发言默认上限 20 轮，用尽后等待人工决策。</p>${S.groupsOff ? '' : button('＋ 新建协作群', 'group-new', 'primary')}</div>`}
+    ${S.groups.length ? `<p class="footer-note">${S.groups.length} 个群 · 时间为 UTC · 群结束后时间线保留、只读。</p>` : ''}</section>`;
+}
+function groupCard(g) {
+  const members = g.members || [];
+  return `<button class="group-card" data-act="group-open" data-id="${esc(g.group_id)}" aria-label="进入群聊：${esc(summarize(g.goal, 24))}">
+    <div class="row"><strong>${esc(summarize(g.goal))}</strong>${badge(g.status)}</div>
+    <div class="group-members">${members.length ? members.map(m => `<span class="badge">${esc(m)}</span>`).join(' ') : '<small class="muted">建群时未选择成员</small>'}</div>
+    <div class="row"><small class="muted">${esc(fmtTime(g.created_at))} 创建</small><small class="muted">${S.groupMsgCounts[g.group_id] || 0} 条消息</small></div>
+  </button>`;
+}
+function isBudgetExhausted(g, msgs) {
+  const cap = g?.budget?.max_rounds ?? 20;
+  let n = 0;
+  for (const m of msgs) if (m.kind === 'agent') n++;
+  return n >= cap;
+}
+function groupMsgHtml(m) {
+  const cls = m.kind === 'user' ? 'msg-user' : m.kind === 'system' ? 'msg-system' : 'msg-agent';
+  return `<li class="msg ${cls}" data-seq="${m.seq}">
+  <div class="msg-meta"><b>${esc(m.from)}</b> · ${esc(GROUP_KINDS[m.kind] || m.kind)} · ${esc(fmtFull(m.created_at))}</div>
+  <div class="msg-body">${esc(m.body)}</div>
+  </li>`;
+}
+function groupDetailPage() {
+  const g = S.groups.find(x => x.group_id === S.groupId);
+  if (!g) {
+    const missing = S.groups.length > 0;   // 列表已加载仍找不到：确实不存在
+    return head('协作群', '', button('← 返回群列表', 'go-groups', 'link'))
+      + `<section class="card"><div class="empty"><h2>${missing ? '找不到该群' : '正在加载群信息'}</h2>
+      <p class="muted">${missing ? '该群不存在或 ID 有误。' : '正在从中心端拉取群列表，请稍候…'}</p>
+      ${missing ? button('返回群列表 →', 'go-groups', 'primary') : ''}</div></section>`;
+  }
+  const G = S.groupView && S.groupView.id === S.groupId ? S.groupView : null;
+  const msgs = G ? G.msgs : [];
+  const concluded = g.status === 'concluded';
+  const members = g.members || [];
+  const agentUsed = msgs.filter(m => m.kind === 'agent').length;
+  const budgetBanner = `<div id="group-budget">${warnNotice('代理发言轮次已达上限，等待人工决策', `智能体发言已达上限 ${g.budget?.max_rounds ?? 20} 条：你仍可插话，或关闭本群结束讨论。`)}</div>`;
+  return head('协作群 · ' + esc(summarize(g.goal, 32)), `${concluded ? `已由 ${esc(g.closed_by || 'admin')} 结束` : '讨论进行中'} · 创建于 ${esc(fmtFull(g.created_at))}`,
+    (concluded ? '' : button('关闭群聊', 'group-close', 'danger')) + button('← 返回群列表', 'go-groups', 'link'))
+    + `<section class="card">
+    <div class="row"><h2>讨论时间线</h2><span class="row" style="gap:8px">${badge(g.status)}<small class="muted">${members.length} 名成员</small></span></div>
+    ${members.length ? `<div class="group-members">${members.map(m => `<span class="badge">${esc(m)}</span>`).join(' ')}</div>` : '<p class="muted">建群时未选择成员智能体。</p>'}
+    <p class="muted">协作目标：${esc(g.goal)}</p>
+    <div id="group-budget-slot"></div>
+    ${isBudgetExhausted(g, msgs) ? budgetBanner : ''}
+    <div id="group-msgwrap" class="msgwrap"><ol id="group-msgline" class="msgline">${msgs.map(groupMsgHtml).join('')}</ol>
+    ${msgs.length ? '' : '<p id="group-msghint" class="muted">还没有发言：写下第一条消息，或等待成员智能体响应。</p>'}</div>
+    ${concluded
+    ? `<div class="notice spaced">本群已结束（${esc(g.closed_by || 'admin')} 于 ${esc(fmtFull(g.closed_at || ''))} 关闭）：时间线只读，不能再发言。</div>
+       <div class="sayline spaced"><textarea rows="2" disabled placeholder="群已结束，不能再发言"></textarea><button class="primary" disabled>发送</button></div>`
+    : `<div class="sayline spaced"><textarea id="group-say" rows="2" placeholder="以 admin 身份发言 · Enter 发送，Shift+Enter 换行"></textarea><button id="group-send" data-act="group-send" class="primary">发送</button></div>`}
+    <p class="footer-note">消息每 3 秒增量刷新 · 智能体发言预算 ${g.budget?.max_rounds ?? 20} 条（已用 ${agentUsed} 条）。</p>
+    </section>`;
+}
+/* enterGroupView 进入群详情：首次全量补齐（since=0），重进沿用缓存增量续拉
+ * （消息账本只追加、seq 单调，缓存永不过期）。 */
+async function enterGroupView() {
+  const id = S.groupId;
+  if (!id) return;
+  if (!S.groupView || S.groupView.id !== id) S.groupView = { id, lastSeq: 0, msgs: [] };
+  await pullGroupMessages();
+}
+/* pullGroupMessages 增量拉取：GET messages?since=lastSeq，只追加新消息到
+ * 时间线尾部（不重绘整页，与任务页的重绘式刷新不同）；按 data-seq 去重，
+ * 全量重绘与增量追加两条路径并发到达也不会画重。 */
+async function pullGroupMessages() {
+  const G = S.groupView;
+  if (!G || G.id !== S.groupId) return;
+  const r = await api('GET', `/api/v1/groups/${encodeURIComponent(G.id)}/messages?since=${G.lastSeq}`).catch(() => null);
+  if (!r || r.code !== 200) return;
+  const fresh = (r.data?.messages || []).filter(m => m.seq > G.lastSeq);
+  if (!fresh.length) return;
+  G.lastSeq = fresh[fresh.length - 1].seq;
+  G.msgs.push(...fresh);
+  if ((S.groupMsgCounts[G.id] || 0) < G.lastSeq) S.groupMsgCounts[G.id] = G.lastSeq;
+  const line = $('#group-msgline');
+  if (line && G.id === S.groupId) {   // 页面仍是本群才动 DOM；已切走只留缓存
+    $('#group-msghint')?.remove();
+    for (const m of fresh) {
+      if (!line.querySelector(`[data-seq="${m.seq}"]`)) line.insertAdjacentHTML('beforeend', groupMsgHtml(m));
+    }
+    scrollMsgToBottom();
+    syncBudgetBanner(false);
+  }
+}
+function scrollMsgToBottom() {
+  const w = $('#group-msgwrap');
+  if (w) w.scrollTop = w.scrollHeight;
+}
+/* syncBudgetBanner 预算黄条：常规按本地消息计数判定；服务端 409 budget_exhausted
+ * 时 force 直出（他端代理消息尚未增量到位也立即提示）。 */
+function syncBudgetBanner(force) {
+  const slot = $('#group-budget-slot');
+  const g = S.groups.find(x => x.group_id === S.groupId);
+  if (!slot || !g || !S.groupView || S.groupView.id !== S.groupId) return;
+  if ((force || isBudgetExhausted(g, S.groupView.msgs)) && !$('#group-budget')) {
+    slot.innerHTML = `<div id="group-budget">${warnNotice('代理发言轮次已达上限，等待人工决策', `智能体发言已达上限 ${g.budget?.max_rounds ?? 20} 条：你仍可插话，或关闭本群结束讨论。`)}</div>`;
+    toast('代理发言轮次已达上限 · 等待人工决策');
+  }
+}
+async function sendGroupMsg() {
+  const G = S.groupView, ta = $('#group-say');
+  if (!G || !ta) return;
+  const body = ta.value.trim();
+  if (!body) { toast('请输入发言内容'); ta.focus(); return; }
+  const btn = $('#group-send');
+  if (btn) btn.disabled = true;
+  let r = null;
+  try {
+    r = await api('POST', `/api/v1/groups/${encodeURIComponent(G.id)}/messages`, { from: 'admin', kind: 'user', body });
+  } catch (e) {
+    if (e.network) toast('结果未知 · 网络中断：发言可能已送达，以时间线为准');
+  }
+  if (btn) btn.disabled = false;
+  if (!r) return;
+  if (r.code === 201) {
+    ta.value = '';
+    await pullGroupMessages();   // 发言后立即拉一次增量，不等 3s 轮询
+  } else if (r.data?.error === 'group_concluded') {
+    const g = S.groups.find(x => x.group_id === G.id);
+    if (g) g.status = 'concluded';
+    render();
+    toast('群已结束，不能再发言');
+  } else if (r.data?.error === 'budget_exhausted') {
+    syncBudgetBanner(true);
+  } else if (r.data?.error === 'body_too_large') {
+    toast('发言超过 8KB 上限，请拆成多条发送');
+  } else toast('发送失败：' + errLine(r.data));
+}
+/* groupCreateModal 建群弹层：goal 必填；成员从能力目录多选（值 = node/agent）；
+ * 代理发言预算走服务端默认 20（MVP 建群端点不支持自定义，展示为只读避免假功能）。 */
+function groupCreateModal() {
+  openLayerPlain(`${modalHead('新建协作群')}
+  <div class="notice">创建即进入「进行中」：你与成员智能体可在群内讨论，代理发言总轮数默认 20，用尽后等待人工决策。</div>
+  <label class="spaced">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
+  <h3>选择成员智能体（可多选）</h3>
+  ${S.directory.length ? `<div class="checkline-grid">${S.directory.map(d => {
+    const v = d.node_id + '/' + d.card.name;
+    return `<label class="checkline"><input type="checkbox" data-group-member="${esc(v)}"> ${esc(d.card.name)}（${esc(d.node_id)}）</label>`;
+  }).join('')}</div>` : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
+  <label class="spaced">代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
+  <div class="actions spaced">${button('创建群聊', 'group-create', 'primary')}${button('取消', 'close', 'link')}</div>
+  <p class="footer-note">建群后自动打开群详情；成员智能体经节点侧接入批次后才会自动发言。</p>`);
+}
+
 /* ---------- 动作表（事件委托） ---------- */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
@@ -868,6 +1065,50 @@ const ACT = {
     if (r && r.code === 200) {
       await loadTokens(); closeLayer(); render(); toast('令牌已撤销');
     } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
+  },
+  /* ---------- 群聊动作（GROUP-RFC 六） ---------- */
+  'go-groups': () => go('groups'),
+  'group-open': b => go('groups/' + b.dataset.id),
+  'group-new': () => groupCreateModal(),
+  'group-create': async () => {
+    const goal = $('#group-goal')?.value.trim() || '';
+    if (!goal) { toast('请先填写协作目标'); $('#group-goal')?.focus(); return; }
+    const members = [...document.querySelectorAll('[data-group-member]:checked')].map(c => c.dataset.groupMember);
+    const btn = document.querySelector('[data-act="group-create"]');
+    if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+    const r = await api('POST', '/api/v1/groups', { goal, members }).catch(() => null);
+    if (r && r.code === 201) {
+      closeLayer();
+      await loadGroups();
+      render();
+      toast('群已创建 —— 下一步：点击群卡片进入讨论');
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
+      toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
+    }
+  },
+  'group-send': () => sendGroupMsg(),
+  'group-close': () => {
+    const g = S.groups.find(x => x.group_id === S.groupId);
+    if (!g) return;
+    openLayerPlain(`${modalHead('关闭群聊')}
+    <div class="notice warn">关闭后本群进入终态：所有成员（含你）都不能再发言，且不可恢复；时间线与历史仍可查看。</div>
+    <p class="muted spaced">协作目标：${esc(g.goal)}</p>
+    <div class="actions spaced">${button('确认关闭', 'group-close-confirm', 'danger', `data-id="${esc(g.group_id)}"`)}${button('取消', 'close', 'link')}</div>`);
+  },
+  'group-close-confirm': async b => {
+    b.disabled = true; b.textContent = '关闭中…';
+    const r = await api('POST', '/api/v1/groups/' + encodeURIComponent(b.dataset.id) + '/close', { by: 'admin' }).catch(() => null);
+    if (r && r.code === 200) {
+      const i = S.groups.findIndex(g => g.group_id === b.dataset.id);
+      if (i >= 0) S.groups[i] = r.data;
+      closeLayer();
+      render();
+      toast('群已结束 · 时间线保留，不能再发言');
+    } else {
+      b.disabled = false; b.textContent = '确认关闭';
+      toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
+    }
   },
   revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`),
   'drawer-refresh': async b => {
@@ -983,14 +1224,14 @@ async function copyText(value, label) {
 }
 
 /* ---------- 事件绑定（委托） ---------- */
-const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, policy: policyPage, tokens: tokensPage };
+const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, policy: policyPage, tokens: tokensPage, groups: groupsPage };
 function bindEvents() {
   window.addEventListener('hashchange', route);
   document.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (b?.id === 'logout') {
       closeLayer();
-      S.authed = false; S.loaded = false; S.C = freshControl();
+      S.authed = false; S.loaded = false; S.C = freshControl(); S.groupView = null;
       location.hash = '#/login';
       route();
       toast('已退出登录 · 服务端会话仍有效至过期（V0 无撤销端点）');
@@ -1029,10 +1270,23 @@ function bindEvents() {
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeLayer(); return; }
+    /* 群发言框 Enter 直发；isComposing 挡住中文输入法选词回车。 */
+    if (e.target?.id === 'group-say' && e.key === 'Enter' && !e.shiftKey) {
+      if (e.isComposing) return;
+      e.preventDefault();
+      sendGroupMsg();
+      return;
+    }
     const tr = e.target.closest?.('tr[data-task]');
     if (tr && e.target === tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(tr.dataset.task); }
   });
   setInterval(pollTick, 5000);
+  setInterval(groupTick, 3000);   // 群详情消息增量轮询；非群详情页在 groupTick 内跳过
+}
+/* groupTick 群消息 3s 增量：只在已登录、正停留在某群详情时拉取，其余一律跳过。 */
+async function groupTick() {
+  if (!S.authed || S.page !== 'groups' || !S.groupId || document.visibilityState !== 'visible') return;
+  try { await pullGroupMessages(); } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
 }
 
 /* ---------- 启动：会话探测 → 恢复控制台或落登录页 ---------- */
