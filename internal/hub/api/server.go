@@ -90,6 +90,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
+	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard) // A2A 发现卡（免鉴权，SPEC 六.五）
+	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))          // A2A JSON-RPC（与现有同一令牌体系）
 	console := web.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)
