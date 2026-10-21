@@ -163,6 +163,16 @@ func loadState(path string) (*state, error) {
 	if err := json.Unmarshal(b, st); err != nil {
 		return nil, fmt.Errorf("group: 群状态快照损坏 %s: %w", path, err)
 	}
+	// 预算下界护栏：快照是唯一可能注入 MaxRounds<1 的入口（创建路径恒为
+	// DefaultMaxRounds 常量）。0/负值会使 countAgent()>=MaxRounds 恒真，预算在
+	// 首条 agent 消息前即「耗尽」，故加载时归一为默认 20；归一后的内存状态随
+	// 下次先写后见落盘覆盖手改值。
+	for id, g := range st.Groups {
+		if g.Budget.MaxRounds < 1 {
+			g.Budget.MaxRounds = DefaultMaxRounds
+			st.Groups[id] = g
+		}
+	}
 	return st, nil
 }
 

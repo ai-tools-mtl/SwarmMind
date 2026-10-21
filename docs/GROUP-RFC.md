@@ -72,3 +72,17 @@ Session      {(group_id, member) → session_id/resume能力映射}   // 协议�
 - 群是新的信任边界：拉人进群=暴露群历史给新成员，邀请需 host 确认（与 D7 接入主权协调）
 - **阶段归属（codex 建议，采纳）**：V0/P1-P2 只留边界（信封寻址扩展、消息类型命名空间，不实现群状态机）；V0.5/P3 验证持续上下文+控制台鉴权；**P4/V1 交付完整协作空间**（Group、邀请授权、历史补齐、主持权、预算护栏、人 observer/member）；V2/P5 深度桌面联动、跨组织联邦、群端到端加密
 - 业界借鉴：A2A contextId、SLIM 群会话成员控制、Mattermost since 补取、AgentBridge 有界收敛——V1 不引入 SLIM/MLS/新中间件，维持轻量自研路线
+
+## 八、MVP 实现偏差记录（2026-10-22）
+
+> 独立评审后补记：MVP 已合入部分（hub group store + REST + 控制台群聊页 + MCP
+> 五工具，2026-10-21）相对本 RFC 的已知偏差。均属「六、MVP 切法」范围内的裁剪，
+> 逐条注明恢复归属，防后续实现者误把 MVP 现状当 RFC 全量。
+
+1. **预算全维裁为 max_rounds**：四.3 所列 token/墙钟/单次上下文/输出长度/每成员等维度均未实现，仅剩 agent 消息条数一维（默认 20，`group.Store` 代码强制，用尽返回 `budget_exhausted`）。
+2. **群消息不做 node 推送扇出**：三 的 `group_msg_event` 扇出未做；消费侧统一为 REST 增量拉取（`GET /api/v1/groups/{id}/messages?since=seq`，控制台 3s 轮询、MCP `swarmmind_group_messages` 同口径）。
+3. **node 侧不持久化群消息**：node 不保存群消息，last_seq 游标机制（三 可靠性语义）随之未做；留 V2 与推送扇出一并交付。
+4. **协议 6 帧中 group_sync / group_msg_event 未实现**：历史补齐与事件推送由 REST since 增量拉取替代（语义等价：seq 单调 + 只补增量）；group_create / group_msg / group_close / group_task_created 以 REST 端点语义落地（POST groups、POST messages、POST close、转任务注记）。
+5. **发言许可制简化为 @提及触发**：四.1 的许可仲裁未做——成员智能体不因群消息自动启动计算，仅在人点名提及（或其操作者主动经 MCP `swarmmind_group_say`）时参与发言；补历史/重放不触发回复的原则不变。
+
+**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，MVP 仅落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）与 agent 发言预算护栏；群消息当前为**全量持久化**（`groups.json` append-only + seq 账本，无 200 条滚动窗口、无 24h 过期）。200 条滚动窗口与过期清理列入 **P4 关门前清单**（关门 DoD 核实项）：落地前防刷屏挤兑任务信箱的初衷由 max_rounds 预算暂代（仅约束 agent 发言；人/system 发言暂无条数上限，靠 8KiB 单体上限与群终态兜底）。

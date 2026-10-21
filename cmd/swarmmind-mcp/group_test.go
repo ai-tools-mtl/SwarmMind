@@ -161,6 +161,58 @@ func TestGroupToolsFullFlow(t *testing.T) {
 	}
 }
 
+// TestGroupCloseByAudit 覆盖 close 审计粒度：缺省 by 审计记 mcp；显式传 by
+// 落自定义署名。经 REST 列表端点核对 closed_by（MCP 与 REST 同一存储）。
+func TestGroupCloseByAudit(t *testing.T) {
+	realHub(t)
+
+	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "默认署名群"})
+	gidDefault := gidFrom(t, out)
+	mustCall(t, "swarmmind_group_close", map[string]any{"group_id": gidDefault})
+
+	out = mustCall(t, "swarmmind_group_create", map[string]any{"goal": "自定义署名群"})
+	gidCustom := gidFrom(t, out)
+	mustCall(t, "swarmmind_group_close", map[string]any{"group_id": gidCustom, "by": " tester-甲 "})
+
+	code, data, err := hubAPI("GET", "/api/v1/groups", nil)
+	if err != nil || code != 200 {
+		t.Fatalf("拉群列表: code=%d err=%v", code, err)
+	}
+	var listing struct {
+		Groups []struct {
+			ID       string `json:"group_id"`
+			ClosedBy string `json:"closed_by"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(data, &listing); err != nil {
+		t.Fatalf("列表解析: %v", err)
+	}
+	closedBy := map[string]string{}
+	for _, g := range listing.Groups {
+		closedBy[g.ID] = g.ClosedBy
+	}
+	if closedBy[gidDefault] != "mcp" {
+		t.Fatalf("缺省 by 审计应记 mcp, got %q", closedBy[gidDefault])
+	}
+	if closedBy[gidCustom] != "tester-甲" {
+		t.Fatalf("自定义 by 应去空白落库为 tester-甲, got %q", closedBy[gidCustom])
+	}
+}
+
+// gidFrom 从建群人话输出中截取群 ID（「协作群已创建：g-…」行）。
+func gidFrom(t *testing.T, out string) string {
+	t.Helper()
+	i := strings.Index(out, "g-")
+	if i < 0 {
+		t.Fatalf("建群输出应含群 ID, got: %s", out)
+	}
+	gid := out[i:]
+	if j := strings.IndexAny(gid, "\n"); j >= 0 {
+		gid = gid[:j]
+	}
+	return strings.TrimSpace(gid)
+}
+
 // TestGroupToolsErrors 参数缺失与未知群的人话错误。
 func TestGroupToolsErrors(t *testing.T) {
 	realHub(t)
