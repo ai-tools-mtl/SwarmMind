@@ -2554,3 +2554,40 @@ printf 'EVIDENCE_DIR=%s\n' "$T"
 ```
 
 保留脱敏后的结果清单、响应、任务 ID、构建/测试日志、浏览器 trace、真实云机身份和异构 agent 证据。验收报告必须分别记录功能用例与 DoD 结果；缺失真实跨云证据时不得宣布完整验收通过。
+
+## 增补批次（2026-10-22 凌晨：账户/总理/群聊/A2A/取消）
+
+### 账户体系（E2E 已覆盖 E01-E02/E13/E17-E18）
+- TC-A01 密码登录成功/失败（错误密码 401）
+- TC-A02 改用户名/改密码（需当前密码验证，新密码可登录）
+- TC-A03 admin_token 恢复通道重置
+- TC-A04 PAT 创建（明文一次性）→ Bearer 鉴权 → 撤销 → 撤销后 401
+
+### 总理模式（E2E 已覆盖 E10/E10b + 实测）
+- TC-P01 复合目标自动分解（双机磁盘对比）→ 并行派发 → 汇总报告
+- TC-P02 报告含真实数据（非占位回显），needs_review 阻断语义
+- TC-P03 Prime 幂等键规则（prime-<term>-<seq>）重派同键不重复执行
+- TC-P04 预算护栏（工具 ≤60/墙钟 45min）触发时强制收尾在途任务
+
+### 群聊 MVP（hub 骨架已测 11 项，以下为端到端补充）
+- TC-G01 控制台建群（goal+成员）→ 群列表可见
+- TC-G02 发言（user/agent/system）→ seq 单调 → 增量拉取正确
+- TC-G03 agent 发言超 max_rounds → budget_exhausted 拒绝 + 群内黄条
+- TC-G04 关闭群 → concluded 拒收消息（409）→ 重复关闭幂等
+- TC-G05 群转任务：group_ref 提交 → system 消息注入 → 终态自动回流（幂等）
+- TC-G06 消息体 >8KiB → 400（含中文多字节边界）
+
+### A2A 兼容端点（E2E API 已验证三链）
+- TC-A2A-01 GET /.well-known/agent.json 结构与 skills 聚合
+- TC-A2A-02 message/send → 任务创建 → tasks/get 状态映射
+- TC-A2A-03 未知 method -32601 / 鉴权失败 401
+- TC-A2A-04 messageId 幂等（同键同内容不重复建任务，异内容 -32000）
+
+### 任务取消（单测已覆盖，端到端补充）
+- TC-C01 running 任务取消 → cancelled(user_cancelled) → 详情页可见
+- TC-C02 已终态任务取消 → 409
+- TC-C03 取消后同 idem 重派 → 新任务正常执行
+
+### 执行说明补充
+- 群/总理/取消用例依赖 v0.2.x 部署版 hub；E2E 编号沿用 tests/e2e-console.mjs
+- 降级演练见 scripts/drill-degrade.sh（P4 Gate 证据）
