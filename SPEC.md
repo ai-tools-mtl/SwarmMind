@@ -398,6 +398,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
+| swarmmind_decide | 外部 StartLux /v1/decisions（bamboonode/MLX 本地） | 分配决策查询：云端 L0 → 规则兜底 L2 自动降级，响应标 used_level（P4.1） |
 
 ### 语义约定
 
