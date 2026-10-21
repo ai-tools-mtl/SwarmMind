@@ -664,14 +664,19 @@ func TestCloseBudgetForcedClose(t *testing.T) {
 
 // TestValidateAPIListen C4：api_listen 无条件只允许 127.0.0.1（空 host/0.0.0.0/
 // 公网地址/::1 拒绝）；校验与 TLS 模式无关（函数本身模式无关，调用点见 cmd/hub）。
+// TestValidateAPIListen 语义更新（Loop 5 登录制）：合法监听地址均接受
+// （公网管理面由 admin_token 登录制保护，绑定范围属部署决策），仅拒绝
+// 无法解析端口的非法地址。
 func TestValidateAPIListen(t *testing.T) {
-	for _, bad := range []string{"0.0.0.0:8444", ":8444", "192.168.1.5:8444", "[::1]:8444", "example.com:8444"} {
-		if err := ValidateAPIListen(bad); err == nil {
-			t.Errorf("api_listen %q 应被拒绝", bad)
+	for _, good := range []string{"127.0.0.1:8444", "0.0.0.0:8444", ":8444", "192.168.1.5:8444", "[::1]:8444", "example.com:8444"} {
+		if err := ValidateAPIListen(good); err != nil {
+			t.Errorf("api_listen %q 应被接受（登录制下绑定范围属部署决策）, got %v", good, err)
 		}
 	}
-	if err := ValidateAPIListen("127.0.0.1:8444"); err != nil {
-		t.Errorf("api_listen 127.0.0.1 应被接受, got %v", err)
+	for _, bad := range []string{"8444", "127.0.0.1", "example.com"} {
+		if err := ValidateAPIListen(bad); err == nil {
+			t.Errorf("api_listen %q 缺端口应报错", bad)
+		}
 	}
 }
 

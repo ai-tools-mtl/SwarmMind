@@ -64,8 +64,8 @@ func (c *Core) FetchArtifact(taskID string, index int, timeout time.Duration) (*
 		c.muArt.Unlock()
 	}()
 
-	err := c.sendFrame(t.TargetNode, protocol.MsgArtifactFetch, mid,
-		protocol.ArtifactFetchPayload{TaskID: taskID, Index: index}, nil)
+	err := c.sendFetchRequest(t.TargetNode, mid,
+		protocol.ArtifactFetchPayload{TaskID: taskID, Index: index})
 	if err != nil {
 		if errors.Is(err, transport.ErrNoEndpoint) || errors.Is(err, transport.ErrClosed) {
 			return nil, fmt.Errorf("%w: %v", ErrNodeOffline, err)
@@ -91,6 +91,25 @@ func (c *Core) FetchArtifact(taskID string, index int, timeout time.Duration) (*
 
 // errArtifactIgnore 内部哨兵：应答帧不可用但不终止等待（继续等到超时）。
 var errArtifactIgnore = errors.New("core: 忽略该应答帧")
+
+// sendFetchRequest 发起 artifact_fetch 关联请求：请求帧 MessageID 即关联键 mid。
+// 全仓应答关联约定是「ReplyTo = 请求帧 MessageID」（node 侧 handleArtifactFetch、
+// hub 侧 query/submit 应答皆然），故本端发起的请求必须让 waiter 键随 MessageID
+// 上路；sendFrame 的 MessageID 恒为新随机值，只适用于应答/推送场景——曾把 waiter
+// 键错放在 ReplyTo，致 node 回帧关联不上、恒 fetch_timeout。
+func (c *Core) sendFetchRequest(to, mid string, payload protocol.ArtifactFetchPayload) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return c.tr.Send(to, &protocol.Envelope{
+		Version:   protocol.ProtocolVersion,
+		Type:      protocol.MsgArtifactFetch,
+		MessageID: mid,
+		To:        to,
+		Payload:   b,
+	})
+}
 
 // consumArtifactReply 解析 node 应答帧：artifact_data → 校验并取内容；
 // err 帧 → 按码映射；其余 → 忽略。

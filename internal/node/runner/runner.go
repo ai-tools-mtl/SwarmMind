@@ -1,6 +1,6 @@
 // Package runner 实现 CLI adapter（SPEC 五执行环境规则/4.9）：spawn、进程组治理、
-// 超时整组终止、stdin 传递、干净基线 env + 白名单覆盖、stdout/stderr tail、
-// FinalAnswer 提取与产物扫描。
+// 超时整组终止、stdin 传递、干净基线 env + 白名单覆盖 + SWARM_* 系统变量注入、
+// stdout/stderr tail、FinalAnswer 提取与产物扫描。
 //
 // 权限边界（诚实声明，SPEC 4.9）：runner 的权限边界 = 进程启动权 + env 白名单 +
 // ExecProfile 固定命令/参数；agent 自身能做什么由其自带权限机制管（AgentArgs
@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,6 +26,11 @@ import (
 
 // waitDelay 超时/取消后等待管道排干的兜底时长（SPEC 五：WaitDelay=5s 兑底）。
 const waitDelay = 5 * time.Second
+
+// swarmEnvPrefix runner 系统变量命名空间（SPEC 4.9 产物链）：SWARM_TASK_ID、
+// SWARM_OUTPUTS_DIR、SWARM_TRACE_ID。由 runner 在 spawn 前注入，是任务定位
+// 信息而非任务侧覆盖，不受 allow_env 白名单约束，任务 env 不可改写。
+const swarmEnvPrefix = "SWARM_"
 
 // Runner 某一 agent（ExecProfile）的任务执行器。
 type Runner struct {
@@ -88,7 +94,7 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 	argv := append(append([]string(nil), r.profile.AgentArgs...), task.Input.Args...)
 	cmd := exec.CommandContext(ctx, r.profile.Command, argv...)
 	cmd.Dir = r.profile.Workdir
-	cmd.Env = r.buildEnv(task.Input.Env)
+	cmd.Env = r.buildEnv(task)
 	configureProcessGroup(cmd) // Unix：spawn 前 setpgid 独立进程组（SPEC 五）
 	cmd.Cancel = func() error {
 		// 超时/取消：kill(-pgid) 整组终止（exec 默认只杀直接子进程）
@@ -188,10 +194,13 @@ func deniedEnvKey(allow []string, overrides map[string]string) (string, bool) {
 	return "", false
 }
 
-// buildEnv 组装进程环境：base_env + HOME=ConfigHome + 白名单内的任务覆盖。
-// 不继承 daemon 自身环境（SPEC 五：防凭证泄漏进子进程），键序确定。
-func (r *Runner) buildEnv(overrides map[string]string) []string {
-	env := make([]string, len(r.baseEnv), len(r.baseEnv)+len(overrides)+1)
+// buildEnv 组装进程环境：base_env + HOME=ConfigHome + 白名单内的任务覆盖 +
+// SWARM_* 系统变量（SPEC 4.9 产物链：agent 由此得知任务标识与产物输出目录）。
+// 系统变量最后写入；任务侧 SWARM_* 覆盖一律丢弃——白名单仅决定该覆盖是否准入
+//（准入也不生效），保证 runner 注入值不可被任务 env 改写。不继承 daemon 自身
+// 环境（SPEC 五：防凭证泄漏进子进程），键序确定。
+func (r *Runner) buildEnv(task protocol.Task) []string {
+	env := make([]string, len(r.baseEnv), len(r.baseEnv)+len(task.Input.Env)+4)
 	copy(env, r.baseEnv)
 	if r.homeDir != "" {
 		env = append(env, "HOME="+r.homeDir)
@@ -202,9 +211,9 @@ func (r *Runner) buildEnv(overrides map[string]string) []string {
 			wildcard = true
 		}
 	}
-	for k, v := range overrides {
-		if k == "HOME" {
-			continue // 固定值，策略层已拒绝，双保险
+	for k, v := range task.Input.Env {
+		if k == "HOME" || strings.HasPrefix(k, swarmEnvPrefix) {
+			continue // HOME 固定值，策略层已拒绝，双保险；SWARM_* 系统命名空间同
 		}
 		if wildcard {
 			env = append(env, k+"="+v)
@@ -217,7 +226,12 @@ func (r *Runner) buildEnv(overrides map[string]string) []string {
 			}
 		}
 	}
-	return env
+	// 系统变量（任务定位信息）：与 scanArtifacts 同一目录口径（绝对路径）
+	return append(env,
+		"SWARM_TASK_ID="+task.ID,
+		"SWARM_OUTPUTS_DIR="+filepath.Join(r.profile.Workdir, "outputs", task.ID),
+		"SWARM_TRACE_ID="+task.TraceID,
+	)
 }
 
 // sanitizeLimit UTF-8 清洗（非法字节 → U+FFFD）后按字节截断至 limit（截断点回落

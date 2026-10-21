@@ -146,7 +146,6 @@ submitted → offered → acknowledged → running → completed | failed | need
 | stdout/stderr tail | 64KiB |
 | 任务离线保留 | 7 天（expire_at 到期非终态 → failed/error=expired） |
 | 终态保留 | 24h 后从快照清理；node 账本 result_acked 条目 24h 后清理 |
-| workdir 排队等待上限（WorkdirQueueWait） | 30min：submitted 任务因 workdir 互斥阻塞排队超此时长 → failed/error=`workdir_busy_timeout`（离线/窗口满滞留不适用，维持 7d expire；排队不计入 agent 执行超时，见 4.10） |
 | node 执行并发 | 2（可配） |
 | 信箱字节预算 | 每 node 8MiB（submitted 任务体字节和），超则 503 `mailbox_full` |
 | hub 任务存储全局字节预算 | 256MiB（含终态 24h 保留），超则拒新提交 503 `storage_full`；部署声明：2核2G 云机目标为低负载（≤5 node 且预算内），满配（20 node×100 条×1MiB≈2GiB）不承诺 |
@@ -184,7 +183,6 @@ type AgentCard struct {
     Interactive    bool     `json:"interactive"`       // V0 恒为 false：不支持澄清/审批/继续输入，任务必须可一次给完
     PermissionMode string   `json:"permission_mode"`   // 映射 agent 自带权限机制（如 codex sandbox 模式），调用方知情
     ProtocolVer    int      `json:"protocol_ver"`      // 适配器协议版本
-    WorkspaceID    string   `json:"workspace_id,omitempty"` // workdir 互斥键（P1.5/4.10）：node 上报的规范化路径派生哈希（sha256 前 16 hex）；hub 不感知路径；空=旧版 node 不参与互斥
     Exposed        bool     `json:"exposed"`           // 接入开关（主权在 node）：false=执行准入关闭（新任务 404 agent_not_exposed）；注册表保留一条审计记录（名称/下线时间，不含能力详情）
 }
 
@@ -268,18 +266,6 @@ type TaskSubmitRequest struct {
 {"status":"completed","exit_code":0,"final_answer":"hello swarmmind","stdout_tail":"hello swarmmind\n","stderr_tail":"","artifacts":[],"started_at":"2026-10-20T09:00:00Z","finished_at":"2026-10-20T09:00:00Z"}
 ```
 
-### 4.10 Workdir 互斥（P1.5）
-
-同一 node 上同一 workdir 的受管执行必须串行（写权限单点化）；互斥键 = `(node_id, workspace_id)`。
-
-- **workspace_id 由 node 上报，hub 不感知路径**（路径不出本机）：node 启动时对每个 ExecProfile.Workdir 规范化——`filepath.Abs` + `filepath.Clean` + `filepath.EvalSymlinks`（失败如目录不存在则回退 Clean+Abs 并注记日志）→ SHA-256 → hex 前 16 字符，写入 AgentCard.WorkspaceID 随 register/card_update 上报。规范化消解 symlink 别名（macOS /tmp vs /private/tmp 同目录同键）。空 WorkspaceID（旧版 node）不参与互斥，行为不变。
-- **hub 侧互斥表**：`State.WorkdirLocks[node_id][workspace_id] = task_id`，随快照持久化，hub 重启恢复；启动时按任务集自愈（终态/已删除任务的脏锁释放；快照缺表时为 offered/acknowledged/running 任务补占；submitted 不占）。表是投递门控的视图，**执行互斥以 node 侧为准**。
-- **调度 eligible 门控**（状态机零改动，复用 submitted）：出队改「遍历取首个 eligible」而非严格队首（修复 head-of-line blocking）——队首任务互斥中时，同 node 异 workdir 任务仍可派发；不合格条目按原序留在信箱。eligible = 目标 (node, workspace_id) 无未终态任务占用。同 workdir 后到任务排队等待，先到任务终态即释放锁并立即补推。
-- **占用起点**：互斥占用从 offered 起算（offered+acknowledged ≤8 投递窗口口径不变）——两个 acked 等并发槽期间互斥已生效，槽一空不会全量 spawn 击穿互斥；offer 超时回退/发送失败回退保留锁（重推幂等覆盖同键）。
-- **排队超时**：submitted 任务因互斥阻塞排队超 `WorkdirQueueWait`（30min，自 CreatedAt 起算）→ failed/error=`workdir_busy_timeout`（进程未运行 ExitCode=-1）；与 expire 同过期时 expire 优先。排队不计入 agent 执行超时（TimeoutSec 唯一超时源从 spawn 起算，SPEC 五）。
-- **node 侧生命周期（真相源）**：互斥占用从 spawn 前准备（started 落盘之前）到**进程组退出 + 产物冻结 + finished 结果落盘**才释放；同 workspace 任务在此严格 FIFO 串行。锁等待可被服务关闭取消（条目保持 accepted，重启恢复再调度）。node 重启互斥表从账本重建：accepted/started 未终态任务占锁（started 实际在账本恢复期已收敛 needs_review，按状态判定保持口径一致）。
-- **限界声明**：互斥只覆盖受管执行（node spawn 的任务）；人工编辑器、外部脚本、共享 ConfigHome 不在覆盖内。hardlink/bind mount 同目录双键、大小写不敏感盘大小写变体双键为已知局限（见第九节）。
-
 ## 五、node 配置（configs/node.example.yaml）
 
 ```yaml
@@ -334,7 +320,7 @@ data_dir: data
 insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`；部署模式为 `wss://` + 证书指纹。
 ```
 
-**执行环境规则**：runner 使用 base_env（+任务在 allow_env 白名单内的覆盖）构造进程环境，不继承 daemon 自身环境（防凭证泄漏进子进程）。**HOME 由 runner 固定设为 ExecProfile.ConfigHome**（agent 配置/凭证目录，默认 data_dir/home，与 workdir 分离——不破坏 agent 的配置查找），cwd=workdir。越界（env 键不在名单）任务直接 failed，error=`policy_denied`，不执行。
+**执行环境规则**：runner 使用 base_env（+任务在 allow_env 白名单内的覆盖）构造进程环境，不继承 daemon 自身环境（防凭证泄漏进子进程）。**runner 额外注入三个系统变量（不受 base_env/allow_env 约束、任务 env 不可覆盖）：`SWARM_TASK_ID`、`SWARM_OUTPUTS_DIR`（=workdir/outputs/<task_id> 绝对路径，agent 产物约定输出位置）、`SWARM_TRACE_ID`**。**HOME 由 runner 固定设为 ExecProfile.ConfigHome**（agent 配置/凭证目录，默认 data_dir/home，与 workdir 分离——不破坏 agent 的配置查找），cwd=workdir。越界（env 键不在名单）任务直接 failed，error=`policy_denied`，不执行。
 **能力边界声明**（写入文档）：CLI agent 的行为边界由 command 本身性质与其自带权限机制决定；stdin/env 是输入面；allow_args 授权解释器类命令等同全权授权，选用即知情；PermissionMode 把 agent 自带权限映射告知调用方。
 
 任务执行 context 独立于会话：唯一超时源是 timeout_sec；会话断开不杀已 spawn 的任务（结果经账本在重连后补传）。**进程组治理（V0 必做，接真实 agent 的前提）**：Unix 下 spawn 前 setpgid 置独立进程组，超时/取消时 kill(-pgid) 整组终止，WaitDelay=5s 兑底；V0 只承诺 Unix 进程组，Windows Job Object V1。
@@ -405,14 +391,6 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 
 demo 脚本：bash、`set -euo pipefail`、trap 清理、mktemp 隔离（hub/node 各自独立 data_dir）、每进程记录 PID、用有上限的状态轮询替代固定 sleep、JSON 解析用 python3；无法注入网络黑洞的项（如 6）用进程 kill 模拟并在脚本注释声明局限；超时验收检查直接子进程消失，不能只看错误字符串。
 
-**P1.5 DoD 增补（workdir 互斥，SPEC 4.10）**：
-- 同 workdir 两任务并发提交 → 串行断言（第二任务 started ≥ 第一任务 finished；hub 门控下第二任务在第一任务终态前不得被投递）
-- 异 workdir 两任务 → 并行断言（执行时间区间重叠）
-- 排队超 WorkdirQueueWait → failed/error=`workdir_busy_timeout`（未超时不动；与 expire 同过期时 expire 优先）
-- head-of-line 修复：nodeB 队首任务互斥中，nodeB 异 workdir 任务仍可派发（投递顺序断言）
-- hub 重启 → 互斥表随快照恢复、门控继续生效（快照缺表时按任务集自愈补占）；node 重启 → 互斥表从账本重建（accepted 未终态占锁）
-- workspace_id 计算：symlink 别名同键、目录不存在回退 Clean+Abs 并注记、键长 16 hex 确定性
-
 ## 八、实现顺序（工程路线，先协议后网络）
 
 1. protocol 包：Schema + 状态机转移表 + 常量，纯函数可单测
@@ -435,4 +413,3 @@ demo 脚本：bash、`set -euo pipefail`、trap 清理、mktemp 隔离（hub/nod
 - 持久化=先写后见+临时文件 rename+单写串行化+写败不发布不 Ack
 - 依赖例外清单：yaml.v3、coder/websocket；`go mod tidy` 提交 go.sum
 - 工人不 commit；最终输出改动文件清单 + DoD 十一条逐条结果（每条附验证证据）
-- 路径别名陷阱（P1.5/4.10）：macOS `/tmp` → `/private/tmp` 同目录双键——EvalSymlinks 规范化消解；APFS 大小写不敏感盘 `/Repo` vs `/repo` 同目录大小写变体双键——路径识别无法消解，配置侧约束同拼写；hardlink/bind mount 指向同一目录路径不同——路径识别原理性不可消解（文档声明局限）；workdir 互斥只覆盖 node spawn 的受管执行，人工编辑器/外部脚本/共享 ConfigHome 不在覆盖内

@@ -14,6 +14,10 @@ base_env:                               # 执行环境基线：不继承 daemon 
   PATH: /usr/bin:/bin
   TMPDIR: /tmp
   LANG: en_US.UTF-8
+# runner 系统变量（SPEC 4.9 产物链）：spawn 前 runner 注入 SWARM_TASK_ID、
+# SWARM_TRACE_ID、SWARM_OUTPUTS_DIR=<workdir>/outputs/<task_id>（绝对路径），
+# 不受 base_env/allow_env 约束、任务 env 不可覆盖；agent 将产物写入
+# SWARM_OUTPUTS_DIR，进程结束后 runner 自动扫描登记为 Artifacts。
 agents:
   - name: echo-demo
     kind: cli
@@ -24,7 +28,7 @@ agents:
     timeout_sec: 30
     allow_args: true                    # 授权该命令的全部参数能力（解释器类=通用执行，文档明示）；false 时非空 args → policy_denied
     allow_env: ["TMPDIR"]               # 允许任务覆盖的 env 键；默认 []；"PATH" 需显式列出
-    description: 回声测试                 # 生成 AgentCard.Description 的源
+    description: 回声测试（产物约定：runner 注入 SWARM_TASK_ID/SWARM_OUTPUTS_DIR/SWARM_TRACE_ID，agent 把产物写入 $SWARM_OUTPUTS_DIR，结束后自动登记为 Artifacts）  # 生成 AgentCard.Description 的源
     permission_mode: no-shell           # 映射 agent 自带权限机制的说明（对外 Card 可见）
   - name: sleeper
     kind: cli

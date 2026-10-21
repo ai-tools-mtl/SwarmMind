@@ -14,6 +14,8 @@ import (
 
 // 产物取回中继单测（Loop 4，SPEC 六/4.2/4.8）：hub 只经 artifact_fetch/artifact_data
 // 中继取回，node 侧哈希校验 + hub 侧再校验；超时/离线/缺失/冲突各有确定错误。
+// 桩按真实 node service 的回帧约定应答（ReplyTo=请求帧 MessageID）；全链覆盖另见
+// artifact_fullchain_test.go。
 
 // newArtifactFixture 构造带一个终态任务（含 1 个产物登记）的 hub。任务经 store
 // 事务直接置终态（跳过执行路径，聚焦中继）；node 端点是否在线由用例自行装配
@@ -61,7 +63,7 @@ func TestFetchArtifactRelay(t *testing.T) {
 		})
 		if err := ep.Send("hub", &protocol.Envelope{
 			Version: protocol.ProtocolVersion, Type: protocol.MsgArtifactData,
-			MessageID: protocol.NewMessageID(), ReplyTo: env.ReplyTo, To: "hub", Payload: b,
+			MessageID: protocol.NewMessageID(), ReplyTo: env.MessageID, To: "hub", Payload: b,
 		}); err != nil {
 			t.Fatalf("artifact_data 发送失败: %v", err)
 		}
@@ -93,7 +95,7 @@ func TestFetchArtifactHashMismatch(t *testing.T) {
 		})
 		_ = ep.Send("hub", &protocol.Envelope{
 			Version: protocol.ProtocolVersion, Type: protocol.MsgArtifactData,
-			MessageID: protocol.NewMessageID(), ReplyTo: env.ReplyTo, To: "hub", Payload: b,
+			MessageID: protocol.NewMessageID(), ReplyTo: env.MessageID, To: "hub", Payload: b,
 		})
 	})
 	if _, err := f.core.FetchArtifact(taskID, 0, 5*time.Second); !errors.Is(err, ErrArtifactMismatch) {
@@ -110,7 +112,7 @@ func TestFetchArtifactNodeSaysNotFound(t *testing.T) {
 		}
 		_ = ep.Send("hub", &protocol.Envelope{
 			Version: protocol.ProtocolVersion, Type: protocol.MsgErr,
-			MessageID: protocol.NewMessageID(), ReplyTo: env.ReplyTo, To: "hub",
+			MessageID: protocol.NewMessageID(), ReplyTo: env.MessageID, To: "hub",
 			Err: &protocol.ErrInfo{Code: protocol.CodeArtifactNotFound, Msg: "文件缺失"},
 		})
 	})

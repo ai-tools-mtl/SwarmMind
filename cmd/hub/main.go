@@ -71,10 +71,14 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		cfg.APIListen = "127.0.0.1:8444"
 	}
 
-	// 管理面（api_listen）无鉴权：无条件强制绑定 127.0.0.1，与 TLS 模式无关
-	//（C4/SPEC 二；此前仅 insecure_loopback 分支校验，TLS 模式下 0.0.0.0 会被放行）。
-	if err := session.ValidateAPIListen(cfg.APIListen); err != nil {
-		return err
+	// 管理面（api_listen）：Loop 5 已实现登录制（admin_token），绑定地址放开为可配置；
+	// 非回环绑定时打印明文 HTTP 警告（P3 收尾项：反代 TLS）。完全无 token 的配置仍
+	// 拒绝公网绑定（无凭据即裸奔，保留 C4 防线）。
+	if !isLoopbackListen(cfg.APIListen) {
+		if cfg.AdminToken == "" {
+			return fmt.Errorf("管理面绑定非回环地址 %s 但未配置 admin_token：公网管理面必须启用登录制", cfg.APIListen)
+		}
+		log.Printf("[hub] 警告：管理面绑定非回环地址 %s（HTTP 明文，令牌传输未加密；建议尽快前置 TLS 反代）", cfg.APIListen)
 	}
 	// insecure_loopback=true：明文 ws，且 node 入口监听地址强制回环（代码强制，
 	// 非文档约束，SPEC 二；node 明文入口允许规格列出的 127.0.0.1/::1）。
@@ -233,4 +237,13 @@ func loadConfig(path string) (*hubConfig, error) {
 		return nil, fmt.Errorf("解析配置 %s 失败: %w", path, err)
 	}
 	return &cfg, nil
+}
+
+// isLoopbackListen 判定监听地址是否为回环（host 部分为 127.0.0.1、::1 或 localhost）。
+func isLoopbackListen(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }

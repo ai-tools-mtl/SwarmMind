@@ -394,3 +394,63 @@ func TestRunCancelKillsProcessGroup(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestRunSwarmEnvInjection runner 系统变量注入（SPEC 4.9 产物链前置）：agent 经
+// SWARM_TASK_ID/SWARM_OUTPUTS_DIR/SWARM_TRACE_ID 得知任务标识与产物输出目录。
+func TestRunSwarmEnvInjection(t *testing.T) {
+	r, workdir := newRunner(t, nil)
+	task := simpleTask("-c", `printf "%s\n%s\n%s\n" "$SWARM_TASK_ID" "$SWARM_OUTPUTS_DIR" "$SWARM_TRACE_ID"`)
+	res := r.Run(context.Background(), task)
+
+	if res.Status != protocol.ResultCompleted {
+		t.Fatalf("应 completed, got %s err=%q tail=%q", res.Status, res.Error, res.StderrTail)
+	}
+	want := task.ID + "\n" + filepath.Join(workdir, "outputs", task.ID) + "\n" + task.TraceID + "\n"
+	if res.FinalAnswer != want {
+		t.Errorf("系统变量注入不符:\n got %q\nwant %q", res.FinalAnswer, want)
+	}
+}
+
+// TestRunSwarmEnvNotOverridable 任务 env 试图覆盖系统变量：即便键已列入
+// allow_env，子进程仍见 runner 注入值（系统变量最后写入，SWARM_* 覆盖丢弃）。
+func TestRunSwarmEnvNotOverridable(t *testing.T) {
+	r, workdir := newRunner(t, func(p *protocol.ExecProfile) {
+		p.AllowEnv = []string{"TMPDIR", "SWARM_TASK_ID", "SWARM_OUTPUTS_DIR", "SWARM_TRACE_ID"}
+	})
+	task := simpleTask("-c", `printf "%s|%s|%s\n" "$SWARM_TASK_ID" "$SWARM_OUTPUTS_DIR" "$SWARM_TRACE_ID"`)
+	task.Input.Env = map[string]string{
+		"SWARM_TASK_ID":     "t-evil",
+		"SWARM_OUTPUTS_DIR": "/evil/outputs",
+		"SWARM_TRACE_ID":    "trace-evil",
+	}
+	res := r.Run(context.Background(), task)
+
+	// 白名单内的覆盖尝试不触发 policy_denied（白名单只管任务侧覆盖的准入），
+	// 只是注入值不生效
+	if res.Status != protocol.ResultCompleted {
+		t.Fatalf("白名单内的 SWARM_* 覆盖应放行执行, got %s/%q", res.Status, res.Error)
+	}
+	want := task.ID + "|" + filepath.Join(workdir, "outputs", task.ID) + "|" + task.TraceID + "\n"
+	if res.FinalAnswer != want {
+		t.Errorf("系统变量被任务 env 改写:\n got %q\nwant %q", res.FinalAnswer, want)
+	}
+}
+
+// TestRunSwarmOutputsDirRoundTrip 产物链闭环：agent 仅凭 SWARM_OUTPUTS_DIR 写
+// 产物，进程结束后 runner 扫描登记（SPEC 4.9 产物发现约定对 agent 可见）。
+func TestRunSwarmOutputsDirRoundTrip(t *testing.T) {
+	r, _ := newRunner(t, nil)
+	task := simpleTask("-c", `mkdir -p "$SWARM_OUTPUTS_DIR" && printf payload > "$SWARM_OUTPUTS_DIR/answer.txt"`)
+	res := r.Run(context.Background(), task)
+
+	if res.Status != protocol.ResultCompleted {
+		t.Fatalf("应 completed, got %s err=%q tail=%q", res.Status, res.Error, res.StderrTail)
+	}
+	if len(res.Artifacts) != 1 {
+		t.Fatalf("应登记 1 条产物, got %d", len(res.Artifacts))
+	}
+	a := res.Artifacts[0]
+	if a.Path != "outputs/"+task.ID+"/answer.txt" || a.Size != 7 || a.Sha256 != wantSha(t, "payload") {
+		t.Errorf("产物登记不符: %+v", a)
+	}
+}

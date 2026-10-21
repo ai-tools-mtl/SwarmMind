@@ -105,17 +105,17 @@ func ValidateLoopback(listenAddr string) error {
 	return fmt.Errorf("session: insecure_loopback 模式监听地址必须为回环（127.0.0.1/::1），got %q", listenAddr)
 }
 
-// ValidateAPIListen 校验管理面（api_listen）监听地址只能绑定 127.0.0.1（C4/SPEC 二）：
-// 无条件、与 TLS 模式无关——管理面无鉴权，禁止 0.0.0.0/公网地址/::1/空 host（全接口）。
+// ValidateAPIListen 校验管理面（api_listen）监听地址合法性（格式校验）。
+// 历史（C4）：曾无条件强制 127.0.0.1（当时管理面无鉴权）；Loop 5 起管理面实现
+// admin_token 登录制，非回环绑定（公网管理面）在已配置凭据时允许——明文 HTTP
+// 风险由调用方打印警告，端到端加密留 P3 反代/P5 TLS。
 func ValidateAPIListen(listenAddr string) error {
 	host, _, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		return fmt.Errorf("session: api_listen 地址非法 %q: %w", listenAddr, err)
 	}
-	if host == "127.0.0.1" {
-		return nil
-	}
-	return fmt.Errorf("session: 管理面 api_listen 必须绑定 127.0.0.1（无鉴权入口禁止对外），got %q", listenAddr)
+	_ = host // 格式校验通过即可；绑定范围由调用方按部署模式决定
+	return nil
 }
 
 // LoadCertificate 加载（或首次生成）证书为 tls.Certificate，供 TLS 监听使用。
