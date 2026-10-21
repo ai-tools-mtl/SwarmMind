@@ -1,0 +1,39 @@
+node_id: mac-mini
+hub_url: ws://127.0.0.1:8443/ws/node   # 开发模式（insecure_loopback=true）；部署时改 wss:// + 证书指纹
+register_token: token-for-mac-mini      # 每 node 独立，与 node_id 绑定
+hub_pubkey_fp: ""                       # SPKI SHA-256（base64）；空则 TOFU 首连记录 trusted_hubs.json
+local_listen: 127.0.0.1:8445            # 本地回环 API（仅本机进程可用，强制回环）；浏览器开 http://127.0.0.1:8445/ 即本地控制台（Loop 7）
+local_token: ""                         # 本地 API 管理令牌（Bearer）；空则启动时生成存 data_dir/local_token（控制台登录用同一令牌）
+hub_api_url: ""                         # hub 管理面（GET /agents 全网目录代理 + 本地控制台信箱余量代理，可选）
+hub_api_token: ""                       # hub 管理令牌（随 hub_api_url）
+concurrency: 2
+data_dir: data
+# 注意：data_dir/agents-state.json 由本地控制台的 exposed 开关自动维护（覆盖下方
+# agents 的 exposed 基线，重启保持），勿手工编辑；改配置基线请改本文件并重启 node。
+base_env:                               # 执行环境基线：不继承 daemon 进程环境
+  PATH: /usr/bin:/bin
+  TMPDIR: /tmp
+  LANG: en_US.UTF-8
+agents:
+  - name: echo-demo
+    kind: cli
+    command: /bin/echo                  # 绝对路径；任务不可更改命令与 workdir
+    workdir: /tmp
+    config_home: ""                     # 空 = data_dir/home；agent 配置/凭证目录（HOME 指此，与 workdir 分离）
+    agent_args: []                      # 固定附加参数（如 codex: [--sandbox, read-only]），任务不可改
+    timeout_sec: 30
+    allow_args: true                    # 授权该命令的全部参数能力（解释器类=通用执行，文档明示）；false 时非空 args → policy_denied
+    allow_env: ["TMPDIR"]               # 允许任务覆盖的 env 键；默认 []；"PATH" 需显式列出
+    description: 回声测试                 # 生成 AgentCard.Description 的源
+    permission_mode: no-shell           # 映射 agent 自带权限机制的说明（对外 Card 可见）
+  - name: sleeper
+    kind: cli
+    command: /bin/sleep
+    workdir: /tmp
+    config_home: ""
+    agent_args: []
+    timeout_sec: 1
+    allow_args: true
+    allow_env: []
+    description: 超时测试
+    permission_mode: no-shell

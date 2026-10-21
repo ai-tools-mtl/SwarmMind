@@ -1,0 +1,13 @@
+# 构建产物（仅根目录的二进制与 dist）
+/dist/
+/hub
+/node
+/swarmmindctl
+*.exe
+
+# 运行时数据（账本/快照/证书/锁）
+/data/
+*.log
+
+# 测试与临时
+*.test

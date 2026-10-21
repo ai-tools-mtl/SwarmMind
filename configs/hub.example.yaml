@@ -1,0 +1,9 @@
+node_listen: 127.0.0.1:8443       # node 入口；insecure_loopback=true 时应为 ws:// 且仅回环
+api_listen: 127.0.0.1:8444        # 管理面，强制回环（代码校验，非回环拒绝启动）
+tls:
+  insecure_loopback: true         # V0 开发模式：ws:// + 回环；部署时改 false + 真实证书
+nodes:                            # 每 node 独立 token，绑定 node_id
+  mac-mini: token-for-mac-mini
+  win-box: token-for-win-box
+admin_token: ""                   # 管理面登录令牌（POST /api/v1/login）；空则启动时生成存 data_dir/admin_token
+data_dir: data
