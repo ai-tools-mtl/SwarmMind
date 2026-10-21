@@ -348,8 +348,11 @@ function overviewPage() {
 function nodesPage() {
   return head('节点接入', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('生成接入配置', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
-    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>管理</th></tr></thead><tbody>
-    ${S.nodes.map(n => `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`).join('')}
+    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
+    ${S.nodes.map(n => {
+      const caps = S.directory.filter(d => d.node_id === n.node_id).map(d => d.card.name);
+      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(c => `<span class="badge">${esc(c)}</span>`).join(' ') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`;
+    }).join('')}
     </tbody></table></div>`
     : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
     <p class="footer-note">每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
