@@ -468,6 +468,7 @@ function drawerHtml(t) {
   <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
   <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 幂等键 <code>' + esc(t.idem) + '</code>' : ''}</p>
   ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半节点重启，无法确认实际进度。' : ''}</div>` : ''}
+  ${r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><pre style="white-space:pre-wrap">${esc(r.stderr_tail)}</pre>` : ''}
   <h3 class="spaced">任务输入</h3>
   <pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre>
   <h3>最终答复</h3>

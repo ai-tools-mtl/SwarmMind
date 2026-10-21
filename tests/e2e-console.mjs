@@ -118,6 +118,21 @@ async function main() {
   record('E11', '批次报告→查看任务：直达详情不 404（BUG 回归）', !notFound, notFound ? '出现归档提示' : '详情正常打开');
   await page.keyboard.press('Escape');
 
+  // TC-E19 失败任务：失败原因（进程错误输出）前置可见（不再折叠）
+  await page.click('aside button:has-text("任务监管")');
+  await page.waitForSelector('th:has-text("提交时间")');
+  const failRow = page.locator('tr[data-task]', { hasText: '执行失败' }).first();
+  if (await failRow.count()) {
+    await failRow.locator('[data-act="detail"]').click();
+    await page.waitForSelector('.drawer', { timeout: 15000 });
+    const dt = await page.textContent('.drawer');
+    const stderrShown = dt.includes('失败原因（进程错误输出）');
+    record('E19', '失败任务详情：stderr 前置展示', stderrShown, stderrShown ? '' : '未见前置 stderr 块');
+    await page.keyboard.press('Escape');
+  } else {
+    record('E19', '失败任务详情：stderr 前置展示', true, '无失败任务可验（跳过）');
+  }
+
   // ---------- 策略容量页 ----------
   await page.click('aside button:has-text("策略容量")');
   await page.waitForSelector('text=信箱条数', { timeout: 15000 }); // 策略页独有首行
