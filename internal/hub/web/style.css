@@ -76,3 +76,20 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 [hidden]{display:none!important}
 @media(max-width:1050px){.deploy{display:none}main{padding:30px 24px}.shell{grid-template-columns:185px minmax(0,1fr)}.cols4,.cols3{grid-template-columns:repeat(2,minmax(0,1fr))}.cols2{grid-template-columns:1fr}.topbar{gap:15px;padding:12px 18px}.switcher button{padding:7px 10px}.checkline-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:680px){.shell{display:block}aside{border-right:0;padding:12px}.workspace,.aside-bottom{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:8px}.navnum{display:none}.topbar{flex-wrap:wrap;gap:10px}.brand{font-size:17px}.top-right{font-size:11px}.switcher{order:3;width:100%}.switcher button{flex:1}main{padding:24px 16px}.page-head{align-items:flex-start;flex-direction:column}h1{font-size:25px}.cols3,.cols4{grid-template-columns:1fr 1fr}.card{padding:18px}.drawer{padding:22px}.checkline-grid{grid-template-columns:1fr}}
+/* 群聊页（GROUP-RFC 六 MVP）：群卡片列表 + 气泡时间线（user 蓝 / agent 白 / system 灰） */
+.discussing{background:#edf0ff;color:#4d6ad1}.concluded{background:#f0f0f2;color:#7e8490}
+.group-list{display:grid;gap:12px}
+.group-card{text-align:left;display:grid;gap:8px;align-content:start;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:white}
+.group-card:hover{border-color:#c5cffd;background:#fafbff}
+.group-members{display:flex;gap:5px;flex-wrap:wrap}
+.msgwrap{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fbfcfe;padding:14px;margin:12px 0 0}
+.msgline{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.msg{max-width:82%;padding:9px 13px;border-radius:12px;background:white;border:1px solid #e9ebf0;font-size:13px;line-height:1.6}
+.msg-meta{font-size:11px;color:var(--muted);margin-bottom:2px}
+.msg-body{white-space:pre-wrap;overflow-wrap:anywhere}
+.msg-user{margin-left:auto;background:#edf1ff;border-color:#dce3ff}
+.msg-system{background:#f1f2f4;color:#687080}
+.sayline{display:flex;gap:10px;align-items:flex-end}
+.sayline textarea{margin-top:0;flex:1;min-height:52px}
+.sayline button{flex-shrink:0}
+@media(max-width:680px){.msg{max-width:94%}}
