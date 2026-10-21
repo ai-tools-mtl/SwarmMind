@@ -16,3 +16,4 @@
 
 # 测试与临时
 *.test
+tmp-rest-probe.py
