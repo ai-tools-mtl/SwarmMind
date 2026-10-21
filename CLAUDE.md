@@ -12,6 +12,10 @@
 
 - 面向管理面的新 REST 能力 → 同一变更内必须同步交付 MCP 工具（SPEC 六.六）：补 SPEC 六.六映射表一行 + cmd/swarmmind-mcp 增工具 + 实测；工具名前缀 swarmmind_，描述写「能做什么」。评审者对照本条检查，缺 MCP 同步 = 必须修
 
+## 测试循环制度（2026-10-21 立，强制）
+
+每个开发阶段收尾时执行：① codex 依需求文档（SPEC/INTERACTION）产出测试文档（docs/TESTPLAN.md，用例可机械执行）；② **新开独立会话**（subagent 或新 zcode，不共享开发上下文）逐条执行测试并出报告（每条 PASS/FAIL+证据）；③ FAIL 清单交 zcode 修改；④ 循环 ②-③ 直到全绿；⑤ **全部功能完整、无 bug 方可进入下个版本开发**。上线纪律（全绿才部署）由此流程保证。
+
 ## Git 远程操作（2026-10-21 新增，两文件同步）
 
 - **push 前必须先查 remote**：`git remote -v` 确认目标仓库是伦哥指定的，禁止凭记忆猜测用户名/仓库名自建 remote（2026-10-21 SwarmMind 首提误建 mtl802/SwarmMind，正确为 ai-tools-mtl/SwarmMind）。
