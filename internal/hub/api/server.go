@@ -52,6 +52,7 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time // 会话 ID → 过期时刻（UTC）
 	tokens   *tokenStore          // 子令牌（PAT）存储；DataDir 为空时为 nil（禁用）
+	accounts *accountStore        // 管理员账户（密码登录）；DataDir 为空时为 nil
 }
 
 // New 构造管理面服务。
@@ -59,6 +60,7 @@ func New(cfg Config) *Server {
 	s := &Server{cfg: cfg, sessions: map[string]time.Time{}}
 	if cfg.DataDir != "" {
 		s.tokens = newTokenStore(cfg.DataDir)
+		s.accounts = newAccountStore(cfg.DataDir)
 	}
 	return s
 }
@@ -71,6 +73,10 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/login-password", s.handleLoginPassword)
+	mux.HandleFunc("POST /api/v1/auth/setup", s.handleAccountSetup)
+	mux.HandleFunc("GET /api/v1/auth/account", s.auth(s.handleAccountStatus))
+	mux.HandleFunc("POST /api/v1/auth/account/update", s.auth(s.handleAccountUpdate))
 	mux.HandleFunc("POST /api/v1/auth/tokens", s.auth(s.handleTokenCreate))
 	mux.HandleFunc("GET /api/v1/auth/tokens", s.auth(s.handleTokenList))
 	mux.HandleFunc("DELETE /api/v1/auth/tokens/{id}", s.auth(s.handleTokenRevoke))

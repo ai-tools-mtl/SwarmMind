@@ -140,7 +140,15 @@ function go(p, status = '') {
 function render() {
   renderChrome();
   const app = $('#app');
-  if (!S.authed) { app.innerHTML = loginPage(); $('#layer').innerHTML = ''; return; }
+  if (!S.authed) {
+    if (loginPageRendered === null) {
+      loginPageRendered = 'loading';
+      loadAccountStatus().then(init => { loginPageRendered = init; render(); });
+    }
+    app.innerHTML = loginPage(loginPageRendered === true);
+    $('#layer').innerHTML = '';
+    return;
+  }
   app.innerHTML = shell(PAGES[S.page]());
   syncDrawer();
 }
@@ -156,7 +164,7 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '运维控制'], ['policy', '策略容量'], ['tokens', '访问令牌']];
+  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '运维控制'], ['policy', '策略容量'], ['tokens', '设置']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
@@ -194,18 +202,74 @@ function preserveFocus(fn) {
 }
 
 /* ---------- 登录页（免鉴权；其余页 401 自动跳到这里） ---------- */
-function loginPage() {
+let loginMode = 'password'; // password | token
+let loginPageRendered = null; // null=未探询 / true=已初始化 / false=待初始化
+async function loadAccountStatus() {
+  try {
+    const r = await fetch('/api/v1/auth/account');
+    if (r.ok) { const d = await r.json(); return !!d.initialized; }
+  } catch { }
+  return false;
+}
+function loginPage(initialized) {
+  const pw = loginMode === 'password';
   return `<main><div class="card login">
   <div class="mark">⌘</div><div class="eyebrow">管理员入口</div>
   <h1>管理你的协作网</h1>
-  <p class="muted">登录后可管理节点接入、监管任务、运行巡检并登记人工核对。</p>
-  <form id="login-form">
-    <label>访问令牌<input id="token" type="password" autocomplete="off" required placeholder="输入管理员令牌"></label>
+  ${pw ? (initialized
+    ? `<form id="pw-login-form">
+    <label>用户名<input id="login-user" autocomplete="username" required placeholder="用户名"></label>
+    <label>密码<input id="login-pass" type="password" autocomplete="current-password" required placeholder="密码"></label>
     <div id="login-feedback" class="statusline" role="status"></div>
-    <button class="primary" type="submit">进入 Hub 中心端 →</button>
-  </form>
-  <p class="footer-note">会话有效期 24 小时；中心端重启后需重新登录。可在登录后的「访问令牌」页创建子令牌给其他管理者使用。</p>
+    <button class="primary" type="submit">登录</button>
+  </form>`
+    : `<form id="setup-form">
+    <div class="notice">首次使用：设置管理员用户名与密码</div>
+    <label>用户名（3-32 位字母/数字/下划线）<input id="su-user" autocomplete="username" required placeholder="例如 admin"></label>
+    <label>密码（至少 8 位）<input id="su-pass" type="password" autocomplete="new-password" required placeholder="设置密码"></label>
+    <label>确认密码<input id="su-pass2" type="password" autocomplete="new-password" required placeholder="再输一次"></label>
+    <div id="login-feedback" class="statusline" role="status"></div>
+    <button class="primary" type="submit">创建账户并登录</button>
+  </form>`)
+  : `<form id="login-form">
+    <label>管理令牌（恢复通道）<input id="token" type="password" autocomplete="off" required placeholder="输入 hub 配置里的管理令牌"></label>
+    <div id="login-feedback" class="statusline" role="status"></div>
+    <button class="primary" type="submit">用令牌登录</button>
+  </form>`}
+  <p class="footer-note">${pw ? '忘记密码？' : ''}<button class="link" data-act="switch-login" type="button">${pw ? '用管理令牌登录（恢复通道）' : '返回密码登录'}</button></p>
   </div></main>`;
+}
+async function doSetup(form) {
+  const u = $('#su-user')?.value.trim(), p = $('#su-pass')?.value || '', p2 = $('#su-pass2')?.value || '';
+  const fb = $('#login-feedback');
+  if (!u || !p) { fb.innerHTML = '<span class="warn-text">请填写用户名与密码</span>'; return; }
+  if (p !== p2) { fb.innerHTML = '<span class="warn-text">两次输入的密码不一致</span>'; return; }
+  try {
+    const r = await fetch('/api/v1/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 201) {
+      await doPasswordLogin(u, p); return;
+    }
+    fb.innerHTML = warnNotice('创建失败 · ' + esc(d.error || r.status), esc(d.message || ''));
+  } catch { fb.innerHTML = warnNotice('网络异常', '请稍后重试'); }
+}
+async function doPasswordLogin(u, p) {
+  const fb = $('#login-feedback') || { innerHTML: '' };
+  try {
+    const r = await fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+    if (r.status === 200) {
+      S.authed = true;
+      S.expAt = Date.now() + 86400 * 1000;
+      S.C = freshControl();
+      try { await loadAll(); } catch { }
+      location.hash = '#/overview';
+      route();
+      toast('登录成功 · 已进入总览');
+      return;
+    }
+    const d = await r.json().catch(() => ({}));
+    fb.innerHTML = warnNotice('登录失败 · ' + esc(d.error || r.status), esc(d.message || '用户名或密码错误'));
+  } catch { fb.innerHTML = warnNotice('网络异常', '请稍后重试'); }
 }
 async function doLogin(form) {
   const token = $('#token').value.trim();
@@ -583,10 +647,22 @@ function policyPage() {
 async function loadTokens() {
   const r = await api('GET', '/api/v1/auth/tokens').catch(() => null);
   if (r && r.code === 200) S.tokens = r.data.tokens || [];
+  const a = await api('GET', '/api/v1/auth/account').catch(() => null);
+  if (a && a.code === 200) S.account = a.data;
 }
 function tokensPage() {
   const nt = S.newToken;
-  return head('访问令牌', '给其他管理者或自动化脚本发独立令牌；随时可撤销，不影响你自己的登录。')
+  const acct = S.account || { initialized: S.tokens.length >= 0 };
+  return head('设置', '账户信息与访问令牌：日常用密码登录，令牌只给脚本和其他设备用。')
+  + `<section class="card"><h2>账户信息</h2>
+    ${S.account?.username ? `<p class="muted">当前用户名：<b>${esc(S.account.username)}</b></p>` : ''}
+    <form id="account-form" class="fields" onsubmit="return false">
+      <label>当前密码（验证身份）<input id="acc-cur" type="password" autocomplete="current-password" required></label>
+      <label>新用户名（不改则留空）<input id="acc-user" autocomplete="username" placeholder="留空表示不修改"></label>
+      <label>新密码（不改则留空，至少 8 位）<input id="acc-new" type="password" autocomplete="new-password" placeholder="留空表示不修改"></label>
+      <div class="actions" style="align-self:end">${button('保存修改', 'account-update', 'primary')}</div>
+    </form>
+    <p class="footer-note">忘记密码？用 hub 配置里的管理令牌登录（登录页切换到「恢复通道」），在令牌登录态下本页同样可改。</p></section>`
   + (nt ? `<section class="card spaced"><h2>令牌已创建</h2>
     <div class="notice warn"><b>请立即保存</b>：明文只显示这一次，关闭后无法再查看。</div>
     <pre id="new-token-plain" style="user-select:all">${esc(nt.token)}</pre>
@@ -635,6 +711,17 @@ const ACT = {
   'copy-config': () => copyText([$('#enroll-snippet')?.textContent, $('#enroll-node-snippet')?.textContent].filter(Boolean).join('\n\n'), '接入配置片段'),
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
+  'switch-login': () => { loginMode = loginMode === 'password' ? 'token' : 'password'; loginPageRendered = null; route(); },
+  'account-update': async () => {
+    const cur = $('#acc-cur')?.value || '', nu = $('#acc-user')?.value.trim() || '', np = $('#acc-new')?.value || '';
+    if (!cur) { toast('请先输入当前密码'); return; }
+    if (!nu && !np) { toast('请填写新用户名或新密码'); return; }
+    const r = await api('POST', '/api/v1/auth/account/update', { current_password: cur, new_username: nu || undefined, new_password: np || undefined }).catch(() => null);
+    if (r && r.code === 200) {
+      S.account = r.data.account;
+      render(); toast('账户信息已更新');
+    } else toast('更新失败：' + (r ? errLine(r.data) : '网络异常'));
+  },
   'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', '', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`),
   'token-revoke-confirm': async b => {
     const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
@@ -780,6 +867,8 @@ function bindEvents() {
     if (e.target.id === 'login-form') doLogin(e.target);
     if (e.target.id === 'control-form') submitControl();
     if (e.target.id === 'token-form') submitToken(e.target);
+    if (e.target.id === 'setup-form') doSetup(e.target);
+    if (e.target.id === 'pw-login-form') doPasswordLogin($('#login-user')?.value.trim(), $('#login-pass')?.value || '');
   });
   document.addEventListener('input', e => {
     const k = e.target.dataset.f;
