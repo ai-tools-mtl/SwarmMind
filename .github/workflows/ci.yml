@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test -race ./...
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Cross build
+        run: |
+          mkdir -p dist
+          GOOS=linux   GOARCH=amd64 go build -ldflags '-s -w' -o dist/swarmmind-hub-linux-amd64 ./cmd/hub
+          GOOS=linux   GOARCH=amd64 go build -ldflags '-s -w' -o dist/swarmmind-node-linux-amd64 ./cmd/node
+          GOOS=darwin  GOARCH=arm64 go build -ldflags '-s -w' -o dist/swarmmind-node-macos-arm64 ./cmd/node
+          GOOS=windows GOARCH=amd64 go build -ldflags '-s -w' -o dist/swarmmind-node-windows-amd64.exe ./cmd/node
+          GOOS=windows GOARCH=amd64 go build -ldflags '-s -w' -o dist/swarmmindctl-windows-amd64.exe ./cmd/swarmmindctl
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

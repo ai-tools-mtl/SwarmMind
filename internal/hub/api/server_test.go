@@ -247,7 +247,7 @@ func TestAgentsNodesCatalog(t *testing.T) {
 }
 
 // TestArtifactEndpointTimeout 产物端点 504 路径：node 可达但不应答。
-//（完整中继链路单测在 hub/core；此处只验 HTTP 映射，超时以短周期注入。）
+// （完整中继链路单测在 hub/core；此处只验 HTTP 映射，超时以短周期注入。）
 func TestArtifactEndpointErrors(t *testing.T) {
 	f := newFixture(t)
 	f.core.RegisterNode("nodeB", []protocol.AgentCard{{
@@ -395,7 +395,7 @@ func TestControlBatchPartial(t *testing.T) {
 	f := newFixture(t)
 	f.core.RegisterNode("nodeB", []protocol.AgentCard{echoCard(true)})
 	f.core.SetOnline("nodeB", true)
-	f.core.RegisterNode("nodeC", []protocol.AgentCard{echoCard(true)}) // 已注册但不在线
+	f.core.RegisterNode("nodeC", []protocol.AgentCard{echoCard(true)})  // 已注册但不在线
 	f.core.RegisterNode("nodeE", []protocol.AgentCard{echoCard(false)}) // 在线但未暴露
 	f.core.SetOnline("nodeE", true)
 	// ghost 未注册

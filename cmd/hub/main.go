@@ -34,9 +34,9 @@ type hubConfig struct {
 	TLS        struct {
 		InsecureLoopback bool `yaml:"insecure_loopback"` // true=明文 ws + 强制回环监听
 	} `yaml:"tls"`
-	Nodes      map[string]string `yaml:"nodes"`      // node_id → register_token
+	Nodes      map[string]string `yaml:"nodes"`       // node_id → register_token
 	AdminToken string            `yaml:"admin_token"` // 管理面登录令牌（空则生成存 data_dir/admin_token）
-	DataDir    string            `yaml:"data_dir"`   // 默认 data
+	DataDir    string            `yaml:"data_dir"`    // 默认 data
 }
 
 func main() {
@@ -149,7 +149,7 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	}
 
 	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4）
-	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{Core: coreSvc, AdminToken: adminToken}).Handler()}
+	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir}).Handler()}
 	apiLn, err := net.Listen("tcp", cfg.APIListen)
 	if err != nil {
 		return fmt.Errorf("管理面监听 %s 失败: %w", cfg.APIListen, err)

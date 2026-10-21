@@ -15,6 +15,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,8 @@ type Config struct {
 	Core *core.Core
 	// AdminToken 管理令牌（登录凭据）；为空时拒绝一切登录（管理面只读不可用）。
 	AdminToken string
+	// DataDir 数据目录（子令牌 api_tokens.json 的存放位置；空则禁用 PAT 功能）。
+	DataDir string
 }
 
 // Server 管理面 HTTP 服务。
@@ -48,21 +51,29 @@ type Server struct {
 
 	mu       sync.Mutex
 	sessions map[string]time.Time // 会话 ID → 过期时刻（UTC）
+	tokens   *tokenStore          // 子令牌（PAT）存储；DataDir 为空时为 nil（禁用）
 }
 
 // New 构造管理面服务。
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg, sessions: map[string]time.Time{}}
+	s := &Server{cfg: cfg, sessions: map[string]time.Time{}}
+	if cfg.DataDir != "" {
+		s.tokens = newTokenStore(cfg.DataDir)
+	}
+	return s
 }
 
 // Handler 返回路由（装配方挂到 http.Server）。
 //
 // 静态资源（Loop 6 控制台）：GET / 控制台入口 + /app.js /style.css，免鉴权
-//（登录页必须可达，登录后由前端 hash 路由接管）；/api/v1/* 数据接口除 login 外
+// （登录页必须可达，登录后由前端 hash 路由接管）；/api/v1/* 数据接口除 login 外
 // 一律要求会话（前端收 401 自动跳登录页）。两侧路径不冲突。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/tokens", s.auth(s.handleTokenCreate))
+	mux.HandleFunc("GET /api/v1/auth/tokens", s.auth(s.handleTokenList))
+	mux.HandleFunc("DELETE /api/v1/auth/tokens/{id}", s.auth(s.handleTokenRevoke))
 	mux.HandleFunc("POST /api/v1/tasks", s.auth(s.handleSubmit))
 	mux.HandleFunc("GET /api/v1/tasks", s.auth(s.handleListTasks))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.auth(s.handleGetTask))
@@ -120,6 +131,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // auth 会话校验中间件：无/失效会话一律 401（五端点全部受保护）。
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		/* 优先级：会话 cookie → Bearer PAT（2026-10-21 验收：GitHub 式子令牌）。 */
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			if s.tokens != nil && s.tokens.verify(strings.TrimPrefix(h, "Bearer ")) {
+				next(w, r)
+				return
+			}
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "令牌无效或已撤销")
+			return
+		}
 		c, err := r.Cookie(sessionCookie)
 		if err != nil || c.Value == "" {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "未登录（先 POST /api/v1/login）")
@@ -263,7 +283,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 // ---------- P3 增补端点（SPEC 六.五） ----------
 
 // adminIdentity 控制台会话固定身份：submitted_by 与核对记录 by 均为此值
-//（SPEC 六.五 提交身份：仅作显示与审计标签，鉴权依据是会话本身）。
+// （SPEC 六.五 提交身份：仅作显示与审计标签，鉴权依据是会话本身）。
 const adminIdentity = "admin"
 
 // reviewRequest 核对登记请求体。
@@ -312,7 +332,7 @@ type controlOpRequest struct {
 // handleControlCreate POST /api/v1/control-operations：两阶段持久化（骨架先于
 // 子任务落库），逐目标走 Submit 全链（离线/未暴露目标标 skipped 不阻塞其余）；
 // 202 返回 batch_id + items；幂等命中 200 + dup；submitted_by 会话固定 admin
-//（SPEC 六.五）。
+// （SPEC 六.五）。
 func (s *Server) handleControlCreate(w http.ResponseWriter, r *http.Request) {
 	var req controlOpRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
@@ -340,7 +360,7 @@ func (s *Server) handleControlCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleControlGet GET /api/v1/control-operations/{batch_id}：批次与逐项状态
-//（逐项任务状态为查询时点快照合并）。
+// （逐项任务状态为查询时点快照合并）。
 func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 	batch, ok := s.cfg.Core.GetControlBatch(r.PathValue("batch_id"))
 	if !ok {
@@ -351,7 +371,7 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDirectory GET /api/v1/directory：全网 exposed=true 的 AgentCard 目录
-//（不含 ExecProfile 字段；中心端与 node 目录代理共用，SPEC 六.五）。
+// （不含 ExecProfile 字段；中心端与 node 目录代理共用，SPEC 六.五）。
 func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"directory": s.cfg.Core.ListDirectory()})
 }

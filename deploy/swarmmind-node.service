@@ -1,0 +1,22 @@
+# SwarmMind Node 节点 systemd 单元
+# 安装：sudo cp deploy/swarmmind-node.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now swarmmind-node
+# 配置默认读 /opt/swarmmind/node.yaml，二进制默认 /opt/swarmmind-node
+
+[Unit]
+Description=SwarmMind Node (节点)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/swarmmind
+ExecStart=/opt/swarmmind-node --config /opt/swarmmind/node.yaml
+Restart=always
+RestartSec=5
+# node 自带优雅关闭：SIGTERM → 打断在途任务 → 落「待人工核对」→ 退出
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

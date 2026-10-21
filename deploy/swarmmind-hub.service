@@ -1,0 +1,22 @@
+# SwarmMind Hub 中心端 systemd 单元
+# 安装：sudo cp deploy/swarmmind-hub.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now swarmmind-hub
+# 配置默认读 /etc/swarmmind/hub.yaml，二进制默认 /opt/swarmmind/hub
+
+[Unit]
+Description=SwarmMind Hub (中心端)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/opt/swarmmind/hub --config /etc/swarmmind/hub.yaml
+Restart=always
+RestartSec=3
+# hub 自带优雅关闭（SIGTERM → 在途投递收尾）；上限 30s
+TimeoutStopSec=30
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

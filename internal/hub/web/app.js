@@ -13,6 +13,7 @@ const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
   running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '待人工核对',
 };
+/* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
 const ERRORS = {
   timeout: '执行超过本机配置的超时上限，进程组已整组终止',
   policy_denied: '参数或环境变量超出本机白名单，未执行',
@@ -26,7 +27,7 @@ const ERRORS = {
   frame_too_large: '提交体超过单消息 1MiB 上限',
 };
 const SKIPS = {
-  offline: '离线或未注册 · offline',
+  offline: '离线或未注册',
   not_exposed: '在线但该 agent 未暴露 · not_exposed',
   interrupted: 'hub 创建中断，未及提交 · interrupted',
 };
@@ -43,6 +44,8 @@ const S = {
   f: { status: '', trace: '', by: '', error: '', from: '', to: '' },   // 任务筛选
   drawer: null,                // 打开的任务详情 {id, task}
   C: freshControl(),           // 运维控制页状态
+  tokens: [],                  // 访问令牌列表
+  newToken: null,              // 刚创建的令牌明文（仅展示一次）
 };
 function freshControl() {
   return { view: 'form', stage: 'idle', agent: '', targets: {}, stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null };
@@ -116,7 +119,7 @@ async function pollTick() {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'policy'];
+const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'policy', 'tokens'];
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [p, arg] = h.split('/');
@@ -142,11 +145,6 @@ function render() {
   syncDrawer();
 }
 function renderChrome() {
-  document.querySelectorAll('[data-view]').forEach(b => {
-    const sel = b.dataset.view === 'hub';
-    b.classList.toggle('selected', sel);
-    b.setAttribute('aria-pressed', String(sel));
-  });
   $('#logout').hidden = !S.authed;
   $('#session-left').textContent = S.authed ? '会话剩余 ' + humanLeft() : '';
 }
@@ -158,24 +156,24 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '运维控制'], ['policy', '策略容量']];
+  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '运维控制'], ['policy', '策略容量'], ['tokens', '访问令牌']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
-  <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind Hub</strong></div>
+  <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
     `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
-  <div class="aside-bottom">127.0.0.1:8444<br>控制面 · 不承载用户任务<hr>协议 v1 · 真实 API<br>数据来自 /api/v1/*</div>
+  <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各个节点本机</div>
   </aside><main id="main">${inner}</main></div>`;
 }
 
 /* ---------- 通用小件 ---------- */
 function button(label, act, cls = '', extra = '') { return `<button data-act="${act}" class="${cls}" ${extra}>${label}</button>`; }
 function head(title, desc, action = '') {
-  return `<div class="page-head"><div><div class="eyebrow">NETWORK ADMINISTRATION</div><h1>${title}</h1><p class="muted">${desc}</p></div><div class="actions">${action}</div></div>`;
+  return `<div class="page-head"><div><h1>${title}</h1><p class="muted">${desc}</p></div><div class="actions">${action}</div></div>`;
 }
 function metric(label, value, desc, cls = '') { return `<div class="card${cls ? ' ' + cls : ''}"><small>${label}</small><div class="metric">${value}</div><small>${desc}</small></div>`; }
-function badge(s) { return `<span class="badge ${esc(s)}">${esc(STATES[s] || s)} · ${esc(s)}</span>`; }
-function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线 · online' : '离线 · offline'}</span>`; }
+function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || s)}</span>`; }
+function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线' : '离线'}</span>`; }
 function warnNotice(title, body) { return `<div class="notice warn"><b>${title}</b><br>${body}</div>`; }
 const fmtTime = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
 const fmtFull = s => s ? String(s).replace('T', ' ').slice(0, 19) + ' UTC' : '';
@@ -198,15 +196,15 @@ function preserveFocus(fn) {
 /* ---------- 登录页（免鉴权；其余页 401 自动跳到这里） ---------- */
 function loginPage() {
   return `<main><div class="card login">
-  <div class="mark">⌘</div><div class="eyebrow">HUB ADMIN ACCESS</div>
+  <div class="mark">⌘</div><div class="eyebrow">管理员入口</div>
   <h1>管理你的协作网</h1>
-  <p class="muted">管理员令牌登录后，可管理节点接入、监管任务、运行巡检并登记 needs_review 核对。</p>
+  <p class="muted">登录后可管理节点接入、监管任务、运行巡检并登记人工核对。</p>
   <form id="login-form">
-    <label>访问令牌<input id="token" type="password" autocomplete="off" required placeholder="hub.yaml 的 admin_token（或 data_dir/admin_token 文件）"></label>
+    <label>访问令牌<input id="token" type="password" autocomplete="off" required placeholder="输入管理员令牌"></label>
     <div id="login-feedback" class="statusline" role="status"></div>
     <button class="primary" type="submit">进入 Hub 中心端 →</button>
   </form>
-  <p class="footer-note">会话有效期 24 小时；hub 重启后会话失效，需重新登录。<br>Node 视角请见 node 本地控制台（node 本机回环站点，不在此处）。</p>
+  <p class="footer-note">会话有效期 24 小时；中心端重启后需重新登录。可在登录后的「访问令牌」页创建子令牌给其他管理者使用。</p>
   </div></main>`;
 }
 async function doLogin(form) {
@@ -248,27 +246,26 @@ function overviewPage() {
   const statChips = [''].concat(Object.keys(STATES)).map(s => s
     ? `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}">${badge(s)} ${c[s] || 0}</button>`
     : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('');
-  return head('让协作网有序运转', `${online} / ${S.nodes.length} 节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
+  return head('总览', `${online} / ${S.nodes.length} 台节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
     + `<div class="grid cols4">
-    ${metric('全网任务', S.tasks.length, '当前快照 · 终态保留 24h')}
-    ${metric('正在执行', c.running || 0, '断线不终止已开始任务')}
-    ${metric('已完成', c.completed || 0, '完整答复与产物引用')}
-    ${metric('等待核对', nr, nr ? 'needs_review · 请登记人工核对' : '无需人工核对', nr ? 'review-card' : '')}
+    ${metric('全网任务', S.tasks.length, '终态保留 24 小时')}
+    ${metric('正在执行', c.running || 0, '节点断线不会终止已开始的任务')}
+    ${metric('已完成', c.completed || 0, '含答复与产物')}
+    ${metric('等待核对', nr, nr ? '点击右侧待办处理' : '无需人工处理', nr ? 'review-card' : '')}
     </div>`
     + `<div class="grid cols2 spaced">
-    <section class="card"><div class="row"><h2>Hub 状态</h2><span class="badge online">管理面在线 · serving</span></div>
+    <section class="card"><div class="row"><h2>中心端状态</h2><span class="badge online">在线</span></div>
       <div class="stack">
-        <div class="row"><span>管理面地址</span><code>${esc(location.host)}</code></div>
-        <div class="row"><span>登录会话剩余</span><b>${esc(humanLeft())}</b></div>
-        <div class="row"><span>协议版本</span><b>v1</b></div>
-        <div class="row"><span>网内能力（已暴露）</span><b>${S.directory.length} 项</b></div>
+        <div class="row"><span>访问地址</span><code>${esc(location.host)}</code></div>
+        <div class="row"><span>登录剩余时间</span><b>${esc(humanLeft())}</b></div>
+        <div class="row"><span>网内开放能力</span><b>${S.directory.length} 项</b></div>
       </div>
-      <small class="muted">hub 为控制面：登记、监管、策略；任务执行全部在 node 本机。</small>
+      <small class="muted">中心端负责登记与监管；所有任务都在各节点本机执行。</small>
     </section>
     <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
-      ${nr ? `<div class="notice purple"><b>${nr} 条执行结果不确定</b><p>执行中断等待人工核对，请勿用新幂等键重新提交同一工作。</p>${button('进入核对队列 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
-    : `<div class="notice">当前没有待核对任务；${c.failed || 0} 条失败任务可在任务监管下钻原因。</div>`}
-      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：提交给它的任务进入离线信箱，重连后补推；7 天未投递过期。<br>${button('查看节点 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
+      ${nr ? `<div class="notice purple"><b>${nr} 条执行结果不确定</b><p>执行中断等待人工核对，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
+    : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务监管」页下钻原因。</div>`}
+      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务会暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看节点 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
     </div>`
     + `<section class="card spaced"><div class="row"><h2>任务状态分布（七态）</h2>${button('查看全网任务 →', 'go', 'link', 'data-page="tasks"')}</div>
@@ -280,12 +277,12 @@ function overviewPage() {
 /* ---------- 节点接入 ---------- */
 function nodesPage() {
   return head('节点接入', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('生成接入配置', 'enroll', 'primary'))
-    + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 个节点 · 每 node 独立 token</small></div>
-    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>epoch</th><th>投递窗口</th><th>接入管理</th></tr></thead><tbody>
-    ${S.nodes.map(n => `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8<small>offered + acknowledged</small></td><td class="table-action">${button('吊销', 'revoke', 'danger', '', `data-node="${esc(n.node_id)}"`)}<small>演示：V0 无撤销机制</small></td></tr>`).join('')}
+    + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
+    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>管理</th></tr></thead><tbody>
+    ${S.nodes.map(n => `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td class="table-action">${button('吊销', 'revoke', 'danger', '', `data-node="${esc(n.node_id)}"`)}</td></tr>`).join('')}
     </tbody></table></div>`
-    : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在 hub.yaml 登记 node 身份与令牌并重启 hub，node 连接成功即出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
-    <p class="footer-note">投递窗口上限 8/node，超限暂停出队；离线不会终止已有执行。epoch 为会话代次，node 每次重连递增。</p></section>`;
+    : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
+    <p class="footer-note">每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
 }
 function enrollModal() {
   openLayerPlain(`${modalHead('生成接入配置 · V0 手工登记')}
@@ -327,27 +324,27 @@ function tasksPage() {
   const counts = stateCounts();
   const filtered = !!(S.f.status || S.f.trace || S.f.by || S.f.error || S.f.from || S.f.to);
   const submitters = [...new Set(S.tasks.map(t => t.submitted_by).filter(Boolean))].sort();
-  return head('任务监管', '全网只读监管；从异常下钻，以证据核对交付。', button('↓ 导出 JSON（当前筛选）', 'export'))
+  return head('任务监管', '全网任务只读监管；从异常下钻，以证据核对交付。', button('↓ 导出 JSON（当前筛选）', 'export'))
     + `<section class="card">
     <div class="filters">${[''].concat(Object.keys(STATES)).map(s => s
     ? `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}">${badge(s)} ${counts[s] || 0}</button>`
     : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('')}</div>
     <div class="fields">
-      <label>trace_id / 任务 ID<input id="f-trace" data-f="trace" value="${esc(S.f.trace)}" placeholder="搜索 trace_id 或任务 ID"></label>
+      <label>搜索任务 ID<input id="f-trace" data-f="trace" value="${esc(S.f.trace)}" placeholder="输入任务 ID 或追踪号"></label>
       <label>提交方<select data-f="by"><option value="">全部提交方</option>${submitters.map(u => `<option ${S.f.by === u ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></label>
-      <label>错误码<select data-f="error"><option value="">全部错误码</option>${Object.entries(ERRORS).map(([k, v]) => `<option value="${k}" title="${esc(v)}" ${S.f.error === k ? 'selected' : ''}>${k} — ${esc(v)}</option>`).join('')}</select></label>
+      <label>失败原因<select data-f="error"><option value="">全部</option>${Object.entries(ERRORS).map(([k, v]) => `<option value="${k}" title="${esc(v)}" ${S.f.error === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
       <label>提交时间 · 从（UTC）<input type="datetime-local" data-f="from" value="${esc(S.f.from)}"></label>
       <label>提交时间 · 至（UTC）<input type="datetime-local" data-f="to" value="${esc(S.f.to)}"></label>
     </div>
     ${list.length ? taskTable(list) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}</div>`}
-    <p class="footer-note">${list.length} 条记录 · 时间均为 UTC · 终态保留 24h，请及时导出 · needs_review 是独立终态，核对在本页抽屉登记，禁止自动重跑。</p></section>`;
+    <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 已完成的任务保留 24 小时，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
   return `<div class="table-wrap"><table><thead><tr><th>任务 / trace_id</th><th>目标节点</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
   ${list.map(t => `<tr data-task="${esc(t.id)}" tabindex="0" aria-label="查看任务 ${esc(t.id)}">
-    <td class="task-title"><strong>${esc(t.target_agent)}</strong><small>${esc(t.id)} · ${esc(t.trace_id)}</small></td>
+    <td class="task-title"><strong>${esc(t.target_agent)}</strong><small>${esc(t.id)}</small></td>
     <td>${esc(t.target_node)}</td>
-    <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，需人工核对')}">${esc(t.result.error)} ⓘ</small>` : ''}${t.review ? '<small>已核对 · reviewed</small>' : ''}</td>
+    <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，需人工核对')}">ⓘ</small>` : ''}${t.review ? '<small>已核对</small>' : ''}</td>
     <td>${esc(t.submitted_by)}</td>
     <td><small>${esc(fmtTime(t.created_at))}</small></td>
     <td class="table-action">${t.status === 'needs_review' && !t.review ? button('去核对', 'detail', 'link', '', `data-id="${esc(t.id)}"`) : button('查看 →', 'detail', 'link', '', `data-id="${esc(t.id)}"`)}</td>
@@ -357,7 +354,21 @@ function taskTable(list) {
 /* ---------- 任务抽屉（详情 + 核对 + 产物 + 时间线） ---------- */
 function openTask(id) {
   const t = S.tasks.find(x => x.id === id);
-  if (!t) { toast('任务不存在或已过保留期'); return; }
+  if (!t) {
+    /* 防悬空引用：批次/核对记录可能引用已归档任务；先强刷一次快照再试。 */
+    toast('正在查询任务最新状态…');
+    api('GET', '/api/v1/tasks/' + encodeURIComponent(id)).then(r => {
+      if (r.code === 200 && r.data) {
+        const i = S.tasks.findIndex(x => x.id === id);
+        if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
+        S.drawer = { id, task: r.data };
+        syncDrawer(true);
+      } else {
+        toast('该任务已归档（终态保留 24 小时），无法查看详情');
+      }
+    }).catch(() => toast('查询失败：网络异常，请稍后重试'));
+    return;
+  }
   modalOpen = false;
   S.drawer = { id, task: t };
   syncDrawer(true);
@@ -382,28 +393,28 @@ function drawerHtml(t) {
   const needs = t.status === 'needs_review';
   const r = t.result;
   const intro = needs
-    ? '执行到一半机器重启了，结果不确定——等待核对登记，请勿重新提交同一工作。'
-    : t.status === 'completed' ? '任务已完成：可阅读最终答复并取回产物；终态保留 24 小时。'
-    : t.status === 'failed' ? '本次执行未完成：先看下方错误码与人话说明，再决定是否重新派单。'
-    : '任务仍在进行，请等待有证据的状态更新；列表每 5 秒自动刷新。';
+    ? '任务执行到一半节点重启了，结果不确定——请核对后登记结论，不要重新提交同一任务。'
+    : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
+    : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
+    : '任务仍在进行，列表每 5 秒自动刷新。';
   return `${modalHead('任务详情 · ' + esc(t.id))}
   <p class="${needs ? 'notice purple' : 'notice'}">${intro}</p>
   <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)}</h2></div>
   <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
   <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 幂等键 <code>' + esc(t.idem) + '</code>' : ''}</p>
-  ${r?.error ? `<div class="notice warn"><b>${esc(r.error)}</b> · ${esc(ERRORS[r.error] || '执行中断')}<br>exit_code = ${r.exit_code}${needs ? '<br>账本有 started 无 finished，无法确认实际进度。' : ''}</div>` : ''}
-  <h3 class="spaced">TaskInput · 任务输入</h3>
+  ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半节点重启，无法确认实际进度。' : ''}</div>` : ''}
+  <h3 class="spaced">任务输入</h3>
   <pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre>
-  <h3>FinalAnswer · 最终答复</h3>
-  ${r && r.final_answer ? `<p style="white-space:pre-wrap">${esc(r.final_answer)}</p>` : '<p class="muted">尚无已确认的最终答复。</p>'}
-  ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>stdout / stderr tail · 诊断日志</summary><pre>${esc(r.stdout_tail || '')}</pre>${r.stderr_tail ? `<pre>${esc(r.stderr_tail)}</pre>` : ''}<small>诊断日志不代替最终答复，各最多 64KiB。</small></details>` : ''}
-  <h3>Artifacts · 产物</h3>
+  <h3>最终答复</h3>
+  ${r && r.final_answer ? `<p style="white-space:pre-wrap">${esc(r.final_answer)}</p>` : (needs ? '<p class="muted">结果未确认，待人工核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
+  ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>运行日志</summary><pre>${esc(r.stdout_tail || '')}</pre>${r.stderr_tail ? `<pre>${esc(r.stderr_tail)}</pre>` : ''}<small>最多保留各 64KiB。</small></details>` : ''}
+  <h3>产物文件</h3>
   ${artifactsHtml(t)}
-  <p class="footer-note">取回经 hub 中继到执行 node；SHA-256 校验失败禁止交付。产物自结果确认起保留 24h。</p>
-  <h3 class="spaced">阶段时间线（仅展示有证据的事件，缺失不补画）</h3>
+  <p class="footer-note">产物经中心端中继从执行节点取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
+  <h3 class="spaced">时间线</h3>
   <ol class="timeline">${timeline(t).map(([e, time]) => `<li>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
   ${reviewSection(t)}
-  ${terminal(t.status) && !needs ? `<div class="notice">终态保留 24h。${button('下一步：返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
+  ${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
   <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}</div>`;
 }
 function artifactsHtml(t) {
@@ -412,32 +423,32 @@ function artifactsHtml(t) {
   return arts.map((a, i) => `<div class="artifact row"><div><b>${esc(a.path)}</b><br><small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…</small></div>${button('取回', 'artifact', '', `data-id="${esc(t.id)}" data-index="${i}"`)}</div>`).join('');
 }
 function timeline(t) {
-  const ev = [['提交持久化 · submit', fmtFull(t.created_at)]];
+  const ev = [['任务已受理', fmtFull(t.created_at)]];
   // Go time.Time 零值序列化为 0001-01-01T00:00:00Z（omitempty 对结构体不生效）：
   // 仅非零时刻才算有证据。
   const real = s => s && !String(s).startsWith('0001-01-01');
-  if (real(t.result?.started_at)) ev.push(['执行开始 · task_started', fmtFull(t.result.started_at)]);
+  if (real(t.result?.started_at)) ev.push(['开始执行', fmtFull(t.result.started_at)]);
   if (terminal(t.status)) {
     const fin = [t.result?.finished_at, t.updated_at].find(real);
-    ev.push([`${STATES[t.status]} · task_result`, fmtFull(fin)]);
+    ev.push([`${STATES[t.status]}`, fmtFull(fin)]);
   }
-  if (t.review) ev.push([`人工核对 · review（${REVIEW_ACTIONS[t.review.action] || t.review.action}，by ${t.review.by}）`, fmtFull(t.review.at)]);
+  if (t.review) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtFull(t.review.at)]);
   return ev;
 }
 function reviewSection(t) {
   if (t.status !== 'needs_review') return '';
   if (t.review) {
     return `<section class="card spaced"><h3>人工核对记录</h3>
-    <div class="notice">已核对 · reviewed<br>结论：${esc(REVIEW_ACTIONS[t.review.action] || t.review.action)}（${esc(t.review.action)}）<br>依据：${esc(t.review.note || '（未填写）')}<br><small>${esc(fmtFull(t.review.at))} · by ${esc(t.review.by)} · 重复提交将覆盖本记录</small></div>
+    <div class="notice">已核对完成<br>结论：${esc(REVIEW_ACTIONS[t.review.action] || t.review.action)}<br>依据：${esc(t.review.note || '（未填写）')}<br><small>${esc(fmtFull(t.review.at))} · ${esc(t.review.by)}</small></div>
     <div class="actions spaced">${button('下一步：回到待办列表 →', 'go-review-queue', 'link')}</div></section>`;
   }
-  return `<section class="card spaced"><h3>needs_review 核对</h3>
-  <p class="muted">核对仅登记人工结论：任务保持 needs_review 终态，不自动重跑，也不改写执行结果。</p>
-  <div class="notice warn"><b>请勿重新提交：</b>V0 不支持任务取消；用新幂等键重复提交同一工作会在 node 本机再次执行。</div>
-  <label class="spaced">核对依据（记录检查过的证据：git diff / 数据库版本 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。"></textarea></label>
+  return `<section class="card spaced"><h3>人工核对</h3>
+  <p class="muted">核对只是登记人工结论：任务保持「待人工核对」状态，不会自动重跑，也不会改写执行结果。</p>
+  <div class="notice warn"><b>请勿重新提交同一任务：</b>重复提交会在节点上再次执行。</div>
+  <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。"></textarea></label>
   <div class="actions">
-    <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}">确认结果有效（ack_review）</button>
-    <button class="warning" data-act="review" data-review-action="mark_failed" data-id="${esc(t.id)}">标记失败（mark_failed）</button>
+    <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}">确认结果有效</button>
+    <button class="warning" data-act="review" data-review-action="mark_failed" data-id="${esc(t.id)}">标记为失败</button>
   </div></section>`;
 }
 
@@ -449,16 +460,16 @@ function controlPage() {
   const targets = Object.keys(C.targets).filter(k => C.targets[k]);
   return head('运维控制', '向网内巡检类 agent 派发正式任务：hub 不内嵌执行体，执行仍在 node 侧。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
-    <div class="row"><h2>全网巡检</h2><span class="badge offered">控制操作 · 经任务全链</span></div>
-    <label>巡检 Agent（来自能力目录）<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
+    <div class="row"><h2>全网巡检</h2><span class="badge offered">正式任务 · 逐节点执行</span></div>
+    <label>选择能力<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
     const v = d.node_id + '/' + d.card.name;
-    return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)} @ ${esc(d.node_id)} — ${esc(d.card.description || '（无描述）')} · ${esc(d.card.permission_mode)}</option>`;
-  }).join('') : '<option value="">目录为空：尚无已暴露能力</option>'}</select></label>
-    ${S.directory.length ? '' : '<div class="notice warn">能力目录为空：先在 node 侧以 exposed: true 暴露 agent。</div>'}
-    <div class="row spaced"><h3>批量目标 · 来自已登记节点</h3><small>已选 ${targets.length} / ${S.nodes.length}；未暴露目标会逐项标 skipped</small></div>
+    return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)} @ ${esc(d.node_id)} — ${esc(d.card.description || '（无描述）')}</option>`;
+  }).join('') : '<option value="">目录为空：还没有节点开放能力</option>'}</select></label>
+    ${S.directory.length ? '' : '<div class="notice warn">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
+    <div class="row spaced"><h3>目标节点</h3><small>已选 ${targets.length} / ${S.nodes.length}；离线或未开放能力的节点会自动跳过</small></div>
     <div class="checkline-grid">${S.nodes.map(n => `<label class="checkline"><input type="checkbox" data-target="${esc(n.node_id)}" ${C.targets[n.node_id] ? 'checked' : ''}> ${esc(n.node_id)} ${onlineB(n)}</label>`).join('') || '<p class="muted">尚无已登记节点。</p>'}</div>
-    <label class="spaced">巡检指令（stdin · 任务输入）<textarea id="ctrl-stdin" rows="4" placeholder="例如：检查本机 agent 进程、磁盘余量与最近错误日志，输出健康摘要。">${esc(C.stdin)}</textarea></label>
-    <label>批次幂等键（自动生成 · 结果未知时用于同键恢复）<input readonly value="${esc(C.idem)}"></label>
+    <label class="spaced">巡检指令<textarea id="ctrl-stdin" rows="4" placeholder="例如：检查本机 agent 进程、磁盘余量与最近错误日志，输出健康摘要。">${esc(C.stdin)}</textarea></label>
+    <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
     <div id="ctrl-feedback" class="statusline" role="status">${ctrlFeedback()}</div>
     <div class="actions">
@@ -467,16 +478,16 @@ function controlPage() {
       ${C.unknownPending && C.stage !== 'unknown' ? button('同键重试上次未决提交', 'ctrl-retry') : ''}
     </div></form></section>
     ${C.message ? `<section class="card spaced">${C.message}</section>` : ''}
-    <section class="card spaced"><h3>控制操作语义</h3>
-    <div class="step"><span>1</span><p>提交时冻结目标快照：离线 / 未暴露目标标 skipped，不阻塞其余目标。</p></div>
-    <div class="step"><span>2</span><p>每个目标是一笔正式任务（走提交校验全链），submitted_by=admin。</p></div>
-    <div class="step"><span>3</span><p>逐项结果见批次报告；部分失败可理解展示，任务进展在任务监管跟踪。</p></div></section>`;
+    <section class="card spaced"><h3>运行规则</h3>
+    <div class="step"><span>1</span><p>提交时锁定目标：离线或未开放能力的节点自动跳过，不影响其余目标。</p></div>
+    <div class="step"><span>2</span><p>每个目标节点上都是一笔正式任务，全程可追踪。</p></div>
+    <div class="step"><span>3</span><p>逐项结果见批次报告；任务进展在「任务监管」页跟踪。</p></div></section>`;
 }
 function ctrlFeedback() {
   const C = S.C;
-  if (C.stage === 'unknown') return warnNotice('结果未知 · 未收到提交确认', '请求可能已在 hub 持久化：表单与幂等键已冻结。「同键重试」命中原批次不会重复执行；「放弃等待」保留幂等键稍后再试。');
-  if (C.stage === 'submitting') return '<span class="muted">正在等待持久化确认 · submitting</span>';
-  return '<span class="muted">就绪 · ready · 提交后逐目标返回准入结果</span>';
+  if (C.stage === 'unknown') return warnNotice('结果未知 · 未收到服务器确认', '这次提交可能已经生效：表单与恢复密钥已冻结。「同键重试」命中原批次不会重复执行；「放弃等待」保留密钥稍后再试。');
+  if (C.stage === 'submitting') return '<span class="muted">正在提交…</span>';
+  return '<span class="muted">就绪 · 提交后逐个节点返回结果</span>';
 }
 function controlResult() {
   const b = S.C.batch;
@@ -484,18 +495,18 @@ function controlResult() {
   const ok = items.filter(i => i.task_id).length;
   const skip = items.filter(i => i.skipped).length;
   const err = items.filter(i => i.error).length;
-  return head('批次报告 · ' + esc(b.batch_id), '控制操作批次：逐项目标的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
+  return head('批次报告 · ' + esc(b.batch_id), '这次巡检在每个节点上的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
     + `<section class="card">
     <div class="row"><h2>汇总</h2><span class="badge ${b.status === 'complete' ? 'completed' : 'running'}">${esc(BATCH_STATES[b.status] || b.status)}</span></div>
-    <div class="mini-stat"><div><b>${ok}</b><small>已提交（正式任务）</small></div><div><b>${skip}</b><small>跳过</small></div><div><b>${err}</b><small>提交失败</small></div></div>
-    <div class="table-wrap spaced"><table><thead><tr><th>目标节点</th><th>结果</th><th>任务 / 去向</th></tr></thead><tbody>
+    <div class="mini-stat"><div><b>${ok}</b><small>已提交</small></div><div><b>${skip}</b><small>已跳过</small></div><div><b>${err}</b><small>提交失败</small></div></div>
+    <div class="table-wrap spaced"><table><thead><tr><th>目标节点</th><th>结果</th><th>去向</th></tr></thead><tbody>
     ${items.map(it => `<tr><td><b>${esc(it.target)}</b></td>
-      <td>${it.task_id ? badge(it.status || 'submitted') : it.skipped ? `<span class="badge offline">跳过 · ${esc(SKIPS[it.skipped] || it.skipped)}</span>` : `<span class="badge failed">失败 · ${esc(it.error || 'unknown')}</span>`}</td>
-      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', '', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${esc(it.skipped ? SKIPS[it.skipped] || it.skipped : ERRORS[it.error] || it.error || '')}</small>`}</td>
+      <td>${it.task_id ? badge(it.status || 'submitted') : it.skipped ? `<span class="badge offline" title="${esc(it.skipped)}">已跳过（${it.skipped === 'offline' ? '离线' : '能力未开放'}）</span>` : `<span class="badge failed">失败</span>`}</td>
+      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', '', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${it.skipped === 'offline' ? '节点离线，未提交' : it.skipped === 'not_exposed' ? '该节点未开放此能力' : esc(ERRORS[it.error] || it.error || '')}</small>`}</td>
     </tr>`).join('')}
     </tbody></table></div>
-    <p class="footer-note">批次创建于 ${esc(fmtFull(b.created_at))} · agent=${esc(b.agent)} · 逐项任务状态为查询时点快照，随页面每 5 秒刷新。</p>
-    <div class="actions spaced">${button('刷新批次状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
+    <p class="footer-note">批次创建于 ${esc(fmtFull(b.created_at))} · 各任务状态随页面自动刷新。</p>
+    <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
     </section>`;
 }
 async function submitControl() {
@@ -524,6 +535,9 @@ async function submitControl() {
     const r = await api('POST', '/api/v1/control-operations', body);
     if (r.code === 202 || r.code === 200) {
       C.batch = r.data; C.view = 'result'; C.stage = 'done'; C.idem = newIdem();
+      /* BUG 修复（2026-10-21 验收）：提交后必须立即刷新任务快照，
+       * 否则批次报告页「查看任务」在下一轮 5s 轮询前点击必然 404。 */
+      try { await loadAll(); } catch { }
       const n = (r.data.items || []).length, ok = (r.data.items || []).filter(i => i.task_id).length;
       toast(`批次已受理${r.code === 200 ? '（幂等命中 dup）' : ''} · ${ok}/${n} 目标已提交 —— 下一步：查看批次报告`);
       render(); return;
@@ -565,6 +579,48 @@ function policyPage() {
     <p class="footer-note">低负载部署目标 ≤ 5 node；此页数据取自协议常量（SPEC 4.6），非运行时快照。</p></section>`;
 }
 
+/* ---------- 访问令牌（GitHub 式 PAT） ---------- */
+async function loadTokens() {
+  const r = await api('GET', '/api/v1/auth/tokens').catch(() => null);
+  if (r && r.code === 200) S.tokens = r.data.tokens || [];
+}
+function tokensPage() {
+  const nt = S.newToken;
+  return head('访问令牌', '给其他管理者或自动化脚本发独立令牌；随时可撤销，不影响你自己的登录。')
+  + (nt ? `<section class="card spaced"><h2>令牌已创建</h2>
+    <div class="notice warn"><b>请立即保存</b>：明文只显示这一次，关闭后无法再查看。</div>
+    <pre id="new-token-plain" style="user-select:all">${esc(nt.token)}</pre>
+    <div class="actions">${button('复制令牌', 'copy-token', 'primary')}${button('我已保存，关闭', 'token-done', 'link')}</div>
+    <p class="footer-note">名称：${esc(nt.name)} · 前缀：${esc(nt.prefix)}…</p></section>` : '')
+  + `<section class="card"><div class="row"><h2>已创建的令牌</h2></div>
+    <form id="token-form" class="fields">
+      <label>用途名称（必填）<input id="token-name" placeholder="例如：运维台电脑 · 只读巡检" required maxlength="64"></label>
+      <div class="actions" style="align-self:end"><button class="primary" type="submit">生成新令牌</button></div>
+    </form>
+    <div class="table-wrap spaced"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th></th></tr></thead><tbody>
+    ${S.tokens.length ? S.tokens.map(t => `<tr>
+      <td><b>${esc(t.name)}</b></td>
+      <td><code>${esc(t.prefix)}…</code></td>
+      <td><small>${esc(fmtTime(t.created_at))}</small></td>
+      <td><small>${t.last_used_at ? esc(fmtTime(t.last_used_at)) : '从未使用'}</small></td>
+      <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
+      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', '', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
+    </tbody></table></div>
+    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
+}
+async function submitToken(form) {
+  const name = $('#token-name')?.value.trim();
+  if (!name) { toast('请先填写令牌用途名称'); return; }
+  const r = await api('POST', '/api/v1/auth/tokens', { name }).catch(() => null);
+  if (r && r.code === 201) {
+    S.newToken = r.data;
+    await loadTokens();
+    render();
+    toast('令牌已生成 · 请立即保存明文');
+  } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
+}
+
 /* ---------- 动作表（事件委托） ---------- */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
@@ -577,6 +633,15 @@ const ACT = {
   enroll: () => enrollModal(),
   'enroll-done': () => { closeLayer(); render(); toast('配置已交接 · 节点上线后将出现在列表'); },
   'copy-config': () => copyText([$('#enroll-snippet')?.textContent, $('#enroll-node-snippet')?.textContent].filter(Boolean).join('\n\n'), '接入配置片段'),
+  'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
+  'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
+  'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', '', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`),
+  'token-revoke-confirm': async b => {
+    const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
+    if (r && r.code === 200) {
+      await loadTokens(); closeLayer(); render(); toast('令牌已撤销');
+    } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
+  },
   revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`),
   'drawer-refresh': async b => {
     const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id)).catch(() => null);
@@ -585,7 +650,7 @@ const ACT = {
       if (i >= 0) S.tasks[i] = r.data;
       S.drawer = { id: r.data.id, task: r.data };
       syncDrawer(true); toast('详情已刷新');
-    } else toast('刷新失败：' + (r ? errLine(r.data) : '网络异常'));
+    } else toast(r && r.code === 404 ? '该任务已归档（终态保留 24 小时）' : '刷新失败：' + (r ? errLine(r.data) : '网络异常'));
   },
   export: () => {
     const list = filteredTasks();
@@ -691,15 +756,11 @@ async function copyText(value, label) {
 }
 
 /* ---------- 事件绑定（委托） ---------- */
-const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, policy: policyPage };
+const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, policy: policyPage, tokens: tokensPage };
 function bindEvents() {
   window.addEventListener('hashchange', route);
   document.addEventListener('click', e => {
     const b = e.target.closest('button');
-    if (b?.dataset.view === 'node') {
-      toast('Node 视角请见 node 本地控制台（node 本机回环 127.0.0.1:8445）——本站仅提供 Hub 中心端视角');
-      return;
-    }
     if (b?.id === 'logout') {
       closeLayer();
       S.authed = false; S.loaded = false; S.C = freshControl();
@@ -718,6 +779,7 @@ function bindEvents() {
     e.preventDefault();
     if (e.target.id === 'login-form') doLogin(e.target);
     if (e.target.id === 'control-form') submitControl();
+    if (e.target.id === 'token-form') submitToken(e.target);
   });
   document.addEventListener('input', e => {
     const k = e.target.dataset.f;

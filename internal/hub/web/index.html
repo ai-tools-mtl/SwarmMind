@@ -3,17 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SwarmMind · Hub 中心端控制台</title>
+<title>SwarmMind · 中心端</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header class="topbar">
-<div class="brand"><b>⌘</b>SwarmMind<span class="chip"> / HUB CONSOLE</span></div>
-<div class="switcher" aria-label="控制台视角"><button data-view="hub" class="selected" aria-pressed="true">Hub 中心端</button><button data-view="node" aria-pressed="false">Node 本地控制台</button></div>
-<div class="deploy">中心端站点（api_listen，回环）；node 视角见 node 本地控制台（node 本机 127.0.0.1:8445 回环）</div>
+<div class="brand"><b>⌘</b>SwarmMind<span class="chip"> 中心端</span></div>
+<div class="deploy">登记与监管 · 任务在各个节点本机执行</div>
 <div class="top-right"><span id="session-left" class="muted small"></span><button id="logout" class="link" hidden>退出登录</button></div>
 </header>
-<div id="app"><main><div class="card login"><h1>SwarmMind Hub</h1><p class="muted">正在连接管理面…</p></div></main></div>
+<div id="app"><main><div class="card login"><h1>SwarmMind</h1><p class="muted">正在连接管理面…</p></main></div></div>
 <div id="layer"></div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <script src="/app.js"></script>

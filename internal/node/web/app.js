@@ -145,7 +145,7 @@ function button(label, act, cls = '', inner = '', attr = '') {
 }
 function badge(status) {
   const s = String(status || 'submitted');
-  return `<span class="badge ${esc(s)}">${esc(STATES[s] || s)} · ${esc(s)}</span>`;
+  return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || s)}</span>`;
 }
 function timeShort(iso) {
   if (!iso) return '—';
@@ -164,7 +164,7 @@ function layout(content) {
   return `<div class="shell"><aside><div class="workspace"><strong>${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
   <nav>${PAGES.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${['①', '②', '③'][PAGES.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
-  <span style="opacity:.75">已接收 · acknowledged<br>本机回环 · 仅本机进程可达</span></div></aside>
+  <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
   <main>${content}</main></div>`;
 }
 
@@ -176,7 +176,7 @@ function render() {
   if (S.authed && S.status?.online != null) {
     const chip = $('#conn-chip');
     chip.className = 'badge ' + (S.status.online ? 'online' : 'offline');
-    chip.textContent = S.status.online ? 'hub 在线 · epoch ' + S.status.epoch : 'hub 离线';
+    chip.textContent = S.status.online ? '中心端在线 · 重连 ' + S.status.epoch + ' 次' : 'hub 离线';
   }
   $('#app').innerHTML = !S.authed ? gateView() : layout(
     S.page === 'overview' ? overviewPage() : S.page === 'services' ? servicesPage() : tasksPage());
@@ -195,7 +195,7 @@ function overviewPage() {
   const st = S.status;
   const led = st?.ledger || {};
   const mb = st?.mailbox || {};
-  const head = `<div class="page-head"><div><div class="eyebrow">OVERVIEW</div><h1>总览</h1>
+  const head = `<div class="page-head"><div><h1>总览</h1>
     <p class="muted">本机 node 状态与最近任务；下一步：<b>＋派单</b> 把工作交给网内能力。</p></div>
     <div class="actions">${button('复制诊断信息', 'copy-diag')}${button('＋ 派单', 'go-tasks', 'primary')}</div></div>`;
   if (!S.agents.length) {
@@ -207,7 +207,7 @@ function overviewPage() {
   }
   return head + `
   <div class="grid cols4">
-    <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线 · online' : '离线 · offline'}</span></div>
+    <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线' : '离线'}</span></div>
       <small class="muted">epoch ${esc(st?.epoch ?? 0)} · 掉线自动重连，重连后代次 +1</small></section>
     <section class="card"><h3>执行账本（三态）</h3><div class="mini-stat spaced"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div>
       <small class="muted">重启恢复：started 未完 → needs_review，绝不自动重跑</small></section>
@@ -229,7 +229,7 @@ function recentTasksCard() {
 
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
-  const head = `<div class="page-head"><div><div class="eyebrow">MY SERVICES</div><h1>我的服务</h1>
+  const head = `<div class="page-head"><div><h1>我的服务</h1>
     <p class="muted">本机 agent 即服务：暴露开关主权在本机；关闭后<b>新任务</b>不再准入（404），已在执行/排队的任务照常跑到终态。</p></div></div>`;
   if (!S.agents.length) {
     return head + `<section class="card"><div class="empty"><h2>还没有可暴露的服务</h2>
@@ -248,7 +248,7 @@ function svcCard(a) {
         ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
   return `<section class="card svc-card ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
-    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? 'exposed · 网内可调用' : 'not exposed · 仅本机'}</span></h2>
+    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span></h2>
       <small class="muted">${esc(a.description || '（无描述）')} · 权限模式 <code>${esc(a.permission_mode || '—')}</code> · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
     <div class="actions"><div class="toggle" role="group" aria-label="暴露开关">
       ${button('暴露', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
@@ -291,7 +291,7 @@ async function setExposed(name, exposed, btn) {
 /* ---------- 页面③：派任务·我的任务（旅程②消费者） ---------- */
 function tasksPage() {
   const c = S.f;
-  const head = `<div class="page-head"><div><div class="eyebrow">TASKS</div><h1>派任务 · 我的任务</h1>
+  const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
     <p class="muted">从能力目录选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
   const opts = S.catalog.map(e => {
     const v = e.node_id + '|' + e.card.name;
