@@ -75,7 +75,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/login-password", s.handleLoginPassword)
 	mux.HandleFunc("POST /api/v1/auth/setup", s.handleAccountSetup)
-	mux.HandleFunc("GET /api/v1/auth/account", s.auth(s.handleAccountStatus))
+	mux.HandleFunc("GET /api/v1/auth/account", s.handleAccountStatus) // 免鉴权：登录页需据此选表单（未登录仅返回 initialized 布尔）
 	mux.HandleFunc("POST /api/v1/auth/account/update", s.auth(s.handleAccountUpdate))
 	mux.HandleFunc("POST /api/v1/auth/tokens", s.auth(s.handleTokenCreate))
 	mux.HandleFunc("GET /api/v1/auth/tokens", s.auth(s.handleTokenList))
