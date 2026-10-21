@@ -114,7 +114,8 @@ func tools() []toolDef {
 			"agent":    s("目标 agent 名（swarmmind_agents 可查）"),
 			"args":     a("命令行参数（可选）"),
 			"stdin":    s("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id": s("追踪号（可选，便于关联）"),
+			"trace_id": s("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
+			"idem_key": s("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
 		}, "node_id", "agent")},
 		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: obj(map[string]any{
 			"task_id": s("任务 ID"),
@@ -243,6 +244,9 @@ func toolSubmit(args map[string]any) (string, error) {
 	}
 	if tid, ok := args["trace_id"].(string); ok && tid != "" {
 		body["trace_id"] = tid
+	}
+	if idem, ok := args["idem_key"].(string); ok && idem != "" {
+		body["idem_key"] = idem
 	}
 	code, data, err := hubAPI("POST", "/api/v1/tasks", body)
 	if err != nil {

@@ -28,6 +28,8 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 
 铁律不变：hub 永不执行；节点主权不动；Prime 与所有 agent 一样走同一套任务全链（无特权通道）。
 
+**V1 权限事实声明（M1）**：系统无细粒度调度权限实体——Prime = 持 admin 令牌的普通客户端，能力上限即管理员全权；换发/吊销其令牌即终结调度能力。scoped token 列入 backlog。
+
 ## 三、StartLux-Decision：影子建议，不是自动驾驶
 
 **决策链**：Prime 分解出子任务 → 向 StartLux 查询「该子任务派给谁」→ Prime 审核（能力匹配/负载/依赖/成本）→ 派发（采纳或改派，**记录差异**）。
@@ -41,9 +43,11 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 | 编排需求 | Prime 的做法（全部用现有 MCP 工具） |
 |---|---|
 | 并行任务 | 连续 submit（hub 并发窗口已支持）→ 逐个 wait |
-| 串行依赖 | submit A → wait A → artifact 取 A 产物 → 产物内容嵌入 B 的任务描述 → submit B |
-| 失败处理 | wait 返回 failed → 读 stderr → 重派（新幂等键）或上报人 |
-| needs_review | 视为终态阻断：Prime 上报人，不自行重跑（对齐 4.8） |
+| 串行依赖 | submit A → wait A → artifact 取 A 产物 → 产物内容嵌入 B 的任务描述 → submit B。**嵌入 ≤200KiB 纯文本**（1MiB 信封硬上限+信箱字节预算）；超限或跨节点大数据依赖在 L2 就绪前禁止编排，上报用户 |
+| 失败处理 | wait 返回 failed → 失败矩阵分类（参数越界改描述重派/环境类原样重派/未知上报），同键幂等保护 |
+| needs_review | 视为终态阻断：Prime 上报人，不自行重跑（对齐 4.8）；其 FinalAnswer 不进结论 |
+| 取消 | **V1 无取消原语**（显式声明）：误派最大代价 = timeout_sec × 受影响任务数；hub→node cancel 帧列入 backlog（runner 进程组终止已就绪，成本可控） |
+| 同 workdir | 同名 agent 的并行子任务强制串行（同 agent ⇒ 同 ExecProfile ⇒ 同 workdir）；跨 agent 同节点并行由 hub L1 互斥兜底（workdir_busy_timeout 属环境类可重派一次） |
 | 超时预算 | wait 的 timeout_sec 参数 + Prime 自身轮次预算（对齐 GROUP-RFC 预算护栏） |
 
 **不做**：hub 内嵌编排引擎、任务 DAG 协议帧、Prime 特权 API——所有编排智能在 Prime 的 LLM 里，可靠性继续由任务全链保证。
@@ -54,22 +58,32 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 - 群内流程：人发目标 → @Prime → Prime 在群里发「分解方案」（子任务×执行者×顺序，附 StartLux 建议）→ 人确认/修改 → Prime 逐个转正式任务（group_task_created 自动回流）→ 各 agent 结果回流 → Prime 发总结 → 人验收 → conclude
 - 预算代码强制不变：Prime 的轮次/调用次数计入群预算
 
+**影子数据契约（P4.1 开工前补齐实现，格式草案）**：每任期 JSONL（deploy/prime/shadow/<term_id>.jsonl），行结构 {ts, term_id, subtask_id, goal_digest, candidates, startlux_rec{node,agent,confidence,rationale}, prime_final, relation: adopted\|overridden\|degraded, task_id, terminal_status}。度量：top-1 命中率 + 采纳/否决组成功率对比。晋级标准（可判定）：连续 ≥50 条、命中率 ≥90%、采纳组成功率不劣 → 报伦哥批准。降级期记 relation=degraded（样本不丢）。**P4.1 验收的「10 个决策」是冒烟非收敛证据**。
+
 ## 六、分阶段交付（测试循环制适用）
 
 | 阶段 | 交付 | 验收 |
 |---|---|---|
-| P4.0 Prime MVP | mac-mini 部署「zcode-dev+MCP」Prime 形态；验证复合目标：「检查两台机器磁盘并汇总对比报告」→ 自动分解 2 并行 diskcheck → 收集 → 产出汇总 | 全自动完成、报告可读、全程无需人干预中间步骤 |
+| P4.0 Prime MVP | mac-mini 部署「zcode-dev+MCP」Prime 形态；验证复合目标（以「直接干」前缀派发，全自动形态）：「检查两台机器磁盘并汇总对比报告」→ 自动分解 2 并行 diskcheck → 收集 → 产出汇总 | 全自动完成、报告可读、全程无需人干预中间步骤 |
 | P4.1 StartLux 影子 | StartLux-Decision-v1.1 服务接入；Prime 分配前查询；差异日志落盘 | 10 个分配决策有影子记录；StartLux 不可用时降级不故障 |
-| P4.2 群聊 MVP | GROUP-RFC MVP 全量（协议 6 帧+群页+Prime 群内编排） | 群版 DoD 增补全过 |
+| P4.2 群聊 MVP | 「GROUP-RFC MVP + Prime 编排扩展」（RFC 本体 MVP 不含 host 自动决策，Prime 编排为扩展项，DoD 单列；需 MCP submit 增 group_ref 透传） | 群版 DoD 增补 + Prime 扩展 DoD 全过 |
 | P4.3 依赖与产物链 | FILE-COLLAB L2（depends_on）——Prime 的手工依赖编排升级为平台原语 | L2 DoD |
 
-## 七、风险与开放问题（供 codex 重点审查）
+**预算强制降级声明（S5）**：GROUP-RFC 的预算「代码强制」原则在 P4.0/P4.1 控制台形态下降级为 prompt 层；兜底方案（MCP 进程内调用计数超限报错 / hub 按 token 限速）二选一列入 P4.x。
+
+**并发任期互斥（S6）**：控制台加软约束——任一 Prime 任期进行中禁止新总理派发（避免叠加派发与预算互不可见）。
+
+## 七、风险与开放问题（含评审增补）
 
 1. **Prime 单点**：Prime 所在节点离线 → 编排中断。V1 接受（人可从控制台接管）；V2 考虑 Prime 多实例选主
 2. **LLM 决策不可解释**：Prime 为什么这么分解——要求 Prime 每步输出「决策理由」（群消息/任务 trace_id 关联），可审计
 3. **StartLux 评估文档已散佚**（工作台清理）——P4.1 开工前需伦哥提供 StartLux-Decision-v1.1 的接口规格/模型文件位置
 4. **成本**：Prime 每次复合目标消耗 GLM tokens——预算代码是否有 token 维度（GROUP-RFC 已留「估算/未知兜底」条款）
-5. **并发写冲突**：Prime 派发的子任务若操作同一 workdir，触碰 Workdir 互斥（P1.5）——Prime 分解时须感知（F-COLLAB L2 的 depends_on 是正解，MVP 靠 Prime 自觉避开同 workdir 并行）
+5. **并发写冲突**：同名 agent 并行子任务强制串行；跨 agent 同节点由 hub 互斥兜底（workdir_busy_timeout 环境类可重派）；完备解是 L2 depends_on
+6. **无取消原语（M6）**：误派代价 = timeout_sec × 任务数；cancel 帧入 backlog
+7. **Prime 会话崩溃接管（S7）**：in-flight 任务照常执行至终态但无人收集；任期幂等键约定（prime-<term>-<seq>）是程序化重建状态的前提
+8. **提示词注入面（S7）**：Prime 持 admin 令牌而 stderr 是任意文本——提示词已含注入防御条款；MCP 层后续加内容转义
+9. **产物 24h 保留与延迟验收的时序竞争（S7）**：超时统一上报/人延迟验收路径下产物可能过期——重要产物 Prime 任期内即时回读并存入报告
 
 ## 八、总理智能体规格（v1 提示词与编排算法，2026-10-21 补）
 
@@ -121,3 +135,11 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 - 并行度 4 < hub 投递窗口 8/node——Prime 不会挤兑单节点窗口
 - 子任务操作同一 workdir 时**禁止并行**（Workdir 互斥 P1.5 会排队，Prime 主动串行化更优）
 - 幂等：重派自然产生新幂等键（hub 按 idem 去重保护同键重试）
+
+
+## 八、评审闭环记录（2026-10-21）
+
+- 评审：codex 不可用（区域 403），按协作制度降级独立 zcode 会话评审 → docs/PRIME-REVIEW.md（M1-M6/S1-S7/Q1-Q6）
+- 修订：M1-M6 全部闭合（M2 含 MCP submit 增 idem_key/trace_id 参数与 SPEC 六.六同步）；S3 八处提示词补丁全收；S1 契约草案入文档（P4.1 实现）；S4c 群范围标签修正；S5/S6/S7 声明纳入
+- 闭合：Q1 禁自干（入提示词）；Q2 跨机大数据 V1 禁用（入分解合法性规则）；Q5 mac diskcheck 已就绪（epoch=24 agents=3）
+- 待办：Q3 StartLux 规格待伦哥提供（P4.1 前置）；Q4 群模式提示词变体（P4.2 决策）；Q6 反代 QoS（部署时定）
