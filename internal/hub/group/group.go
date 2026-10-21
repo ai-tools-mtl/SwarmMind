@@ -502,11 +502,13 @@ func countAgent(msgs []GroupMessage) int {
 
 // ---------- 群闭环消息文案（GROUP-RFC group_task_created 语义） ----------
 
-// 终态 → 人话状态词（与控制台 STATES 词典同口径）。
+// 终态 → 人话状态词（与控制台 STATES 词典同口径）。cancelled 取消时 Result 可为
+// nil（真实执行数据由 node 后到时合并），TaskTerminalBody 已兜底可读。
 var terminalLabels = map[string]string{
 	"completed":    "已完成",
 	"failed":       "执行失败",
 	"needs_review": "待人工核对",
+	"cancelled":    "已取消",
 }
 
 // TaskCreatedBody 转任务创建注记：注入群的 kind=system 消息正文。

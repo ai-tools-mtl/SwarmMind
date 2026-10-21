@@ -223,6 +223,8 @@ func (c *Core) HandleFrame(env *protocol.Envelope) {
 		c.handleTaskStarted(env)
 	case protocol.MsgTaskResult:
 		c.handleTaskResult(env)
+	case protocol.MsgTaskCancelled:
+		c.handleTaskCancelledAck(env)
 	case protocol.MsgPing:
 		_ = c.sendFrame(env.From, protocol.MsgPong, env.MessageID, nil, nil)
 	case protocol.MsgPong, protocol.MsgCardUpdate, protocol.MsgRegister:

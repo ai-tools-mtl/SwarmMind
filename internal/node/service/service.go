@@ -8,7 +8,8 @@
 // 执行并发由信号量限制（node 执行并发，默认 2，可配）；任务执行 context 独立于
 // 会话（重连不断任务），但随服务关闭取消——关闭打断在途执行时整组终止子进程，
 // 以 needs_review/node_restarted_midway 收尾并回传（SPEC 4.8），绝不以
-// completed 落盘。
+// completed 落盘。管理面取消（task_cancel）同理以执行 ctx 中断在途任务，以
+// cancelled/user_cancelled 收尾（cancel.go）。
 package service
 
 import (
@@ -68,6 +69,11 @@ type Service struct {
 	// 在途本地请求表（Loop 4，localreq.go）：请求帧 mid → 应答通道。
 	muPend  sync.Mutex
 	pending map[string]chan *protocol.Envelope
+
+	// 在途任务取消表（task_cancel 生命周期，cancel.go）：task_id → 取消开关。
+	// execute 登记goroutine 注销；handleTaskCancel 依此触发执行中断。
+	muCancels sync.Mutex
+	cancels   map[string]*cancelEntry
 }
 
 // New 构造服务并订阅入站帧；启动补传 worker 与周期兜底循环；从账本重建 workdir
@@ -86,6 +92,7 @@ func New(cfg Config, tr transport.Transport) *Service {
 		stop:       stop,
 		resendKick: make(chan struct{}, 1),
 		pending:    make(map[string]chan *protocol.Envelope),
+		cancels:    make(map[string]*cancelEntry),
 		wsByAgent:  make(map[string]string, len(cfg.ArtifactRoots)),
 		wsLocks:    newWsMutex(),
 	}
@@ -139,6 +146,8 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 	switch env.Type {
 	case protocol.MsgTaskOffer:
 		s.handleOffer(env)
+	case protocol.MsgTaskCancel:
+		s.handleTaskCancel(env)
 	case protocol.MsgResultAck:
 		s.handleResultAck(env)
 	case protocol.MsgErr:
@@ -195,6 +204,8 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 // spawn；finished+result 落盘 → 发 task_result。任务 ctx 独立于会话（重连不断
 // 任务，SPEC 五）但随服务关闭（Close→stop）取消——取消即整组终止子进程，并按
 // SPEC 4.8 以 needs_review 收尾，绝不把打断后的结果当 completed 落盘。
+// 管理面取消（task_cancel，cancel.go）同样以执行 ctx 中断：整组终止后账本以
+// cancelled/user_cancelled 收尾并回传（与关闭打断的判定见执行结果分类处）。
 //
 // P1.5 workdir 互斥（SPEC 4.10，node 侧为准）：互斥登记在调用方 goroutine 内
 // 同步完成（reserve：空闲/自持即取得，他持则入 FIFO 队尾——登记序即授予序，
@@ -202,17 +213,20 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 // 进行，且并发槽在授予之后才取——「先锁后槽」，等待者不占槽，杜绝 Concurrency
 // 受限时「等待者占槽 + 持有者等槽」互等死锁（P1.5 二轮必修2）。锁持有至
 // finished+result 落盘，同 workspace 任务严格串行。锁等待随服务关闭取消：未获
-// 授予即放弃（withdraw 摘队），条目保持 accepted 由重启恢复再调度；授予与取消
-// 竞态时按持有走关闭检查退出（defer 释放，无执行副作用）。
+// 授予即放弃（withdraw 摘队），条目保持 accepted 由重启恢复再调度；随管理面
+// 取消则账本落 cancelled 终态（不再恢复执行）。授予与取消/关闭竞态时按持有
+// 走下方检查退出（defer 释放，无执行副作用）。
 func (s *Service) execute(task protocol.Task) {
 	ws := s.wsByAgent[task.TargetAgent]
 	var wake <-chan struct{} // 非 nil：已登记排队，release 授予时关闭
 	if ws != "" {
 		wake = s.wsLocks.reserve(ws, task.ID) // nil=已持有（含自持重投）
 	}
+	ce := s.regCancel(task.ID) // task_cancel 入口（cancel.go）；goroutine 退出注销
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		defer s.unregCancel(task.ID)
 		if wake != nil {
 			select {
 			case <-wake: // release 先置 held=本任务再 close，唤醒即持有
@@ -221,6 +235,12 @@ func (s *Service) execute(task protocol.Task) {
 					return // 未获授予即放弃：条目保持 accepted，重启恢复再调度
 				}
 				// 授予与关闭竞态：持有已生效，按持有走下方关闭检查退出
+			case <-ce.doneCh():
+				if s.wsLocks.withdraw(ws, task.ID, wake) {
+					s.finishCancelledBeforeRun(task.ID) // 管理面取消：不再执行，落终态回传
+					return
+				}
+				// 授予与取消竞态：持有已生效，按持有走下方取消检查退出
 			}
 		}
 		select {
@@ -230,18 +250,29 @@ func (s *Service) execute(task protocol.Task) {
 				s.wsLocks.release(ws, task.ID)
 			}
 			return
+		case <-ce.doneCh():
+			if ws != "" {
+				s.wsLocks.release(ws, task.ID)
+			}
+			s.finishCancelledBeforeRun(task.ID)
+			return
 		}
 		defer func() { <-s.sem }()
 		if ws != "" {
 			defer s.wsLocks.release(ws, task.ID)
 		}
 
-		// runCtx：任务执行期中止开关——独立于会话，随服务关闭取消。
+		// runCtx：任务执行期中止开关——独立于会话，随服务关闭或管理面取消。
 		runCtx, cancelRun := context.WithCancel(s.ctx)
 		defer cancelRun()
-		// 关闭竞态（select 双就绪随机）：不再 started，条目保持 accepted，
-		// 重启恢复进 Reschedule（SPEC 4.8），不产生任何执行副作用。
+		ce.bind(cancelRun) // 此前已触发取消则立即生效
+		// 关闭/取消竞态（select 双就绪随机）：关闭 → 不再 started，条目保持
+		// accepted，重启恢复进 Reschedule（SPEC 4.8）；管理面取消 → 落 cancelled
+		// 终态（账本先到为准，与取消路径竞争失败则幂等收敛）。
 		if runCtx.Err() != nil {
+			if ce.triggered() {
+				s.finishCancelledBeforeRun(task.ID)
+			}
 			return
 		}
 
@@ -264,18 +295,27 @@ func (s *Service) execute(task protocol.Task) {
 		}
 
 		if err := s.cfg.Ledger.MarkStarted(task.ID); err != nil {
-			// 已 finished（重复执行竞争）/不存在：账本为准，结果由重发链路闭合
+			// 已 finished（重复执行竞争/取消路径先落）/不存在：账本为准，结果由重发链路闭合
 			log.Printf("[node] 标记 started 失败 task=%s: %v", task.ID, err)
 			return
 		}
 		s.sendRef(protocol.MsgTaskStarted, task.ID) // started 落盘成功后、spawn 前发（SPEC 4.7）
 
 		res := s.runTask(runCtx, task)
-		// SPEC 4.8：服务关闭打断了在途执行（子进程已被整组终止）——执行结果
-		// 不确定，写 needs_review/node_restarted_midway 收尾并回传；禁止把
-		// 自然跑完的 completed/超时分类当终态落盘（P2 实测缺陷根因）。
+		// 执行结果分类：服务关闭打断了在途执行（子进程已被整组终止）——执行结果
+		// 不确定，写 needs_review/node_restarted_midway 收尾并回传；管理面取消同样
+		// 整组终止，写 cancelled/user_cancelled（仅当进程确被终止或未运行——进程已
+		// 自然退出的保留自然终态，由账本先到为准与 hub 收敛表兜底）。禁止把打断后
+		// 的结果当 completed 落盘（P2 实测缺陷根因）。
 		if runCtx.Err() != nil {
-			res = interruptedResult(res)
+			switch {
+			case ce.triggered():
+				if res.ExitCode == protocol.ExitCodeNotRun {
+					res = cancelledResult(res)
+				}
+			default:
+				res = interruptedResult(res)
+			}
 		}
 		// N2：按最终编码实测计量并截断，得到最终可发送的同一结果后持久化
 		//（重传内容稳定，SPEC 4.7/4.9）

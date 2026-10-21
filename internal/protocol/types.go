@@ -86,7 +86,7 @@ type TaskInput struct {
 
 // TaskResult 终态结果（SPEC 4.9）；Status 取值见 ResultXxx 常量。
 type TaskResult struct {
-	// Status 结果终态：completed | failed | needs_review。
+	// Status 结果终态：completed | failed | needs_review | cancelled。
 	Status string `json:"status"`
 	// ExitCode 进程退出码；信号终止或未运行 = -1。
 	ExitCode int `json:"exit_code"`
@@ -98,8 +98,8 @@ type TaskResult struct {
 	StderrTail string `json:"stderr_tail"`
 	// Artifacts 产物引用（路径+哈希，node 本地保留，按需拉取）。
 	Artifacts []Artifact `json:"artifacts"`
-	// Error 失败/复核原因：timeout / policy_denied / expired / node_restarted_midway 等
-	//（取值见 CodeXxx 常量）。
+	// Error 失败/复核/取消原因：timeout / policy_denied / expired / user_cancelled /
+	// node_restarted_midway 等（取值见 CodeXxx 常量）。
 	Error string `json:"error,omitempty"`
 	// StartedAt 执行开始时刻（UTC）。
 	StartedAt time.Time `json:"started_at,omitempty"`
@@ -175,7 +175,7 @@ type TaskSubmitRequest struct {
 	IdemKey string `json:"idem_key,omitempty"`
 }
 
-// 结果终态取值（TaskResult.Status；与 TaskStatus 的三个终态同值，SPEC 4.3/4.9）。
+// 结果终态取值（TaskResult.Status；与 TaskStatus 的四个终态同值，SPEC 4.3/4.9）。
 const (
 	// ResultCompleted 执行成功。
 	ResultCompleted = "completed"
@@ -183,6 +183,8 @@ const (
 	ResultFailed = "failed"
 	// ResultNeedsReview 执行结果不确定，需人工核对；协议与展示层不得折叠为 failed（SPEC 4.8）。
 	ResultNeedsReview = "needs_review"
+	// ResultCancelled 被管理面取消：进程已整组终止（或未再执行）；独立终态，不自动重跑。
+	ResultCancelled = "cancelled"
 )
 
 // ExitCodeNotRun 进程未运行或被信号终止时的退出码（SPEC 4.9：信号终止或未运行 = -1）。

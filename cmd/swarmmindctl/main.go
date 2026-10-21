@@ -360,6 +360,8 @@ func statusHuman(s protocol.TaskStatus) string {
 		return "已失败 · failed"
 	case protocol.StatusNeedsReview:
 		return "待人工核对 · needs_review"
+	case protocol.StatusCancelled:
+		return "已取消 · cancelled"
 	}
 	return string(s)
 }
@@ -383,6 +385,8 @@ func printTaskDetail(t *protocol.Task) {
 	switch t.Status {
 	case protocol.StatusNeedsReview:
 		fmt.Printf("\n执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交。\n")
+	case protocol.StatusCancelled:
+		fmt.Printf("\n任务已被取消（进程已整组终止）；以下为终止前采集的输出，不确定是否完整。\n")
 	case protocol.StatusCompleted:
 		fmt.Printf("\n最终答复 (FinalAnswer):\n%s\n", withIndent(r.FinalAnswer))
 	default:
@@ -419,6 +423,8 @@ func nextStep(t *protocol.Task) string {
 			return "任务已过期，请重新提交（swarmmindctl submit）"
 		}
 		return "排查错误后重试（swarmmindctl submit，携同 --idem 可追溯）"
+	case protocol.StatusCancelled:
+		return "任务已被取消，不会自动重跑；确有需要请重新提交（swarmmindctl submit，新幂等键）"
 	}
 	return "稍后重查: swarmmindctl query --id " + t.ID
 }

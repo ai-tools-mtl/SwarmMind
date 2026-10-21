@@ -90,6 +90,8 @@ const (
 	CodePolicyDenied = "policy_denied"
 	// CodeNodeRestartedMidway started 未 finished 时 node 重启（SPEC 4.8）。
 	CodeNodeRestartedMidway = "node_restarted_midway"
+	// CodeUserCancelled 管理面取消（task_cancel 生命周期：TaskResult.Error 标记）。
+	CodeUserCancelled = "user_cancelled"
 	// CodeTruncated 编码后超限被截断（SPEC 4.9 编码后预算）。
 	CodeTruncated = "truncated"
 	// CodeTaskNotFound 任务不存在（task_query 查无此任务 / 已过保留期清理；err 帧码）。

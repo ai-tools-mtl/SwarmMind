@@ -149,7 +149,7 @@ func tools() []toolDef {
 		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: obj(map[string]any{
 			"task_id": s("任务 ID"),
 		}, "task_id")},
-		{Name: "swarmmind_wait", Description: "等待任务完成并返回最终结果（轮询至终态：completed/failed/needs_review）", InputSchema: obj(map[string]any{
+		{Name: "swarmmind_wait", Description: "等待任务完成并返回最终结果（轮询至终态：completed/failed/needs_review/cancelled）", InputSchema: obj(map[string]any{
 			"task_id":      s("任务 ID"),
 			"timeout_sec":  n("最长等待秒数（默认 300，上限 1800）"),
 			"interval_sec": n("轮询间隔秒数（默认 3）"),
@@ -371,7 +371,10 @@ func taskStatus(taskID string) (string, bool) {
 	if t.Status == "needs_review" {
 		b.WriteString("\n注意：结果不确定（执行中节点重启），需人工核对，请勿凭此结果下结论。\n")
 	}
-	return b.String(), t.Status == "completed" || t.Status == "failed" || t.Status == "needs_review"
+	if t.Status == "cancelled" {
+		b.WriteString("\n注意：此任务已被管理员取消，进程已整组终止，不会自动重跑；请勿凭此结果下结论。\n")
+	}
+	return b.String(), t.Status == "completed" || t.Status == "failed" || t.Status == "needs_review" || t.Status == "cancelled"
 }
 
 func toolWait(args map[string]any) (string, error) {
@@ -876,6 +879,7 @@ func statusCN(s string) string {
 	return map[string]string{
 		"submitted": "已提交", "offered": "已投递", "acknowledged": "已接收",
 		"running": "执行中", "completed": "已完成", "failed": "执行失败", "needs_review": "待人工核对（结果不确定）",
+		"cancelled": "已取消（管理员手动终止）",
 	}[s]
 }
 
