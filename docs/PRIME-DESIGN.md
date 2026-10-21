@@ -58,6 +58,11 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 - 群内流程：人发目标 → @Prime → Prime 在群里发「分解方案」（子任务×执行者×顺序，附 StartLux 建议）→ 人确认/修改 → Prime 逐个转正式任务（group_task_created 自动回流）→ 各 agent 结果回流 → Prime 发总结 → 人验收 → conclude
 - 预算代码强制不变：Prime 的轮次/调用次数计入群预算
 
+**StartLux-Decision-v1.1 接口情报（2026-10-21 查实，Q3 闭合）**：
+开源家族（GitHub StartLuxLabs/StartLux-Decision，HuggingFace startlux-models），0.8B/2B/4B/9B/27B 五档 × Instant/AutoThink 双路线（27B AutoThink 决策榜第一 73.37）。接口 = HTTP `POST /v1/decisions`：state（文本/JSON/图像）+ typed questions（choice/noul/score），输出每选项概率（置信度天然满足影子契约）。Instant 中位 25-52ms，适合 Prime 高频查询。
+部署三选：① bamboonode.dev 免费托管 27B AutoThink（P4.1 首选验证）；② Mac mini MLX 本地（官方 4-bit/8-bit，9B≈5GB 内存，离线生产）；③ 腾讯云 2C2G 无 GPU 排除。API 兼容 System One /v1/systemone。
+集成形态：swarmmind-mcp 增第七工具 `startlux_decide`（state+question → 概率集），对齐 SPEC 六.六 同步规则。
+
 **影子数据契约（P4.1 开工前补齐实现，格式草案）**：每任期 JSONL（deploy/prime/shadow/<term_id>.jsonl），行结构 {ts, term_id, subtask_id, goal_digest, candidates, startlux_rec{node,agent,confidence,rationale}, prime_final, relation: adopted\|overridden\|degraded, task_id, terminal_status}。度量：top-1 命中率 + 采纳/否决组成功率对比。晋级标准（可判定）：连续 ≥50 条、命中率 ≥90%、采纳组成功率不劣 → 报伦哥批准。降级期记 relation=degraded（样本不丢）。**P4.1 验收的「10 个决策」是冒烟非收敛证据**。
 
 ## 六、分阶段交付（测试循环制适用）
@@ -142,4 +147,4 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 - 评审：codex 不可用（区域 403），按协作制度降级独立 zcode 会话评审 → docs/PRIME-REVIEW.md（M1-M6/S1-S7/Q1-Q6）
 - 修订：M1-M6 全部闭合（M2 含 MCP submit 增 idem_key/trace_id 参数与 SPEC 六.六同步）；S3 八处提示词补丁全收；S1 契约草案入文档（P4.1 实现）；S4c 群范围标签修正；S5/S6/S7 声明纳入
 - 闭合：Q1 禁自干（入提示词）；Q2 跨机大数据 V1 禁用（入分解合法性规则）；Q5 mac diskcheck 已就绪（epoch=24 agents=3）
-- 待办：Q3 StartLux 规格待伦哥提供（P4.1 前置）；Q4 群模式提示词变体（P4.2 决策）；Q6 反代 QoS（部署时定）
+- 待办：Q3 已闭合（开源模型接口查实，见上）；Q4 群模式提示词变体（P4.2 决策）；Q6 反代 QoS（部署时定）
