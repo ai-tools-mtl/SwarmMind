@@ -35,7 +35,7 @@ const (
 	MsgTaskAck = "task_ack"
 	// MsgTaskStarted node→hub：执行已开始（started 持久化成功后、spawn 前发）。
 	MsgTaskStarted = "task_started"
-	// MsgTaskResult node→hub 终态回传（status ∈ completed/failed/needs_review，含 FinalAnswer 与产物引用）。
+	// MsgTaskResult node→hub 终态回传（status ∈ completed/failed/needs_review/cancelled，含 FinalAnswer 与产物引用）。
 	MsgTaskResult = "task_result"
 	// MsgResultAck hub→node：终态已持久化。
 	MsgResultAck = "result_ack"
@@ -49,6 +49,13 @@ const (
 	MsgArtifactFetch = "artifact_fetch"
 	// MsgArtifactData 执行 node→请求方（经 hub 中继）产物内容。
 	MsgArtifactData = "artifact_data"
+	// MsgTaskCancel hub→node 取消任务（管理面 task_cancel 生命周期）：node 整组终止
+	// 在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；
+	// 任务已终态或不在账本则回 task_cancelled 幂等 ack（至少一次+幂等，重复 cancel 安全）。
+	MsgTaskCancel = "task_cancel"
+	// MsgTaskCancelled node→hub 取消确认 ack：任务已终态或不在账本（无可取消对象）。
+	// 执行中断路径不走本帧——回 task_result(cancelled) 走三段确认（task_result→result_ack）。
+	MsgTaskCancelled = "task_cancelled"
 	// MsgErr 双向错误帧；协议级错误（版本/epoch 残余/格式）另按规则断开。
 	MsgErr = "err"
 )

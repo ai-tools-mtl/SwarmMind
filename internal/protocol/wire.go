@@ -20,11 +20,19 @@ type SubmitAckPayload struct {
 	Dup bool `json:"dup"`
 }
 
+// TaskCancelPayload task_cancel 载荷（hub→node）：取消指定任务。
+type TaskCancelPayload struct {
+	// TaskID 任务 ID。
+	TaskID string `json:"task_id"`
+	// Reason 取消原因（人话，随日志/审计展示；可空）。
+	Reason string `json:"reason,omitempty"`
+}
+
 // TaskResultPayload task_result / result_event 载荷（SPEC 4.2：{task_id, status, result}）。
 type TaskResultPayload struct {
 	// TaskID 任务 ID。
 	TaskID string `json:"task_id"`
-	// Status 终态：completed | failed | needs_review（ResultXxx 常量）。
+	// Status 终态：completed | failed | needs_review | cancelled（ResultXxx 常量）。
 	Status string `json:"status"`
 	// Result 终态结果（含 FinalAnswer 与产物引用）。
 	Result *TaskResult `json:"result"`

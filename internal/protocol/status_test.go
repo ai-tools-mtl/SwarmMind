@@ -25,13 +25,18 @@ var legalPairs = []struct {
 	{StatusAcknowledged, StatusCompleted, "收敛表：task_result 于 acknowledged 直达终态"},
 	{StatusAcknowledged, StatusFailed, "收敛表：task_result 于 acknowledged 直达终态（含 expire_at 到期）"},
 	{StatusAcknowledged, StatusNeedsReview, "收敛表：task_result 于 acknowledged 直达终态"},
+	// 收敛表：管理面取消（task_cancel 生命周期），任意可取消态直达 cancelled 终态
+	{StatusSubmitted, StatusCancelled, "取消：submitted 未投递直接撤回（信箱移除，不通知 node）"},
+	{StatusOffered, StatusCancelled, "取消：offered 撤回投递 + task_cancel 通知 node（迟到 ack 收敛行兜底）"},
+	{StatusAcknowledged, StatusCancelled, "取消：acknowledged task_cancel → node 整组终止 → task_result(cancelled)"},
+	{StatusRunning, StatusCancelled, "取消：running task_cancel → node 整组终止 → task_result(cancelled)"},
 }
 
-// TestTransitionCheckFullGrid 状态机 7×7 全组合逐格核对 + 未知状态拒绝。
+// TestTransitionCheckFullGrid 状态机 8×8 全组合逐格核对 + 未知状态拒绝。
 func TestTransitionCheckFullGrid(t *testing.T) {
 	all := []TaskStatus{
 		StatusSubmitted, StatusOffered, StatusAcknowledged, StatusRunning,
-		StatusCompleted, StatusFailed, StatusNeedsReview,
+		StatusCompleted, StatusFailed, StatusNeedsReview, StatusCancelled,
 	}
 	legal := make(map[TaskStatus]map[TaskStatus]bool)
 	for _, p := range legalPairs {
@@ -56,7 +61,7 @@ func TestTransitionCheckFullGrid(t *testing.T) {
 		t.Error("未知 to 状态应非法")
 	}
 	// 终态永不回退：终态→终态（含自身）亦非法
-	for _, term := range []TaskStatus{StatusCompleted, StatusFailed, StatusNeedsReview} {
+	for _, term := range []TaskStatus{StatusCompleted, StatusFailed, StatusNeedsReview, StatusCancelled} {
 		if TransitionCheck(term, term) {
 			t.Errorf("终态 %s→%s 应非法（永不回退）", term, term)
 		}
@@ -65,7 +70,7 @@ func TestTransitionCheckFullGrid(t *testing.T) {
 
 // TestTerminalStatus 终态判定。
 func TestTerminalStatus(t *testing.T) {
-	for _, s := range []TaskStatus{StatusCompleted, StatusFailed, StatusNeedsReview} {
+	for _, s := range []TaskStatus{StatusCompleted, StatusFailed, StatusNeedsReview, StatusCancelled} {
 		if !s.Terminal() {
 			t.Errorf("%s 应为终态", s)
 		}

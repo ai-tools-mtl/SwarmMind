@@ -15,14 +15,18 @@ var resultStatuses = map[string]protocol.TaskStatus{
 	protocol.ResultCompleted:   protocol.StatusCompleted,
 	protocol.ResultFailed:      protocol.StatusFailed,
 	protocol.ResultNeedsReview: protocol.StatusNeedsReview,
+	protocol.ResultCancelled:   protocol.StatusCancelled,
 }
 
 // handleTaskResult 终态回传仲裁（SPEC 4.3 收敛表）：
 //   - 归属检查先于一切：任何 node 的帧只对其名下任务有效；
 //   - 任意非终态（submitted/offered/acknowledged/running）→ 接受（结果优先于
 //     状态机中间态），submitted 需同步释放信箱；
+//   - 已 cancelled 且结果未落（hub 先取消，Result 为 nil）→ cancelled 分支：合并
+//     node 回传的真实执行数据（退出码/日志尾/产物），重复回发 ack；
 //   - 已同终态且结果一致（重发）→ 重发 result_ack；
-//   - 已终态但结果不同（冲突）→ 保留先到，回 err(result_conflict)，不重发 ack。
+//   - 已终态但结果不同（含取消后 node 迟到的自然终态）→ 保留先到，
+//     回 err(result_conflict)，不重发 ack。
 //
 // 终态落盘后：result_ack 回执行 node；提交方为 node 会话时另发 result_event
 // （离线错过即弃，靠 task_query 补查——SPEC 已声明限制）。
@@ -40,6 +44,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 
 	var (
 		accepted *protocol.Task // 接受后的任务（nil=未接受）
+		merged   bool           // cancelled 分支：合并结果（终态钩子已在取消时触发过）
 		dupAck   bool           // 同终态同结果：重发 ack
 		conflict bool           // 保留先到：回冲突
 	)
@@ -50,9 +55,20 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 			return nil
 		}
 		if t.Status.Terminal() {
-			if sameTerminalResult(t.Result, p.Result) {
+			switch {
+			case t.Status == protocol.StatusCancelled && t.Result == nil && toStatus == protocol.StatusCancelled:
+				// 收敛表 cancelled 分支：hub 先取消（无结果），node 的取消结果后到——
+				// 合并真实执行数据，终态不回退（仍为 cancelled）
+				nt := t.Clone()
+				res := p.Result.Clone()
+				nt.Result = &res
+				nt.UpdatedAt = c.now()
+				st.Tasks[nt.ID] = nt
+				accepted = &nt
+				merged = true
+			case sameTerminalResult(t.Result, p.Result):
 				dupAck = true // 收敛表：重复结果重发 result_ack，禁止确认悬挂
-			} else {
+			default:
 				conflict = true // 收敛表：冲突保留先到，回 err(result_conflict)
 			}
 			return nil
@@ -80,6 +96,12 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)
 		c.notifyResultEvent(accepted)
+		if merged {
+			// cancelled 分支：终态在 CancelTask 事务时已落、终态旁路已触发过，
+			// 此处只补真实执行数据，不重复触发（fireTerminal 语义：首次落终态）
+			c.dispatch(env.From)
+			break
+		}
 		c.fireTerminal(accepted) // 群聊闭环回流等终态旁路（GROUP-RFC）
 		c.dispatch(env.From)     // 窗口释放一格，恢复出队
 	case dupAck:

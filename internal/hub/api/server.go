@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -91,6 +92,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/agents", s.auth(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/nodes", s.auth(s.handleNodes))
 	mux.HandleFunc("POST /api/v1/tasks/{id}/review", s.auth(s.handleReview))
+	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
@@ -353,6 +355,42 @@ func (s *Server) handleReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+// cancelRequest 取消任务请求体（reason 可空）。
+type cancelRequest struct {
+	Reason string `json:"reason"`
+}
+
+// handleTaskCancel POST /api/v1/tasks/{id}/cancel（管理面任务取消，SPEC 4.3
+// cancelled 终态）：hub 事务内收敛状态并尽力下发 task_cancel，node 终态结果经
+// task_result 异步回传（前端轮询可见）。202 取消已受理 / 200 幂等命中（此前已
+// cancelled）/ 409 已终态不可取消（completed/failed/needs_review）/ 404 不存在。
+func (s *Server) handleTaskCancel(w http.ResponseWriter, r *http.Request) {
+	var req cancelRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		// 空请求体合法（reason 可省），其余解码失败拒绝
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {reason}")
+		return
+	}
+	t, dup, err := s.cfg.Core.CancelTask(r.PathValue("id"), req.Reason)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrTaskNotFound):
+			writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已过保留期")
+		case errors.Is(err, core.ErrNotCancellable):
+			writeErr(w, http.StatusConflict, "not_cancellable", "任务已终态，不可取消")
+		default:
+			log.Printf("[hub] 取消任务内部错误: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal", "取消失败")
+		}
+		return
+	}
+	code := http.StatusAccepted
+	if dup {
+		code = http.StatusOK // 幂等命中：200（同 POST /tasks dup 语义）
+	}
+	writeJSON(w, code, t)
 }
 
 // controlOpRequest 控制操作批次请求体。

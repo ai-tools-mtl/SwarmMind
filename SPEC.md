@@ -74,25 +74,28 @@ type ErrInfo struct { Code string `json:"code"`; Msg string `json:"msg"` }
 | task_offer | hub→node | 完整 Task | 推任务 |
 | task_ack | node→hub | `{task_id}` | 任务已入账本（accepted 持久化成功后发） |
 | task_started | node→hub | `{task_id}` | 执行已开始（started 持久化成功后、spawn 前发） |
-| task_result | node→hub | `{task_id, status, result}` | 终态回传（status ∈ completed/failed/needs_review；含 FinalAnswer 与产物引用） |
+| task_result | node→hub | `{task_id, status, result}` | 终态回传（status ∈ completed/failed/needs_review/cancelled；含 FinalAnswer 与产物引用） |
 | result_ack | hub→node | `{task_id}` | 终态已持久化 |
 | result_event | hub→提交方（node 会话时） | `{task_id, status, result}` | 终态推送给提交方，闭合「调用方拿回结果」；HTTP 提交方靠 GET /tasks/{id} 轮询。已知限制：提交方离线错过即弃，靠主动查询补 |
 | task_query | 提交方→hub | `{task_id}` | 查询任务状态（result_event 离线错过的补查路径） |
 | task_status | hub→提交方 | Task | 查询响应（完整 Task 可能接近 1MiB 上限，超大任务以摘要+artifact 引用返回） |
 | artifact_fetch | 提交方→hub | `{task_id, index}` | 请求取回第 index 个产物（hub 中继到执行 node） |
 | artifact_data | 执行 node→请求方（经 hub 中继） | `{task_id, index, meta, data_base64}` | 产物内容（单文件原始 ≤640KiB，base64 后随帧 ≤1MiB；更大产物 V1 分块） |
+| task_cancel | hub→node | `{task_id, reason?}` | 管理面取消（管理面 POST /tasks/{id}/cancel 触发）：node 整组终止在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；至少一次+幂等，重复 cancel 安全 |
+| task_cancelled | node→hub | `{task_id}` | 取消确认 ack：任务已终态或不在账本（无可取消对象）；执行中断路径不走本帧（回 task_result 走三段确认） |
 | err | 双向 | ErrInfo | 错误帧；协议级错误（版本/epoch 残余/格式）另按规则断开 |
 
 ### 4.3 任务状态机（hub 视角）与迟到事件收敛
 
 ```
-submitted → offered → acknowledged → running → completed | failed | needs_review
+submitted → offered → acknowledged → running → completed | failed | needs_review | cancelled
    ↑          |(ack 超时 30s 回退)
    └──────────┘
 ```
 
-- **终态（completed/failed/needs_review）永不回退。**
+- **终态（completed/failed/needs_review/cancelled）永不回退。**
 - offered 30s 未收 task_ack → 回 submitted 重新入队补推（任务过期则置 failed/expired）。
+- **管理面取消（task_cancel 生命周期）**：submitted/offered/acknowledged/running 可取消（hub 事务内置 cancelled 终态；submitted 未投递直接撤回，其余向 node 发 task_cancel）；completed/failed/needs_review 不可取消（409）；重复取消幂等命中。cancelled 与 needs_review 同级独立终态：不折叠为 failed，不自动重跑。
 - 迟到事件收敛表（hub 侧，全部先过幂等/归属检查——任务归属 node 由提交时绑定，任何 node 的帧只对其名下任务有效）：
 
 | 事件 | 当前状态 | 处理 |
@@ -102,9 +105,12 @@ submitted → offered → acknowledged → running → completed | failed | need
 | task_started 迟到 | acknowledged | 置 running |
 | task_started 迟到 | 终态 / submitted | 忽略 + 告警 |
 | task_result 到达 | 任意非终态（submitted/offered/acknowledged/running） | 接受 → 置对应终态（结果优先于状态机中间态） |
+| task_result 到达（cancelled） | 已 cancelled 且结果未落 | 合并 node 回传的真实执行数据（退出码/日志尾/产物），重发 result_ack（取消分支） |
 | task_result 重复 | 已同终态且结果一致 | 重发 result_ack |
-| task_result 冲突 | 已终态但结果不同 | 保留先到，回 err(result_conflict) + 告警，不重发 ack |
+| task_result 冲突 | 已终态但结果不同（含取消后 node 迟到的自然终态） | 保留先到，回 err(result_conflict) + 告警，不重发 ack |
 | expire_at 到期 | 非终态任意状态 | 置 failed，error=expired（结果后到按冲突行处理） |
+| task_cancel 到达（node 侧） | 账本 accepted/started（在途） | 整组终止执行（killProcessGroup），账本落 finished(cancelled/user_cancelled)，回 task_result(cancelled) |
+| task_cancel 到达（node 侧） | 已终态 / 不在账本 | 回 task_cancelled 幂等 ack（重复 cancel 安全） |
 | task_offer 到达但账本无此任务且 target_agent 不在当前配置 | -（配置漂移） | node 直接回 task_result failed，error=agent_not_found，不进重推循环 |
 
 - node 侧对重复 task_offer 的处理：账本已有该 task_id → 不再执行，直接重发 task_ack（若已 finished 附带重发 task_result）。
@@ -216,13 +222,13 @@ type TaskInput struct {
 }
 
 type TaskResult struct {
-    Status     string       `json:"status"`          // completed | failed | needs_review
+    Status     string       `json:"status"`          // completed | failed | needs_review | cancelled
     ExitCode   int          `json:"exit_code"`       // 信号终止或未运行 = -1
     FinalAnswer string      `json:"final_answer"`    // 完整最终答复（agent 产出正文，≤512KiB，独立于日志 tail）
     StdoutTail string       `json:"stdout_tail"`     // 诊断用日志尾部 64KiB（非正式结果载体）
     StderrTail string       `json:"stderr_tail"`
     Artifacts  []Artifact   `json:"artifacts"`       // 产物引用（路径+哈希，node 本地保留，按需拉取）
-    Error      string       `json:"error,omitempty"` // timeout / policy_denied / expired / node_restarted_midway ...
+    Error      string       `json:"error,omitempty"` // timeout / policy_denied / expired / user_cancelled / node_restarted_midway ...
     StartedAt  time.Time    `json:"started_at,omitempty"`
     FinishedAt time.Time    `json:"finished_at,omitempty"`
 }
@@ -338,6 +344,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 | GET | /api/v1/agents | - | `{agents:[{card, node_id, online}]}`；card=AgentCard，**绝不包含 ExecProfile 字段**（执行配置不出本机） |
 | GET | /api/v1/nodes | - | `{nodes:[{node_id, online, epoch, inflight}]}` |
 | GET | /api/v1/tasks/{id}/artifacts/{index} | - | 200 产物内容（hub 经 artifact_fetch/artifact_data 中继到执行 node 取回；超时 30s → 504） |
+| POST | /api/v1/tasks/{id}/cancel | `{reason?}` | 202 取消已受理（hub 置 cancelled 终态 + 下发 task_cancel，node 结果异步回传）；幂等命中 200；已终态（completed/failed/needs_review）409 `not_cancellable`；不存在 404。管理面能力，**不设 MCP 工具**（取消保留给人工管理员，agent 不可互删任务） |
 
 **无 HTTP 轮询回退**：离线路径=信箱+重连补推，别无分叉（避免绕过账本/Ack 的第二条路径）。旧 `/tasks/fetch` 概念废除。
 任务提交校验链（顺序与 §4.5 一致）：**鉴权/目标存在且 exposed=true（未接入 → 404 `agent_not_exposed`）→ idem 查重（命中即返回，不做配额检查）→ 序列化体积实测预检 → 信箱配额与字节预算 → 持久化（单写事务内全部重检）→ submit_ack**。全链失败则无 Ack。
@@ -426,6 +433,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    ① SPEC 本节表格补一行映射；② cmd/swarmmind-mcp 增补对应工具（含人话描述）；
    ③ MCP 层至少一条实测或单测。
 2. 纯内部实现（调度/存储/协议内部）不适用本规则。
+3. **人工管理专属豁免（2026-10-22）**：POST /api/v1/tasks/{id}/cancel（任务取消）不设 MCP 工具——取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）。除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 3. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 4. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
 

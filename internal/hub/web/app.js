@@ -88,6 +88,7 @@ const PRIME_PROMPT = `# SwarmMind 总理智能体（Prime）
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
   running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '待人工核对',
+  cancelled: '已取消',
 };
 /* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
 const ERRORS = {
@@ -97,6 +98,7 @@ const ERRORS = {
   agent_not_found: '执行节点配置已变化，找不到该 agent',
   agent_not_exposed: '目标未暴露该能力，任务未准入',
   node_restarted_midway: '执行到一半机器重启，结果不确定',
+  user_cancelled: '管理员手动取消了此任务，进程已整组终止',
   truncated: '结果超过编码预算，答复或诊断日志已截断',
   mailbox_full: '目标信箱已满（条数或字节预算）',
   storage_full: 'hub 存储全局预算已满',
@@ -309,7 +311,7 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 3400);
 }
-function terminal(st) { return ['completed', 'failed', 'needs_review'].includes(st); }
+function terminal(st) { return ['completed', 'failed', 'needs_review', 'cancelled'].includes(st); }
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
 function preserveFocus(fn) {
   const a = document.activeElement;
@@ -583,6 +585,7 @@ function drawerHtml(t) {
     ? '任务执行到一半节点重启了，结果不确定——请核对后登记结论，不要重新提交同一任务。'
     : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
     : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
+    : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
     : '任务仍在进行，列表每 5 秒自动刷新。';
   return `${modalHead('任务详情 · ' + esc(t.id))}
   <p class="${needs ? 'notice purple' : 'notice'}">${intro}</p>
@@ -603,7 +606,7 @@ function drawerHtml(t) {
   <ol class="timeline">${timeline(t).map(([e, time]) => `<li>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
   ${reviewSection(t)}
   ${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
-  <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}</div>`;
+  <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`;
 }
 function artifactsHtml(t) {
   const arts = t.result?.artifacts || [];
@@ -1160,6 +1163,23 @@ const ACT = {
     }
   },
   revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`),
+  /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
+  'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
+    <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
+    <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`),
+  'task-cancel-confirm': async b => {
+    b.disabled = true; b.textContent = '取消中…';
+    const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
+    if (r && (r.code === 202 || r.code === 200)) {
+      const i = S.tasks.findIndex(t => t.id === r.data.id);
+      if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
+      closeLayer(); render();
+      toast('已发送取消指令 · 任务进入「已取消」，节点侧执行数据回传后自动补充');
+    } else if (r && r.code === 409) {
+      closeLayer(); render();
+      toast('任务已终态，无需取消');
+    } else toast('取消失败：' + (r ? errLine(r.data) : '网络异常'));
+  },
   'drawer-refresh': async b => {
     const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id)).catch(() => null);
     if (r && r.code === 200) {

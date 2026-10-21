@@ -36,6 +36,7 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .badge:before{content:'';width:5px;height:5px;background:currentColor;border-radius:50%}
 .submitted{background:#eff0f2;color:#687080}.offered{background:#edf0ff;color:#4d6ad1}.acknowledged{background:#e7f5f8;color:#198293}
 .running{background:#fff1df;color:#ad6714}.completed,.online{background:#e9f5ed;color:#35805a}.failed{background:#fcebec;color:#b64e56}
+.cancelled{background:#f0f0f3;color:#5c6270}
 /* needs_review 橙色高亮（本 Loop 要求：独立终态，一眼可辨） */
 .needs_review{background:#ffe8d1;color:#a4510b;box-shadow:0 0 0 1px #f5c99a}
 .offline{background:#f0f0f2;color:#7e8490}
