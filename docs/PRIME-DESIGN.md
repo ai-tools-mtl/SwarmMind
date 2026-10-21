@@ -60,7 +60,19 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 
 **StartLux-Decision-v1.1 接口情报（2026-10-21 查实，Q3 闭合）**：
 开源家族（GitHub StartLuxLabs/StartLux-Decision，HuggingFace startlux-models），0.8B/2B/4B/9B/27B 五档 × Instant/AutoThink 双路线（27B AutoThink 决策榜第一 73.37）。接口 = HTTP `POST /v1/decisions`：state（文本/JSON/图像）+ typed questions（choice/noul/score），输出每选项概率（置信度天然满足影子契约）。Instant 中位 25-52ms，适合 Prime 高频查询。
-部署三选：① bamboonode.dev 免费托管 27B AutoThink（P4.1 首选验证）；② Mac mini MLX 本地（官方 4-bit/8-bit，9B≈5GB 内存，离线生产）；③ 腾讯云 2C2G 无 GPU 排除。API 兼容 System One /v1/systemone。
+部署三选：① bamboonode.dev 免费托管 27B AutoThink（P4.1 首选验证，Bamboo API key）；② Mac mini MLX 本地（官方 4-bit/8-bit，9B≈5GB 内存，离线生产）；③ 腾讯云 2C2G 无 GPU 排除。API 兼容 System One /v1/systemone。
+
+**三级降级策略（伦哥 2026-10-21 定：云端验证+必须有兜底）**：
+
+| 级别 | 决策来源 | 触发条件 | 成本 |
+|---|---|---|---|
+| L0 | bamboonode 云端 27B AutoThink | 默认 | 网络延迟 ~1s；免费额度 |
+| L1 | Mac mini MLX 本地（9B/4B） | L0 连续失败 3 次或显式配置切本地 | 内存 5GB，离线可用 |
+| L2 | Prime 规则分配（兜底，永在） | L0/L1 皆不可用，或单次查询超时 5s/非 200/解析失败 | 零依赖 |
+
+规则分配算法（L2 具体化）：能力目录关键词匹配（子任务描述 ↔ agent 描述）→ 同能力多节点取 inflight 最低 → 无匹配 → 上报用户。**每次降级记 relation=degraded**（影子数据不丢样本）。
+
+实现形态：swarmmind-mcp 增第七工具 `startlux_decide`（env：SWARM_STARTLUX_URL/KEY；内部自动 L0→L2 降级，响应标注 used_level）。验证脚本：tests/startlux-verify.sh。
 集成形态：swarmmind-mcp 增第七工具 `startlux_decide`（state+question → 概率集），对齐 SPEC 六.六 同步规则。
 
 **影子数据契约（P4.1 开工前补齐实现，格式草案）**：每任期 JSONL（deploy/prime/shadow/<term_id>.jsonl），行结构 {ts, term_id, subtask_id, goal_digest, candidates, startlux_rec{node,agent,confidence,rationale}, prime_final, relation: adopted\|overridden\|degraded, task_id, terminal_status}。度量：top-1 命中率 + 采纳/否决组成功率对比。晋级标准（可判定）：连续 ≥50 条、命中率 ≥90%、采纳组成功率不劣 → 报伦哥批准。降级期记 relation=degraded（样本不丢）。**P4.1 验收的「10 个决策」是冒烟非收敛证据**。
