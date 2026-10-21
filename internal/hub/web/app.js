@@ -114,7 +114,12 @@ async function pollTick() {
       const r = await api('GET', '/api/v1/control-operations/' + encodeURIComponent(S.C.batch.batch_id));
       if (r.code === 200 && r.data) { S.C.batch = r.data; changed = true; }
     }
-    if (changed) render();
+    /* 表单填写视图不整页重渲染（2026-10-21 验收：5s 轮询重建 DOM 打断
+     * 下拉选择与输入——「选择能力时经常刷新」根因）。数据静默更新。 */
+    if (changed) {
+      if (S.page === 'control' && S.C.view === 'form') return;
+      render();
+    }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
 }
 
@@ -526,14 +531,13 @@ function controlPage() {
   const targets = Object.keys(C.targets).filter(k => C.targets[k]);
   return head('运维控制', '向网内巡检类 agent 派发正式任务：hub 不内嵌执行体，执行仍在 node 侧。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
-    <div class="row"><h2>全网巡检</h2><span class="badge offered">正式任务 · 逐节点执行</span></div>
+    <div class="row"><h2>全网巡检</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
     <label>选择能力<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
     const v = d.node_id + '/' + d.card.name;
-    return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)} @ ${esc(d.node_id)} — ${esc(d.card.description || '（无描述）')}</option>`;
+    return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)}（${esc(d.node_id)}）— ${esc(d.card.description || '（无描述）')}</option>`;
   }).join('') : '<option value="">目录为空：还没有节点开放能力</option>'}</select></label>
-    ${S.directory.length ? '' : '<div class="notice warn">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
-    <div class="row spaced"><h3>目标节点</h3><small>已选 ${targets.length} / ${S.nodes.length}；离线或未开放能力的节点会自动跳过</small></div>
-    <div class="checkline-grid">${S.nodes.map(n => `<label class="checkline"><input type="checkbox" data-target="${esc(n.node_id)}" ${C.targets[n.node_id] ? 'checked' : ''}> ${esc(n.node_id)} ${onlineB(n)}</label>`).join('') || '<p class="muted">尚无已登记节点。</p>'}</div>
+    ${S.directory.length ? `<div class="row"><small class="muted">将在 <b id="ctrl-node-hint">${esc((S.directory[0] || {}).node_id || '')}</b> 上执行</small></div>` : '<div class="notice warn">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
+    <label class="checkline spaced"><input type="checkbox" id="ctrl-broadcast"> 广播到所有拥有同名能力的节点（默认只派给能力所属节点）</label>
     <label class="spaced">巡检指令<textarea id="ctrl-stdin" rows="4" placeholder="例如：检查本机 agent 进程、磁盘余量与最近错误日志，输出健康摘要。">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
@@ -579,11 +583,15 @@ async function submitControl() {
   const C = S.C;
   if (C.stage === 'submitting' || C.stage === 'unknown') return;
   const sel = $('#ctrl-agent')?.value;
-  if (!sel) { toast('目录为空：先在 node 侧暴露能力，再运行巡检'); return; }
-  const targets = Object.keys(C.targets).filter(k => C.targets[k]);
+  if (!sel) { toast('目录为空：先在节点侧开放能力，再运行巡检'); return; }
+  const agentName = sel.split('/')[1];
+  const broadcast = $('#ctrl-broadcast')?.checked;
+  const targets = broadcast
+    ? [...new Set(S.directory.filter(d => d.card.name === agentName).map(d => d.node_id))]
+    : [sel.split('/')[0]];
   if (!targets.length) {
     C.stage = 'idle'; C.unknownPending = false;
-    C.message = warnNotice('明确失败 · invalid_request', '请至少勾选一个目标节点。');
+    C.message = warnNotice('明确失败 · invalid_request', '没有可执行的目标节点。');
     render(); toast('明确失败：请修正后重试'); return;
   }
   C.stdin = $('#ctrl-stdin').value;
@@ -592,7 +600,7 @@ async function submitControl() {
   C.stage = 'submitting'; C.message = '';
   render(); toast('已锁定表单：正在提交巡检批次…');
   const body = {
-    agent: sel.split('/')[1],
+    agent: agentName,
     targets,
     input: { args: [], stdin: C.stdin || '全网健康巡检：输出本机 agent、连接与资源健康摘要。' },
     idem_key: C.idem,
@@ -881,8 +889,12 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    const n = e.target.dataset.target;
-    if (n) { S.C.targets[n] = e.target.checked; preserveFocus(() => render()); }
+    if (e.target.id === 'ctrl-agent') {
+      const node = e.target.value.split('/')[0];
+      const hint = document.querySelector('#ctrl-node-hint');
+      if (hint) hint.textContent = node;
+      return;
+    }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeLayer(); return; }

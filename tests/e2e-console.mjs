@@ -98,8 +98,10 @@ async function main() {
   const agentOptions = await page.locator('#ctrl-agent option').count();
   record('E09', '运维控制：能力目录下拉非空', agentOptions >= 1, `选项 ${agentOptions}`);
 
-  // 勾选 mac-mini 目标、填指令、提交
-  await page.check('input[data-target="mac-mini"]');
+  // 选能力（节点随之确定）、填指令、提交
+  await page.selectOption('#ctrl-agent', { index: 0 });
+  const nodeHint = await page.textContent('#ctrl-node-hint');
+  record('E09b', '选择能力后显示执行节点提示（不再单独选节点）', !!nodeHint, `节点 ${nodeHint}`);
   await page.fill('#ctrl-stdin', 'E2E 自动化巡检验证：请回报节点名');
   await page.click('button:has-text("运行巡检")');
   await page.waitForSelector('text=批次报告', { timeout: 30000 });
