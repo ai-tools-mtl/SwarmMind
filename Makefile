@@ -45,3 +45,29 @@ release:
 clean:
 	rm -f hub swarmmind-node swarmmindctl
 	rm -rf dist
+
+## deploy-hub: 自行打包部署——git bundle 经 SSH 直传服务器，源码编译+重启（不走 Release 下载）
+HUB_SSH   ?= ubuntu@1.13.158.180
+HUB_KEY   ?= /Users/tl.m/Downloads/Mac2026.pem
+HUB_SRC   ?= /opt/swarmmind-src
+
+deploy-hub:
+	@$(MAKE) -s release GOOS=linux
+	git bundle create /tmp/swarmmind.bundle main
+	scp -i $(HUB_KEY) /tmp/swarmmind.bundle $(HUB_SSH):/tmp/swarmmind.bundle
+	ssh -i $(HUB_KEY) $(HUB_SSH) 'set -e; \
+	  export PATH=$$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,direct; \
+	  if [ -d $(HUB_SRC)/.git ]; then \
+	    git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main:bundle-main 2>/dev/null || git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main; \
+	    git -C $(HUB_SRC) checkout -q bundle-main; \
+	  else \
+	    sudo git clone -q -b main /tmp/swarmmind.bundle $(HUB_SRC); \
+	    git -C $(HUB_SRC) checkout -q bundle-main 2>/dev/null || true; \
+	  fi; \
+	  cd $(HUB_SRC) && echo "构建自: $$(git log --oneline -1)"; \
+	  sudo /usr/local/go/bin/go build -o /opt/swarmmind/hub.new ./cmd/hub; \
+	  sudo systemctl stop swarmmind-hub; \
+	  sudo mv /opt/swarmmind/hub.new /opt/swarmmind/hub && sudo chmod +x /opt/swarmmind/hub; \
+	  sudo systemctl start swarmmind-hub; sleep 2; \
+	  systemctl is-active swarmmind-hub; \
+	  curl -s -o /dev/null -w "控制台: %{http_code}\n" http://127.0.0.1:8444/'
