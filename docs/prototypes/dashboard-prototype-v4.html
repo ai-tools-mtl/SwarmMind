@@ -1,0 +1,1386 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SwarmMind · 协作控制台 v3</title>
+<style>
+:root{--bg:#f7f6f3;--white:#fff;--ink:#252830;--muted:#83858e;--line:#eae9e5;--blue:#4a6cf7;--blue-bg:#eef2ff;--green:#288263;--green-bg:#edf7f1;--orange:#ab7420;--orange-bg:#fff5e4;--red:#c15555;--red-bg:#fff0ef;--shadow:0 8px 32px #292c3610}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+button,a,input,select,textarea{outline-offset:4px}
+button:focus-visible,a:focus-visible{outline:2px solid var(--blue)}
+a{color:var(--blue);text-decoration:none}
+button{border:1px solid var(--line);background:white;color:var(--ink);border-radius:8px;padding:8px 13px;transition:.16s}
+button:hover{background:#f5f6f9;border-color:#d7dae5}
+button.primary{color:white;background:var(--blue);border-color:var(--blue);box-shadow:0 3px 8px #4a6cf71a}
+button.primary:hover{background:#3d5ee4}
+button.danger{color:var(--red);border-color:#efd4d1;background:#fff}
+button.ghost{border-color:transparent;background:transparent}
+button.small{padding:5px 10px;font-size:12px}
+button.icon{padding:6px;display:grid;place-items:center;width:32px;height:32px}
+svg{vertical-align:middle;flex-shrink:0}
+header{height:76px;background:#ffffffec;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 28px;position:sticky;top:0;z-index:20;backdrop-filter:blur(12px);gap:16px}
+.brand{display:flex;align-items:center;gap:11px;font-size:20px;letter-spacing:-.7px;font-weight:720;white-space:nowrap}
+.brandmark{background:var(--ink);color:white;border-radius:10px;width:34px;height:34px;display:grid;place-items:center}
+.header-left,.header-right,.row{display:flex;align-items:center;gap:12px}
+.divider{height:23px;width:1px;background:var(--line);margin:0 12px}
+.views{display:flex;gap:3px;padding:4px;background:#f2f2f0;border-radius:10px}
+.views button{font-size:12px;border:0;background:transparent;color:var(--muted);padding:7px 12px;white-space:nowrap}
+.views button.active{color:var(--ink);background:white;box-shadow:0 1px 5px #0000000d}
+.avatar{display:grid;place-items:center;background:#eef0fa;color:var(--blue);font-size:11px;font-weight:700;border:1px solid #dfe4fa;width:31px;height:31px;border-radius:50%}
+.identity{font-size:12px}
+.demo{font-size:10px;border:1px solid #e0dfd9;border-radius:5px;padding:2px 6px;color:#89867e;letter-spacing:.8px}
+.layout{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:calc(100vh - 76px)}
+aside{padding:28px 16px 20px;border-right:1px solid var(--line);display:flex;flex-direction:column;position:sticky;top:76px;height:calc(100vh - 76px)}
+.aside-label{font-size:10px;letter-spacing:1.6px;color:#999992;margin:0 12px 14px}
+nav{display:flex;flex-direction:column;gap:5px}
+nav button{text-align:left;border:0;display:flex;align-items:center;gap:11px;background:transparent;color:#71747b;padding:11px 13px;font-size:13px}
+nav button.active{background:#eaeefe;color:var(--blue);font-weight:600}
+nav button .count{margin-left:auto;background:#fff1d8;border-radius:5px;font-size:10px;padding:1px 6px;color:#a67b27}
+.aside-foot{margin-top:auto;padding:18px 11px 0;font-size:11px;color:var(--muted)}
+.aside-foot .connection{margin-bottom:10px;color:#64686e;display:flex;align-items:center;gap:6px}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block;background:#409478;flex-shrink:0}
+.dot.off{background:#aaaeb6}
+main{padding:34px 40px 50px;max-width:1500px;width:100%;margin:0 auto;min-width:0}
+.crumb{color:#94969d;font-size:11px;margin-bottom:18px;display:flex;gap:9px;align-items:center}
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:27px}
+h1{font-size:27px;letter-spacing:-1px;font-weight:650;margin:0 0 5px}
+h2{font-size:15px;letter-spacing:-.2px;margin:0;font-weight:650}
+h3{font-size:14px;margin:0;font-weight:620}
+p{margin:0}
+.subtitle{font-size:12px;color:var(--muted)}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:17px}
+.section-head h2{display:flex;align-items:center;gap:8px}
+.section-head .sub{font-weight:400;color:var(--muted);font-size:11px}
+.card{background:white;border:1px solid var(--line);border-radius:12px;padding:22px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:28px}
+.metric{position:relative;overflow:hidden}
+.metric-label{font-size:12px;color:#80828a;display:flex;align-items:center;justify-content:space-between}
+.metric-value{font-size:32px;font-weight:630;letter-spacing:-1.3px;line-height:1.4;margin:9px 0 4px}
+.metric-value span{font-size:13px;letter-spacing:0;font-weight:400;color:#a0a2aa;margin-left:5px}
+.metric-foot{color:#9799a0;font-size:10px}
+.metric-foot b{color:var(--green);font-weight:500}
+.topology-head{display:flex;align-items:center;gap:10px}
+.pill{display:inline-flex;align-items:center;gap:5px;font-size:10px;border-radius:5px;padding:3px 7px;white-space:nowrap;font-weight:500}
+.pill.green{color:var(--green);background:var(--green-bg)}
+.pill.gray{color:#8b8d94;background:#f1f2f4}
+.pill.blue{color:var(--blue);background:var(--blue-bg)}
+.pill.orange{color:var(--orange);background:var(--orange-bg)}
+.pill.red{color:var(--red);background:var(--red-bg)}
+.node-grid,.agent-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.node-card{padding:20px;position:relative}
+.node-icon{width:38px;height:38px;display:grid;place-items:center;background:#f5f5f3;border-radius:10px;color:#7b7e87}
+.node-title{display:flex;align-items:center;gap:10px;margin-bottom:19px}
+.node-title .pill{margin-left:auto}
+.tiny{font-size:10px;color:var(--muted)}
+.mono,code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.node-info{display:flex;justify-content:space-between;font-size:11px;color:#8d9097;border-top:1px solid #f2f2ee;padding-top:13px}
+.node-info strong{font-weight:550;color:#5b5f68}
+.node-stats{display:flex;gap:23px;margin-bottom:17px}
+.node-stats b{display:block;font-size:19px;font-weight:600}
+.node-stats span{font-size:10px;color:var(--muted)}
+.split{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(260px,1fr);gap:22px;margin-top:26px}
+.list-card{padding:21px 0 0;overflow:hidden}
+.list-card>.section-head{padding:0 21px}
+table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}
+th{text-align:left;color:#93969f;font-size:10px;font-weight:500;background:#fafaf8;padding:12px 19px;border-bottom:1px solid var(--line)}
+td{padding:15px 19px;border-bottom:1px solid #f0f0ed}
+tr:last-child td{border-bottom:0}
+tbody tr:hover{background:#fcfcfe}
+.table-wrap{overflow:auto}
+.task-name{display:block;font-weight:550;max-width:270px;overflow:hidden;text-overflow:ellipsis;color:#41454f}
+.task-id{display:block;font-size:9px;color:#999da6;margin-top:3px}
+.text-button{padding:0;border:0;background:transparent;color:var(--blue);font-size:12px}
+.text-button:hover{background:transparent;color:#2d4fe0}
+.review-mini{padding:15px 0;border-bottom:1px solid var(--line)}
+.review-mini:last-child{border:0;padding-bottom:0}
+.review-mini p{font-size:12px;margin:7px 0}
+.notice{padding:13px 15px;border-radius:8px;background:#f2f5ff;color:#68759f;font-size:11px;display:flex;align-items:flex-start;gap:9px}
+.notice.orange{background:var(--orange-bg);color:#997032}
+.notice.gray{background:#f4f4f1;color:#80817f}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:20px}
+.input-icon{position:relative;flex:1;min-width:180px}
+.input-icon svg{position:absolute;top:12px;left:12px;color:#969aa4}
+.input-icon input{padding-left:36px;width:100%}
+input,select,textarea{background:white;border:1px solid #e3e4e8;border-radius:7px;padding:10px 11px;color:#424752;font-size:12px;min-width:0}
+input:focus,textarea:focus,select:focus{outline:2px solid #4a6cf72b;border-color:#7890f8}
+209:const $ = s => document.querySelector(s);
+210:const esc = v => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+211:const icons = {
+230:function icon(name,size=17){return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]||icons.grid}</svg>`}
+231:const nodes=[
+236:let agents=[
+244:const statuses=['submitted','offered','acknowledged','running','completed','failed','needs_review'];
+245:const statusInfo={
+248:const titles=['审查 WebSocket 重连与 epoch 隔离逻辑','为新控制台整理信息架构方案','验证离线信箱恢复路径','排查 Windows 路径兼容问题','审查 ledger 持久化事务实现','编写跨机部署与回滚计划','检查产物 SHA-256 校验链路','评估任务超时与进程组终止策略','核对状态机迟到事件收敛表','分析只读沙盒的权限边界','检查注册鉴权失败路径','整理真实双机验收步骤','验证 env 白名单拒绝规则','审查历史任务补传策略','诊断节点心跳与背压指标','输出协议版本迁移建议'];
+249:const taskStates=['running','needs_review','completed','submitted','acknowledged','running','completed','needs_review','completed','failed','offered','completed','failed','submitted','acknowledged','completed'];
+250:const targets=[0,1,2,3,0,4,5,0,1,0,5,4,2,3,0,1];
+251:let tasks=titles.map((title,i)=>{
+252:const a=agents[targets[i]],state=taskStates[i];
+261:const state={view:'hub',page:'overview',auth:{hub:true,node:true},taskFilter:'all',taskSearch:'',taskNode:'all',taskTab:'received',dirSearch:'',dirNode:'all',dirMode:'all',agentSearch:'',nodeSearch:'',detailTab:'input',dispatch:{},envKeys:[],lastFocus:null};
+262:const navs={
+264:node:[['overview','grid','本机概览'],['agents','agent','Agent 配置管理'],['directory','search','搜寻 agent'],['dispatch','send','本机派单'],['tasks','task','本机任务'],['settings','settings','设置']]
+266:function getNode(id){return nodes.find(n=>n.id===id)}
+267:function badge(status){const [text,color]=statusInfo[status];return `<span class="pill ${color}">${status==='running'?'<span class="dot" style="background:currentColor"></span>':''}${text}</span>`}
+268:function onlineBadge(n){return `<span class="pill ${n.online?'green':'gray'}"><span class="dot ${n.online?'':'off'}"></span>${n.online?'在线':'离线'}</span>`}
+269:function pendingReview(local=false){return tasks.filter(t=>t.status==='needs_review'&&!t.review&&(!local||t.node==='mac-mini'))}
+270:function renderHeader(){
+273:function render(){
+276:const nav=navs[state.view],pageLabel=nav.find(n=>n[0]===state.page)?.[2]||'总览';
+278:const f=({overview:overview,nodes:nodePage,dispatch:dispatchPage,tasks:taskPage,review:reviewPage,settings:settingsPage,agents:agentPage,directory:directoryPage})[state.page];
+281:function pageHead(title,sub,action=''){return `<div class="page-head"><div><h1>${title}</h1><p class="subtitle">${sub}</p></div>${action}</div>`}
+282:function metric(label,value,unit,foot,ic,color=''){return `<div class="card metric"><div class="metric-label">${label}${icon(ic,16)}</div><div class="metric-value" style="${color?'color:'+color:''}">${value}<span>${unit}</span></div><div class="metric-foot">${foot}</div></div>`}
+283:function overview(){
+284:const hub=state.view==='hub',pool=hub?tasks:tasks.filter(t=>t.node==='mac-mini'),running=pool.filter(t=>t.status==='running').length,done=pool.filter(t=>t.status==='completed').length;
+285:let html=pageHead(hub?'让协作，在每台机器间发生。':'你好，mac-mini。',hub?'从这里掌握整个网络，连接能力与任务。':'本机 Agent 已就绪，与你的协作网络保持连接。',`<div class="row"><button data-action="refresh">${icon('pulse',14)}　刷新</button><button class="primary" data-page="dispatch">${icon('plus',15)}　${hub?'跨机派单':'派发任务'}</button></div>`);
+289:const local=tasks.filter(t=>t.node==='mac-mini'),accepted=local.filter(t=>t.status==='acknowledged').length,started=local.filter(t=>t.status==='running').length,finished=local.filter(t=>['completed','failed','needs_review'].includes(t.status)).length;
+290:html+=`<div class="card" style="margin-bottom:22px"><div class="section-head" style="margin:0"><div class="topology-head"><span class="node-icon">${icon('node',24)}</span><div><h2>mac-mini <span class="pill green">与 Hub 已连接</span></h2><div class="tiny">macOS · Apple M4　/　epoch 12　/　并发 2</div></div></div><span class="pill blue">本机节点</span></div></div><div class="metrics">${metric('账本 · accepted',accepted,'条','已落盘，等待执行','task')}${metric('账本 · started',started,'条','执行已开始，断网不终止任务','pulse')}${metric('账本 · finished',finished,'条','包含完成、失败与待核对终态','check')}${metric('信箱余量',100-local.filter(t=>t.status==='submitted').length,'/ 100','Hub 侧本节点的离线信箱','node')}</div><div class="settings-grid"><div class="card"><div class="section-head"><h2>投递与执行</h2><span class="pill green">窗口正常</span></div>${settingLine('投递窗口（offered + acknowledged）',local.filter(t=>['offered','acknowledged'].includes(t.status)).length+' / 8')}${settingLine('执行并发',started+' / 2')}${settingLine('待人工核对',pendingReview(true).length+' 条')}<button class="text-button" data-page="tasks" style="margin-top:15px">查看本机任务 ${icon('arrow',13)}</button></div><div class="card"><div class="section-head"><h2>本机能力</h2><span class="pill blue">ExecProfile</span></div><p style="font-size:30px;font-weight:600">${agents.filter(a=>a.node==='mac-mini'&&a.enabled).length}<span class="subtitle"> 个 Agent 已启用</span></p><p class="subtitle" style="margin:8px 0 20px">执行配置留在本机；向全网发布能力卡片。</p><button data-page="agents">管理 Agent 配置 ${icon('arrow',13)}</button></div></div>`;
+295:function nodeCard(n){
+296:const ts=tasks.filter(t=>t.node===n.id),rs=ts.filter(t=>t.status==='running').length;
+299:function nodePage(){
+303:function renderNodeRows(){
+304:const list=nodes.filter(n=>n.id.includes(state.nodeSearch.toLowerCase()));
+307:function taskTable(list,compact=false){
+310:function taskBase(){return state.view==='hub'?tasks:tasks.filter(t=>state.taskTab==='received'?t.node==='mac-mini':t.by==='mac-mini')}
+311:function taskPage(){
+315:function renderTaskRows(){
+316:const base=taskBase(),q=state.taskSearch.toLowerCase();
+318:const list=base.filter(t=>(state.taskFilter==='all'||t.status===state.taskFilter)&&(state.taskNode==='all'||t.node===state.taskNode)&&(t.title+' '+t.id+' '+t.agent).toLowerCase().includes(q));
+321:function dispatchPage(){
+322:const d=state.dispatch,node=d.node||'mac-mini';
+326:function fillTargetAgents(preferred){
+327:const node=$('#target-node').value;
+328:const available=agents.filter(a=>a.node===node&&a.enabled);
+333:function renderTargetPreview(){
+334:const n=getNode($('#target-node').value),a=agents.find(a=>a.node===n?.id&&a.name===$('#target-agent').value);
+337:function agentPage(){
+338:$('#content').innerHTML=pageHead('Agent 配置管理','配置本机的执行方式，将清晰的能力声明发布到全网。',`<button class="primary" data-agent-edit="new">${icon('plus',15)}　添加 Agent</button>`)+`<div class="notice" style="margin-bottom:23px">${icon('shield',17)}<div><b>双卡分离，权限留在本机。</b> ExecProfile 包含命令、工作目录与环境白名单，仅本机可见；AgentCard 仅发布名称、描述、权限模式等能力信息。</div></div><div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="agent-search" placeholder="搜索本机 Agent 名称或命令…" value="${esc(state.agentSearch)}" aria-label="搜索本机 Agent"></div><span class="tiny">本机 mac-mini</span></div><div class="agent-grid" id="agent-grid"></div><div class="notice gray" style="margin-top:22px">原型中的保存、热重载、启停与删除仅更新演示内存，不操作本机 daemon。</div>`;
+341:function renderAgents(){
+342:const list=agents.filter(a=>a.node==='mac-mini'&&(a.name+' '+a.command).toLowerCase().includes(state.agentSearch.toLowerCase()));
+345:function directoryPage(){
+346:$('#content').innerHTML=pageHead('搜寻 agent','发现全网能力，找到适合这项工作的协作者。',`<span class="pill blue">全网 AgentCard 目录</span>`)+`<div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="dir-search" value="${esc(state.dirSearch)}" placeholder="搜索名称、描述或技能关键词…" aria-label="搜索全网 Agent"></div><select id="dir-node" aria-label="按所属节点筛选"><option value="all">全部节点</option>${nodes.map(n=>`<option ${state.dirNode===n.id?'selected':''}>${esc(n.id)}</option>`).join('')}</select><select id="dir-mode" aria-label="按权限模式筛选"><option value="all">全部权限模式</option>${[...new Set(agents.map(a=>a.mode))].map(m=>`<option ${state.dirMode===m?'selected':''}>${esc(m)}</option>`).join('')}</select><button data-action="reset-dir">重置</button></div><div class="section-head"><h2>可发现的能力 <span class="sub" id="dir-count"></span></h2><span class="tiny">仅能力声明，不含远端执行配置</span></div><div class="agent-grid" id="dir-grid"></div>`;
+349:function renderDirectory(){
+350:const q=state.dirSearch.toLowerCase(),list=agents.filter(a=>a.enabled&&!getNode(a.node).revoked&&(state.dirNode==='all'||a.node===state.dirNode)&&(state.dirMode==='all'||a.mode===state.dirMode)&&(a.name+' '+a.description).toLowerCase().includes(q));
+354:function reviewPage(){
+357:function reviewCard(t){
+360:function settingLine(label,value){return `<div class="setting-line"><span>${label}</span><code>${esc(value)}</code></div>`}
+361:function settingsPage(){
+362:const hub=state.view==='hub';
+365:function renderLogin(){
+366:const hub=state.view==='hub';
+369:function toast(message){
+373:function modal(title,body,footer='',wide=false){
+378:function closeModal(){const f=state.lastFocus;$('#portal').innerHTML='';if(f&&f.isConnected)f.focus()}
+379:function confirmBox(title,body,action,label='确认',danger=false){
+382:function tokenDialog(){
+385:let generatedConfig='',generatedToken='';
+386:function generateToken(id){
+387:const bytes=new Uint8Array(24);crypto.getRandomValues(bytes);
+392:function agentEditor(name){
+393:const original=agents.find(a=>a.node==='mac-mini'&&a.name===name),a=original||{name:'',command:'',workdir:'',timeout:900,allow_args:false,env:[],config_home:'',args:[],mode:'read-only',description:''};
+395:modal(original?'编辑 Agent · '+esc(a.name):'添加本机 Agent',`<form id="agent-form" data-original="${esc(original?.name||'')}"><div class="notice" style="margin-bottom:20px">ExecProfile · 仅本机保存。名称、描述和权限模式会生成对外 AgentCard。</div><div class="form-grid"><div class="field"><label for="af-name">name</label><input id="af-name" name="name" value="${esc(a.name)}" required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" placeholder="例如 codex"></div><div class="field"><label for="af-command">command <span>绝对路径</span></label><input id="af-command" name="command" value="${esc(a.command)}" required placeholder="/opt/homebrew/bin/codex"></div><div class="field wide"><label for="af-workdir">workdir <span>工作目录绝对路径</span></label><input id="af-workdir" name="workdir" value="${esc(a.workdir)}" required placeholder="/Users/dev/projects/my-project"></div><div class="field"><label for="af-timeout">timeout_sec</label><input id="af-timeout" name="timeout" value="${a.timeout}" type="number" min="1" max="86400" step="1" required></div><div class="field"><label for="af-mode">permission_mode</label><select id="af-mode" name="mode">${['read-only','plan','workspace-write','no-shell','custom'].map(m=>`<option ${a.mode===m?'selected':''}>${m}</option>`).join('')}</select></div><div class="field wide"><label for="af-home">config_home <span>配置与凭证目录</span></label><input id="af-home" name="home" value="${esc(a.config_home)}" placeholder="留空使用 data_dir/home"><span class="help">runner 将 HOME 固定指向此目录，与 workdir 分离。</span></div><div class="field wide"><label for="af-args">agent_args <span>固定参数 · JSON 数组</span></label><input id="af-args" name="args" class="mono" value="${esc(JSON.stringify(a.args))}" required><span class="help">须映射 CLI 自身的权限旗标，例如 ["--sandbox","read-only"]；选择权限说明不会自动改变参数。</span></div><div class="field wide"><label>allow_args</label><div class="toggle-line"><div><b style="font-size:12px">允许任务追加 Args</b><p class="help">授权该命令全部参数能力；解释器类命令等同通用执行。</p></div><input type="checkbox" name="allow" id="af-allow" ${a.allow_args?'checked':''} aria-label="允许任务追加参数"></div></div><div class="field wide"><label for="env-key-input">allow_env <span>允许任务覆盖的环境键</span></label><div class="key-editor" id="env-editor"></div><span class="help">输入键名后点击添加，或按 Enter。PATH 必须显式添加；* 代表全部放行。</span></div><div class="field wide"><label for="af-description">description <span>同时生成能力卡片描述</span></label><textarea id="af-description" name="description" rows="3" maxlength="1000" required>${esc(a.description)}</textarea></div></div><div class="form-footer"><span class="tiny">原型演示 · 不写入真实配置</span><div class="row"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存配置</button></div></div></form>`,'',true);
+398:function renderEnvKeys(){
+401:function addEnv(){
+402:const input=$('#env-key-input'),key=input.value.trim();
+409:function parseArray(raw){const val=JSON.parse(raw);if(!Array.isArray(val)||!val.every(v=>typeof v==='string'))throw Error('参数必须是由字符串组成的 JSON 数组');return val}
+410:function absolute(path){return /^(\/|[a-zA-Z]:[\\/])/.test(path)}
+411:function saveAgent(form){
+412:const f=new FormData(form),name=f.get('name').trim(),command=f.get('command').trim(),workdir=f.get('workdir').trim(),home=f.get('home').trim(),old=form.dataset.original;
+417:const args=parseArray(f.get('args')),mode=f.get('mode'),timeout=Number(f.get('timeout'));
+421:const existing=agents.find(a=>a.node==='mac-mini'&&a.name===old);
+422:const updated={name,node:'mac-mini',command,workdir,config_home:home,timeout,args,mode,description:f.get('description').trim(),allow_args:f.has('allow'),env:[...state.envKeys],enabled:existing?existing.enabled:true,today:existing?.today||0};
+429:function submitTask(form){
+431:const f=new FormData(form),node=f.get('node'),agent=f.get('agent'),description=f.get('description').trim();
+433:const a=agents.find(a=>a.node===node&&a.name===agent&&a.enabled),n=getNode(node);
+435:const args=parseArray(f.get('args')),env=JSON.parse(f.get('env'));
+437:const idem=f.get('idem').trim(),by=state.view==='hub'?'管理员':'mac-mini',input={args,stdin:description,env};
+438:const signature=JSON.stringify({node,agent,input,by});
+439:const existing=idem&&tasks.find(t=>t.idem===idem);
+441:const t={id:'t-'+Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join(''),trace:'tr-'+Date.now().toString(16),title:description.split('\n')[0].slice(0,70),node,agent,status:'submitted',by,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}),input,answer:'',error:'',review:null,idem,signature,origin:state.dispatch.origin||null};
+446:function detail(id,tab){
+447:const t=tasks.find(t=>t.id===id);if(!t)return;
+450:const terminal=['completed','failed','needs_review'].includes(t.status);
+451:const step=terminal?4:statuses.indexOf(t.status);
+456:function renderDetailContent(t){
+457:let html='';
+458:if(state.detailTab==='input')html=`<h3>任务输入</h3><pre>${esc(JSON.stringify(t.input,null,2))}</pre><p class="tiny">Args 和 Env 由目标本机白名单校验，Command 与工作目录无法被任务覆盖。</p>`;
+464:function reviewAction(id,action){
+465:const t=tasks.find(t=>t.id===id);if(!t||t.review)return;
+470:const valid=action==='valid';
+474:async function copyValue(kind){
+475:const value=kind==='token'?generatedToken:generatedConfig;
+479:async function downloadArtifact(id){
+480:const t=tasks.find(t=>t.id===id);if(!t)return;
+481:const content=`SwarmMind 演示检查报告\n任务：${t.id}\n标题：${t.title}\n目标：${t.node} / ${t.agent}\n\n${t.answer}\n\n此文件由离线原型生成。\n`;
+482:const bytes=new TextEncoder().encode(content);
+483:if(crypto.subtle){const digest=await crypto.subtle.digest('SHA-256',bytes);if($('#artifact-hash'))$('#artifact-hash').textContent=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')+' · '+bytes.length+' 字节'}
+485:const url=URL.createObjectURL(new Blob([bytes],{type:'text/plain;charset=utf-8'})),a=document.createElement('a');
+488:function navigate(page){state.page=page;state.dispatch={};closeModal();render();window.scrollTo({top:0,behavior:'instant'})}
+490:const b=e.target.closest('button');if(!b)return;
+503:const name=b.dataset.agentDelete;
+504:confirmBox('删除 Agent 配置',`<p>确认删除本机 <b>${esc(name)}</b> 的 ExecProfile？</p><div class="notice orange" style="margin-top:15px">能力声明将从目录移除。已有任务与账本记录保留，已开始的执行不受影响。</div>`,'delete|'+name,'确认删除',true);return;
+507:const a=agents.find(a=>a.node==='mac-mini'&&a.name===b.dataset.toggle);a.enabled=!a.enabled;renderAgents();toast(a.name+(a.enabled?' 已启用，能力重新发布':' 已停用，不再接收新任务'));return;
+509:if(b.dataset.assign){const [node,agent]=b.dataset.assign.split('|');state.dispatch={node,agent};state.page='dispatch';render();toast('已预填目标 '+node+' / '+agent);return}
+511:const n=getNode(b.dataset.revoke);
+520:const t=tasks.find(t=>t.id===b.dataset.riskContinue);
+525:const [type,id,action]=b.dataset.confirm.split('|');
+
+exec
+/bin/zsh -lc "sed -n '110,220p' dashboard-prototype-v3.1.html; sed -n '231,365p' dashboard-prototype-v3.1.html" in /Users/tl.m/Documents/HanaAgent/workSpace/dev/SwarmMind
+ succeeded in 0ms:
+input:focus,textarea:focus,select:focus{outline:2px solid #4a6cf72b;border-color:#7890f8}
+209:const $ = s => document.querySelector(s);
+210:const esc = v => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+211:const icons = {
+230:function icon(name,size=17){return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]||icons.grid}</svg>`}
+231:const nodes=[
+236:let agents=[
+244:const statuses=['submitted','offered','acknowledged','running','completed','failed','needs_review'];
+245:const statusInfo={
+248:const titles=['审查 WebSocket 重连与 epoch 隔离逻辑','为新控制台整理信息架构方案','验证离线信箱恢复路径','排查 Windows 路径兼容问题','审查 ledger 持久化事务实现','编写跨机部署与回滚计划','检查产物 SHA-256 校验链路','评估任务超时与进程组终止策略','核对状态机迟到事件收敛表','分析只读沙盒的权限边界','检查注册鉴权失败路径','整理真实双机验收步骤','验证 env 白名单拒绝规则','审查历史任务补传策略','诊断节点心跳与背压指标','输出协议版本迁移建议'];
+249:const taskStates=['running','needs_review','completed','submitted','acknowledged','running','completed','needs_review','completed','failed','offered','completed','failed','submitted','acknowledged','completed'];
+250:const targets=[0,1,2,3,0,4,5,0,1,0,5,4,2,3,0,1];
+251:let tasks=titles.map((title,i)=>{
+252:const a=agents[targets[i]],state=taskStates[i];
+261:const state={view:'hub',page:'overview',auth:{hub:true,node:true},taskFilter:'all',taskSearch:'',taskNode:'all',taskTab:'received',dirSearch:'',dirNode:'all',dirMode:'all',agentSearch:'',nodeSearch:'',detailTab:'input',dispatch:{},envKeys:[],lastFocus:null};
+262:const navs={
+264:node:[['overview','grid','本机概览'],['agents','agent','Agent 配置管理'],['directory','search','搜寻 agent'],['dispatch','send','本机派单'],['tasks','task','本机任务'],['settings','settings','设置']]
+266:function getNode(id){return nodes.find(n=>n.id===id)}
+267:function badge(status){const [text,color]=statusInfo[status];return `<span class="pill ${color}">${status==='running'?'<span class="dot" style="background:currentColor"></span>':''}${text}</span>`}
+268:function onlineBadge(n){return `<span class="pill ${n.online?'green':'gray'}"><span class="dot ${n.online?'':'off'}"></span>${n.online?'在线':'离线'}</span>`}
+269:function pendingReview(local=false){return tasks.filter(t=>t.status==='needs_review'&&!t.review&&(!local||t.node==='mac-mini'))}
+270:function renderHeader(){
+273:function render(){
+276:const nav=navs[state.view],pageLabel=nav.find(n=>n[0]===state.page)?.[2]||'总览';
+278:const f=({overview:overview,nodes:nodePage,dispatch:dispatchPage,tasks:taskPage,review:reviewPage,settings:settingsPage,agents:agentPage,directory:directoryPage})[state.page];
+281:function pageHead(title,sub,action=''){return `<div class="page-head"><div><h1>${title}</h1><p class="subtitle">${sub}</p></div>${action}</div>`}
+282:function metric(label,value,unit,foot,ic,color=''){return `<div class="card metric"><div class="metric-label">${label}${icon(ic,16)}</div><div class="metric-value" style="${color?'color:'+color:''}">${value}<span>${unit}</span></div><div class="metric-foot">${foot}</div></div>`}
+283:function overview(){
+284:const hub=state.view==='hub',pool=hub?tasks:tasks.filter(t=>t.node==='mac-mini'),running=pool.filter(t=>t.status==='running').length,done=pool.filter(t=>t.status==='completed').length;
+285:let html=pageHead(hub?'让协作，在每台机器间发生。':'你好，mac-mini。',hub?'从这里掌握整个网络，连接能力与任务。':'本机 Agent 已就绪，与你的协作网络保持连接。',`<div class="row"><button data-action="refresh">${icon('pulse',14)}　刷新</button><button class="primary" data-page="dispatch">${icon('plus',15)}　${hub?'跨机派单':'派发任务'}</button></div>`);
+289:const local=tasks.filter(t=>t.node==='mac-mini'),accepted=local.filter(t=>t.status==='acknowledged').length,started=local.filter(t=>t.status==='running').length,finished=local.filter(t=>['completed','failed','needs_review'].includes(t.status)).length;
+290:html+=`<div class="card" style="margin-bottom:22px"><div class="section-head" style="margin:0"><div class="topology-head"><span class="node-icon">${icon('node',24)}</span><div><h2>mac-mini <span class="pill green">与 Hub 已连接</span></h2><div class="tiny">macOS · Apple M4　/　epoch 12　/　并发 2</div></div></div><span class="pill blue">本机节点</span></div></div><div class="metrics">${metric('账本 · accepted',accepted,'条','已落盘，等待执行','task')}${metric('账本 · started',started,'条','执行已开始，断网不终止任务','pulse')}${metric('账本 · finished',finished,'条','包含完成、失败与待核对终态','check')}${metric('信箱余量',100-local.filter(t=>t.status==='submitted').length,'/ 100','Hub 侧本节点的离线信箱','node')}</div><div class="settings-grid"><div class="card"><div class="section-head"><h2>投递与执行</h2><span class="pill green">窗口正常</span></div>${settingLine('投递窗口（offered + acknowledged）',local.filter(t=>['offered','acknowledged'].includes(t.status)).length+' / 8')}${settingLine('执行并发',started+' / 2')}${settingLine('待人工核对',pendingReview(true).length+' 条')}<button class="text-button" data-page="tasks" style="margin-top:15px">查看本机任务 ${icon('arrow',13)}</button></div><div class="card"><div class="section-head"><h2>本机能力</h2><span class="pill blue">ExecProfile</span></div><p style="font-size:30px;font-weight:600">${agents.filter(a=>a.node==='mac-mini'&&a.enabled).length}<span class="subtitle"> 个 Agent 已启用</span></p><p class="subtitle" style="margin:8px 0 20px">执行配置留在本机；向全网发布能力卡片。</p><button data-page="agents">管理 Agent 配置 ${icon('arrow',13)}</button></div></div>`;
+295:function nodeCard(n){
+296:const ts=tasks.filter(t=>t.node===n.id),rs=ts.filter(t=>t.status==='running').length;
+299:function nodePage(){
+303:function renderNodeRows(){
+304:const list=nodes.filter(n=>n.id.includes(state.nodeSearch.toLowerCase()));
+307:function taskTable(list,compact=false){
+310:function taskBase(){return state.view==='hub'?tasks:tasks.filter(t=>state.taskTab==='received'?t.node==='mac-mini':t.by==='mac-mini')}
+311:function taskPage(){
+315:function renderTaskRows(){
+316:const base=taskBase(),q=state.taskSearch.toLowerCase();
+318:const list=base.filter(t=>(state.taskFilter==='all'||t.status===state.taskFilter)&&(state.taskNode==='all'||t.node===state.taskNode)&&(t.title+' '+t.id+' '+t.agent).toLowerCase().includes(q));
+321:function dispatchPage(){
+322:const d=state.dispatch,node=d.node||'mac-mini';
+326:function fillTargetAgents(preferred){
+327:const node=$('#target-node').value;
+328:const available=agents.filter(a=>a.node===node&&a.enabled);
+333:function renderTargetPreview(){
+334:const n=getNode($('#target-node').value),a=agents.find(a=>a.node===n?.id&&a.name===$('#target-agent').value);
+337:function agentPage(){
+338:$('#content').innerHTML=pageHead('Agent 配置管理','配置本机的执行方式，将清晰的能力声明发布到全网。',`<button class="primary" data-agent-edit="new">${icon('plus',15)}　添加 Agent</button>`)+`<div class="notice" style="margin-bottom:23px">${icon('shield',17)}<div><b>双卡分离，权限留在本机。</b> ExecProfile 包含命令、工作目录与环境白名单，仅本机可见；AgentCard 仅发布名称、描述、权限模式等能力信息。</div></div><div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="agent-search" placeholder="搜索本机 Agent 名称或命令…" value="${esc(state.agentSearch)}" aria-label="搜索本机 Agent"></div><span class="tiny">本机 mac-mini</span></div><div class="agent-grid" id="agent-grid"></div><div class="notice gray" style="margin-top:22px">原型中的保存、热重载、启停与删除仅更新演示内存，不操作本机 daemon。</div>`;
+341:function renderAgents(){
+342:const list=agents.filter(a=>a.node==='mac-mini'&&(a.name+' '+a.command).toLowerCase().includes(state.agentSearch.toLowerCase()));
+345:function directoryPage(){
+346:$('#content').innerHTML=pageHead('搜寻 agent','发现全网能力，找到适合这项工作的协作者。',`<span class="pill blue">全网 AgentCard 目录</span>`)+`<div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="dir-search" value="${esc(state.dirSearch)}" placeholder="搜索名称、描述或技能关键词…" aria-label="搜索全网 Agent"></div><select id="dir-node" aria-label="按所属节点筛选"><option value="all">全部节点</option>${nodes.map(n=>`<option ${state.dirNode===n.id?'selected':''}>${esc(n.id)}</option>`).join('')}</select><select id="dir-mode" aria-label="按权限模式筛选"><option value="all">全部权限模式</option>${[...new Set(agents.map(a=>a.mode))].map(m=>`<option ${state.dirMode===m?'selected':''}>${esc(m)}</option>`).join('')}</select><button data-action="reset-dir">重置</button></div><div class="section-head"><h2>可发现的能力 <span class="sub" id="dir-count"></span></h2><span class="tiny">仅能力声明，不含远端执行配置</span></div><div class="agent-grid" id="dir-grid"></div>`;
+349:function renderDirectory(){
+350:const q=state.dirSearch.toLowerCase(),list=agents.filter(a=>a.enabled&&!getNode(a.node).revoked&&(state.dirNode==='all'||a.node===state.dirNode)&&(state.dirMode==='all'||a.mode===state.dirMode)&&(a.name+' '+a.description).toLowerCase().includes(q));
+354:function reviewPage(){
+357:function reviewCard(t){
+360:function settingLine(label,value){return `<div class="setting-line"><span>${label}</span><code>${esc(value)}</code></div>`}
+361:function settingsPage(){
+362:const hub=state.view==='hub';
+365:function renderLogin(){
+366:const hub=state.view==='hub';
+369:function toast(message){
+373:function modal(title,body,footer='',wide=false){
+378:function closeModal(){const f=state.lastFocus;$('#portal').innerHTML='';if(f&&f.isConnected)f.focus()}
+379:function confirmBox(title,body,action,label='确认',danger=false){
+382:function tokenDialog(){
+385:let generatedConfig='',generatedToken='';
+386:function generateToken(id){
+387:const bytes=new Uint8Array(24);crypto.getRandomValues(bytes);
+392:function agentEditor(name){
+393:const original=agents.find(a=>a.node==='mac-mini'&&a.name===name),a=original||{name:'',command:'',workdir:'',timeout:900,allow_args:false,env:[],config_home:'',args:[],mode:'read-only',description:''};
+395:modal(original?'编辑 Agent · '+esc(a.name):'添加本机 Agent',`<form id="agent-form" data-original="${esc(original?.name||'')}"><div class="notice" style="margin-bottom:20px">ExecProfile · 仅本机保存。名称、描述和权限模式会生成对外 AgentCard。</div><div class="form-grid"><div class="field"><label for="af-name">name</label><input id="af-name" name="name" value="${esc(a.name)}" required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" placeholder="例如 codex"></div><div class="field"><label for="af-command">command <span>绝对路径</span></label><input id="af-command" name="command" value="${esc(a.command)}" required placeholder="/opt/homebrew/bin/codex"></div><div class="field wide"><label for="af-workdir">workdir <span>工作目录绝对路径</span></label><input id="af-workdir" name="workdir" value="${esc(a.workdir)}" required placeholder="/Users/dev/projects/my-project"></div><div class="field"><label for="af-timeout">timeout_sec</label><input id="af-timeout" name="timeout" value="${a.timeout}" type="number" min="1" max="86400" step="1" required></div><div class="field"><label for="af-mode">permission_mode</label><select id="af-mode" name="mode">${['read-only','plan','workspace-write','no-shell','custom'].map(m=>`<option ${a.mode===m?'selected':''}>${m}</option>`).join('')}</select></div><div class="field wide"><label for="af-home">config_home <span>配置与凭证目录</span></label><input id="af-home" name="home" value="${esc(a.config_home)}" placeholder="留空使用 data_dir/home"><span class="help">runner 将 HOME 固定指向此目录，与 workdir 分离。</span></div><div class="field wide"><label for="af-args">agent_args <span>固定参数 · JSON 数组</span></label><input id="af-args" name="args" class="mono" value="${esc(JSON.stringify(a.args))}" required><span class="help">须映射 CLI 自身的权限旗标，例如 ["--sandbox","read-only"]；选择权限说明不会自动改变参数。</span></div><div class="field wide"><label>allow_args</label><div class="toggle-line"><div><b style="font-size:12px">允许任务追加 Args</b><p class="help">授权该命令全部参数能力；解释器类命令等同通用执行。</p></div><input type="checkbox" name="allow" id="af-allow" ${a.allow_args?'checked':''} aria-label="允许任务追加参数"></div></div><div class="field wide"><label for="env-key-input">allow_env <span>允许任务覆盖的环境键</span></label><div class="key-editor" id="env-editor"></div><span class="help">输入键名后点击添加，或按 Enter。PATH 必须显式添加；* 代表全部放行。</span></div><div class="field wide"><label for="af-description">description <span>同时生成能力卡片描述</span></label><textarea id="af-description" name="description" rows="3" maxlength="1000" required>${esc(a.description)}</textarea></div></div><div class="form-footer"><span class="tiny">原型演示 · 不写入真实配置</span><div class="row"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存配置</button></div></div></form>`,'',true);
+398:function renderEnvKeys(){
+401:function addEnv(){
+402:const input=$('#env-key-input'),key=input.value.trim();
+409:function parseArray(raw){const val=JSON.parse(raw);if(!Array.isArray(val)||!val.every(v=>typeof v==='string'))throw Error('参数必须是由字符串组成的 JSON 数组');return val}
+410:function absolute(path){return /^(\/|[a-zA-Z]:[\\/])/.test(path)}
+411:function saveAgent(form){
+412:const f=new FormData(form),name=f.get('name').trim(),command=f.get('command').trim(),workdir=f.get('workdir').trim(),home=f.get('home').trim(),old=form.dataset.original;
+417:const args=parseArray(f.get('args')),mode=f.get('mode'),timeout=Number(f.get('timeout'));
+421:const existing=agents.find(a=>a.node==='mac-mini'&&a.name===old);
+422:const updated={name,node:'mac-mini',command,workdir,config_home:home,timeout,args,mode,description:f.get('description').trim(),allow_args:f.has('allow'),env:[...state.envKeys],enabled:existing?existing.enabled:true,today:existing?.today||0};
+429:function submitTask(form){
+431:const f=new FormData(form),node=f.get('node'),agent=f.get('agent'),description=f.get('description').trim();
+433:const a=agents.find(a=>a.node===node&&a.name===agent&&a.enabled),n=getNode(node);
+435:const args=parseArray(f.get('args')),env=JSON.parse(f.get('env'));
+437:const idem=f.get('idem').trim(),by=state.view==='hub'?'管理员':'mac-mini',input={args,stdin:description,env};
+438:const signature=JSON.stringify({node,agent,input,by});
+439:const existing=idem&&tasks.find(t=>t.idem===idem);
+441:const t={id:'t-'+Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join(''),trace:'tr-'+Date.now().toString(16),title:description.split('\n')[0].slice(0,70),node,agent,status:'submitted',by,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}),input,answer:'',error:'',review:null,idem,signature,origin:state.dispatch.origin||null};
+446:function detail(id,tab){
+447:const t=tasks.find(t=>t.id===id);if(!t)return;
+450:const terminal=['completed','failed','needs_review'].includes(t.status);
+451:const step=terminal?4:statuses.indexOf(t.status);
+456:function renderDetailContent(t){
+457:let html='';
+458:if(state.detailTab==='input')html=`<h3>任务输入</h3><pre>${esc(JSON.stringify(t.input,null,2))}</pre><p class="tiny">Args 和 Env 由目标本机白名单校验，Command 与工作目录无法被任务覆盖。</p>`;
+464:function reviewAction(id,action){
+465:const t=tasks.find(t=>t.id===id);if(!t||t.review)return;
+470:const valid=action==='valid';
+474:async function copyValue(kind){
+475:const value=kind==='token'?generatedToken:generatedConfig;
+479:async function downloadArtifact(id){
+480:const t=tasks.find(t=>t.id===id);if(!t)return;
+481:const content=`SwarmMind 演示检查报告\n任务：${t.id}\n标题：${t.title}\n目标：${t.node} / ${t.agent}\n\n${t.answer}\n\n此文件由离线原型生成。\n`;
+482:const bytes=new TextEncoder().encode(content);
+483:if(crypto.subtle){const digest=await crypto.subtle.digest('SHA-256',bytes);if($('#artifact-hash'))$('#artifact-hash').textContent=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')+' · '+bytes.length+' 字节'}
+526:if(type==='delete'){agents=agents.filter(a=>!(a.node==='mac-mini'&&a.name===id));closeModal();render();toast('本机 Agent 配置已删除')}
+527:if(type==='revoke'){const n=getNode(id);n.revoked=true;n.online=false;n.heartbeat='吊销时断开';closeModal();render();toast(id+' 的演示令牌已吊销')}
+529:const t=tasks.find(t=>t.id===id);t.review={label:action==='valid'?'人工确认有效':'人工标记失败',by:state.view==='hub'?'管理员':'mac-mini 本机',time:new Date().toLocaleTimeString('zh-CN')};
+565:const form=e.target;
+567:const token=$('#login-token').value,expected=state.view==='hub'?'hub_demo_admin':'node_demo_local';
+572:const id=new FormData(form).get('node').trim();
+584:const list=[...$('#portal').querySelectorAll('button:not(:disabled),input:not(:disabled),select,textarea,[tabindex="0"]')].filter(el=>el.offsetParent!==null);
+585:const first=list[0],last=list[list.length-1];
+805:const $ = s => document.querySelector(s);
+806:const esc = v => String(v ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+807:const icons = {
+826:function icon(name,size=17){return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]||icons.grid}</svg>`}
+827:const nodes=[
+832:let agents=[
+840:const statuses=['submitted','offered','acknowledged','running','completed','failed','needs_review'];
+841:const statusInfo={
+844:const titles=['审查 WebSocket 重连与 epoch 隔离逻辑','为新控制台整理信息架构方案','验证离线信箱恢复路径','排查 Windows 路径兼容问题','审查 ledger 持久化事务实现','编写跨机部署与回滚计划','检查产物 SHA-256 校验链路','评估任务超时与进程组终止策略','核对状态机迟到事件收敛表','分析只读沙盒的权限边界','检查注册鉴权失败路径','整理真实双机验收步骤','验证 env 白名单拒绝规则','审查历史任务补传策略','诊断节点心跳与背压指标','输出协议版本迁移建议'];
+845:const taskStates=['running','needs_review','completed','submitted','acknowledged','running','completed','needs_review','completed','failed','offered','completed','failed','submitted','acknowledged','completed'];
+846:const targets=[0,1,2,3,0,4,5,0,1,0,5,4,2,3,0,1];
+847:let tasks=titles.map((title,i)=>{
+848:const a=agents[targets[i]],state=taskStates[i];
+857:const state={view:'hub',page:'overview',auth:{hub:true,node:true},taskFilter:'all',taskSearch:'',taskNode:'all',taskTab:'received',dirSearch:'',dirNode:'all',dirMode:'all',agentSearch:'',nodeSearch:'',detailTab:'input',dispatch:{},envKeys:[],lastFocus:null};
+858:const navs={
+860:node:[['overview','grid','本机概览'],['agents','agent','Agent 配置管理'],['directory','search','搜寻 agent'],['dispatch','send','本机派单'],['tasks','task','本机任务'],['settings','settings','设置']]
+862:function getNode(id){return nodes.find(n=>n.id===id)}
+863:function badge(status){const [text,color]=statusInfo[status];return `<span class="pill ${color}">${status==='running'?'<span class="dot" style="background:currentColor"></span>':''}${text}</span>`}
+864:function onlineBadge(n){return `<span class="pill ${n.online?'green':'gray'}"><span class="dot ${n.online?'':'off'}"></span>${n.online?'在线':'离线'}</span>`}
+865:function pendingReview(local=false){return tasks.filter(t=>t.status==='needs_review'&&!t.review&&(!local||t.node==='mac-mini'))}
+866:function renderHeader(){
+869:function render(){
+872:const nav=navs[state.view],pageLabel=nav.find(n=>n[0]===state.page)?.[2]||'总览';
+874:const f=({overview:overview,nodes:nodePage,dispatch:dispatchPage,tasks:taskPage,review:reviewPage,settings:settingsPage,agents:agentPage,directory:directoryPage})[state.page];
+877:function pageHead(title,sub,action=''){return `<div class="page-head"><div><h1>${title}</h1><p class="subtitle">${sub}</p></div>${action}</div>`}
+878:function metric(label,value,unit,foot,ic,color=''){return `<div class="card metric"><div class="metric-label">${label}${icon(ic,16)}</div><div class="metric-value" style="${color?'color:'+color:''}">${value}<span>${unit}</span></div><div class="metric-foot">${foot}</div></div>`}
+879:function overview(){
+880:const hub=state.view==='hub',pool=hub?tasks:tasks.filter(t=>t.node==='mac-mini'),running=pool.filter(t=>t.status==='running').length,done=pool.filter(t=>t.status==='completed').length;
+881:let html=pageHead(hub?'让协作，在每台机器间发生。':'你好，mac-mini。',hub?'从这里掌握整个网络，连接能力与任务。':'本机 Agent 已就绪，与你的协作网络保持连接。',`<div class="row"><button data-action="refresh">${icon('pulse',14)}　刷新</button><button class="primary" data-page="dispatch">${icon('plus',15)}　${hub?'跨机派单':'派发任务'}</button></div>`);
+885:const local=tasks.filter(t=>t.node==='mac-mini'),accepted=local.filter(t=>t.status==='acknowledged').length,started=local.filter(t=>t.status==='running').length,finished=local.filter(t=>['completed','failed','needs_review'].includes(t.status)).length;
+886:html+=`<div class="card" style="margin-bottom:22px"><div class="section-head" style="margin:0"><div class="topology-head"><span class="node-icon">${icon('node',24)}</span><div><h2>mac-mini <span class="pill green">与 Hub 已连接</span></h2><div class="tiny">macOS · Apple M4　/　epoch 12　/　并发 2</div></div></div><span class="pill blue">本机节点</span></div></div><div class="metrics">${metric('账本 · accepted',accepted,'条','已落盘，等待执行','task')}${metric('账本 · started',started,'条','执行已开始，断网不终止任务','pulse')}${metric('账本 · finished',finished,'条','包含完成、失败与待核对终态','check')}${metric('信箱余量',100-local.filter(t=>t.status==='submitted').length,'/ 100','Hub 侧本节点的离线信箱','node')}</div><div class="settings-grid"><div class="card"><div class="section-head"><h2>投递与执行</h2><span class="pill green">窗口正常</span></div>${settingLine('投递窗口（offered + acknowledged）',local.filter(t=>['offered','acknowledged'].includes(t.status)).length+' / 8')}${settingLine('执行并发',started+' / 2')}${settingLine('待人工核对',pendingReview(true).length+' 条')}<button class="text-button" data-page="tasks" style="margin-top:15px">查看本机任务 ${icon('arrow',13)}</button></div><div class="card"><div class="section-head"><h2>本机能力</h2><span class="pill blue">ExecProfile</span></div><p style="font-size:30px;font-weight:600">${agents.filter(a=>a.node==='mac-mini'&&a.enabled).length}<span class="subtitle"> 个 Agent 已启用</span></p><p class="subtitle" style="margin:8px 0 20px">执行配置留在本机；向全网发布能力卡片。</p><button data-page="agents">管理 Agent 配置 ${icon('arrow',13)}</button></div></div>`;
+891:function nodeCard(n){
+892:const ts=tasks.filter(t=>t.node===n.id),rs=ts.filter(t=>t.status==='running').length;
+895:function nodePage(){
+899:function renderNodeRows(){
+900:const list=nodes.filter(n=>n.id.includes(state.nodeSearch.toLowerCase()));
+903:function taskTable(list,compact=false){
+906:function taskBase(){return state.view==='hub'?tasks:tasks.filter(t=>state.taskTab==='received'?t.node==='mac-mini':t.by==='mac-mini')}
+907:function taskPage(){
+911:function renderTaskRows(){
+912:const base=taskBase(),q=state.taskSearch.toLowerCase();
+914:const list=base.filter(t=>(state.taskFilter==='all'||t.status===state.taskFilter)&&(state.taskNode==='all'||t.node===state.taskNode)&&(t.title+' '+t.id+' '+t.agent).toLowerCase().includes(q));
+917:function dispatchPage(){
+918:const d=state.dispatch,node=d.node||'mac-mini';
+922:function fillTargetAgents(preferred){
+923:const node=$('#target-node').value;
+924:const available=agents.filter(a=>a.node===node&&a.enabled);
+929:function renderTargetPreview(){
+930:const n=getNode($('#target-node').value),a=agents.find(a=>a.node===n?.id&&a.name===$('#target-agent').value);
+933:function agentPage(){
+934:$('#content').innerHTML=pageHead('Agent 配置管理','配置本机的执行方式，将清晰的能力声明发布到全网。',`<button class="primary" data-agent-edit="new">${icon('plus',15)}　添加 Agent</button>`)+`<div class="notice" style="margin-bottom:23px">${icon('shield',17)}<div><b>双卡分离，权限留在本机。</b> ExecProfile 包含命令、工作目录与环境白名单，仅本机可见；AgentCard 仅发布名称、描述、权限模式等能力信息。</div></div><div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="agent-search" placeholder="搜索本机 Agent 名称或命令…" value="${esc(state.agentSearch)}" aria-label="搜索本机 Agent"></div><span class="tiny">本机 mac-mini</span></div><div class="agent-grid" id="agent-grid"></div><div class="notice gray" style="margin-top:22px">原型中的保存、热重载、启停与删除仅更新演示内存，不操作本机 daemon。</div>`;
+937:function renderAgents(){
+938:const list=agents.filter(a=>a.node==='mac-mini'&&(a.name+' '+a.command).toLowerCase().includes(state.agentSearch.toLowerCase()));
+941:function directoryPage(){
+942:$('#content').innerHTML=pageHead('搜寻 agent','发现全网能力，找到适合这项工作的协作者。',`<span class="pill blue">全网 AgentCard 目录</span>`)+`<div class="toolbar"><div class="input-icon">${icon('search',16)}<input id="dir-search" value="${esc(state.dirSearch)}" placeholder="搜索名称、描述或技能关键词…" aria-label="搜索全网 Agent"></div><select id="dir-node" aria-label="按所属节点筛选"><option value="all">全部节点</option>${nodes.map(n=>`<option ${state.dirNode===n.id?'selected':''}>${esc(n.id)}</option>`).join('')}</select><select id="dir-mode" aria-label="按权限模式筛选"><option value="all">全部权限模式</option>${[...new Set(agents.map(a=>a.mode))].map(m=>`<option ${state.dirMode===m?'selected':''}>${esc(m)}</option>`).join('')}</select><button data-action="reset-dir">重置</button></div><div class="section-head"><h2>可发现的能力 <span class="sub" id="dir-count"></span></h2><span class="tiny">仅能力声明，不含远端执行配置</span></div><div class="agent-grid" id="dir-grid"></div>`;
+945:function renderDirectory(){
+946:const q=state.dirSearch.toLowerCase(),list=agents.filter(a=>a.enabled&&!getNode(a.node).revoked&&(state.dirNode==='all'||a.node===state.dirNode)&&(state.dirMode==='all'||a.mode===state.dirMode)&&(a.name+' '+a.description).toLowerCase().includes(q));
+950:function reviewPage(){
+953:function reviewCard(t){
+956:function settingLine(label,value){return `<div class="setting-line"><span>${label}</span><code>${esc(value)}</code></div>`}
+957:function settingsPage(){
+958:const hub=state.view==='hub';
+961:function renderLogin(){
+962:const hub=state.view==='hub';
+965:function toast(message){
+969:function modal(title,body,footer='',wide=false){
+974:function closeModal(){const f=state.lastFocus;$('#portal').innerHTML='';if(f&&f.isConnected)f.focus()}
+975:function confirmBox(title,body,action,label='确认',danger=false){
+978:function tokenDialog(){
+981:let generatedConfig='',generatedToken='';
+982:function generateToken(id){
+983:const bytes=new Uint8Array(24);crypto.getRandomValues(bytes);
+988:function agentEditor(name){
+989:const original=agents.find(a=>a.node==='mac-mini'&&a.name===name),a=original||{name:'',command:'',workdir:'',timeout:900,allow_args:false,env:[],config_home:'',args:[],mode:'read-only',description:''};
+991:modal(original?'编辑 Agent · '+esc(a.name):'添加本机 Agent',`<form id="agent-form" data-original="${esc(original?.name||'')}"><div class="notice" style="margin-bottom:20px">ExecProfile · 仅本机保存。名称、描述和权限模式会生成对外 AgentCard。</div><div class="form-grid"><div class="field"><label for="af-name">name</label><input id="af-name" name="name" value="${esc(a.name)}" required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" placeholder="例如 codex"></div><div class="field"><label for="af-command">command <span>绝对路径</span></label><input id="af-command" name="command" value="${esc(a.command)}" required placeholder="/opt/homebrew/bin/codex"></div><div class="field wide"><label for="af-workdir">workdir <span>工作目录绝对路径</span></label><input id="af-workdir" name="workdir" value="${esc(a.workdir)}" required placeholder="/Users/dev/projects/my-project"></div><div class="field"><label for="af-timeout">timeout_sec</label><input id="af-timeout" name="timeout" value="${a.timeout}" type="number" min="1" max="86400" step="1" required></div><div class="field"><label for="af-mode">permission_mode</label><select id="af-mode" name="mode">${['read-only','plan','workspace-write','no-shell','custom'].map(m=>`<option ${a.mode===m?'selected':''}>${m}</option>`).join('')}</select></div><div class="field wide"><label for="af-home">config_home <span>配置与凭证目录</span></label><input id="af-home" name="home" value="${esc(a.config_home)}" placeholder="留空使用 data_dir/home"><span class="help">runner 将 HOME 固定指向此目录，与 workdir 分离。</span></div><div class="field wide"><label for="af-args">agent_args <span>固定参数 · JSON 数组</span></label><input id="af-args" name="args" class="mono" value="${esc(JSON.stringify(a.args))}" required><span class="help">须映射 CLI 自身的权限旗标，例如 ["--sandbox","read-only"]；选择权限说明不会自动改变参数。</span></div><div class="field wide"><label>allow_args</label><div class="toggle-line"><div><b style="font-size:12px">允许任务追加 Args</b><p class="help">授权该命令全部参数能力；解释器类命令等同通用执行。</p></div><input type="checkbox" name="allow" id="af-allow" ${a.allow_args?'checked':''} aria-label="允许任务追加参数"></div></div><div class="field wide"><label for="env-key-input">allow_env <span>允许任务覆盖的环境键</span></label><div class="key-editor" id="env-editor"></div><span class="help">输入键名后点击添加，或按 Enter。PATH 必须显式添加；* 代表全部放行。</span></div><div class="field wide"><label for="af-description">description <span>同时生成能力卡片描述</span></label><textarea id="af-description" name="description" rows="3" maxlength="1000" required>${esc(a.description)}</textarea></div></div><div class="form-footer"><span class="tiny">原型演示 · 不写入真实配置</span><div class="row"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存配置</button></div></div></form>`,'',true);
+994:function renderEnvKeys(){
+997:function addEnv(){
+998:const input=$('#env-key-input'),key=input.value.trim();
+1005:function parseArray(raw){const val=JSON.parse(raw);if(!Array.isArray(val)||!val.every(v=>typeof v==='string'))throw Error('参数必须是由字符串组成的 JSON 数组');return val}
+1006:function absolute(path){return /^(\/|[a-zA-Z]:[\\/])/.test(path)}
+1007:function saveAgent(form){
+1008:const f=new FormData(form),name=f.get('name').trim(),command=f.get('command').trim(),workdir=f.get('workdir').trim(),home=f.get('home').trim(),old=form.dataset.original;
+1013:const args=parseArray(f.get('args')),mode=f.get('mode'),timeout=Number(f.get('timeout'));
+1017:const existing=agents.find(a=>a.node==='mac-mini'&&a.name===old);
+1018:const updated={name,node:'mac-mini',command,workdir,config_home:home,timeout,args,mode,description:f.get('description').trim(),allow_args:f.has('allow'),env:[...state.envKeys],enabled:existing?existing.enabled:true,today:existing?.today||0};
+1025:function submitTask(form){
+1027:const f=new FormData(form),node=f.get('node'),agent=f.get('agent'),description=f.get('description').trim();
+1029:const a=agents.find(a=>a.node===node&&a.name===agent&&a.enabled),n=getNode(node);
+1031:const args=parseArray(f.get('args')),env=JSON.parse(f.get('env'));
+1033:const idem=f.get('idem').trim(),by=state.view==='hub'?'管理员':'mac-mini',input={args,stdin:description,env};
+1034:const signature=JSON.stringify({node,agent,input,by});
+1035:const existing=idem&&tasks.find(t=>t.idem===idem);
+1037:const t={id:'t-'+Array.from(crypto.getRandomValues(new Uint8Array(8)),b=>b.toString(16).padStart(2,'0')).join(''),trace:'tr-'+Date.now().toString(16),title:description.split('\n')[0].slice(0,70),node,agent,status:'submitted',by,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}),input,answer:'',error:'',review:null,idem,signature,origin:state.dispatch.origin||null};
+1042:function detail(id,tab){
+1043:const t=tasks.find(t=>t.id===id);if(!t)return;
+1046:const terminal=['completed','failed','needs_review'].includes(t.status);
+1047:const step=terminal?4:statuses.indexOf(t.status);
+1052:function renderDetailContent(t){
+1053:let html='';
+1054:if(state.detailTab==='input')html=`<h3>任务输入</h3><pre>${esc(JSON.stringify(t.input,null,2))}</pre><p class="tiny">Args 和 Env 由目标本机白名单校验，Command 与工作目录无法被任务覆盖。</p>`;
+1060:function reviewAction(id,action){
+1061:const t=tasks.find(t=>t.id===id);if(!t||t.review)return;
+1066:const valid=action==='valid';
+1070:async function copyValue(kind){
+1071:const value=kind==='token'?generatedToken:generatedConfig;
+1075:async function downloadArtifact(id){
+1076:const t=tasks.find(t=>t.id===id);if(!t)return;
+1077:const content=`SwarmMind 演示检查报告\n任务：${t.id}\n标题：${t.title}\n目标：${t.node} / ${t.agent}\n\n${t.answer}\n\n此文件由离线原型生成。\n`;
+1078:const bytes=new TextEncoder().encode(content);
+1079:if(crypto.subtle){const digest=await crypto.subtle.digest('SHA-256',bytes);if($('#artifact-hash'))$('#artifact-hash').textContent=Array.from(new Uint8Array(digest),b=>b.toString(16).padStart(2,'0')).join('')+' · '+bytes.length+' 字节'}
+1081:const url=URL.createObjectURL(new Blob([bytes],{type:'text/plain;charset=utf-8'})),a=document.createElement('a');
+1084:function navigate(page){state.page=page;state.dispatch={};closeModal();render();window.scrollTo({top:0,behavior:'instant'})}
+1086:const b=e.target.closest('button');if(!b)return;
+1099:const name=b.dataset.agentDelete;
+1100:confirmBox('删除 Agent 配置',`<p>确认删除本机 <b>${esc(name)}</b> 的 ExecProfile？</p><div class="notice orange" style="margin-top:15px">能力声明将从目录移除。已有任务与账本记录保留，已开始的执行不受影响。</div>`,'delete|'+name,'确认删除',true);return;
+1103:const a=agents.find(a=>a.node==='mac-mini'&&a.name===b.dataset.toggle);a.enabled=!a.enabled;renderAgents();toast(a.name+(a.enabled?' 已启用，能力重新发布':' 已停用，不再接收新任务'));return;
+1105:if(b.dataset.assign){const [node,agent]=b.dataset.assign.split('|');state.dispatch={node,agent};state.page='dispatch';render();toast('已预填目标 '+node+' / '+agent);return}
+1107:const n=getNode(b.dataset.revoke);
+1116:const t=tasks.find(t=>t.id===b.dataset.riskContinue);
+1121:const [type,id,action]=b.dataset.confirm.split('|');
+1122:if(type==='delete'){agents=agents.filter(a=>!(a.node==='mac-mini'&&a.name===id));closeModal();render();toast('本机 Agent 配置已删除')}
+1123:if(type==='revoke'){const n=getNode(id);n.revoked=true;n.online=false;n.heartbeat='吊销时断开';closeModal();render();toast(id+' 的演示令牌已吊销')}
+1125:const t=tasks.find(t=>t.id===id);t.review={label:action==='valid'?'人工确认有效':'人工标记失败',by:state.view==='hub'?'管理员':'mac-mini 本机',time:new Date().toLocaleTimeString('zh-CN')};
+1161:const form=e.target;
+1163:const token=$('#login-token').value,expected=state.view==='hub'?'hub_demo_admin':'node_demo_local';
+1168:const id=new FormData(form).get('node').trim();
+1180:const list=[...$('#portal').querySelectorAll('button:not(:disabled),input:not(:disabled),select,textarea,[tabindex="0"]')].filter(el=>el.offsetParent!==null);
+
+exec
+/bin/zsh -lc "rg -n '"'^<!DOCTYPE|''^<script|''^</style|''^</html|''^const |''^function |''^'"\\(\\(' dashboard-prototype-v3.1.html" in /Users/tl.m/Documents/HanaAgent/workSpace/dev/SwarmMind
+ succeeded in 0ms:
+1:<!DOCTYPE html>
+371:const nodes=[
+384:const statuses=['submitted','offered','acknowledged','running','completed','failed','needs_review'];
+385:const statusInfo={
+388:const titles=['审查 WebSocket 重连与 epoch 隔离逻辑','为新控制台整理信息架构方案','验证离线信箱恢复路径','排查 Windows 路径兼容问题','审查 ledger 持久化事务实现','编写跨机部署与回滚计划','检查产物 SHA-256 校验链路','评估任务超时与进程组终止策略','核对状态机迟到事件收敛表','分析只读沙盒的权限边界','检查注册鉴权失败路径','整理真实双机验收步骤','验证 env 白名单拒绝规则','审查历史任务补传策略','诊断节点心跳与背压指标','输出协议版本迁移建议'];
+389:const taskStates=['running','needs_review','completed','submitted','acknowledged','running','completed','needs_review','completed','failed','offered','completed','failed','submitted','acknowledged','completed'];
+390:const targets=[0,1,2,3,0,4,5,0,1,0,5,4,2,3,0,1];
+392:const a=agents[targets[i]],state=taskStates[i];
+401:const state={view:'hub',page:'overview',auth:{hub:true,node:true},taskFilter:'all',taskSearch:'',taskNode:'all',taskTab:'received',dirSearch:'',dirNode:'all',dirMode:'all',agentSearch:'',nodeSearch:'',detailTab:'input',dispatch:{},envKeys:[],lastFocus:null};
+402:const navs={
+406:function getNode(id){return nodes.find(n=>n.id===id)}
+407:function dispatchPage(){
+408:const d=state.dispatch,node=d.node||'mac-mini';
+412:function fillTargetAgents(preferred){
+413:const node=$('#target-node').value;
+414:const available=agents.filter(a=>a.node===node&&a.enabled);
+419:function renderTargetPreview(){
+420:const n=getNode($('#target-node').value),a=agents.find(a=>a.node===n?.id&&a.name===$('#target-agent').value);
+423:function agentPage(){
+427:function renderAgents(){
+428:const list=agents.filter(a=>a.node==='mac-mini'&&(a.name+' '+a.command).toLowerCase().includes(state.agentSearch.toLowerCase()));
+431:function directoryPage(){
+435:function renderDirectory(){
+436:const q=state.dirSearch.toLowerCase(),list=agents.filter(a=>a.enabled&&!getNode(a.node).revoked&&(state.dirNode==='all'||a.node===state.dirNode)&&(state.dirMode==='all'||a.mode===state.dirMode)&&(a.name+' '+a.description).toLowerCase().includes(q));
+440:function reviewPage(){
+443:function reviewCard(t){
+446:function settingLine(label,value){return `<div class="setting-line"><span>${label}</span><code>${esc(value)}</code></div>`}
+447:function settingsPage(){
+448:const hub=state.view==='hub';
+451:function detail(id,tab){
+452:const t=tasks.find(t=>t.id===id);if(!t)return;
+455:const terminal=['completed','failed','needs_review'].includes(t.status);
+456:const step=terminal?4:statuses.indexOf(t.status);
+461:function renderDetailContent(t){
+469:function reviewAction(id,action){
+470:const t=tasks.find(t=>t.id===id);if(!t||t.review)return;
+475:const valid=action==='valid';
+481:<!DOCTYPE html>
+602:</style>
+621:<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const local='mac-mini';
+const hour=3600000;
+const boot=Date.now();
+const stamp=n=>new Date(n).toLocaleString('zh-CN',{hour12:false});
+const clock=n=>new Date(n).toLocaleTimeString('zh-CN',{hour12:false});
+const clone=v=>JSON.parse(JSON.stringify(v));
+const uid=()=>globalThis.crypto?.randomUUID?.()||Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+let nodes=[
+{id:local,online:true,epoch:12,os:'macOS · Apple M4',time:'2026-10-16 09:30',heartbeat:'2 秒前'},
+{id:'win-box',online:false,epoch:4,os:'Windows 11 · x64',time:'2026-10-17 14:20',heartbeat:'38 分钟前'},
+{id:'office-imac',online:true,epoch:8,os:'macOS · Apple M3',time:'2026-10-18 10:05',heartbeat:'5 秒前'}
+];
+let agents=[
+{id:'a1',name:'codex',node:local,mode:'read-only',description:'代码审查、依赖分析与技术方案核对。只读沙盒，适合探索代码库。',exposed:true,registered:true,joined:'2026-10-16 09:32',today:6,command:'/opt/homebrew/bin/codex',workdir:'/Users/dev/projects/swarmmind',home:'/Users/dev/.codex',args:['--sandbox','read-only'],timeout:900,allow:false,env:['LANG','TMPDIR']},
+{id:'a2',name:'claude-code',node:local,mode:'plan',description:'复杂问题拆解与实现规划，输出可供人工确认的实施方案。',exposed:true,registered:true,joined:'2026-10-16 09:34',today:4,command:'/opt/homebrew/bin/claude',workdir:'/Users/dev/projects/swarmmind',home:'/Users/dev/.claude',args:['--permission-mode','plan'],timeout:1200,allow:false,env:['LANG']},
+{id:'a3',name:'echo-demo',node:local,mode:'no-shell',description:'连接诊断与端到端回声测试，验证任务投递与结果回传。',exposed:false,registered:true,joined:'2026-10-16 09:36',today:2,command:'/bin/echo',workdir:'/tmp',home:'',args:[],timeout:30,allow:true,env:['TMPDIR']},
+{id:'a4',name:'zcode',node:'win-box',mode:'read-only',description:'Windows 项目兼容性分析、路径问题排查与只读审查。',exposed:true,registered:true,joined:'2026-10-17 14:22',today:1},
+{id:'a5',name:'opencode',node:'office-imac',mode:'workspace-write',description:'在已授权的项目工作区内实现变更，整理测试结果与交付产物。',exposed:true,registered:true,joined:'2026-10-18 10:07',today:2},
+{id:'a6',name:'goose',node:'office-imac',mode:'read-only',description:'文档整理、变更影响分析与协作报告生成。',exposed:true,registered:true,joined:'2026-10-18 10:09',today:1}
+];
+const cardOf=a=>({name:a.name,node:a.node,mode:a.mode,description:a.description});
+agents.forEach(a=>{a.desired=a.exposed;a.pending=false;a.published=cardOf(a)});
+const statusMap={submitted:['已提交',''],offered:['已投递','blue'],acknowledged:['已接收','blue'],running:['执行中','blue'],completed:['已完成','green'],failed:['失败','red'],needs_review:['待核对','orange']};
+const errors={
+timeout:'执行超过目标 Agent 的超时限制，执行被终止。',
+policy_denied:'任务参数或环境变量被目标本机执行策略拒绝。',
+expired:'离线信箱中的任务超过保留期限，未再投递。',
+agent_not_found:'目标节点找不到指定 Agent。',
+agent_not_exposed:'目标 Agent 未接入或已主动下线。',
+node_restarted_midway:'节点在执行中重启，最终执行结果未知；禁止自动重跑。'
+};
+const titles=['审查 WebSocket 重连与 epoch 隔离逻辑','整理控制台信息架构方案','验证离线信箱恢复路径','排查 Windows 路径兼容问题','审查 ledger 持久化事务实现','编写跨机部署与回滚计划','检查产物 SHA-256 校验链路','评估任务超时与进程组终止策略','核对状态机迟到事件收敛表','分析只读沙盒的权限边界','检查注册鉴权失败路径','整理真实双机验收步骤','验证 env 白名单拒绝规则','审查历史任务补传策略','诊断节点心跳与背压指标','输出协议版本迁移建议'];
+const initialStates=['running','needs_review','completed','submitted','acknowledged','running','completed','needs_review','completed','failed','offered','completed','failed','submitted','acknowledged','completed'];
+const targets=[0,1,2,3,0,4,5,0,1,0,5,4,2,3,0,1];
+let tasks=titles.map((title,i)=>{
+const a=agents[targets[i]],status=initialStates[i],createdAt=boot-(i+1)*hour/2;
+return {
+id:'t-'+(1658-i),trace:'tr-20261020-'+(1658-i),title,node:a.node,agent:a.name,
+by:i%3===0?'管理员':i%3===1?local:'office-imac',status,createdAt,time:stamp(createdAt),
+terminalAt:['completed','failed','needs_review'].includes(status)?createdAt+60000:null,
+reviewSince:status==='needs_review'?boot-(i===1?27:3)*hour:null,
+snapshot:i===1,
+input:{stdin:title+'。请给出检查结论、依据和后续建议。',args:[],env:{}},
+answer:status==='completed'?'检查已完成。\n\n已核对协议约束与相关实现，关键路径符合预期。\n确认遵循先持久化后 Ack 的顺序。\n建议在真实双机环境补充断线恢复与权限拒绝验证。':'',
+error:status==='needs_review'?'node_restarted_midway':status==='failed'?(i===12?'policy_denied':'timeout'):'',
+artifact:['ready','offline','cleaned','invalid'][[2,6,8,11,15].indexOf(i)%4]||'ready',
+review:null,origin:null,changedAt:0,uploadPending:false
+};
+});
+const initial={nodes:clone(nodes),agents:clone(agents),tasks:clone(tasks)};
+const navs={
+hub:[['overview','◫','总览'],['registry','▤','Agent 注册表'],['nodes','▧','节点与接入管理'],['dispatch','↗','跨机派单'],['tasks','▣','任务中心'],['review','◇','needs_review'],['settings','⚙','设置']],
+node:[['overview','◫','本机概览'],['agents','✳','接入的 Agent'],['dispatch','↗','本机派单'],['tasks','▣','本机任务'],['settings','⚙','设置']]
+};
+const state={
+view:'hub',page:'overview',registryNode:'all',registryStatus:'all',localSearch:'',nodeSearch:'',
+taskStatus:'all',taskNode:'all',taskSearch:'',taskTab:'received',taskBy:'all',taskFrom:'',taskTo:'',taskError:'all',reviewOnly:false,
+drafts:{hub:null,node:null},detailId:null,detailTab:'input',auth:{hub:true,node:true},
+connected:true,lastSync:boot,highlight:true,scene:'normal',receipts:new Map()
+};
+let toastTimer,confirmAction,lastFocus;
+const nodeBy=id=>nodes.find(n=>n.id===id);
+const pill=(text,color='')=>`<span class="pill ${color}">${esc(text)}</span>`;
+const badge=s=>pill(statusMap[s]?.[0]||s,statusMap[s]?.[1]);
+const online=n=>pill(n.revoked?'接入已撤销':n.online?'在线':'离线',n.online&&!n.revoked?'green':'');
+const available=()=>agents.filter(a=>a.registered&&a.exposed&&!nodeBy(a.node)?.revoked).map(a=>({...a,...a.published,id:a.id}));
+const age=t=>Math.max(0,Date.now()-(t.reviewSince||t.terminalAt||t.createdAt));
+const duration=t=>{const m=Math.floor(age(t)/60000);return m>=60?Math.floor(m/60)+' 小时 '+m%60+' 分钟':m+' 分钟'};
+const reviewPool=()=>tasks.filter(t=>t.status==='needs_review'&&!t.review&&(state.view==='hub'||t.node===local)).sort((a,b)=>(a.reviewSince||a.createdAt)-(b.reviewSince||b.createdAt));
+const agentState=a=>!a.exposed?'withdrawn':nodeBy(a.node)?.online?'online':'offline';
+const agentStatus=a=>pill(!a.exposed?'已下线':nodeBy(a.node)?.online?'在线':'节点离线',!a.exposed?'':nodeBy(a.node)?.online?'green':'orange');
+const head=(title,sub,action='')=>`<div class="head"><div><h1>${title}</h1><p class="sub">${sub}</p></div>${action}</div>`;
+const metric=(name,value,unit,foot)=>`<div class="card metric"><div class="metric-label">${name}</div><div class="number">${value}<small>${unit}</small></div><p class="tiny">${foot}</p></div>`;
+const settings=rows=>rows.map(([k,v])=>`<div class="setting"><span>${esc(k)}</span><code>${esc(v)}</code></div>`).join('');
+const errorCode=e=>e?`<span class="error-code mono" tabindex="0" title="${esc(errors[e]||e)}" aria-label="${esc(e+'：'+(errors[e]||e))}">${esc(e)}</span>`:'<span class="tiny">—</span>';
+const retention=()=>'<div class="notice gray">终态保留 24h（含 needs_review），人工核对不延长 Hub 的保留时间；请及时核对并导出所需记录。标有「历史演示快照」的超期条目仅用于演示积压，不代表 Hub 会无限保留。</div>';
+const offlineHint='Hub 连接中断，经 Hub 的新派单已暂停';
+const canDispatch=()=>state.connected;
+const dispatchButton=(label='＋ 新建任务')=>`<span title="${canDispatch()?'明确指定目标后提交':offlineHint}"><button class="primary" data-page="dispatch" ${canDispatch()?'':'disabled'}>${label}</button></span>`;
+const reviewRecord=t=>t.review?`<div class="tiny review-record">人工核对：${esc(t.review.by)}<br>${esc(t.review.time)}<br>结论：${esc(t.review.label)}</div>`:'';
+function toast(message){clearTimeout(toastTimer);$('#toast').textContent=message;$('#toast').hidden=false;toastTimer=setTimeout(()=>$('#toast').hidden=true,4000)}
+function syncChrome(){
+$('#network-pill').innerHTML=pill(state.connected?'协作网正常':'Hub 连接中断',state.connected?'green':'orange');
+$('#connection-banner').hidden=state.view!=='node'||state.connected;
+$('#aside-connection').innerHTML=`<span class="dot ${state.connected?'':'off'}"></span>${state.connected?'Hub 中继已连接':'Hub 中继已断开'}`;
+$('#sync-corner').innerHTML=`<span class="dot ${state.connected?'':'off'}"></span>${state.connected?'已连接':'连接中断'} · 最近同步 ${clock(state.lastSync)}`;
+$('#connection-toggle').textContent=state.connected?'模拟 Hub 断网':'模拟恢复连接';
+$('#demo-data').value=state.scene;
+$('#highlight-toggle').checked=state.highlight;
+}
+function render(){
+document.querySelectorAll('[data-view]').forEach(b=>{b.classList.toggle('active',b.dataset.view===state.view);b.setAttribute('aria-pressed',String(b.dataset.view===state.view))});
+$('#identity').textContent=state.view==='hub'?'管理员 · 中心端':'mac-mini · 本机主人';
+$('#avatar').textContent=state.view==='hub'?'H':'M';
+$('#scope').textContent=state.view==='hub'?'协作网络 / 中心端':'本机 / MAC-MINI';
+syncChrome();
+const nav=navs[state.view];
+if(!nav.some(n=>n[0]===state.page))state.page='overview';
+$('#nav').innerHTML=nav.map(([id,ic,label])=>`<button data-page="${id}" class="${state.page===id?'active':''}" ${state.page===id?'aria-current="page"':''}><span class="nav-icon">${ic}</span>${label}${id==='review'?'　'+pill(reviewPool().length,'orange'):''}</button>`).join('');
+$('#crumb').textContent=(state.view==='hub'?'Hub 中心端':'Node 本地控制台 · mac-mini')+'　/　'+nav.find(n=>n[0]===state.page)[2];
+if(!state.auth[state.view]){loginPage();return}
+({overview,registry,nodes:nodePage,agents:agentsPage,dispatch:dispatchPage,tasks:taskPage,review:reviewPage,settings:settingsPage})[state.page]();
+}
+function emptyBlock(kind,action,label){
+const content={
+error:['加载失败','暂时无法加载此列表。保留当前筛选，可重试读取。','retry-load','重试加载'],
+filter:['筛选无结果','请调整筛选条件，或重置后查看全部。',action||'reset-tasks',label||'重置筛选'],
+data:['暂无数据','完成首次配置或创建第一条记录后，数据会显示在这里。',action||'dispatch',label||'创建任务']
+}[kind];
+return `<div class="empty"><h3>${content[0]}</h3><p class="tiny">${content[1]}</p><button class="small" data-empty="${content[2]}">${content[3]}</button></div>`;
+}
+function listEmpty(base,filtered,action,label){
+return emptyBlock(state.scene==='error'?'error':base&&!filtered?'filter':'data',action,label);
+}
+function reviewMeta(t){
+return `<span class="tiny">待核对 ${duration(t)}</span> ${age(t)>24*hour?pill('积压','orange'):''} ${t.snapshot?pill('历史演示快照'):''}`;
+}
+function overview(){
+const hub=state.view==='hub',pool=hub?tasks:tasks.filter(t=>t.node===local),running=pool.filter(t=>t.status==='running').length;
+const count=reviewPool().length;
+$('#content').innerHTML=head(hub?'让协作，在每台机器间发生。':'你好，mac-mini。',hub?'登记网络事实，追踪每一次明确的任务交付。':'你决定本机哪些 Agent 接入协作网。',`<div class="row"><button data-act="refresh">↻ 刷新</button>${dispatchButton(hub?'＋ 跨机派单':'＋ 派发任务')}</div>`)+
+(!hub&&!pool.length?guide():'')+
+`<div class="metrics">${metric(hub?'在线节点':'本机已接入 Agent',hub?nodes.filter(n=>n.online&&!n.revoked).length:agents.filter(a=>a.node===local&&a.exposed&&!a.pending).length,hub?'/ '+nodes.length:'个',hub?'心跳与节点会话状态':'接入状态由本机控制')}${metric(hub?'Agent 登记记录':'本机任务',hub?agents.filter(a=>a.registered).length:pool.length,'条',hub?'含已下线的审计记录':'接收任务与账本状态')}${metric('执行中',running,'项','断网不终止已开始的执行')}${metric('待人工核对',`<button class="link" data-act="review-filter" aria-label="查看${hub?'全网':'本机'}待核对任务">${count}</button>`,'项','点击查看待核对筛选 · 最久优先')}</div>`+
+(hub?`<div class="section"><h2>节点连接</h2><button class="link" data-page="nodes">接入管理 →</button></div><div class="grid">${state.scene==='error'?emptyBlock('error'):nodes.length?nodes.map(nodeCard).join(''):emptyBlock('data','add-node','生成接入配置')}</div>`:
+`<div class="two"><div class="card"><h2>本机连接</h2>${settings([['node_id',local],['会话',state.connected?'已连接':'Hub 不可达'],['epoch',nodeBy(local)?.epoch||12],['执行并发','2'],['执行配置','ExecProfile 仅保留于本机']])}<div class="setting"><span>待人工核对</span><button class="link" data-act="review-filter">${count} 条 →</button></div></div><div class="card"><h2>接入即授权</h2><p class="sub">保存只保存本机配置。接入或下线需单独确认；下线撤回新派单入口，已开始的任务继续执行。</p><div class="command">codex　--sandbox read-only<br>claude-code　--permission-mode plan</div><button data-page="agents">管理接入的 Agent →</button></div></div>`)+
+`<div class="section"><h2>最近任务</h2><button class="link" data-page="tasks">查看全部 →</button></div>${state.scene==='error'?`<div class="card">${emptyBlock('error')}</div>`:taskTable(pool.slice(0,5),pool.length)}`;
+}
+function guide(){
+const locals=agents.filter(a=>a.node===local),configured=locals.length>0,joined=locals.some(a=>a.exposed&&!a.pending);
+return `<div class="notice">开始协作 · 配置与接入由本机主人决定，按照下面三步完成首次派单。</div><div class="grid">
+<div class="card guide-step">${pill('01','blue')}<h3>配置 Agent</h3><p class="sub">设置命令、工作目录和权限白名单。</p>${configured?pill('已配置','green'):''}<button data-edit="new">配置 Agent</button></div>
+<div class="card guide-step">${pill('02','blue')}<h3>接入协作网</h3><p class="sub">在 Agent 卡片上打开接入开关并确认。</p>${joined?pill('已接入','green'):''}<button data-page="agents">管理接入</button></div>
+<div class="card guide-step">${pill('03','blue')}<h3>试派一单</h3><p class="sub">明确选择 node / agent，确认任务已获 task_id。</p>${dispatchButton('试派一单 →')}</div></div>`;
+}
+function nodeCard(n){
+const all=agents.filter(a=>a.node===n.id&&a.registered),count=all.filter(a=>a.exposed).length;
+return `<div class="card"><div class="row" style="justify-content:space-between"><h3>${esc(n.id)}</h3>${online(n)}</div><p class="tiny" style="margin-top:6px">${esc(n.os)}</p><div class="number">${count}<small>个 Agent 已接入</small></div><div class="card-foot tiny"><span>epoch ${n.epoch}</span><span>心跳 ${esc(n.heartbeat)}</span></div></div>`;
+}
+function registry(){
+$('#content').innerHTML=head('Agent 注册表','登记事实，用于审计与任务目标确认。',pill('只读事实视图','blue'))+
+`<div class="notice">此列表为各 node 自主接入的 Agent 登记记录，接入与下线由各 node 本机管理。尚未同步的本机配置不代表网内已生效。</div>
+<div class="toolbar"><select id="registry-node" aria-label="按 node 筛选"><option value="all">全部 node</option>${nodes.map(n=>`<option value="${esc(n.id)}" ${state.registryNode===n.id?'selected':''}>${esc(n.id)}</option>`).join('')}</select><select id="registry-status" aria-label="按状态筛选">${[['all','全部状态'],['online','在线'],['offline','节点离线'],['withdrawn','已下线']].map(([v,l])=>`<option value="${v}" ${state.registryStatus===v?'selected':''}>${l}</option>`).join('')}</select><button data-act="reset-registry">重置筛选</button><span class="tiny" id="registry-count"></span></div>
+<div class="card table-card scroll"><table><thead><tr><th>Agent 名</th><th>所属 node</th><th>权限模式</th><th>接入时间</th><th>今日任务数</th><th>在线状态</th></tr></thead><tbody id="registry-rows"></tbody></table></div>
+<p class="tiny" style="margin-top:15px">已下线记录保留用于审计。节点离线与 Agent 主动下线分别记录；离线 Agent 可进入离线信箱，下线 Agent 不可选择。</p>`;
+registryRows();
+}
+function registryRows(){
+const base=agents.filter(a=>a.registered),list=base.filter(a=>(state.registryNode==='all'||a.node===state.registryNode)&&(state.registryStatus==='all'||agentState(a)===state.registryStatus));
+$('#registry-count').textContent=state.scene==='error'?'加载失败':list.length+' / '+base.length+' 条记录';
+$('#registry-rows').innerHTML=state.scene!=='error'&&list.length?list.map(a=>`<tr><td><b>${esc(a.published?.name||a.name)}</b></td><td class="mono">${esc(a.node)}</td><td>${pill(a.published?.mode||a.mode,'blue')}</td><td class="tiny">${esc(a.joined)}</td><td>${a.today}</td><td>${agentStatus(a)}</td></tr>`).join(''):`<tr><td colspan="6">${listEmpty(base.length,list.length,'reset-registry','重置筛选')}</td></tr>`;
+}
+function nodePage(){
+$('#content').innerHTML=head('节点与接入管理','管理 node 入网凭证；每个 node 自主决定其 Agent 的接入。',`<button class="primary" data-act="add-node">＋ 生成接入配置</button>`)+
+`<div class="notice">Hub 管理节点入网身份，Agent 的接入开关与执行权限由节点本机管理。令牌吊销仅为演示，V0 无撤销机制。</div><div class="toolbar"><input id="node-search" placeholder="按 node 名定位" aria-label="筛选节点" value="${esc(state.nodeSearch)}"></div><div class="card table-card scroll"><table><thead><tr><th>Node</th><th>状态</th><th>已接入 Agent</th><th>接入时间</th><th>会话</th><th>操作</th></tr></thead><tbody id="node-rows"></tbody></table></div>`;
+nodeRows();
+}
+function nodeRows(){
+const list=nodes.filter(n=>n.id.toLowerCase().includes(state.nodeSearch.toLowerCase()));
+$('#node-rows').innerHTML=state.scene!=='error'&&list.length?list.map(n=>`<tr><td><b>${esc(n.id)}</b><p class="tiny">${esc(n.os)}</p></td><td>${online(n)}</td><td>${agents.filter(a=>a.node===n.id&&a.exposed).length}</td><td class="tiny">${esc(n.time)}</td><td>epoch ${n.epoch}</td><td><button class="link" data-node-detail="${esc(n.id)}">详情</button>　<button class="link" data-revoke="${esc(n.id)}" ${n.revoked?'disabled':''}>吊销令牌</button><p class="tiny">演示：V0 无撤销机制</p></td></tr>`).join(''):`<tr><td colspan="6">${listEmpty(nodes.length,list.length,nodes.length?'reset-nodes':'add-node',nodes.length?'重置筛选':'生成接入配置')}</td></tr>`;
+}
+function localStatus(a){
+return `${pill('本机已配置','blue')} ${a.pending?pill('待同步','orange'):a.exposed?pill('已接入（网内生效）','green'):pill('未接入')}`;
+}
+function agentsPage(){
+$('#content').innerHTML=head('接入的 Agent','配置保留于本机；接入与下线单独确认。',`<button class="primary" data-edit="new">＋ 添加 Agent</button>`)+
+`<div class="notice"><b>本机拥有接入主权。</b> 仅保存不改变接入开关。已接入 Agent 的配置修改后，重新确认同步才更新对外 AgentCard；未确认或断网时标记「待同步」。</div>
+<div class="toolbar"><input id="local-search" value="${esc(state.localSearch)}" placeholder="定位本机 Agent" aria-label="搜索本机 Agent"><span class="tiny">本机 mac-mini</span></div><div class="grid" id="agent-cards"></div>
+<div class="notice gray" style="margin-top:22px">演示说明：配置、接入与下线仅更新当前页面内存。断网时保存本机配置仍可用，网内是否生效以同步确认结果为准。</div>`;
+agentCards();
+}
+function agentCards(){
+const base=agents.filter(a=>a.node===local),list=base.filter(a=>(a.name+' '+a.command).toLowerCase().includes(state.localSearch.toLowerCase()));
+$('#agent-cards').innerHTML=state.scene!=='error'&&list.length?list.map(a=>`<div class="card">
+<div class="profile-top"><span class="agent-icon">${a.name==='codex'?'C':a.name==='claude-code'?'✳':'›_'}</span><div><h3>${esc(a.name)}</h3><span class="tiny">本机接入意愿：${a.desired?'接入':'下线'}</span></div><button class="toggle ${a.desired?'on':''}" role="switch" aria-checked="${a.desired}" aria-label="${esc(a.name)} 接入开关" data-toggle="${a.id}"></button></div>
+<div class="row" style="flex-wrap:wrap;gap:6px">${localStatus(a)}</div>
+${a.pending?`<p class="tiny" style="margin-top:10px">${state.connected?'本机配置或接入意愿尚未同步确认。':'Hub 不可达，本机配置可用；接入状态暂不能确认。'} 上次确认：${a.exposed?'已接入':'未接入'}。</p>`:''}
+<div style="margin-top:12px">${pill(a.mode,'blue')} ${pill('CLI · 非交互')}</div>
+<div class="command mono">${esc(a.command)}<br>${esc(a.args.join(' ')||'无固定附加参数')}</div><p class="agent-desc">${esc(a.description)}</p><p class="tiny">超时 ${a.timeout}s · 今日任务 ${a.today}</p>
+<div class="card-foot"><span class="tiny">${a.pending?'等待同步确认':a.exposed?'网内可见可派单':'不接受新的网内派单'}</span><div class="row">${a.pending?`<button class="small" data-sync-agent="${a.id}" ${state.connected?'':'disabled'} title="${state.connected?'确认后同步配置及接入意愿':'Hub 恢复连接后可同步'}">确认同步</button>`:''}<button class="small" data-edit="${a.id}">编辑</button></div></div></div>`).join(''):`<div class="card wide">${listEmpty(base.length,list.length,base.length?'reset-agents':'edit-agent',base.length?'重置筛选':'配置 Agent')}</div>`;
+}
+function draft(){
+if(!state.drafts[state.view])state.drafts[state.view]={node:'',agentId:'',description:'',args:'[]',env:'{}',idem:'idem-'+uid(),phase:'ready',outcome:'success',origin:null,error:'',taskId:null};
+return state.drafts[state.view];
+}
+function captureDraft(){
+const form=$('#dispatch-form');if(!form)return;
+const d=draft();
+if(['submitting','unknown','confirmed'].includes(d.phase))return;
+const f=new FormData(form);
+Object.assign(d,{node:$('#target-node')?.value||'',agentId:f.get('target')||'',description:f.get('description')||'',args:f.get('args')||'[]',env:f.get('env')||'{}',idem:f.get('idem')||d.idem,outcome:$('#submit-outcome')?.value||'success'});
+}
+function dispatchPage(){
+const d=draft(),locked=['submitting','unknown','confirmed'].includes(d.phase);
+$('#content').innerHTML=head(state.view==='hub'?'跨机派单':'本机派单','明确指定目标 node / agent，目标来自已注册且对方已暴露的 AgentCard。')+
+`<div class="split"><form id="dispatch-form" class="card">
+<h2>创建任务</h2><div class="notice gray">目标选择只用于定位和确认派单对象。不会自动匹配或自动改派 Agent。</div>
+<fieldset class="form-lock" id="dispatch-fields" ${locked?'disabled':''}>
+${state.view==='hub'?`<div class="field"><label for="target-node">目标 node</label><select id="target-node"><option value="">请选择 node</option>${nodes.filter(n=>!n.revoked).map(n=>`<option value="${esc(n.id)}" ${d.node===n.id?'selected':''}>${esc(n.id)} · ${n.online?'在线':'离线'}</option>`).join('')}</select></div>`:''}
+<div class="field"><label for="target-search">定位目标</label><input id="target-search" type="search" placeholder="输入 node / agent 名称定位已知目标"><span class="help">搜索仅过滤下方目标选择器。</span></div>
+<div class="field"><label for="target-agent">目标 Agent · 按 node 分组</label><select id="target-agent" name="target" required></select></div>
+<div id="target-preview" aria-live="polite"></div>
+<div class="field"><label for="description">任务描述</label><textarea id="description" name="description" rows="6" maxlength="20000" required placeholder="说明目标、上下文、输出要求与约束，让 Agent 一次获得完整任务。">${esc(d.description)}</textarea><span class="help">写入 TaskInput.stdin；非交互执行，不支持运行中澄清或审批。</span></div>
+<details ${locked?'open':''}><summary>高级选项 · 幂等键 / Args / Env</summary>
+<div class="field"><label for="idem">幂等键 · 自动生成，可在首次提交前修改</label><input id="idem" name="idem" value="${esc(d.idem)}" required maxlength="120"></div>
+<div class="field"><label for="task-args">任务 Args · JSON 字符串数组</label><input id="task-args" name="args" value="${esc(d.args)}"></div>
+<div class="field"><label for="task-env">任务 Env · JSON 对象</label><textarea id="task-env" name="env">${esc(d.env)}</textarea><span class="help">由目标 node 执行配置的白名单校验。远端 ExecProfile 不向调用方暴露。</span></div></details>
+<div class="field"><label for="submit-outcome">提交响应 · 演示</label><select id="submit-outcome">${[['success','正常确认'],['failure','明确失败 · policy_denied'],['unknown','结果未知 · 确认响应丢失']].map(([v,l])=>`<option value="${v}" ${d.outcome===v?'selected':''}>${l}</option>`).join('')}</select></div>
+</fieldset>
+${d.origin?`<div class="notice orange">重新派发自 ${esc(d.origin)}。原 needs_review 终态保留，新任务单独追踪。</div>`:''}
+<div id="submit-feedback" aria-live="polite" role="status"></div>
+<div class="form-foot"><span class="tiny">提交方：${state.view==='hub'?'管理员':local}</span><span id="submit-wrap"><button class="primary" id="submit-task" type="submit">确认并提交任务 ↗</button></span></div>
+<div id="submit-followup" style="margin-top:15px"></div></form>
+<div><div class="card"><h2>一次交付，三次确认</h2>${[['01','submit_ack','Hub 已持久化任务'],['02','task_ack','目标 node 已落盘 accepted 账本'],['03','result_ack','Hub 已持久化最终结果']].map(([i,t,p])=>`<div class="row" style="margin:22px 0;align-items:flex-start">${pill(i,'blue')}<div><h3 class="mono" style="font-size:12px">${t}</h3><p class="tiny">${p}</p></div></div>`).join('')}
+<div class="notice gray" style="margin-bottom:0">提交中禁止重复点击。结果未知时保留表单与幂等键；重试查询或提交同一请求，避免重复创建任务。任务状态与提交响应状态分别展示。</div></div>
+<div class="card" style="margin-top:20px"><h2>提交状态</h2><p class="tiny">可提交 → 提交中 → 已确认 / 明确失败 / 结果未知</p><p class="tiny" style="margin-top:10px">演示不连接真实 Hub，不执行真实 Agent。</p></div></div></div>`;
+fillTargets(d.agentId);
+updateSubmitUI();
+}
+function fillTargets(preferred){
+const select=$('#target-agent');if(!select)return;
+const d=draft(),old=preferred||select.value,q=$('#target-search').value.trim().toLowerCase(),node=$('#target-node')?.value;
+const list=available().filter(a=>(state.view!=='hub'||a.node===node)&&(a.node+' '+a.name).toLowerCase().includes(q));
+select.innerHTML='<option value="">请选择明确的目标 Agent</option>'+nodes.map(n=>{
+const group=list.filter(a=>a.node===n.id);
+return group.length?`<optgroup label="${esc(n.id)} · ${n.online?'在线':'离线，进入信箱'}">${group.map(a=>`<option value="${a.id}">${esc(a.name)} · ${esc(a.mode)}</option>`).join('')}</optgroup>`:'';
+}).join('');
+if(list.some(a=>a.id===old))select.value=old;
+if(['submitting','unknown','confirmed'].includes(d.phase)&&!list.some(a=>a.id===d.agentId)&&d.payload){
+const option=document.createElement('option');option.value=d.agentId;option.textContent=d.payload.node+' / '+d.payload.agent+' · 原提交目标';select.add(option);select.value=d.agentId;
+}
+if(!list.length&&!select.value)select.innerHTML='<option value="">当前条件下没有可派单目标</option>';
+targetPreview();
+}
+function targetPreview(){
+const a=available().find(a=>a.id===$('#target-agent')?.value);
+$('#target-preview').innerHTML=a?`<div class="notice"><b>${esc(a.node)} / ${esc(a.name)}</b>　${pill(a.mode,'blue')}<p style="margin-top:7px">${esc(a.description)}</p><p class="tiny" style="margin-top:8px">AgentCard · CLI · prompt_text → answer+artifacts · 非交互 · 协议 v1</p></div>${!nodeBy(a.node).online?'<div class="notice orange">目标 node 离线，但该 Agent 仍为已接入。任务将进入离线信箱，重连后补推，保留 7 天。</div>':''}`:'<div class="notice gray">选中目标后，将显示对方 AgentCard 的描述与权限模式，供提交前确认。</div>';
+updateSubmitUI();
+}
+function updateSubmitUI(){
+if(!$('#submit-task'))return;
+const d=draft(),b=$('#submit-task'),valid=!!available().find(a=>a.id===$('#target-agent').value);
+const labels={ready:'确认并提交任务 ↗',submitting:'提交中…',confirmed:'已确认',failed:'修正后重新提交 ↗',unknown:'复用同一幂等键重试 ↗'};
+b.textContent=labels[d.phase];
+b.disabled=!canDispatch()||['submitting','confirmed'].includes(d.phase)||(d.phase!=='unknown'&&!valid);
+$('#submit-wrap').title=!canDispatch()?offlineHint:d.phase==='submitting'?'正在等待确认，请勿重复提交':'';
+$('#dispatch-fields').disabled=['submitting','unknown','confirmed'].includes(d.phase);
+const messages={
+ready:'',submitting:`<div class="notice">提交中，正在等待 Hub 确认。幂等键：<span class="mono">${esc(d.idem)}</span></div>`,
+confirmed:`<div class="notice">${pill('已确认','green')}<p style="margin-top:8px">task_id：<b class="mono">${esc(d.taskId)}</b></p><p class="tiny">Hub 已确认持久化；执行状态请查看任务详情。</p></div>`,
+failed:`<div class="notice red"><b>明确失败</b><p>${esc(d.error)}</p><p class="tiny">表单已保留，可修正后提交。</p></div>`,
+unknown:`<div class="notice orange"><b>结果未知，重试将复用同一幂等键</b><p style="margin-top:8px">幂等键：<span class="mono">${esc(d.idem)}</span></p><p class="tiny">可能已被 Hub 接收。原表单已保留并锁定；恢复连接后重试同一请求。</p></div>`
+};
+$('#submit-feedback').innerHTML=messages[d.phase];
+$('#submit-followup').innerHTML=d.phase==='confirmed'?`<div class="row"><button type="button" data-detail="${esc(d.taskId)}">查看任务详情</button><button type="button" data-act="new-draft">再派一单</button></div>`:d.phase==='unknown'?'<button class="small danger" type="button" data-act="abandon-draft">放弃本次重试，另建任务</button>':'';
+}
+function stringArray(value){
+const a=JSON.parse(value);
+if(!Array.isArray(a)||a.some(v=>typeof v!=='string'))throw Error('参数与白名单须为 JSON 字符串数组');
+return a;
+}
+function validateTask(d){
+const a=available().find(a=>a.id===d.agentId);if(!a)throw Error('agent_not_exposed：目标已下线或不可派单，请重新选择');
+const description=d.description.trim();if(!description)throw Error('请填写任务描述');
+const args=stringArray(d.args),env=JSON.parse(d.env);
+if(!env||typeof env!=='object'||Array.isArray(env)||Object.values(env).some(v=>typeof v!=='string'))throw Error('Env 须为键值均为字符串的 JSON 对象');
+const idem=d.idem.trim();if(!idem)throw Error('幂等键不能为空');
+const by=state.view==='hub'?'管理员':local,input={stdin:description,args,env};
+const payload={node:a.node,agent:a.name,by,input,origin:d.origin};
+const signature=JSON.stringify({node:a.node,agent:a.name,by,input});
+const envelope={v:1,mid:'m-'+uid(),type:'task_offer',from:by,to:a.node,payload:{id:'t-'+uid(),target_node:a.node,target_agent:a.name,input}};
+if(new TextEncoder().encode(JSON.stringify(envelope)).length>1048576)throw Error('任务消息超过 1 MiB');
+return {payload,signature,idem};
+}
+function submitTask(){
+const d=draft();
+if(['submitting','confirmed'].includes(d.phase))return;
+if(!canDispatch()){toast(offlineHint);return}
+const retry=d.phase==='unknown';
+try{
+if(!retry){captureDraft();Object.assign(d,validateTask(d))}
+}catch(error){d.phase='failed';d.error=error.message;updateSubmitUI();return}
+const view=state.view;
+d.phase='submitting';updateSubmitUI();
+setTimeout(()=>{
+if(state.drafts[view]!==d)return;
+try{
+const key=d.payload.by+'\0'+d.idem;
+const previous=state.receipts.get(key)||tasks.find(t=>t.by===d.payload.by&&t.idem===d.idem);
+if(previous&&previous.signature!==d.signature)throw Error('409：相同幂等键对应了不同内容，请恢复原请求或另建任务');
+if(!previous&&!state.connected){d.phase='unknown';return}
+if(!previous&&d.outcome==='failure')throw Error('policy_denied：Hub 明确拒绝本次演示请求，未创建任务');
+if(!previous&&tasks.filter(t=>t.node===d.payload.node&&t.status==='submitted').length>=100)throw Error('mailbox_full：目标 node 信箱已满，未创建任务');
+let t=previous;
+if(!t){
+const now=Date.now();
+t={id:'t-'+uid(),trace:'tr-'+uid(),title:d.payload.input.stdin.split('\n')[0].slice(0,90),...clone(d.payload),status:'submitted',createdAt:now,time:stamp(now),idem:d.idem,signature:d.signature,answer:'',error:'',review:null,changedAt:now,artifact:'ready',uploadPending:false};
+tasks.unshift(t);state.receipts.set(key,t);scheduleHighlight(t);
+}
+if(!retry&&d.outcome==='unknown'){d.phase='unknown';return}
+if(!state.connected){d.phase='unknown';return}
+d.phase='confirmed';d.taskId=t.id;state.lastSync=Date.now();
+}catch(error){d.phase='failed';d.error=error.message}
+finally{if(state.view===view&&state.page==='dispatch')updateSubmitUI();syncChrome()}
+},1000);
+}
+function taskBase(){return state.view==='hub'?tasks:tasks.filter(t=>state.taskTab==='received'?t.node===local:t.by===local)}
+function taskTable(list,baseCount=list.length){
+return `<div class="card table-card scroll"><table><thead><tr><th>任务 / trace_id</th><th>目标 node / agent</th><th>状态与核对记录</th><th>错误码 ⓘ</th><th>提交方</th><th>时间</th><th></th></tr></thead><tbody>${list.length?list.map(t=>`<tr data-task-row="${t.id}" class="${state.highlight&&Date.now()-t.changedAt<2000?'changed':''}" ${state.highlight&&Date.now()-t.changedAt<2000?`style="animation-delay:-${Date.now()-t.changedAt}ms"`:''}>
+<td><button class="link task-title" data-detail="${t.id}">${esc(t.title)}</button><p class="tiny mono">${esc(t.id)}</p><p class="tiny mono">${esc(t.trace)}</p></td>
+<td><b>${esc(t.agent)}</b><p class="tiny mono">${esc(t.node)}</p></td>
+<td>${badge(t.status)}${t.status==='needs_review'&&!t.review?'<p>'+reviewMeta(t)+'</p>':''}${reviewRecord(t)}${t.uploadPending?'<p>'+pill('结果待补传','orange')+'</p>':''}</td>
+<td>${errorCode(t.error)}</td><td>${esc(t.by)}</td><td class="tiny">${esc(t.time)}${t.snapshot?'<p>历史演示快照</p>':''}</td><td><button class="link" data-detail="${t.id}">详情 →</button></td></tr>`).join(''):`<tr><td colspan="7">${listEmpty(baseCount,0,baseCount?'reset-tasks':'dispatch',baseCount?'重置筛选':'创建任务')}</td></tr>`}</tbody></table></div>`;
+}
+function resetTasks(){
+Object.assign(state,{taskStatus:'all',taskNode:'all',taskSearch:'',taskBy:'all',taskFrom:'',taskTo:'',taskError:'all',reviewOnly:false});
+}
+function taskPage(){
+const count=reviewPool().length;
+$('#content').innerHTML=head(state.view==='hub'?'任务中心':'本机任务','七态完整追踪，needs_review 保持独立终态。',dispatchButton())+
+(state.view==='node'?`<div class="tabs">${[['received','收到的任务'],['sent','发出的任务']].map(([v,l])=>`<button class="${state.taskTab===v?'active':''}" data-task-tab="${v}">${l}</button>`).join('')}</div>`:'')+
+`<div class="toolbar"><button class="${state.reviewOnly?'primary':'small'}" data-act="review-filter">待核对 ${count} 条 → ${state.view==='node'?'本机收到的任务':'全网'}</button><span class="tiny">最久优先 · 超 24h 标记积压</span><button class="small" data-act="demo-status">模拟一条状态变更</button></div>
+<div class="toolbar">
+<input id="task-search" aria-label="搜索任务或 trace_id" placeholder="搜索任务名称、task_id、trace_id 或 Agent" value="${esc(state.taskSearch)}">
+<select id="task-status" aria-label="按任务状态筛选"><option value="all">全部状态</option>${Object.entries(statusMap).map(([v,[l]])=>`<option value="${v}" ${state.taskStatus===v?'selected':''}>${l} · ${v}</option>`).join('')}</select>
+<select id="task-node" aria-label="按目标节点筛选"><option value="all">全部目标 node</option>${nodes.map(n=>`<option value="${esc(n.id)}" ${state.taskNode===n.id?'selected':''}>${esc(n.id)}</option>`).join('')}</select>
+<select id="task-by" aria-label="按提交方筛选"><option value="all">全部提交方</option>${[...new Set(tasks.map(t=>t.by))].map(by=>`<option value="${esc(by)}" ${state.taskBy===by?'selected':''}>${esc(by)}</option>`).join('')}</select>
+<select id="task-error" aria-label="按错误码筛选"><option value="all">全部错误码</option>${Object.keys(errors).map(e=>`<option value="${e}" ${state.taskError===e?'selected':''}>${e}</option>`).join('')}</select>
+</div>
+<div class="toolbar"><label for="task-from">提交时间从</label><input id="task-from" type="datetime-local" value="${esc(state.taskFrom)}"><label for="task-to">至（含）</label><input id="task-to" type="datetime-local" value="${esc(state.taskTo)}"><button data-act="reset-tasks">重置筛选</button></div>
+<div id="task-count" class="tiny" style="margin-bottom:12px" role="status"></div>${retention()}<div id="task-table"></div>`;
+taskRows();
+}
+function filteredTasks(){
+const q=state.taskSearch.trim().toLowerCase(),from=state.taskFrom?new Date(state.taskFrom).getTime():-Infinity,to=state.taskTo?new Date(state.taskTo).getTime()+59999:Infinity;
+const list=taskBase().filter(t=>(state.taskStatus==='all'||t.status===state.taskStatus)&&(state.taskNode==='all'||t.node===state.taskNode)&&(state.taskBy==='all'||t.by===state.taskBy)&&(state.taskError==='all'||t.error===state.taskError)&&(!state.reviewOnly||(t.status==='needs_review'&&!t.review))&&t.createdAt>=from&&t.createdAt<=to&&(t.title+' '+t.id+' '+t.trace+' '+t.agent).toLowerCase().includes(q));
+if(state.reviewOnly||state.taskStatus==='needs_review')list.sort((a,b)=>(a.reviewSince||a.createdAt)-(b.reviewSince||b.createdAt));
+else list.sort((a,b)=>b.createdAt-a.createdAt);
+return list;
+}
+function taskRows(){
+const list=filteredTasks(),base=taskBase(),invalidRange=state.taskFrom&&state.taskTo&&new Date(state.taskFrom)>new Date(state.taskTo);
+$('#task-count').textContent=state.scene==='error'?'加载失败 · 当前筛选已保留':invalidRange?'时间范围无效：开始时间须早于结束时间':`当前筛选范围：${list.length} / ${base.length} 条任务 · ${state.view==='node'?(state.taskTab==='received'?'本机收到':'本机发出'):'全网'}${state.reviewOnly?' · 尚未人工核对':''} · 终态保留 24h`;
+$('#task-table').innerHTML=state.scene==='error'?`<div class="card">${emptyBlock('error')}</div>`:taskTable(invalidRange?[]:list,base.length);
+}
+function reviewButtons(t){return `<div class="row" style="flex-wrap:wrap;margin-top:17px"><button class="small primary" data-review="valid" data-id="${t.id}">确认有效</button><button class="small" data-review="failed" data-id="${t.id}">标记失败</button><button class="small danger" data-review="retry" data-id="${t.id}">重新派发</button></div>`}
+function reviewPage(){
+const list=reviewPool(),records=tasks.filter(t=>t.review&&(state.view==='hub'||t.node===local));
+$('#content').innerHTML=head('needs_review','按待核对时长排序，最久优先。',pill(list.length+' 条待办','orange'))+
+`<div class="notice orange">人工核对单独保存，不覆盖协议终态，不自动重跑。重新派发可能产生重复副作用。</div>${retention()}<div class="two">${state.scene==='error'?emptyBlock('error'):list.length?list.map(t=>`<div class="card review-card">${badge(t.status)} ${reviewMeta(t)}<h3>${esc(t.title)}</h3><p class="tiny mono">${t.id} · ${esc(t.node)} / ${esc(t.agent)}</p><div class="notice orange" style="margin:16px 0">${errorCode(t.error)}<br>节点在执行中重启。请核对代码、日志及产物，确认是否已产生变更。</div><button class="link" data-detail="${t.id}">查看详情 →</button>${reviewButtons(t)}</div>`).join(''):emptyBlock('data','tasks','查看全部任务')}</div><div class="section"><h2>已核对记录</h2></div>${state.scene==='error'?emptyBlock('error'):taskTable(records,records.length)}`;
+}
+function settingsPage(){
+const hub=state.view==='hub';
+$('#content').innerHTML=head('设置',hub?'中心端服务信息与配额。':'本机连接与执行环境。',pill('只读'))+
+`<div class="two"><div class="card"><h2>${hub?'服务与协议':'本机与连接'}</h2>${settings(hub?[['Hub','hub.swarm.example'],['节点会话','8443 / WSS'],['管理数据面','127.0.0.1:8444'],['内部协议','v1'],['控制台原型','v4']]:[['node_id',local],['hub_url','wss://hub.swarm.example:8443/ws/node'],['连接',state.connected?'已连接':'连接中断'],['register_token','sm_node_••••••••'],['本机管理面','127.0.0.1:8445'],['data_dir','~/.swarmmind/data']])}</div><div class="card"><h2>${hub?'配额与保留':'执行与安全'}</h2>${settings(hub?[['投递窗口 / node','8'],['信箱 / node','100 条 / 8 MiB'],['全局存储预算','256 MiB'],['单消息上限','1 MiB'],['离线保留 / 终态保留','7 天 / 24 小时'],['令牌吊销','演示：V0 无撤销机制']]:[['执行并发','2'],['Ping / Pong 超时','15s / 45s'],['执行环境','干净基线 + env 白名单'],['ExecProfile','仅本机持有'],['接入管理','由本机主人决定']])}</div></div><div class="notice gray" style="margin-top:22px">运行参数通过对应端配置文件调整。Agent 的接入与执行配置在本机「接入的 Agent」页面管理。角落显示最近一次成功同步时间；断网期间不刷新同步时间。</div>${retention()}`;
+}
+function modal(title,html){
+lastFocus=$('#modal').open?lastFocus:document.activeElement;
+$('#modal-title').textContent=title;$('#modal-body').innerHTML=html;
+if(!$('#modal').open)$('#modal').showModal();
+}
+function closeModal(){$('#modal').close();confirmAction=null;lastFocus?.focus?.()}
+function confirmOperation({verb,object,impact,detail='',danger=false,label,fn,risk=false}){
+confirmAction=fn;
+modal(verb+' · '+object,`<div class="field"><span class="tiny">操作对象</span><h3 style="margin-top:5px">${esc(object)}</h3></div><div class="notice ${danger?'orange':''}"><b>影响说明</b><p style="margin-top:6px">${esc(impact)}</p></div>${detail}
+${risk?'<label class="check"><input id="retry-risk" type="checkbox">我已核对执行情况，理解重复写入或其他副作用风险</label>':''}
+<div class="modal-foot"><button data-act="close">取消</button><button id="operation-confirm" class="${danger?'danger':'primary'}" data-act="confirm" ${risk?'disabled':''}>${esc(label||verb+' '+object)}</button></div>`);
+}
+function absolute(p){return /^(\/|[A-Za-z]:[\\/])/.test(p)}
+function editAgent(id){
+const a=agents.find(a=>a.id===id&&a.node===local)||{id:'',name:'',description:'',command:'',workdir:'',home:'',args:[],timeout:900,mode:'read-only',env:[],allow:false};
+modal(a.id?'编辑 Agent · '+a.name:'添加本机 Agent',`<form id="agent-form" data-id="${a.id}">
+<div class="notice">仅保存只更新本机配置，不改变接入状态。「保存并接入」先保存配置，再单独确认接入；取消确认也会保留刚保存的配置。</div>
+<div class="form-grid">
+<div class="field"><label for="af-name">Agent 名称</label><input id="af-name" name="name" value="${esc(a.name)}" pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" required></div>
+<div class="field"><label for="af-mode">权限模式</label><select id="af-mode" name="mode">${['read-only','plan','workspace-write','no-shell','custom'].map(m=>`<option ${a.mode===m?'selected':''}>${m}</option>`).join('')}</select></div>
+<div class="field wide"><label for="af-command">命令绝对路径</label><input id="af-command" name="command" value="${esc(a.command)}" placeholder="/opt/homebrew/bin/codex" required></div>
+<div class="field wide"><label for="af-workdir">工作目录绝对路径</label><input id="af-workdir" name="workdir" value="${esc(a.workdir)}" placeholder="/Users/dev/projects/swarmmind" required></div>
+<div class="field wide"><label for="af-args">固定权限旗标 / agent_args · JSON 数组</label><input id="af-args" name="args" value="${esc(JSON.stringify(a.args))}" required><span class="help">例如 ["--sandbox","read-only"] 或 ["--permission-mode","plan"]。权限模式说明不会自动改写命令参数。</span></div>
+<div class="field"><label for="af-timeout">超时 / 秒</label><input id="af-timeout" name="timeout" type="number" min="1" max="86400" step="1" value="${a.timeout}" required></div>
+<div class="field"><label for="af-home">配置与凭证目录</label><input id="af-home" name="home" value="${esc(a.home)}" placeholder="留空使用 data_dir/home"></div>
+<div class="field wide"><label for="af-env">环境变量白名单 · JSON 数组</label><input id="af-env" name="env" value="${esc(JSON.stringify(a.env))}" required><span class="help">PATH 须显式列出；"*" 表示全部放行。</span></div>
+<div class="field wide"><label class="check"><input type="checkbox" name="allow" ${a.allow?'checked':''}>允许任务追加 Args</label><span class="help">授权该命令的全部参数能力；解释器类命令可能具有通用执行能力。</span></div>
+<div class="field wide"><label for="af-desc">AgentCard 描述</label><textarea id="af-desc" name="description" maxlength="1000" required>${esc(a.description)}</textarea></div>
+</div><p id="agent-error" class="tiny" role="alert"></p>
+<div class="form-foot"><span class="tiny">演示仅更新内存</span><div class="row"><button type="button" data-act="close">取消</button><button type="submit" name="intent" value="save">仅保存</button><button type="submit" name="intent" value="join" class="primary">保存并接入</button></div></div></form>`);
+}
+function saveAgent(form,intent){
+const f=new FormData(form),id=form.dataset.id,name=f.get('name').trim(),command=f.get('command').trim(),workdir=f.get('workdir').trim(),home=f.get('home').trim(),description=f.get('description').trim();
+if(!name||!description)throw Error('名称与描述不能为空');
+if(agents.some(a=>a.node===local&&a.name===name&&a.id!==id))throw Error('本机 Agent 名称已存在');
+if(!absolute(command)||!absolute(workdir)||(home&&!absolute(home)))throw Error('命令、工作目录与非空配置目录须为绝对路径');
+const args=stringArray(f.get('args')),env=stringArray(f.get('env')),mode=f.get('mode'),timeout=Number(f.get('timeout'));
+if(!Number.isInteger(timeout)||timeout<1||timeout>86400)throw Error('超时须为 1 至 86400 的整数');
+if(mode==='read-only'&&name==='codex'&&!(args.includes('--sandbox')&&args[args.indexOf('--sandbox')+1]==='read-only'))throw Error('codex 的 read-only 声明须对应 --sandbox read-only 固定参数');
+if(mode==='plan'&&name==='claude-code'&&!(args.includes('--permission-mode')&&args[args.indexOf('--permission-mode')+1]==='plan'))throw Error('claude-code 的 plan 声明须对应 --permission-mode plan 固定参数');
+const old=agents.find(a=>a.id===id);
+const a={...old,id:old?.id||'a-'+uid(),name,node:local,command,workdir,home,args,env,timeout,mode,description,allow:f.has('allow'),exposed:old?.exposed||false,desired:old?.desired||false,registered:old?.registered||false,joined:old?.joined||'',today:old?.today||0,published:old?.published||null,pending:old?.pending||false};
+if(old&&(a.exposed||a.desired)&&JSON.stringify({...old,changed:undefined})!==JSON.stringify({...a,changed:undefined}))a.pending=true;
+if(old)agents[agents.indexOf(old)]=a;else agents.push(a);
+closeModal();render();toast(name+' 本机配置已保存，接入开关保持不变');
+if(intent==='join')askAgent(a,true);
+}
+function askAgent(a,desired=a.desired,syncOnly=false){
+if(!a||a.node!==local)return;
+const verb=syncOnly?'同步':desired?'接入':'下线';
+a.pending=a.pending||syncOnly;
+confirmOperation({
+verb,object:a.name,danger:!desired,
+impact:desired?'确认后向协作网发布此 Agent 的能力卡片，网内其他 node 可向它派单。执行配置保留于本机。':'撤回新的网内派单入口。已经开始的任务继续执行，登记和历史任务保留。',
+detail:`<p class="tiny">${state.connected?'将同步本机配置及接入意愿，收到确认后才显示网内生效。':'Hub 不可达：本次仅记录本机接入意愿并标记待同步，恢复连接后还需确认同步。'}</p>`,
+label:verb+' '+a.name,
+fn:()=>{
+a.desired=desired;
+if(state.connected){a.exposed=desired;a.pending=false;a.published=cardOf(a);if(desired){a.registered=true;a.joined=a.joined||stamp(Date.now())}state.lastSync=Date.now()}
+else a.pending=true;
+closeModal();render();toast(a.name+(a.pending?' 接入意愿已保存在本机，待同步':desired?' 已接入，网内生效':' 已下线'));
+}
+});
+}
+const artifactLabels={ready:'可取回',offline:'来源离线暂不可取',cleaned:'已清理',invalid:'校验失败'};
+function artifactState(t){
+if(t.artifact==='cleaned'||t.artifact==='invalid')return t.artifact;
+if(t.artifact==='offline'||!state.connected||!nodeBy(t.node)?.online)return 'offline';
+return 'ready';
+}
+function artifactContent(t){
+if(t.status!=='completed')return `<div class="empty"><h3>暂无数据</h3><p class="tiny">此任务尚无已登记的产物。</p></div>`;
+const s=artifactState(t),descriptions={
+ready:'来源可达，可取回并核验 SHA-256 后保存。',
+offline:'来源节点离线或中继不可达，保留产物登记；恢复连接后可重试。',
+cleaned:'产物文件已清理，登记信息仅供审计，无法再下载。',
+invalid:'内容与登记 SHA-256 不一致，已阻止下载，请联系来源节点核对。'
+};
+return `<div class="card"><div class="row" style="justify-content:space-between"><h3>检查报告.txt</h3>${pill(artifactLabels[s],s==='ready'?'green':s==='invalid'?'red':s==='offline'?'orange':'')}</div>
+<p class="tiny mono" style="margin:10px 0;overflow-wrap:anywhere">outputs/${esc(t.id)}/检查报告.txt</p><p class="sub">${descriptions[s]}</p>
+<p class="tiny mono" id="artifact-hash" style="margin:12px 0;overflow-wrap:anywhere">SHA-256：取回后核验（演示内容）</p>
+<span title="${esc(descriptions[s])}"><button data-download="${t.id}" ${s==='ready'?'':'disabled'}>取回并校验演示产物</button></span>
+${s==='offline'?`<button class="small" data-artifact-retry="${t.id}">重试检查来源</button>`:''}
+<div class="field" style="margin:20px 0 0"><label for="artifact-demo">产物状态 · 演示</label><select id="artifact-demo">${Object.entries(artifactLabels).map(([v,l])=>`<option value="${v}" ${t.artifact===v?'selected':''}>${l}</option>`).join('')}</select><span class="help">选择「可取回」仍需来源节点与 Hub 均可达。</span></div></div>`;
+}
+function detail(id,tab='input'){
+const t=tasks.find(t=>t.id===id);if(!t)return;
+state.detailId=id;state.detailTab=tab;
+const states=['submitted','offered','acknowledged','running'],terminal=!states.includes(t.status),step=terminal?4:states.indexOf(t.status);
+modal('任务详情',`<div class="row" style="justify-content:space-between">${badge(t.status)}<span class="tiny">${esc(t.time)}</span></div><h2 style="font-size:20px;margin:16px 0">${esc(t.title)}</h2><p class="tiny mono">${esc(t.id)}</p><div class="two" style="margin-top:16px"><div class="notice gray">目标<br><b>${esc(t.node)} / ${esc(t.agent)}</b></div><div class="notice gray">提交方<br><b>${esc(t.by)}</b></div></div>
+<div class="timeline">${['已提交','已投递','已接收','执行中','终态'].map((s,i)=>`<span class="${i<=step?'done':''}">${i===4&&terminal?statusMap[t.status][0]:s}</span>`).join('')}</div>
+${t.status==='needs_review'?`<div class="notice orange">${errorCode(t.error)} · 执行结果不确定，原协议终态保持 needs_review。<p style="margin-top:8px">${reviewMeta(t)}</p>${reviewRecord(t)}</div>${!t.review&&(state.view==='hub'||t.node===local)?reviewButtons(t):''}`:''}
+${t.uploadPending?'<div class="notice orange">本机执行已结束，结果待补传；恢复连接后同步至 Hub。</div>':''}
+${terminal?'<p class="tiny" style="margin-top:14px">终态保留 24h；人工核对不延长 Hub 的保留边界。</p>':''}
+${t.snapshot?'<p class="tiny">历史演示快照：仅用于展示超 24h 积压。</p>':''}
+${t.origin?`<div class="notice" style="margin-top:15px">独立新任务，重新派发自 ${esc(t.origin)}</div>`:''}
+<div class="tabs">${[['input','输入'],['answer','完整答复'],['logs','日志'],['artifacts','产物']].map(([v,l])=>`<button data-detail-tab="${v}" class="${tab===v?'active':''}" aria-pressed="${tab===v}">${l}</button>`).join('')}</div>
+<div id="detail-content"></div><p class="tiny mono" style="margin-top:20px">trace_id: ${esc(t.trace)}</p>`);
+let html='';
+if(tab==='input')html=`<pre>${esc(JSON.stringify(t.input,null,2))}</pre><p class="tiny">目标命令与工作目录由本机 ExecProfile 固定，任务不能覆盖。</p>`;
+if(tab==='answer')html=`<div class="result">${esc(t.answer||(t.status==='needs_review'?'执行在节点重启前已开始，最终结果未知。请人工核对。':t.status==='failed'?'任务执行失败。':'尚无最终答复。'))}</div>${t.error?`<div class="notice orange" style="margin-top:16px">error: ${errorCode(t.error)}</div>`:''}<p class="tiny" style="margin-top:16px">FinalAnswer 单独展示，V0 为 stdout 全文，上限 512 KiB。</p>`;
+if(tab==='logs')html=`<h3>stdout_tail</h3><pre>${esc(t.status==='completed'?'[runner] 执行完成\n[ledger] finished 已落盘\n[transport] '+(t.uploadPending?'等待结果补传':'result_ack 已接收'):t.status==='needs_review'?'[ledger] 恢复 started 条目\n[recovery] node_restarted_midway\n[recovery] 禁止自动重跑':t.status==='failed'?'[runner] failed: '+t.error:'暂无执行日志')}</pre><h3>stderr_tail</h3><pre>${esc(t.error||'（空）')}</pre><p class="tiny">演示日志 · 每路 tail 最多保留 64 KiB。</p>`;
+if(tab==='artifacts')html=artifactContent(t);
+$('#detail-content').innerHTML=html;
+}
+function reviewAction(id,action){
+const t=tasks.find(t=>t.id===id);
+if(!t||t.review||(state.view==='node'&&t.node!==local))return;
+if(action==='retry'){
+confirmOperation({
+verb:'重新派发',object:t.id,danger:true,risk:true,label:'重新派发 · 填写新任务',
+impact:'原执行可能已产生变更。新任务可能重复写入或产生其他副作用。原任务终态及待核对记录保留，继续填写不会直接提交。',
+detail:`<p class="sub">${esc(t.title)}</p>`,
+fn:()=>{
+const a=available().find(a=>a.node===t.node&&a.name===t.agent);
+closeModal();state.drafts[state.view]={node:t.node,agentId:a?.id||'',description:t.input.stdin,args:JSON.stringify(t.input.args),env:JSON.stringify(t.input.env),idem:'idem-'+uid(),phase:'ready',outcome:'success',origin:t.id,error:'',taskId:null};state.page='dispatch';render();
+if(!a)toast('原目标已不可派单，请重新明确选择目标');
+}
+});
+}else{
+const label=action==='valid'?'人工确认有效':'人工标记失败';
+confirmOperation({
+verb:action==='valid'?'确认有效':'标记失败',object:t.id,danger:action!=='valid',
+impact:'单独保存人工核对记录并移出待办。原协议终态保持 needs_review，不触发重跑，也不延长 24h 终态保留。',
+detail:`<p class="sub">${esc(t.title)}</p>`,label:(action==='valid'?'确认有效 ':'记录失败 ')+t.id,
+fn:()=>{t.review={label,by:state.view==='hub'?'管理员':local+' 本机主人',time:stamp(Date.now())};closeModal();render();toast('核对记录已保存，原终态保持 needs_review')}
+});
+}
+}
+function loginPage(){
+$('#content').innerHTML=head('登录控制台','本地交互演示，令牌不会发送到网络。')+`<form class="card" id="login-form" style="max-width:480px"><h2>${state.view==='hub'?'Hub 管理员':'mac-mini 本机'}登录</h2><div class="field"><label for="login-token">访问令牌</label><input type="password" id="login-token" required autocomplete="off"><span class="help">演示令牌：${state.view==='hub'?'hub_demo_admin':'node_demo_local'}</span></div><button class="primary">登录</button></form>`;
+}
+function randomToken(){
+const bytes=new Uint8Array(24);
+if(globalThis.crypto?.getRandomValues)crypto.getRandomValues(bytes);else return 'sm_demo_'+uid();
+return 'sm_demo_'+Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+}
+function addNode(){
+modal('生成节点接入配置',`<form id="node-config-form"><div class="notice">每 node 使用独立令牌并绑定 node_id。生成配置后，由节点主人在本机接入。</div><div class="field"><label for="new-node-id">Node ID</label><input id="new-node-id" name="node" required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}" placeholder="例如 studio-mac"></div><div class="modal-foot"><button type="button" data-act="close">取消</button><button class="primary">生成演示配置</button></div></form>`);
+}
+function scheduleHighlight(t){
+setTimeout(()=>{
+document.querySelectorAll('[data-task-row]').forEach(row=>{if(row.dataset.taskRow===t.id&&Date.now()-t.changedAt>=2000){row.classList.remove('changed');row.style.animationDelay=''}});
+},2050);
+}
+function demoStatus(){
+const list=filteredTasks(),t=list.find(t=>['submitted','offered','acknowledged','running'].includes(t.status)&&(state.connected||t.node===local&&t.status==='running'));
+if(!t){toast(state.connected?'当前筛选中没有可推进的进行中任务':'断网时仅可演示本机已运行任务继续执行');return}
+const next={submitted:'offered',offered:'acknowledged',acknowledged:'running',running:'completed'};
+t.status=next[t.status];t.changedAt=Date.now();
+if(t.status==='completed'){t.terminalAt=Date.now();t.answer='演示状态推进：执行已完成，finished 账本已保存。';t.uploadPending=!state.connected;t.artifact='ready'}
+if(state.connected)state.lastSync=Date.now();
+taskRows();syncChrome();scheduleHighlight(t);toast('演示：'+t.id+' → '+statusMap[t.status][0]);
+}
+function connectionToggle(){
+captureDraft();state.connected=!state.connected;
+const n=nodeBy(local);if(n)n.online=state.connected;
+if(!state.connected){
+agents.filter(a=>a.node===local&&(a.exposed||a.desired)).forEach(a=>a.pending=true);
+}else{
+state.lastSync=Date.now();tasks.forEach(t=>t.uploadPending=false);
+}
+render();
+toast(state.connected?'连接已恢复，待同步 Agent 请在本机逐项确认；任务结果已补传（演示）':'Hub 连接中断，本机功能与进行中的执行继续可用');
+}
+function navigate(page){
+if(page==='dispatch'&&!canDispatch()){toast(offlineHint);return}
+captureDraft();closeModal();state.page=page;render();window.scrollTo(0,0);
+}
+function applyScene(value){
+captureDraft();closeModal();
+if(value==='error'){state.scene='error';render();return}
+state.scene=value;state.receipts.clear();state.drafts={hub:null,node:null};resetTasks();
+if(value==='empty'){
+agents=[];tasks=[];nodes=[clone(initial.nodes[0])];nodes[0].online=state.connected;
+state.localSearch='';state.nodeSearch='';state.registryNode='all';state.registryStatus='all';state.page='overview';
+}else{
+agents=clone(initial.agents);tasks=clone(initial.tasks);nodes=clone(initial.nodes);nodeBy(local).online=state.connected;
+if(!state.connected)agents.filter(a=>a.node===local&&a.exposed).forEach(a=>a.pending=true);
+}
+render();toast(value==='empty'?'已进入首次使用演示':'已恢复初始 mock 数据');
+}
+function showReviewFilter(){
+captureDraft();closeModal();resetTasks();state.taskTab='received';state.taskStatus='needs_review';state.reviewOnly=true;state.page='tasks';render();
+}
+async function downloadArtifact(id){
+const t=tasks.find(t=>t.id===id);if(!t||artifactState(t)!=='ready'){toast('产物当前不可取回');return}
+const bytes=new TextEncoder().encode('SwarmMind 演示报告\n'+t.id+'\n\n'+t.answer);
+if(!globalThis.crypto?.subtle){toast('当前环境无法进行 SHA-256 校验，请通过 localhost 或 HTTPS 打开原型');return}
+const hash=async b=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',b)),x=>x.toString(16).padStart(2,'0')).join('');
+const expected=await hash(bytes),received=bytes.slice(),actual=await hash(received);
+if(artifactState(t)!=='ready'){toast('来源状态已变化，请重新取回');return}
+if(expected!==actual){t.artifact='invalid';detail(id,'artifacts');toast('校验失败，已阻止下载');return}
+if(state.detailId===id&&$('#artifact-hash'))$('#artifact-hash').textContent='SHA-256：'+actual+' · 已校验 · '+bytes.length+' 字节';
+const url=URL.createObjectURL(new Blob([received],{type:'text/plain;charset=utf-8'})),a=document.createElement('a');
+a.href=url;a.download='SwarmMind-'+t.id+'.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('演示产物已校验并生成下载');
+}
+document.addEventListener('click',e=>{
+const b=e.target.closest('button');if(!b||b.disabled)return;
+if(b.dataset.view){captureDraft();closeModal();state.view=b.dataset.view;state.page='overview';render();return}
+if(b.dataset.page){navigate(b.dataset.page);return}
+if(b.dataset.act==='close'){closeModal();return}
+if(!state.auth[state.view]&&!['session','logout'].includes(b.dataset.act))return;
+if(b.dataset.empty){
+const act=b.dataset.empty;
+if(act==='retry-load'){state.scene=tasks.length||agents.length?'normal':'empty';if(state.connected)state.lastSync=Date.now();render();toast('已重新加载演示列表')}
+else if(act==='edit-agent')editAgent('new');
+else if(act==='add-node')addNode();
+else if(act==='reset-registry'){state.registryNode='all';state.registryStatus='all';registry()}
+else if(act==='reset-nodes'){state.nodeSearch='';nodePage()}
+else if(act==='reset-agents'){state.localSearch='';agentsPage()}
+else if(act==='reset-tasks'){resetTasks();taskPage()}
+else navigate(act);
+return;
+}
+if(b.dataset.toggle){const a=agents.find(a=>a.id===b.dataset.toggle);askAgent(a,!a.desired);return}
+if(b.dataset.syncAgent){const a=agents.find(a=>a.id===b.dataset.syncAgent);if(state.connected)askAgent(a,a.desired,true);return}
+if(b.dataset.edit){editAgent(b.dataset.edit);return}
+if(b.dataset.detail){detail(b.dataset.detail);return}
+if(b.dataset.detailTab){detail(state.detailId,b.dataset.detailTab);return}
+if(b.dataset.taskTab){state.taskTab=b.dataset.taskTab;resetTasks();taskPage();return}
+if(b.dataset.review){reviewAction(b.dataset.id,b.dataset.review);return}
+if(b.dataset.download){downloadArtifact(b.dataset.download).catch(error=>toast(error.message));return}
+if(b.dataset.artifactRetry){
+const t=tasks.find(t=>t.id===b.dataset.artifactRetry);
+if(state.connected&&nodeBy(t.node)?.online)t.artifact='ready';
+detail(t.id,'artifacts');toast(artifactState(t)==='ready'?'来源已恢复，可取回':'来源仍不可达，请稍后重试');return;
+}
+if(b.dataset.nodeDetail){
+const n=nodeBy(b.dataset.nodeDetail);
+modal('节点 · '+n.id,settings([['状态',n.revoked?'接入已撤销':n.online?'在线':'离线'],['系统',n.os],['epoch',n.epoch],['接入时间',n.time],['最近心跳',n.heartbeat]])+'<div class="notice" style="margin-top:18px">Agent 接入与下线由此节点本机管理。</div>');return;
+}
+if(b.dataset.revoke){
+const n=nodeBy(b.dataset.revoke);
+confirmOperation({verb:'吊销令牌',object:n.id,danger:true,label:'演示吊销 '+n.id,
+impact:'仅模拟撤销入网凭证并断开节点会话。该节点停止接收新派单，Agent 登记保留，已有执行不被终止。演示：V0 无撤销机制。',
+fn:()=>{n.revoked=true;n.online=false;n.heartbeat='演示吊销时';closeModal();render();toast(n.id+' 令牌吊销仅为演示，V0 无撤销机制')}});
+return;
+}
+switch(b.dataset.act){
+case 'confirm':{const fn=confirmAction;confirmAction=null;fn?.();break}
+case 'refresh':captureDraft();if(state.connected)state.lastSync=Date.now();render();toast(state.connected?'已同步当前演示状态':'已刷新本机演示状态，Hub 仍不可达');break;
+case 'connection':connectionToggle();break;
+case 'review-filter':showReviewFilter();break;
+case 'reset-registry':state.registryNode='all';state.registryStatus='all';registry();break;
+case 'reset-tasks':resetTasks();taskPage();break;
+case 'demo-status':demoStatus();break;
+case 'new-draft':state.drafts[state.view]=null;dispatchPage();break;
+case 'abandon-draft':{
+const d=draft();
+confirmOperation({verb:'放弃重试',object:d.idem,danger:true,label:'放弃重试并另建任务',
+impact:'当前请求可能已经被 Hub 接收。放弃不会撤销原请求，另建任务使用新幂等键，可能重复执行并产生副作用。',
+fn:()=>{state.drafts[state.view]=null;closeModal();dispatchPage()}});break;
+}
+case 'session':
+captureDraft();modal('当前会话',`<p>${state.view==='hub'?'Hub 管理员':'mac-mini 本机主人'}</p><p class="tiny" style="margin-top:10px">演示数据只保留在页面内存，切换视角不会改变接入主权。派单草稿按视角分别保留。</p><div class="modal-foot"><button data-act="close">返回</button><button class="danger" data-act="logout">退出当前视角</button></div>`);break;
+case 'logout':
+confirmOperation({verb:'退出会话',object:state.view==='hub'?'Hub 管理员':'mac-mini 本机主人',danger:true,
+impact:'退出当前控制台视角，任务执行和本机 Agent 接入状态继续保留。',label:'退出当前视角',
+fn:()=>{state.auth[state.view]=false;closeModal();render()}});break;
+case 'add-node':addNode();break;
+}
+});
+document.addEventListener('input',e=>{
+const el=e.target;
+if(el.id==='local-search'){state.localSearch=el.value;agentCards()}
+if(el.id==='node-search'){state.nodeSearch=el.value;nodeRows()}
+if(el.id==='task-search'){state.taskSearch=el.value;taskRows()}
+if(el.id==='target-search')fillTargets();
+if(el.closest('#dispatch-form'))captureDraft();
+});
+document.addEventListener('change',e=>{
+const el=e.target;
+if(el.id==='demo-data'){applyScene(el.value);return}
+if(el.id==='highlight-toggle'){
+state.highlight=el.checked;
+if(!el.checked)document.querySelectorAll('tr.changed').forEach(row=>{row.classList.remove('changed');row.style.animationDelay=''});
+return;
+}
+if(el.id==='registry-node'){state.registryNode=el.value;registryRows()}
+if(el.id==='registry-status'){state.registryStatus=el.value;registryRows()}
+const filterKeys={'task-status':'taskStatus','task-node':'taskNode','task-by':'taskBy','task-error':'taskError','task-from':'taskFrom','task-to':'taskTo'};
+if(filterKeys[el.id]){
+state[filterKeys[el.id]]=el.value;
+if(el.id==='task-status'&&el.value!=='needs_review')state.reviewOnly=false;
+taskRows();
+}
+if(el.id==='target-node')fillTargets();
+if(el.id==='target-agent')targetPreview();
+if(el.closest('#dispatch-form'))captureDraft();
+if(el.id==='retry-risk')$('#operation-confirm').disabled=!el.checked;
+if(el.id==='artifact-demo'){const t=tasks.find(t=>t.id===state.detailId);t.artifact=el.value;detail(t.id,'artifacts')}
+});
+document.addEventListener('submit',e=>{
+e.preventDefault();
+try{
+const form=e.target;
+if(form.id==='login-form'){
+const expected=state.view==='hub'?'hub_demo_admin':'node_demo_local';
+if($('#login-token').value!==expected)throw Error('演示令牌不正确');
+state.auth[state.view]=true;render();toast('已登录');return;
+}
+if(!state.auth[state.view])return;
+if(form.id==='agent-form')saveAgent(form,e.submitter?.value||'save');
+if(form.id==='dispatch-form')submitTask();
+if(form.id==='node-config-form'){
+const id=new FormData(form).get('node').trim();
+if(nodes.some(n=>n.id===id))throw Error('Node ID 已存在，请使用新的 ID');
+const token=randomToken(),config='node_id: '+id+'\nhub_url: wss://hub.swarm.example:8443/ws/node\nregister_token: '+token+'\nhub_pubkey_fp: "" # 首连核对并记录指纹\nconcurrency: 2\nagents: [] # 由本机主人配置并接入\n';
+modal('演示配置 · '+id,`<div class="notice orange">此令牌仅由原型生成，未在真实 Hub 签发。演示不新增实际节点。</div><div class="field"><label for="generated-config">接入配置</label><textarea id="generated-config" rows="9" readonly class="mono">${esc(config)}</textarea></div><p class="tiny">点击配置框可全选复制。</p>`);
+$('#generated-config').addEventListener('click',ev=>ev.target.select());
+}
+}catch(error){if($('#agent-error'))$('#agent-error').textContent=error.message;toast(error.message||'请检查输入内容')}
+});
+$('#modal').addEventListener('click',e=>{
+if(e.target===$('#modal')){
+const r=$('#modal').getBoundingClientRect();
+if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)closeModal();
+}
+});
+$('#modal').addEventListener('cancel',e=>{e.preventDefault();closeModal()});
+render();
+</script>
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SwarmMind · 协作控制台 v4</title>
+<style>
+:root{--bg:#f7f6f3;--primary:#4a6cf7;--ink:#292d37;--muted:#858993;--line:#e9e9e5;--blue:#eef2ff;--green:#268066;--orange:#a97425;--red:#bd5454}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:white;border-radius:8px;padding:8px 13px;color:var(--ink)}
+button:hover{border-color:#bfcaf5;background:#f8f9ff}
+button:disabled{opacity:.45;cursor:not-allowed}
+:focus-visible{outline:3px solid #4a6cf755;outline-offset:3px}
+.primary{background:var(--primary);border-color:var(--primary);color:white}
+.primary:hover{background:#3c5de5;color:white}
+.danger{color:var(--red);border-color:#efd8d4}
+.link{border:0;background:transparent;color:var(--primary);padding:0;text-align:left}
+.small{font-size:12px;padding:5px 10px}
+header{min-height:78px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:16px 28px;gap:18px;position:sticky;top:0;z-index:5}
+.brand{display:flex;align-items:center;gap:11px;font-size:21px;font-weight:750;letter-spacing:-.7px}
+.logo{width:35px;height:35px;background:#292d37;color:white;display:grid;place-items:center;border-radius:11px;font-size:22px}
+.row{display:flex;align-items:center;gap:12px}
+.switcher{display:flex;background:#f3f3f0;border-radius:10px;padding:4px;gap:3px}
+.switcher button{background:transparent;border:0;color:var(--muted);font-size:12px}
+.switcher button.active{background:white;color:var(--ink);box-shadow:0 1px 5px #00000012}
+.version{font-size:10px;border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:var(--muted)}
+.avatar{background:var(--blue);color:var(--primary);border-radius:50%;width:32px;height:32px;display:grid;place-items:center;font-size:12px}
+.layout{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:calc(100vh - 78px)}
+aside{padding:28px 16px;position:sticky;top:78px;height:calc(100vh - 78px);border-right:1px solid var(--line);display:flex;flex-direction:column}
+.eyebrow{font-size:10px;letter-spacing:1.5px;color:#969992;margin:0 12px 17px}
+nav{display:grid;gap:5px}
+nav button{border:0;background:transparent;color:#737884;text-align:left;display:flex;align-items:center;gap:11px;font-size:13px;padding:12px}
+nav button.active{background:#eaeefe;color:var(--primary);font-weight:600}
+.nav-icon{width:21px;text-align:center;font-size:17px}
+.aside-foot{margin-top:auto;padding:22px 10px 0;font-size:11px;color:var(--muted)}
+.dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:6px;vertical-align:middle}
+.dot.off{background:#a3a7b0}
+main{padding:30px 38px 64px;max-width:1500px;width:100%;margin:auto;min-width:0;align-self:start}
+.crumb{font-size:11px;color:var(--muted);margin-bottom:19px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:25px}
+h1{font-size:27px;letter-spacing:-.8px;margin:0 0 6px;font-weight:650}
+h2{font-size:15px;margin:0 0 15px;font-weight:650}
+h3{font-size:14px;margin:0}
+p{margin:0}
+.sub,.tiny{color:var(--muted);font-size:12px}
+.tiny{font-size:11px}
+.card{background:white;border:1px solid var(--line);border-radius:12px;padding:22px}
+.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:22px 0}
+.metric-label{font-size:12px;color:var(--muted)}
+.number{font-size:33px;letter-spacing:-1px;font-weight:650;margin:8px 0}
+.number small{font-size:12px;font-weight:400;color:var(--muted);margin-left:7px;letter-spacing:0}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.split{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(260px,1fr);gap:22px}
+.notice{background:var(--blue);color:#65749d;border-radius:8px;padding:13px 16px;font-size:12px;margin-bottom:20px;overflow-wrap:anywhere}
+.notice.orange{background:#fff5e4;color:#986c29}
+.notice.gray{background:#f5f5f2;color:#7d8289}
+.notice.red{background:#fff0ef;color:var(--red)}
+.pill{display:inline-flex;align-items:center;border-radius:5px;padding:3px 7px;font-size:10px;white-space:nowrap;background:#f0f1f4;color:#7f8590}
+.pill.blue{background:var(--blue);color:var(--primary)}
+.pill.green{background:#edf7f1;color:var(--green)}
+.pill.orange{background:#fff5e4;color:var(--orange)}
+.pill.red{background:#fff0ef;color:var(--red)}
+.section{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:25px 0 15px}
+.section h2{margin:0}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 18px}
+input,select,textarea{border:1px solid #e0e2e8;background:white;border-radius:7px;padding:10px 11px;color:#454b58;min-width:0;width:100%;font-size:12px}
+textarea{resize:vertical;min-height:90px}
+.toolbar input{flex:1;min-width:180px}
+.toolbar select{width:auto;max-width:230px}
+.toolbar label{font-size:11px;color:var(--muted)}
+.toolbar input[type=datetime-local]{min-width:185px}
+.table-card{padding:0;overflow:hidden}
+.scroll{overflow:auto}
+table{width:100%;border-collapse:collapse;text-align:left;white-space:nowrap;font-size:12px}
+th{padding:12px 18px;background:#fafaf8;color:#8e939d;font-weight:500;font-size:11px}
+td{padding:15px 18px;border-top:1px solid #f0f0ed}
+tbody tr:hover{background:#fcfcfe}
+.task-title{max-width:290px;display:block;overflow:hidden;text-overflow:ellipsis}
+.mono,pre,code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f8fa;padding:16px;border-radius:8px;font-size:12px;max-height:380px;overflow:auto}
+.empty{padding:45px 20px;color:var(--muted);text-align:center}
+.empty h3{color:var(--ink);margin-bottom:8px}
+.empty button{margin-top:16px}
+.profile-top{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.agent-icon{background:var(--blue);color:var(--primary);width:39px;height:39px;border-radius:10px;display:grid;place-items:center;font-size:19px}
+.toggle{margin-left:auto;width:38px;height:22px;border:0;border-radius:20px;padding:3px;background:#d5d8df;position:relative;flex-shrink:0}
+.toggle:before{content:"";position:absolute;left:3px;top:3px;background:white;width:16px;height:16px;border-radius:50%;box-shadow:0 1px 4px #0002;transition:left .15s}
+.toggle.on,.toggle.on:hover{background:var(--primary)}
+.toggle.on:before{left:19px}
+.agent-desc{color:#838894;font-size:12px;min-height:62px;margin:16px 0}
+.command{background:#f7f8fa;border-radius:7px;padding:11px;font-size:10px;color:#737c8e;overflow-wrap:anywhere;margin:13px 0;min-height:65px}
+.card-foot{border-top:1px solid var(--line);padding-top:15px;margin-top:18px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.field{margin-bottom:18px}
+.field label{font-size:12px;font-weight:600;display:block;margin-bottom:7px}
+.help{display:block;font-size:11px;color:var(--muted);margin-top:6px}
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.wide{grid-column:1/-1}
+.form-foot{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid var(--line);padding-top:19px;margin-top:18px;flex-wrap:wrap}
+.check{display:flex!important;align-items:center;gap:9px;font-weight:400!important}
+.check input{width:auto}
+details{margin:15px 0}
+summary{cursor:pointer;color:#7481a8;font-size:12px;margin-bottom:15px}
+.setting{display:flex;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid #f0f0ec;font-size:12px}
+.setting span{color:var(--muted)}
+.setting code{overflow-wrap:anywhere;text-align:right}
+.tabs{display:flex;gap:5px;border-bottom:1px solid var(--line);margin:18px 0;overflow:auto}
+.tabs button{border:0;background:transparent;color:var(--muted);border-radius:0;padding:10px 13px;white-space:nowrap}
+.tabs button.active{color:var(--primary);border-bottom:2px solid var(--primary)}
+dialog{border:1px solid var(--line);border-radius:15px;padding:0;width:690px;max-width:calc(100% - 32px);max-height:90vh;color:var(--ink);box-shadow:0 24px 90px #1e26352b}
+dialog::backdrop{background:#20263866;backdrop-filter:blur(3px)}
+.modal-head{padding:21px 24px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:15px}
+.modal-head h2{margin:0}
+.modal-body{padding:24px;overflow:auto;max-height:calc(90vh - 80px)}
+.modal-foot{display:flex;justify-content:flex-end;gap:10px;margin-top:23px}
+#toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#303646;color:white;padding:11px 20px;border-radius:9px;font-size:12px;z-index:30;box-shadow:0 5px 22px #0002;max-width:90vw}
+#toast[hidden],[hidden]{display:none!important}
+.result{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.9}
+.review-card h3{margin:14px 0 7px}
+.timeline{display:flex;gap:7px;margin:22px 0}
+.timeline span{flex:1;background:#f1f2f5;border-radius:5px;padding:9px 3px;text-align:center;font-size:10px;color:#9ca1ac}
+.timeline span.done{background:var(--blue);color:var(--primary)}
+#sync-corner{position:fixed;right:16px;bottom:12px;z-index:6;background:#ffffffed;border:1px solid var(--line);border-radius:8px;padding:6px 11px;font-size:10px;color:var(--muted);box-shadow:0 3px 14px #00000007}
+#connection-banner{border-radius:0;margin:0;padding:12px 28px}
+.demo-bar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:10px 28px;background:#fbfbf9;border-bottom:1px solid var(--line);font-size:11px;color:var(--muted)}
+.demo-bar select{width:auto;padding:5px 8px}
+.demo-bar .check{margin-left:auto}
+.demo-bar .check input{accent-color:var(--primary)}
+.error-code{border-bottom:1px dotted var(--muted);cursor:help}
+.review-record{white-space:normal;min-width:180px;max-width:260px;margin-top:6px}
+.guide-step{display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+.guide-step button{margin-top:auto}
+.form-lock{border:0;margin:0;padding:0;min-width:0}
+.form-lock:disabled{opacity:.72}
+@keyframes task-flash{from{background:#edf4ff}to{background:transparent}}
+tr.changed{animation:task-flash 2s ease-out both}
+@media(prefers-reduced-motion:reduce){tr.changed{animation:none;background:#edf4ff}}
+@media(max-width:1100px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.layout{grid-template-columns:190px minmax(0,1fr)}main{padding:28px 24px}.split{grid-template-columns:1fr}.metrics{gap:10px}.metric.card{padding:16px}.identity{display:none}}
+@media(max-width:730px){header{padding:15px;flex-wrap:wrap}.brand{font-size:18px}.header-left{flex-wrap:wrap}.layout{display:block}aside{position:static;height:auto;padding:12px;border-right:0;border-bottom:1px solid var(--line)}.eyebrow,.aside-foot{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:9px}.nav-icon{display:none}main{padding:24px 16px 64px}.metrics,.grid,.two,.form-grid{grid-template-columns:1fr 1fr}.grid,.two{grid-template-columns:1fr}.head{flex-wrap:wrap}.form-grid .field{grid-column:1/-1}.number{font-size:28px}.version{display:none}.row{gap:8px}.modal-body{padding:18px}.toolbar select{flex:1;max-width:none}.demo-bar{padding:10px 15px}.demo-bar .check{margin-left:0}#connection-banner{padding:12px 15px}.form-foot .row{flex-wrap:wrap}.header-right .identity{display:none}}
+</style>
+</head>
+<body>
+<header>
+<div class="row header-left">
+<div class="brand"><span class="logo">✳</span>SwarmMind <span class="version">原型 v4</span></div>
+<div class="switcher" aria-label="控制台视角">
+<button data-view="hub" class="active">Hub 中心端</button>
+<button data-view="node">Node 本地控制台</button>
+</div>
+</div>
+<div class="row header-right"><span id="network-pill"></span><span class="identity tiny" id="identity"></span><span class="avatar" id="avatar">H</span><button class="small" data-act="session">会话</button></div>
+</header>
+<div class="demo-bar">
+<span class="version">交互演示</span>
+<label for="demo-data">数据场景</label>
+<select id="demo-data"><option value="normal">现有 mock 数据</option><option value="empty">首次使用 · 无数据</option><option value="error">列表加载失败</option></select>
+<button class="small" data-act="connection" id="connection-toggle">模拟 Hub 断网</button>
+<label class="check"><input id="highlight-toggle" type="checkbox" checked>状态变更柔和高亮 2s · 演示</label>
+</div>
+<div id="connection-banner" class="notice orange" role="status" hidden>Hub 连接中断：本机功能可用，经 Hub 的新派单已暂停，进行中的任务继续执行、结果待补传</div>
+<div class="layout">
+<aside>
+<div class="eyebrow" id="scope"></div>
+<nav id="nav" aria-label="页面导航"></nav>
+<div class="aside-foot"><p id="aside-connection"></p><p style="margin-top:8px">接入由本机决定<br>任务由调用方明确指定</p><p style="margin-top:16px">交互原型 · 数据仅保留于当前页面<br>刷新恢复初始演示数据</p></div>
+</aside>
+<main><div class="crumb" id="crumb"></div><div id="content"></div></main>
+</div>
+<div id="sync-corner" role="status"></div>
+<dialog id="modal" aria-labelledby="modal-title">
+<div class="modal-head"><h2 id="modal-title"></h2><button data-act="close" aria-label="关闭弹层">×</button></div>
+<div class="modal-body" id="modal-body"></div>
+</dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+</body>
+</html>
