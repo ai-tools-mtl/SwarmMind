@@ -168,16 +168,21 @@ async function main() {
   // TC-E19 失败任务：失败原因（进程错误输出）前置可见（不再折叠）
   await page.click('aside button:has-text("任务监管")');
   await page.waitForSelector('th:has-text("提交时间")');
-  const failRow = page.locator('tr[data-task]', { hasText: '执行失败' }).first();
-  if (await failRow.count()) {
-    await failRow.locator('[data-act="detail"]').click();
+  // 从 API 找一个 stderr 非空的失败任务（超时类失败无 stderr，不适用本断言）
+  const stderrTask = await page.evaluate(async () => {
+    const r = await fetch('/api/v1/tasks', { credentials: 'same-origin' }).then(x => x.json());
+    const hit = (r.tasks || []).find(t => t.status === 'failed' && t.result?.stderr_tail);
+    return hit ? hit.id : null;
+  });
+  if (stderrTask) {
+    await page.evaluate(id => openTask(id), stderrTask);
     await page.waitForSelector('.drawer', { timeout: 15000 });
     const dt = await page.textContent('.drawer');
     const stderrShown = dt.includes('失败原因（进程错误输出）');
     record('E19', '失败任务详情：stderr 前置展示', stderrShown, stderrShown ? '' : '未见前置 stderr 块');
     await page.keyboard.press('Escape');
   } else {
-    record('E19', '失败任务详情：stderr 前置展示', true, '无失败任务可验（跳过）');
+    record('E19', '失败任务详情：stderr 前置展示', true, '当前无带 stderr 的失败任务（跳过）');
   }
 
   // ---------- 策略容量页 ----------
