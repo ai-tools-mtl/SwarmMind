@@ -1,6 +1,6 @@
 // SwarmMind 控制台 E2E 测试（Playwright，真实浏览器交互）
 // 运行：node tests/e2e-console.mjs
-// 覆盖：首次初始化/密码登录/总览/节点/任务/运维控制/策略/设置（账户+令牌）/退出
+// 覆盖：首次初始化/密码登录/总览/节点/任务/运维控制（含总理模式派发）/策略/设置（账户+令牌）/退出
 // 语义：needs_review 提示、抽屉详情、批次报告、令牌明文一次性展示
 
 import { chromium } from 'playwright';
@@ -98,16 +98,61 @@ async function main() {
   const agentOptions = await page.locator('#ctrl-agent option').count();
   record('E09', '运维控制：能力目录下拉非空', agentOptions >= 1, `选项 ${agentOptions}`);
 
-  // 选能力（节点随之确定）、填指令、提交
+  // 选能力（节点随之确定）
   await page.selectOption('#ctrl-agent', { index: 0 });
   const nodeHint = await page.textContent('#ctrl-node-hint');
   record('E09b', '选择能力后显示执行节点提示（不再单独选节点）', !!nodeHint, `节点 ${nodeHint}`);
-  await page.fill('#ctrl-stdin', 'E2E 自动化巡检验证：请回报节点名');
-  await page.click('button:has-text("运行巡检")');
-  await page.waitForSelector('text=批次报告', { timeout: 30000 });
-  await page.waitForSelector('[data-act="detail"]', { timeout: 20000 }); // 等待任务行出现（提交后自动刷新快照）
-  const reportOk = (await page.textContent('body')).includes('已提交');
-  record('E10', '运维控制：提交批次并进入批次报告（含已提交任务行）', reportOk);
+
+  // TC-E10 总理模式（PRIME-DESIGN 8.1）：勾选联动（agent→zcode-dev、广播隐藏、
+  // placeholder 切换、节点提示同步）→ 取消全恢复 → 再勾选提交复合目标 → 批次报告
+  const PRIME_GOAL = 'E2E 总理模式链路验证：查询网内能力目录并回报在线节点数量，无需派发子任务';
+  const primeOpt = page.locator('#ctrl-agent option[value*="zcode-dev"]');
+  let e10ok = false, e10note = '';
+  if (await primeOpt.count()) {
+    const selBefore = await page.inputValue('#ctrl-agent');
+    await page.check('#ctrl-prime');
+    const selOn = await page.inputValue('#ctrl-agent');
+    const hintOn = await page.textContent('#ctrl-node-hint');
+    const bcHidden = await page.locator('#ctrl-broadcast-line').isHidden();
+    const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
+    await page.uncheck('#ctrl-prime');
+    const selOff = await page.inputValue('#ctrl-agent');
+    const bcShown = await page.locator('#ctrl-broadcast-line').isVisible();
+    const phOff = await page.getAttribute('#ctrl-stdin', 'placeholder');
+    const toggleOk = selOn.includes('zcode-dev') && bcHidden && phOn.startsWith('描述复合目标')
+      && hintOn === selOn.split('/')[0]
+      && selOff === selBefore && bcShown && phOff.startsWith('用自然语言描述');
+    if (!toggleOk) e10note = `联动异常: on=${selOn} hint=${hintOn} ph=${String(phOn).slice(0, 12)}… off=${selOff}`;
+    await page.check('#ctrl-prime');
+    await page.fill('#ctrl-stdin', PRIME_GOAL);
+    await page.click('button:has-text("运行巡检")');
+    await page.waitForSelector('text=批次报告', { timeout: 30000 });
+    await page.waitForSelector('[data-act="detail"]', { timeout: 20000 }); // 等待任务行出现（提交后自动刷新快照）
+    const reportOk = (await page.textContent('body')).includes('已提交');
+    e10ok = toggleOk && reportOk;
+    record('E10', '总理模式：勾选联动+取消恢复，提交复合目标进入批次报告', e10ok, e10note);
+  } else {
+    // 网内无 zcode-dev 能力：回退普通巡检提交保持链路覆盖；E10b 相应标 PENDING
+    await page.fill('#ctrl-stdin', 'E2E 自动化巡检验证：请回报节点名');
+    await page.click('button:has-text("运行巡检")');
+    await page.waitForSelector('text=批次报告', { timeout: 30000 });
+    await page.waitForSelector('[data-act="detail"]', { timeout: 20000 });
+    e10ok = (await page.textContent('body')).includes('已提交');
+    record('E10', '总理模式提交（回退普通巡检：网内无 zcode-dev 能力）', e10ok, 'PENDING');
+  }
+
+  // TC-E10b 总理模式任务入参：经任务详情 API 断言 args[0] 以 PRIME 提示词开头、
+  // 含「# 本次目标」段与用户输入的目标文本
+  const primeTaskId = await page.locator('[data-act="detail"]').first().getAttribute('data-id');
+  const primeTask = await page.evaluate(async id => {
+    const r = await fetch('/api/v1/tasks/' + encodeURIComponent(id), { credentials: 'same-origin' });
+    return r.status === 200 ? r.json() : null;
+  }, primeTaskId);
+  const a0 = primeTask?.input?.args?.[0] || '';
+  const primeArgsOk = a0.startsWith('# SwarmMind 总理智能体（Prime）')
+    && a0.includes('# 本次目标') && a0.includes(PRIME_GOAL);
+  record('E10b', '总理模式任务 args[0] 含 PRIME 提示词特征与目标文本（任务详情 API）', primeArgsOk,
+    primeArgsOk ? `任务 ${primeTaskId}` : `PENDING/异常：任务 ${primeTaskId} args[0] 头 40 字=${a0.slice(0, 40)}`);
 
   // TC-E11 批次报告「查看任务」直达详情（BUG 回归：提交后快照即时刷新）
   await page.locator('[data-act="detail"]').first().click();
