@@ -80,7 +80,8 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)
 		c.notifyResultEvent(accepted)
-		c.dispatch(env.From) // 窗口释放一格，恢复出队
+		c.fireTerminal(accepted) // 群聊闭环回流等终态旁路（GROUP-RFC）
+		c.dispatch(env.From)     // 窗口释放一格，恢复出队
 	case dupAck:
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)

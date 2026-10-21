@@ -137,13 +137,14 @@ func tools() []toolDef {
 	return []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: obj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: obj(map[string]any{})},
-		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果", InputSchema: obj(map[string]any{
-			"node_id":  s("目标节点 ID（swarmmind_nodes 可查）"),
-			"agent":    s("目标 agent 名（swarmmind_agents 可查）"),
-			"args":     a("命令行参数（可选）"),
-			"stdin":    s("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id": s("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
-			"idem_key": s("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
+		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群", InputSchema: obj(map[string]any{
+			"node_id":   s("目标节点 ID（swarmmind_nodes 可查）"),
+			"agent":     s("目标 agent 名（swarmmind_agents 可查）"),
+			"args":      a("命令行参数（可选）"),
+			"stdin":     s("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
+			"trace_id":  s("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
+			"idem_key":  s("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
+			"group_ref": s("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
 		}, "node_id", "agent")},
 		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: obj(map[string]any{
 			"task_id": s("任务 ID"),
@@ -297,6 +298,9 @@ func toolSubmit(args map[string]any) (string, error) {
 	}
 	if idem, ok := args["idem_key"].(string); ok && idem != "" {
 		body["idem_key"] = idem
+	}
+	if gr, ok := args["group_ref"].(string); ok && gr != "" {
+		body["group_ref"] = gr
 	}
 	code, data, err := hubAPI("POST", "/api/v1/tasks", body)
 	if err != nil {

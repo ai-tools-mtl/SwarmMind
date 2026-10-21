@@ -30,7 +30,7 @@ func TestControlBatchIdempotency(t *testing.T) {
 	f.registerOffline("nodeD", agentsOf("echo"))
 
 	input := protocol.TaskInput{Args: []string{"patrol"}}
-	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, input, "K-1", "admin")
+	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, input, "K-1", "admin", "")
 	if err != nil {
 		t.Fatalf("首次创建失败: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestControlBatchIdempotency(t *testing.T) {
 	}
 
 	// 同键同内容：原 batch_id + dup=true，不新增任务/批次
-	retry, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, input, "K-1", "admin")
+	retry, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, input, "K-1", "admin", "")
 	if err != nil {
 		t.Fatalf("幂等重试失败: %v", err)
 	}
@@ -60,16 +60,20 @@ func TestControlBatchIdempotency(t *testing.T) {
 	}
 
 	// 同键不同内容（换目标序）：冲突
-	if _, err := f.core.CreateControlBatch("echo", []string{"nodeC", "nodeB", "nodeD"}, input, "K-1", "admin"); !errors.Is(err, ErrBatchConflict) {
+	if _, err := f.core.CreateControlBatch("echo", []string{"nodeC", "nodeB", "nodeD"}, input, "K-1", "admin", ""); !errors.Is(err, ErrBatchConflict) {
 		t.Errorf("同键不同内容应 ErrBatchConflict, got %v", err)
 	}
 	// 同键不同内容（换 input）：冲突
-	if _, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, protocol.TaskInput{Args: []string{"CHANGED"}}, "K-1", "admin"); !errors.Is(err, ErrBatchConflict) {
+	if _, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, protocol.TaskInput{Args: []string{"CHANGED"}}, "K-1", "admin", ""); !errors.Is(err, ErrBatchConflict) {
 		t.Errorf("同键不同 input 应 ErrBatchConflict, got %v", err)
+	}
+	// 同键不同内容（换 group_ref）：冲突（GROUP-RFC：群引用参与批次内容指纹）
+	if _, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC", "nodeD"}, input, "K-1", "admin", "g-other"); !errors.Is(err, ErrBatchConflict) {
+		t.Errorf("同键不同 group_ref 应 ErrBatchConflict, got %v", err)
 	}
 
 	// 无 idem_key：行为不变，每次新批次
-	plain, err := f.core.CreateControlBatch("echo", []string{"nodeB"}, input, "", "admin")
+	plain, err := f.core.CreateControlBatch("echo", []string{"nodeB"}, input, "", "admin", "")
 	if err != nil {
 		t.Fatalf("无键创建失败: %v", err)
 	}
@@ -89,22 +93,22 @@ func TestControlBatchConvergedIdem(t *testing.T) {
 	f.newNode("nodeB", agentsOf("echo"), true)
 
 	input := protocol.TaskInput{Args: []string{"patrol"}}
-	b1, _, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, input, "K", "admin",
-		batchContentHash("echo", []string{"nodeB"}, input),
+	b1, _, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, input, "K", "admin", "",
+		batchContentHash("echo", []string{"nodeB"}, input, ""),
 		[]admissionDecision{admitSubmit})
 	if err != nil {
 		t.Fatalf("骨架 1 失败: %v", err)
 	}
 	// 同键同内容：收敛为命中 b1
-	id, dup, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, input, "K", "admin",
-		batchContentHash("echo", []string{"nodeB"}, input),
+	id, dup, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, input, "K", "admin", "",
+		batchContentHash("echo", []string{"nodeB"}, input, ""),
 		[]admissionDecision{admitSubmit})
 	if err != nil || !dup || id != b1 {
 		t.Errorf("事务重检应收敛为 dup(id=%s), got id=%s dup=%v err=%v", b1, id, dup, err)
 	}
 	// 同键不同内容：事务重检冲突
-	if _, _, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, protocol.TaskInput{Args: []string{"X"}}, "K", "admin",
-		batchContentHash("echo", []string{"nodeB"}, protocol.TaskInput{Args: []string{"X"}}),
+	if _, _, err := f.core.createBatchSkeleton("echo", []string{"nodeB"}, protocol.TaskInput{Args: []string{"X"}}, "K", "admin", "",
+		batchContentHash("echo", []string{"nodeB"}, protocol.TaskInput{Args: []string{"X"}}, ""),
 		[]admissionDecision{admitSubmit}); !errors.Is(err, ErrBatchConflict) {
 		t.Errorf("事务重检应冲突, got %v", err)
 	}
@@ -125,7 +129,7 @@ func TestControlBatchChildIdemKeys(t *testing.T) {
 	node := f.newNode("nodeB", agentsOf("echo"), true)
 	f.registerOffline("nodeC", agentsOf("echo"))
 
-	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC"}, protocol.TaskInput{Args: []string{"p"}}, "K", "admin")
+	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC"}, protocol.TaskInput{Args: []string{"p"}}, "K", "admin", "")
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
@@ -151,7 +155,7 @@ func TestControlBatchItemError(t *testing.T) {
 
 	// stdin 超 1MiB 信封上限 → 所有可提交目标 frame_too_large
 	big := strings.Repeat("x", protocol.MaxMessageBytes+1)
-	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC"}, protocol.TaskInput{Stdin: big}, "", "admin")
+	batch, err := f.core.CreateControlBatch("echo", []string{"nodeB", "nodeC"}, protocol.TaskInput{Stdin: big}, "", "admin", "")
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
@@ -245,7 +249,7 @@ func TestControlBatchCrashRecovery(t *testing.T) {
 	var batch *BatchView
 	go func() {
 		b, err := core1.CreateControlBatch("echo", []string{"nodeB", "nodeC"},
-			protocol.TaskInput{Args: []string{"patrol"}}, "K-CRASH", "admin")
+			protocol.TaskInput{Args: []string{"patrol"}}, "K-CRASH", "admin", "")
 		batch = b
 		errCh <- err
 	}()

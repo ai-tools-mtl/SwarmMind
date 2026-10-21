@@ -55,13 +55,19 @@ type Config struct {
 	Now func() time.Time
 	// SweepInterval 后台清扫周期；0 = 不启动后台清扫（Sweep 手动驱动，测试用）。
 	SweepInterval time.Duration
+	// OnTaskTerminal 任务终态旁路钩子（可选，nil 安全）：任务首次落定终态时
+	// 同步调用（result 首次接受 / 清扫置 failed 均触发；重复结果与冲突不触发）。
+	// 群聊闭环「结果回流群」的接线点（GROUP-RFC）：实现方不得长时间阻塞，错误
+	// 自行消化，不影响任务状态机。
+	OnTaskTerminal func(protocol.Task)
 }
 
 // Core hub 任务服务。
 type Core struct {
-	st  *store.Store
-	tr  transport.Transport
-	now func() time.Time
+	st         *store.Store
+	tr         transport.Transport
+	now        func() time.Time
+	onTerminal func(protocol.Task)
 
 	// 在线会话表（会话层经 SetOnline 维护；V0 内存 transport 下注册即在线）。
 	mu     sync.Mutex
@@ -95,14 +101,15 @@ func New(cfg Config) (*Core, error) {
 		now = protocol.NowUTC
 	}
 	c := &Core{
-		st:        cfg.Store,
-		tr:        cfg.Transport,
-		now:       now,
-		online:    make(map[string]bool),
-		sizes:     make(map[string]int64),
-		fetches:   make(map[string]*fetchWaiter),
-		sweepStop: make(chan struct{}),
-		sweepDone: make(chan struct{}),
+		st:         cfg.Store,
+		tr:         cfg.Transport,
+		now:        now,
+		onTerminal: cfg.OnTaskTerminal,
+		online:     make(map[string]bool),
+		sizes:      make(map[string]int64),
+		fetches:    make(map[string]*fetchWaiter),
+		sweepStop:  make(chan struct{}),
+		sweepDone:  make(chan struct{}),
 	}
 	for _, t := range cfg.Store.View().Tasks {
 		tt := t
@@ -275,6 +282,13 @@ func (c *Core) noteDelete(taskID string) {
 	defer c.szMu.Unlock()
 	c.totalSz -= c.sizes[taskID]
 	delete(c.sizes, taskID)
+}
+
+// fireTerminal 终态旁路钩子触发（nil 安全；同步调用，见 Config.OnTaskTerminal）。
+func (c *Core) fireTerminal(t *protocol.Task) {
+	if c.onTerminal != nil {
+		c.onTerminal(*t)
+	}
 }
 
 // mailboxTaskBytes Task JSON 编码字节数（计量口径与 mailbox.TaskBytes 一致）。

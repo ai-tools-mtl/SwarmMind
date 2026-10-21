@@ -12,8 +12,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/mtl802/swarmmind/internal/hub/group"
+	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
 // groupUnavailable Groups 未接线（旧配置/测试基座）时群端点统一降级 503。
@@ -23,6 +25,54 @@ func (s *Server) groupUnavailable(w http.ResponseWriter) bool {
 		return true
 	}
 	return false
+}
+
+// groupRefCheck 校验提交请求携带的 group_ref（GROUP-RFC 转任务闭环）：群必须
+// 存在且进行中——创建注记消息要求群可收消息。失败写 HTTP 错误并返回 false。
+// groupRef 为空直接放行。
+func (s *Server) groupRefCheck(w http.ResponseWriter, groupRef string) bool {
+	if groupRef == "" {
+		return true
+	}
+	if s.cfg.Groups == nil {
+		writeErr(w, http.StatusServiceUnavailable, "group_unavailable", "群聊功能未启用，group_ref 不可用")
+		return false
+	}
+	g, ok := s.cfg.Groups.GetGroup(groupRef)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "group_not_found", "group_ref 指向的群不存在")
+		return false
+	}
+	if g.Status == group.StatusConcluded {
+		writeErr(w, http.StatusConflict, "group_concluded", "group_ref 指向的群已结束，不能再转入任务")
+		return false
+	}
+	return true
+}
+
+// wireGroupTask 任务入群登记（GROUP-RFC group_task_created 语义）：任务已落库后
+// 调用——登记群内任务引用并注入 kind=system 创建消息。登记/注记失败只记日志：
+// 任务已提交生效，注记属 best-effort，不回滚提交。
+func (s *Server) wireGroupTask(groupRef, taskID, desc string) {
+	if s.cfg.Groups == nil || groupRef == "" || taskID == "" {
+		return
+	}
+	if err := s.cfg.Groups.AddTaskRef(groupRef, taskID); err != nil {
+		log.Printf("[hub] 任务入群登记失败 task=%s group=%s: %v", taskID, groupRef, err)
+		return
+	}
+	if _, err := s.cfg.Groups.PostMessage(groupRef, group.RefluxFrom, group.KindSystem, group.TaskCreatedBody(taskID, desc)); err != nil {
+		log.Printf("[hub] 转任务系统消息注入失败 task=%s group=%s: %v", taskID, groupRef, err)
+	}
+}
+
+// taskDesc 任务描述（转任务注记用）：优先 stdin（控制台转任务弹层承载描述的
+// 约定通道），退回 args 拼接。
+func taskDesc(input protocol.TaskInput) string {
+	if s := strings.TrimSpace(input.Stdin); s != "" {
+		return s
+	}
+	return strings.Join(input.Args, " ")
 }
 
 // groupCreateRequest 建群请求体（GROUP-RFC 六 MVP：人建群；host 固定会话

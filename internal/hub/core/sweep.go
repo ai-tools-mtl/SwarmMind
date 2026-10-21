@@ -94,6 +94,7 @@ func (c *Core) Sweep() {
 	for _, t := range terminalized {
 		c.noteTask(t)
 		c.notifyResultEvent(t)
+		c.fireTerminal(t) // 清扫置终态同样走终态旁路（expire/排队超时回流群）
 	}
 	for _, id := range removed {
 		c.noteDelete(id)
