@@ -16,6 +16,7 @@ build:
 	go build -ldflags '$(LDFLAGS)' -o hub ./cmd/hub
 	go build -ldflags '$(LDFLAGS)' -o swarmmind-node ./cmd/node
 	go build -ldflags '$(LDFLAGS)' -o swarmmindctl ./cmd/swarmmindctl
+	go build -ldflags '$(LDFLAGS)' -o swarmmind-mcp ./cmd/swarmmind-mcp
 
 test:
 	go test ./...
@@ -37,6 +38,8 @@ release:
 	GOOS=darwin GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-macos-arm64 ./cmd/node
 	GOOS=windows GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-windows-amd64.exe ./cmd/node
 	GOOS=windows GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmindctl-windows-amd64.exe ./cmd/swarmmindctl
+	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-mcp-linux-amd64 ./cmd/swarmmind-mcp
+	GOOS=darwin GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-mcp-macos-arm64 ./cmd/swarmmind-mcp
 	@ls -la dist/
 
 clean:

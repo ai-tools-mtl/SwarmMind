@@ -92,6 +92,29 @@ curl -X POST https://<hub>:8444/api/v1/tasks \
   -d '{"target_node":"my-node","target_agent":"echo","input":{"args":["hello"]},"submitted_by":"me"}'
 ```
 
+### 4. 用 MCP 让任何 agent 派任务
+
+`swarmmind-mcp` 是标准 MCP stdio 服务，任意支持 MCP 的客户端（Claude Desktop /
+HanaAgent / 其它 agent）接入后即可自然语言派单：
+
+```json
+{
+  "mcpServers": {
+    "swarmmind": {
+      "command": "/opt/swarmmind/swarmmind-mcp",
+      "env": {
+        "SWARM_HUB_URL": "http://<hub 地址>:8444",
+        "SWARM_HUB_TOKEN": "smsw_…（设置页创建的访问令牌）"
+      }
+    }
+  }
+}
+```
+
+内置 6 个工具：`swarmmind_nodes`（看节点）、`swarmmind_agents`（看能力）、
+`swarmmind_submit`（派任务）、`swarmmind_status` / `swarmmind_wait`（查状态 /
+等到终态）、`swarmmind_artifact`（取产物）。
+
 ## 核心概念
 
 | 概念 | 说明 |
@@ -113,6 +136,8 @@ curl -X POST https://<hub>:8444/api/v1/tasks \
 ## Roadmap
 
 - [x] V0：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
+- [x] 账户体系：密码登录、账户设置、PAT 令牌（GitHub 式）、恢复通道
+- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物
 - [x] 跨云实测：腾讯云 ↔ 百度云 双节点、25ms 全链、产物跨机取回
 - [ ] P4 群聊：多 agent 会话、@提及派单、上下文包共享
 - [ ] P5 Git 集成：worktree 分配、commit 归属、PR 流程
