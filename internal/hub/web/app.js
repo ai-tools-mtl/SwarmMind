@@ -170,7 +170,7 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '运维控制'], ['policy', '策略容量'], ['tokens', '设置']];
+  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
@@ -532,16 +532,16 @@ function controlPage() {
   if (C.view === 'result') return controlResult();
   const locked = C.stage === 'submitting' || C.stage === 'unknown';
   const targets = Object.keys(C.targets).filter(k => C.targets[k]);
-  return head('运维控制', '向网内巡检类 agent 派发正式任务：hub 不内嵌执行体，执行仍在 node 侧。')
+  return head('任务派发', '把任务派给网内任意节点上的智能体或工具：zcode/codex 等编码智能体，或巡检脚本。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
-    <div class="row"><h2>全网巡检</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
-    <label>选择能力<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
+    <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
+    <label>选择智能体 / 能力<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
     const v = d.node_id + '/' + d.card.name;
     return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)}（${esc(d.node_id)}）— ${esc(d.card.description || '（无描述）')}</option>`;
   }).join('') : '<option value="">目录为空：还没有节点开放能力</option>'}</select></label>
     ${S.directory.length ? `<div class="row"><small class="muted">将在 <b id="ctrl-node-hint">${esc((S.directory[0] || {}).node_id || '')}</b> 上执行</small></div>` : '<div class="notice warn">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="checkline spaced"><input type="checkbox" id="ctrl-broadcast"> 广播到所有拥有同名能力的节点（默认只派给能力所属节点）</label>
-    <label class="spaced">巡检指令<textarea id="ctrl-stdin" rows="4" placeholder="例如：检查本机 agent 进程、磁盘余量与最近错误日志，输出健康摘要。">${esc(C.stdin)}</textarea></label>
+    <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="用自然语言描述要做什么。编码智能体会读取这段描述并执行；工具脚本则把它作为附加说明。\n例如：在 demo 目录创建一个 Python 脚本，输出当前时间。">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
     <div id="ctrl-feedback" class="statusline" role="status">${ctrlFeedback()}</div>
@@ -568,7 +568,7 @@ function controlResult() {
   const ok = items.filter(i => i.task_id).length;
   const skip = items.filter(i => i.skipped).length;
   const err = items.filter(i => i.error).length;
-  return head('批次报告 · ' + esc(b.batch_id), '这次巡检在每个节点上的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
+  return head('批次报告 · ' + esc(b.batch_id), '本次派发在每个节点上的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
     + `<section class="card">
     <div class="row"><h2>汇总</h2><span class="badge ${b.status === 'complete' ? 'completed' : 'running'}">${esc(BATCH_STATES[b.status] || b.status)}</span></div>
     <div class="mini-stat"><div><b>${ok}</b><small>已提交</small></div><div><b>${skip}</b><small>已跳过</small></div><div><b>${err}</b><small>提交失败</small></div></div>
@@ -586,7 +586,7 @@ async function submitControl() {
   const C = S.C;
   if (C.stage === 'submitting' || C.stage === 'unknown') return;
   const sel = $('#ctrl-agent')?.value;
-  if (!sel) { toast('目录为空：先在节点侧开放能力，再运行巡检'); return; }
+  if (!sel) { toast('目录为空：先在节点配置里开放能力'); return; }
   const agentName = sel.split('/')[1];
   const broadcast = $('#ctrl-broadcast')?.checked;
   const targets = broadcast

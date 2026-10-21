@@ -93,7 +93,7 @@ async function main() {
   }
 
   // ---------- 运维控制页：真实派单 ----------
-  await page.click('button:has-text("运维控制")');
+  await page.click('button:has-text("任务派发")');
   await page.waitForSelector('#ctrl-agent');
   const agentOptions = await page.locator('#ctrl-agent option').count();
   record('E09', '运维控制：能力目录下拉非空', agentOptions >= 1, `选项 ${agentOptions}`);
