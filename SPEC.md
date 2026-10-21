@@ -375,6 +375,48 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - 控制台提交：submitted_by=admin（会话固定）；node 帧提交：submitted_by=node_id（hub 按连接身份覆盖）
 - submitted_by 仅作显示与审计标签，鉴权依据是会话/令牌本身
 
+## 六.六、MCP 服务（agent 统一入口，2026-10-21 立）
+
+> 定位：MCP 与 REST 管理面、双端控制台同为**一等公民接口面**。此后所有面向管理面的新功能，
+> 必须同步设计并交付对应的 MCP 工具（见本节「同步开发规则」）——禁止只写 HTTP 不管 MCP。
+
+### 实现形态
+
+- `cmd/swarmmind-mcp`：MCP stdio 服务，newline-delimited JSON-RPC 2.0 手写实现，
+  **零第三方依赖**（对齐 SPEC 三依赖白名单哲学）；新进程、不在 hub/node 内嵌。
+- 配置仅环境变量：`SWARM_HUB_URL`（管理面地址）、`SWARM_HUB_TOKEN`
+  （`smsw_` PAT 或 admin_token）；不读配置文件（MCP 客户端 env 注入为准）。
+- 鉴权：全部调用走 `Authorization: Bearer <token>`，与 REST 同一令牌体系（六.五 PAT）。
+
+### 工具面（与 REST 端点映射）
+
+| MCP 工具 | REST 映射 | 说明 |
+|---|---|---|
+| swarmmind_nodes | GET /api/v1/nodes | 在线节点与负载 |
+| swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面） |
+| swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp） |
+| swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
+| swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
+| swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
+
+### 语义约定
+
+- `wait` 是 agent 派单的主路径：轮询至终态（completed/failed/needs_review），
+  默认 300s 上限 1800s、间隔可配；超时返回当前状态而非报错（agent 可再等或转人工）。
+- `needs_review` 是合法终态：MCP 结果必须明确「结果不确定，需人工核对」，
+  禁止 agent 基于未核对结果下结论（对齐 4.8 语义）。
+- 产物仅回读文本类（无 NUL 字节）；二进制提示走控制台取回。
+- 错误一律包装为人话文本（isError=true），不向 agent 泄漏内部堆栈。
+
+### 同步开发规则（强制）
+
+1. **新功能入库检查单新增一条**：面向管理面的新 REST 能力，同一变更内必须：
+   ① SPEC 本节表格补一行映射；② cmd/swarmmind-mcp 增补对应工具（含人话描述）；
+   ③ MCP 层至少一条实测或单测。
+2. 纯内部实现（调度/存储/协议内部）不适用本规则。
+3. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
+4. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
+
 ## 七、验证标准（DoD 十一条）
 
 1. `go build ./...` 过，go.sum 完整（`-mod=readonly` 实测）

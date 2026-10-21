@@ -139,13 +139,15 @@
 
 **P1 架构预留清单（群聊 RFC 降下的边界，不实现只留位）**：Envelope 的 to 字段预留 group 寻址命名空间；消息类型注册表集中定义（防 V1 加群帧时动协议层）；runner 的 prompt 组装层独立成模块（V1 context-injection 的挂点）。
 
+**MCP 同步开发制（2026-10-21 立，SPEC 六.六）**：MCP 与 REST 管理面、双端控制台同为一级接口面。所有面向管理面的新功能（P4 群聊/任务租约、P5 产物链/Git 集成…）在阶段交付物中必须**同步列出 MCP 工具项**——实现时同一变更内交付 SPEC 六.六映射表行+工具+实测，评审时 codex 对照检查。禁止「HTTP 先行、MCP 以后补」。
+
 | 阶段 | 目标 | 交付物 | Gate（进门条件=上一阶段完成） |
 |---|---|---|---|
 | **P0 方案期** | 方案冻结 | PLAN/SPEC FINAL、竞品实测报告、模型评估 | ✅ 已完成（五轮评审+实测） |
 | **P1 V0 核心** | 单机回环+真实 agent profile | hub / node / swarmmindctl / demo 脚本 | DoD 1-10 全绿 + 伦哥验收归位 ~/coding + git 首提 |
 | **P2 V0 产品验收** | 真实异构闭环 | 双机部署文档+实测记录 | DoD 11（双机双 agent：发现/互派/产物取回/断线/权限拒绝） |
 | **P1.5 文件协作互斥**（填 P2 等待期，2-3 人日） | 同 workdir 串行性 | 调度互斥表+eligible 门控+workspace_id 上报+DoD 四项断言 | FILE-COLLAB L1 DoD 全过 |
-| **P3 V0.5 标准接入** | 生态标准接口+Web 控制台 | A2A v1.0 端点（a2a-go）、MCP 薄客户端、**Web 控制台（codex 原型 v2 已出，亮色带操作：登录制+派任务+任务管理+needs_review 核对，实现前原型经伦哥终版拍板）** | A2A 互操作实测（外部 A2A 客户端能发现并调用网内 agent）+ 控制台上线（登录制鉴权） |
+| **P3 V0.5 标准接入** | 生态标准接口+Web 控制台 | A2A v1.0 端点（a2a-go）、MCP 薄客户端、**Web 控制台（codex 原型 v2 已出，亮色带操作：登录制+派任务+任务管理+needs_review 核对，实现前原型经伦哥终版拍板）** + **账户体系（密码登录/PAT/恢复通道，v0.1.1 已交付）+ MCP 统一入口（6 工具，v0.1.1 已交付，SPEC 六.六）** | A2A 互操作实测（外部 A2A 客户端能发现并调用网内 agent）+ 控制台上线（登录制鉴权） |
 | **P4 V1 长期可用** | 无人值守稳定 + 协作空间 | 任务租约（fencing token）、Windows 服务化、凭证管理、DecisionProvider 实验（StartLux 影子建议先行）、**群聊/协作空间（GROUP-RFC，MVP：人建群点名发言+转任务+结果回流）+ 产物链与依赖（FILE-COLLAB L2：depends_on idem 寻址/纯复制挂载/跨机取回）** | 连续 14 天无人值守稳定 + 降级演练通过 + 群版 DoD 增补通过 |
 | **P5 V2 生态扩展** | 按需 | 端到端加密、IDE/app adapter、能力下发、**Git 集成（FILE-COLLAB L3：worktree/branch 模式+自动 commit+冲突回群+janitor，8-12 人日，前置=凭证方案+保留窗对齐）**、开源发布工程（若开源：文档/CI/社区） | 按需定义 |
 

@@ -10,6 +10,8 @@
 - 禁止在 V0 引入 SPEC 第三节白名单之外的依赖；新增依赖必须在代码注释写理由
 - 工人不执行 git commit；提交按钮在伦哥手里。改完跑 `go build ./... && go test ./...` 并在最终输出列出改动文件清单与每条 DoD 的验证结果
 
+- 面向管理面的新 REST 能力 → 同一变更内必须同步交付 MCP 工具（SPEC 六.六）：补 SPEC 六.六映射表一行 + cmd/swarmmind-mcp 增工具 + 实测；工具名前缀 swarmmind_，描述写「能做什么」。评审者对照本条检查，缺 MCP 同步 = 必须修
+
 ## Git 远程操作（2026-10-21 新增，两文件同步）
 
 - **push 前必须先查 remote**：`git remote -v` 确认目标仓库是伦哥指定的，禁止凭记忆猜测用户名/仓库名自建 remote（2026-10-21 SwarmMind 首提误建 mtl802/SwarmMind，正确为 ai-tools-mtl/SwarmMind）。
