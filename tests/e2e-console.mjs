@@ -75,8 +75,8 @@ async function main() {
   await page.waitForSelector('#enroll-snippet', { state: 'detached' });
 
   // ---------- 任务监管页 ----------
-  await page.click('button:has-text("任务监管")');
-  await page.waitForSelector('.table-wrap');
+  await page.click('aside button:has-text("任务监管")');
+  await page.waitForSelector('th:has-text("提交时间")', { timeout: 15000 }); // 任务表头唯一，option 不会误匹配
   const taskRows = await page.locator('tr[data-task]').count();
   record('E07', '任务监管：历史任务列表渲染', taskRows >= 1, `行数 ${taskRows}`);
 
@@ -107,7 +107,10 @@ async function main() {
 
   // TC-E11 批次报告「查看任务」直达详情（BUG 回归：提交后快照即时刷新）
   await page.locator('[data-act="detail"]').first().click();
-  await page.waitForSelector('.drawer', { timeout: 20000 });
+  await page.waitForSelector('.drawer', { timeout: 20000, state: 'visible' }).catch(async () => {
+    console.log('  [调试] drawer 未出现；S.tasks=', await p.evaluate(() => S.tasks.length), 'hash=', p.url());
+    throw new Error('drawer not visible');
+  });
   const detailText = await page.textContent('.drawer');
   const notFound = detailText.includes('已归档') || detailText.includes('不存在');
   record('E11', '批次报告→查看任务：直达详情不 404（BUG 回归）', !notFound, notFound ? '出现归档提示' : '详情正常打开');

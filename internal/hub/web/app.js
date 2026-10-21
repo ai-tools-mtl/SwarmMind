@@ -343,7 +343,7 @@ function nodesPage() {
   return head('节点接入', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('生成接入配置', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
     ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>管理</th></tr></thead><tbody>
-    ${S.nodes.map(n => `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td class="table-action">${button('吊销', 'revoke', 'danger', '', `data-node="${esc(n.node_id)}"`)}</td></tr>`).join('')}
+    ${S.nodes.map(n => `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`).join('')}
     </tbody></table></div>`
     : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
     <p class="footer-note">每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
@@ -411,7 +411,7 @@ function taskTable(list) {
     <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，需人工核对')}">ⓘ</small>` : ''}${t.review ? '<small>已核对</small>' : ''}</td>
     <td>${esc(t.submitted_by)}</td>
     <td><small>${esc(fmtTime(t.created_at))}</small></td>
-    <td class="table-action">${t.status === 'needs_review' && !t.review ? button('去核对', 'detail', 'link', '', `data-id="${esc(t.id)}"`) : button('查看 →', 'detail', 'link', '', `data-id="${esc(t.id)}"`)}</td>
+    <td class="table-action">${t.status === 'needs_review' && !t.review ? button('去核对', 'detail', 'link', `data-id="${esc(t.id)}"`) : button('查看 →', 'detail', 'link', `data-id="${esc(t.id)}"`)}</td>
   </tr>`).join('')}</tbody></table></div>`;
 }
 
@@ -566,7 +566,7 @@ function controlResult() {
     <div class="table-wrap spaced"><table><thead><tr><th>目标节点</th><th>结果</th><th>去向</th></tr></thead><tbody>
     ${items.map(it => `<tr><td><b>${esc(it.target)}</b></td>
       <td>${it.task_id ? badge(it.status || 'submitted') : it.skipped ? `<span class="badge offline" title="${esc(it.skipped)}">已跳过（${it.skipped === 'offline' ? '离线' : '能力未开放'}）</span>` : `<span class="badge failed">失败</span>`}</td>
-      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', '', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${it.skipped === 'offline' ? '节点离线，未提交' : it.skipped === 'not_exposed' ? '该节点未开放此能力' : esc(ERRORS[it.error] || it.error || '')}</small>`}</td>
+      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${it.skipped === 'offline' ? '节点离线，未提交' : it.skipped === 'not_exposed' ? '该节点未开放此能力' : esc(ERRORS[it.error] || it.error || '')}</small>`}</td>
     </tr>`).join('')}
     </tbody></table></div>
     <p class="footer-note">批次创建于 ${esc(fmtFull(b.created_at))} · 各任务状态随页面自动刷新。</p>
@@ -680,7 +680,7 @@ function tokensPage() {
       <td><small>${esc(fmtTime(t.created_at))}</small></td>
       <td><small>${t.last_used_at ? esc(fmtTime(t.last_used_at)) : '从未使用'}</small></td>
       <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
-      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', '', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
+      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
     </tbody></table></div>
     <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
@@ -722,7 +722,7 @@ const ACT = {
       render(); toast('账户信息已更新');
     } else toast('更新失败：' + (r ? errLine(r.data) : '网络异常'));
   },
-  'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', '', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`),
+  'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`),
   'token-revoke-confirm': async b => {
     const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
     if (r && r.code === 200) {

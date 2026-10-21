@@ -57,9 +57,10 @@ deploy-hub:
 	scp -i $(HUB_KEY) /tmp/swarmmind.bundle $(HUB_SSH):/tmp/swarmmind.bundle
 	ssh -i $(HUB_KEY) $(HUB_SSH) 'set -e; \
 	  export PATH=$$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,direct; \
+	  git config --global --add safe.directory $(HUB_SRC) 2>/dev/null || true; \
 	  if [ -d $(HUB_SRC)/.git ]; then \
-	    git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main:bundle-main 2>/dev/null || git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main; \
-	    git -C $(HUB_SRC) checkout -q bundle-main; \
+	    sudo git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main:bundle-main 2>/dev/null || sudo git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main; \
+	    sudo git -C $(HUB_SRC) checkout -q bundle-main; \
 	  else \
 	    sudo git clone -q -b main /tmp/swarmmind.bundle $(HUB_SRC); \
 	    git -C $(HUB_SRC) checkout -q bundle-main 2>/dev/null || true; \
