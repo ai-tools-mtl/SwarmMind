@@ -35,9 +35,11 @@ sleep 4
 ST=$($HUB_SSH "curl -s -b /tmp/hc http://127.0.0.1:8444/api/v1/tasks/$TID2" | python3 -c "import sys,json;t=json.load(sys.stdin);print(t['status'],(t.get('result') or {}).get('error',''))")
 check "cancelled(user_cancelled) 终态" "$ST" "cancelled user_cancelled"
 
-echo "== 演练 4：终端态取消 → 409 =="
+echo "== 演练 4：重复取消 → 幂等 200（客户端重试友好，设计如此）=="
 CODE2=$($HUB_SSH "curl -s -b /tmp/hc -X POST http://127.0.0.1:8444/api/v1/tasks/$TID2/cancel -H 'Content-Type: application/json' -d '{}' -o /dev/null -w '%{http_code}'")
-check "已终态取消 409" "$CODE2" "409"
+check "已终态取消幂等 200" "$CODE2" "200"
+ST2=$($HUB_SSH "curl -s -b /tmp/hc http://127.0.0.1:8444/api/v1/tasks/$TID2" | python3 -c "import sys,json;t=json.load(sys.stdin);print(t['status'])")
+check "重复取消后状态仍 cancelled" "$ST2" "cancelled"
 
 echo
 echo "===== 演练汇总：$PASS 通过 / $FAIL 失败 ====="
