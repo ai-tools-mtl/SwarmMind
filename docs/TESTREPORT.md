@@ -29,3 +29,20 @@ API 直验补充：改密码全链 curl 200×4；PAT 生命周期（创建/鉴�
 ## 遗留
 
 - E2E 脚本与 TESTPLAN curl 用例合并为持续回归套件（P4 开发时随功能同步扩展）
+
+
+## 附：P4.0 总理验收实测（2026-10-22 00:50）
+
+**场景**：总理模式复合目标「检查 mac-mini 和 baidu-node 磁盘并汇总对比报告」（PRIME.md 全文包装，用户明示直接干）
+
+**执行**：zcode（GLM）+ SwarmMind MCP（.zcode/config.json mcp.servers 挂载）→ 自主分解 2 并行 diskcheck → wait 收集 → 产出对比报告
+
+**结果**：✅ 通过
+- 双机真实数据齐全（baidu 40G/53%、mac 460Gi/324Gi 可用、负载/内存）
+- 专业洞察：baidu 无 swap OOM 风险提醒；mac 只读系统卷 4% 与 Data 卷区分
+- 遗留决策项规范上报（swap 决策、Data 卷精确巡检）
+- 全程无人工干预
+
+**前次失败教训闭环**：首任期（会话无 MCP+误连测试网）暴露环境配置缺口 → 本轮 .zcode/config.json mcp.servers 挂载修复 → 真数据报告达成。
+
+**判定：P4.0 关门。**
