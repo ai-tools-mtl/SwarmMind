@@ -108,7 +108,10 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)
 	case conflict:
-		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID, nil,
+		// 必须携带 TaskRef：node 依赖它定位账本条目置 closed 停止重传（2026-10-22
+		// 深夜演练抓到：Payload nil 导致 node 重发循环每分钟一次）
+		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID,
+			protocol.TaskRef{TaskID: p.TaskID},
 			&protocol.ErrInfo{Code: protocol.CodeResultConflict, Msg: "终态已持久化，保留先到结果"})
 	}
 }
