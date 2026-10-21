@@ -59,11 +59,10 @@ deploy-hub:
 	  export PATH=$$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,direct; \
 	  git config --global --add safe.directory $(HUB_SRC) 2>/dev/null || true; \
 	  if [ -d $(HUB_SRC)/.git ]; then \
-	    sudo git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main:bundle-main 2>/dev/null || sudo git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main; \
-	    sudo git -C $(HUB_SRC) checkout -q bundle-main; \
+	    sudo git -C $(HUB_SRC) fetch /tmp/swarmmind.bundle main; \
+	    sudo git -C $(HUB_SRC) checkout -q --detach FETCH_HEAD; \
 	  else \
-	    sudo git clone -q -b main /tmp/swarmmind.bundle $(HUB_SRC); \
-	    git -C $(HUB_SRC) checkout -q bundle-main 2>/dev/null || true; \
+	    sudo git clone -q /tmp/swarmmind.bundle $(HUB_SRC); \
 	  fi; \
 	  cd $(HUB_SRC) && echo "构建自: $$(git log --oneline -1)"; \
 	  sudo /usr/local/go/bin/go build -o /opt/swarmmind/hub.new ./cmd/hub; \
