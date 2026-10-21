@@ -127,6 +127,7 @@ function route() {
   if (p === 'tasks' && arg && STATES[arg]) { S.f = { status: arg, trace: '', by: '', error: '', from: '', to: '' }; }
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
   render();
+  if (S.authed && S.page === 'tokens') loadTokens().then(() => { if (S.page === 'tokens') render(); });
   window.scrollTo(0, 0);
 }
 function go(p, status = '') {

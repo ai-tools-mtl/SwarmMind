@@ -10,6 +10,7 @@ const USER = process.env.E2E_USER || 'admin';
 const PASS = process.env.E2E_PASS || 'Swarm@2026';
 
 const results = [];
+const p_sleep = ms => new Promise(r => setTimeout(r, ms));
 function record(id, name, ok, note = '') {
   results.push({ id, name, ok, note });
   console.log(`${ok ? '✅ PASS' : '❌ FAIL'}  ${id}  ${name}${note ? '  — ' + note : ''}`);
@@ -117,8 +118,8 @@ async function main() {
   await page.keyboard.press('Escape');
 
   // ---------- 策略容量页 ----------
-  await page.click('button:has-text("策略容量")');
-  await page.waitForSelector('text=策略容量');
+  await page.click('aside button:has-text("策略容量")');
+  await page.waitForSelector('text=信箱条数', { timeout: 15000 }); // 策略页独有首行
   const policyRows = await page.locator('table tbody tr').count();
   record('E12', '策略容量：额度表渲染', policyRows >= 8, `行数 ${policyRows}`);
 
@@ -157,14 +158,16 @@ async function main() {
   await page.fill('#acc-cur', PASS);
   await page.fill('#acc-new', PASS + 'x');
   await page.click('[data-act="account-update"]');
-  await page.waitForSelector('text=账户信息已更新', { timeout: 15000 });
-  record('E17', '设置：修改密码成功', true);
+  await p_sleep(2000);
+  const accAfter = await page.evaluate(() => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: PASS + 'x' }) }).then(r => r.status));
+  record('E17', '设置：修改密码成功（新密码可换会话验证）', accAfter === 200, `新密码登录态 ${accAfter}`);
   // 改回原密码（保持环境稳定）
   await page.fill('#acc-cur', PASS + 'x');
   await page.fill('#acc-new', PASS);
   await page.click('[data-act="account-update"]');
-  await page.waitForSelector('text=账户信息已更新', { timeout: 15000 });
-  record('E18', '设置：密码改回原值（环境闭环）', true);
+  await p_sleep(2000);
+  const accBack = await page.evaluate(() => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: PASS }) }).then(r => r.status));
+  record('E18', '设置：密码改回原值（环境闭环）', accBack === 200);
 
   await browser.close();
 
