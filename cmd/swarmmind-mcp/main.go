@@ -15,7 +15,10 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具（7 个）：nodes / agents / submit / status / wait / artifact / swarmmind_decide。
+// 工具（12 个）：nodes / agents / submit / status / wait / artifact / decide
+// + group_create / group_list / group_say / group_messages / group_close
+// （群聊协作空间，GROUP-RFC 六 MVP：有目标的多 agent 持续讨论空间，创建即
+// discussing，concluded 终态；agent 发言预算默认 20 轮，消息体 8KiB 上限）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
 // 失败自动降级 L2 本地规则分配（关键词匹配 + inflight 负载决胜），永不停摆，响应标注 used_level。
@@ -158,6 +161,24 @@ func tools() []toolDef {
 			"subtask_description": s("子任务描述（做什么，越具体越准）"),
 			"capability_options":  a("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
 		}, "subtask_description", "capability_options")},
+		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。返回群 ID", InputSchema: obj(map[string]any{
+			"goal":    s("群目标（一句话说清要讨论出什么）"),
+			"members": a("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
+		}, "goal")},
+		{Name: "swarmmind_group_list", Description: "查看全部协作群：群 ID、目标、状态（discussing 进行中 / concluded 已结束）、成员与发言预算", InputSchema: obj(map[string]any{})},
+		{Name: "swarmmind_group_say", Description: "在协作群里发一条消息。默认按 user（人转述）发言；agent 参与讨论请传 kind=agent（计入发言预算，默认 20 轮，用尽返回 budget_exhausted）", InputSchema: obj(map[string]any{
+			"group_id": s("群 ID（swarmmind_group_list 可查）"),
+			"from":     s("发言者标识（谁在说话，如 coder / admin）"),
+			"body":     s("消息正文（8KiB 上限）"),
+			"kind":     s("消息类别（可选：user|agent|system，默认 user）"),
+		}, "group_id", "from", "body")},
+		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐", InputSchema: obj(map[string]any{
+			"group_id": s("群 ID"),
+			"since":    n("已见最大 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
+		}, "group_id")},
+		{Name: "swarmmind_group_close", Description: "结束协作群：置 concluded 终态（不可回退、不再收消息）；重复关闭幂等", InputSchema: obj(map[string]any{
+			"group_id": s("群 ID"),
+		}, "group_id")},
 	}
 }
 
@@ -862,6 +883,175 @@ func truncateBytes(b []byte, n int) string {
 	return string(b[:n]) + "…（截断）"
 }
 
+/* ---------- 群聊协作空间（GROUP-RFC 六 MVP） ---------- */
+
+// groupErrHint 将 hub 错误码转成 agent 可行动的人话提示。
+func groupErrHint(code int, data []byte) error {
+	var e struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(data, &e)
+	hint := map[string]string{
+		"group_not_found":  "群不存在（swarmmind_group_list 可查现有群）",
+		"group_concluded":  "群已结束（终态），不能再发言",
+		"budget_exhausted": "发言预算（agent 轮数）已用尽：可 swarmmind_group_close 结束后另建群，或由人插话推进",
+		"body_too_large":   "消息体超 8KiB 上限，请精简正文后再发",
+		"invalid_request":  e.Message,
+	}[e.Error]
+	if hint == "" {
+		hint = truncate(data)
+	}
+	return fmt.Errorf("hub %d：%s", code, hint)
+}
+
+func toolGroupCreate(args map[string]any) (string, error) {
+	goal, _ := args["goal"].(string)
+	if strings.TrimSpace(goal) == "" {
+		return "", fmt.Errorf("goal 必填（一句话说清要讨论出什么）")
+	}
+	raw, _ := args["members"].([]any)
+	members := make([]string, 0, len(raw))
+	for _, v := range raw {
+		sv, ok := v.(string)
+		if !ok || strings.TrimSpace(sv) == "" {
+			return "", fmt.Errorf("members 须为非空字符串数组")
+		}
+		members = append(members, strings.TrimSpace(sv))
+	}
+	code, data, err := hubAPI("POST", "/api/v1/groups", map[string]any{"goal": goal, "members": members})
+	if err != nil {
+		return "", err
+	}
+	if code != 201 {
+		return "", groupErrHint(code, data)
+	}
+	var g struct {
+		ID      string   `json:"group_id"`
+		Members []string `json:"members"`
+	}
+	_ = json.Unmarshal(data, &g)
+	return fmt.Sprintf("协作群已创建：%s\n目标：%s\n成员：%s\n用 swarmmind_group_say 发言、swarmmind_group_messages 拉消息、swarmmind_group_close 结束。",
+		g.ID, goal, strings.Join(g.Members, "、")), nil
+}
+
+func toolGroupList() (string, error) {
+	code, data, err := hubAPI("GET", "/api/v1/groups", nil)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", groupErrHint(code, data)
+	}
+	var out struct {
+		Groups []struct {
+			ID      string   `json:"group_id"`
+			Goal    string   `json:"goal"`
+			Status  string   `json:"status"`
+			Members []string `json:"members"`
+			Budget  struct {
+				MaxRounds int `json:"max_rounds"`
+			} `json:"budget"`
+		} `json:"groups"`
+	}
+	_ = json.Unmarshal(data, &out)
+	if len(out.Groups) == 0 {
+		return "还没有协作群（swarmmind_group_create 可建）。", nil
+	}
+	var b strings.Builder
+	for _, g := range out.Groups {
+		st := "讨论中"
+		if g.Status == "concluded" {
+			st = "已结束"
+		} else if g.Status == "forming" {
+			st = "组建中"
+		}
+		fmt.Fprintf(&b, "%s：%s（%s｜成员 %s｜发言上限 %d 轮）\n", g.ID, g.Goal, st, strings.Join(g.Members, "、"), g.Budget.MaxRounds)
+	}
+	return b.String(), nil
+}
+
+func toolGroupSay(args map[string]any) (string, error) {
+	gid, _ := args["group_id"].(string)
+	from, _ := args["from"].(string)
+	body, _ := args["body"].(string)
+	kind, _ := args["kind"].(string)
+	if gid == "" || from == "" {
+		return "", fmt.Errorf("group_id 与 from 必填")
+	}
+	if body == "" {
+		return "", fmt.Errorf("body 必填")
+	}
+	req := map[string]any{"from": from, "kind": kind, "body": body}
+	if kind == "" {
+		req["kind"] = "user"
+	}
+	code, data, err := hubAPI("POST", "/api/v1/groups/"+gid+"/messages", req)
+	if err != nil {
+		return "", err
+	}
+	if code != 201 {
+		return "", groupErrHint(code, data)
+	}
+	var m struct {
+		Seq int64 `json:"seq"`
+	}
+	_ = json.Unmarshal(data, &m)
+	return fmt.Sprintf("已发到群 %s（seq=%d）。\n用 swarmmind_group_messages（since=%d）拉新消息。", gid, m.Seq, m.Seq), nil
+}
+
+func toolGroupMessages(args map[string]any) (string, error) {
+	gid, _ := args["group_id"].(string)
+	if gid == "" {
+		return "", fmt.Errorf("group_id 必填")
+	}
+	since := int64(0)
+	if v, ok := args["since"].(float64); ok && v > 0 {
+		since = int64(v)
+	}
+	code, data, err := hubAPI("GET", fmt.Sprintf("/api/v1/groups/%s/messages?since=%d", gid, since), nil)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", groupErrHint(code, data)
+	}
+	var out struct {
+		Messages []struct {
+			Seq  int64  `json:"seq"`
+			From string `json:"from"`
+			Kind string `json:"kind"`
+			Body string `json:"body"`
+		} `json:"messages"`
+	}
+	_ = json.Unmarshal(data, &out)
+	if len(out.Messages) == 0 {
+		return fmt.Sprintf("群 %s 自 seq=%d 后没有新消息。", gid, since), nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "群 %s 新增 %d 条：\n", gid, len(out.Messages))
+	for _, m := range out.Messages {
+		fmt.Fprintf(&b, "[#%d] %s(%s)：%s\n", m.Seq, m.From, m.Kind, m.Body)
+	}
+	b.WriteString("按 #序号 继续 swarmmind_group_messages(since=最大序号) 轮询。")
+	return b.String(), nil
+}
+
+func toolGroupClose(args map[string]any) (string, error) {
+	gid, _ := args["group_id"].(string)
+	if gid == "" {
+		return "", fmt.Errorf("group_id 必填")
+	}
+	code, data, err := hubAPI("POST", "/api/v1/groups/"+gid+"/close", map[string]any{"by": "mcp"})
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", groupErrHint(code, data)
+	}
+	return fmt.Sprintf("群 %s 已结束（concluded 终态，不再收消息）。", gid), nil
+}
+
 /* ---------- 工具路由 ---------- */
 
 func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
@@ -891,6 +1081,16 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolArtifact(args)
 	case "swarmmind_decide":
 		text, err = toolDecide(args)
+	case "swarmmind_group_create":
+		text, err = toolGroupCreate(args)
+	case "swarmmind_group_list":
+		text, err = toolGroupList()
+	case "swarmmind_group_say":
+		text, err = toolGroupSay(args)
+	case "swarmmind_group_messages":
+		text, err = toolGroupMessages(args)
+	case "swarmmind_group_close":
+		text, err = toolGroupClose(args)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

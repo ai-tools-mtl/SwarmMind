@@ -23,6 +23,7 @@ import (
 
 	"github.com/mtl802/swarmmind/internal/hub/api"
 	"github.com/mtl802/swarmmind/internal/hub/core"
+	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/session"
 	"github.com/mtl802/swarmmind/internal/hub/store"
 )
@@ -113,6 +114,13 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	}
 	defer st.Close()
 
+	// 群聊存储（GROUP-RFC 六 MVP）：独立快照 groups.json，先写后见同模式
+	groups, err := group.Open(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("打开群聊 store 失败: %w", err)
+	}
+	defer groups.Close()
+
 	// 会话层与任务服务接线：Manager 实现 transport.Transport（membus 替换点，
 	// SPEC 八.3）；SetOnline 经 late-bound 闭包接 core（core 构造需要 Manager）。
 	var coreSvc *core.Core
@@ -148,8 +156,8 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 
-	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4）
-	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir}).Handler()}
+	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4；Groups 群聊 MVP 端点）
+	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups}).Handler()}
 	apiLn, err := net.Listen("tcp", cfg.APIListen)
 	if err != nil {
 		return fmt.Errorf("管理面监听 %s 失败: %w", cfg.APIListen, err)
