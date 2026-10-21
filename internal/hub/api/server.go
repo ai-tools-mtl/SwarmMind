@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/mtl802/swarmmind/internal/hub/core"
+	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
 	"github.com/mtl802/swarmmind/internal/hub/web"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -43,6 +44,9 @@ type Config struct {
 	AdminToken string
 	// DataDir 数据目录（子令牌 api_tokens.json 的存放位置；空则禁用 PAT 功能）。
 	DataDir string
+	// Groups 群聊存储（GROUP-RFC 六 MVP）；nil 时群端点统一 503 降级
+	// （旧构造方不感知该依赖）。
+	Groups *group.Store
 }
 
 // Server 管理面 HTTP 服务。
@@ -90,8 +94,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
-	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard) // A2A 发现卡（免鉴权，SPEC 六.五）
-	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))          // A2A JSON-RPC（与现有同一令牌体系）
+	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                // 群聊 MVP（GROUP-RFC 六）
+	mux.HandleFunc("GET /api/v1/groups", s.auth(s.handleGroupList))                   // 群列表
+	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages)) // 增量拉取
+	mux.HandleFunc("POST /api/v1/groups/{id}/messages", s.auth(s.handleGroupSay))     // 发言
+	mux.HandleFunc("POST /api/v1/groups/{id}/close", s.auth(s.handleGroupClose))      // 结束（终态）
+	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)                  // A2A 发现卡（免鉴权，SPEC 六.五）
+	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))                           // A2A JSON-RPC（与现有同一令牌体系）
 	console := web.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

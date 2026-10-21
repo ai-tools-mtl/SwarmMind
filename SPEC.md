@@ -405,6 +405,11 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
 | swarmmind_decide | 外部 StartLux /v1/decisions（bamboonode/MLX 本地） | 分配决策查询：云端 L0 → 规则兜底 L2 自动降级，响应标 used_level（P4.1） |
+| swarmmind_group_create | POST /api/v1/groups | 建协作群（目标+成员；返回 g- 群 ID，创建即 discussing；GROUP-RFC 六 MVP，P4/V1） |
+| swarmmind_group_list | GET /api/v1/groups | 看全部协作群（目标/状态/成员/发言预算） |
+| swarmmind_group_say | POST /api/v1/groups/{id}/messages | 群里发言（kind 缺省 user；agent 发言计入预算，用尽报 budget_exhausted；消息体 8KiB 上限） |
+| swarmmind_group_messages | GET /api/v1/groups/{id}/messages?since | 拉群消息（since 增量补齐，seq 单调锚点） |
+| swarmmind_group_close | POST /api/v1/groups/{id}/close | 结束群（concluded 终态不可回退，重复关闭幂等） |
 
 ### 语义约定
 
