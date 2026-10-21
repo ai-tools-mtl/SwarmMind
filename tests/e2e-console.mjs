@@ -19,6 +19,7 @@ function record(id, name, ok, note = '') {
 async function main() {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  globalThis.__page = page;
   page.setDefaultTimeout(15000);
 
   // ---------- 账户状态探测：走 setup 或密码登录 ----------
@@ -126,7 +127,11 @@ async function main() {
   // ---------- 设置页：账户信息 + 令牌 ----------
   await page.click('button:has-text("设置")');
   await page.waitForSelector('text=账户信息');
-  const acctOk = (await page.textContent('body')).includes('admin');
+  let acctOk = false;
+  try {
+    await page.waitForFunction(() => document.body.innerText.includes('admin'), { timeout: 10000 });
+    acctOk = true;
+  } catch { }
   record('E13', '设置：账户信息显示当前用户名', acctOk);
 
   // TC-E14 令牌创建：明文一次性展示 → 保存后列表可见
@@ -148,25 +153,28 @@ async function main() {
   record('E16', '退出登录回到登录页', backToLogin);
 
   // TC-E17 修改密码后旧密码失效 + 新密码可登录（改回原密码闭环）
-  // 先重新登录
+  // 先重新登录（等退出后的渲染稳定：密码表单可见且探询完成）
+  await page.waitForSelector('#pw-login-form', { state: 'visible', timeout: 15000 });
+  await p_sleep(1200);
   await page.fill('#login-user', USER);
   await page.fill('#login-pass', PASS);
   await page.click('#pw-login-form button[type=submit]');
   await page.waitForSelector('text=总览', { timeout: 15000 });
-  await page.click('button:has-text("设置")');
+  await page.click('aside button:has-text("设置")');
   await page.waitForSelector('#acc-cur');
+  await p_sleep(1500); // 等进页异步重渲（loadTokens 完成后 render 会重建 DOM，提前填值会被清掉）
   await page.fill('#acc-cur', PASS);
   await page.fill('#acc-new', PASS + 'x');
   await page.click('[data-act="account-update"]');
   await p_sleep(2000);
-  const accAfter = await page.evaluate(() => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: PASS + 'x' }) }).then(r => r.status));
+  const accAfter = await page.evaluate(([u, pw]) => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: pw }) }).then(r => r.status), [USER, PASS + 'x']);
   record('E17', '设置：修改密码成功（新密码可换会话验证）', accAfter === 200, `新密码登录态 ${accAfter}`);
   // 改回原密码（保持环境稳定）
   await page.fill('#acc-cur', PASS + 'x');
   await page.fill('#acc-new', PASS);
   await page.click('[data-act="account-update"]');
   await p_sleep(2000);
-  const accBack = await page.evaluate(() => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: PASS }) }).then(r => r.status));
+  const accBack = await page.evaluate(([u, pw]) => fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: pw }) }).then(r => r.status), [USER, PASS]);
   record('E18', '设置：密码改回原值（环境闭环）', accBack === 200);
 
   await browser.close();
@@ -181,4 +189,15 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('E2E 异常终止:', e.message); process.exit(2); });
+main().catch(async e => {
+  console.error('E2E 异常终止:', e.message);
+  try {
+    const page = globalThis.__page;
+    if (page) {
+      console.log('[dump] URL:', page.url());
+      console.log('[dump] body:', (await page.textContent('body')).replace(/\s+/g, ' ').slice(0, 400));
+      await page.screenshot({ path: '/tmp/e2e-fail.png' });
+    }
+  } catch { }
+  process.exit(2);
+});

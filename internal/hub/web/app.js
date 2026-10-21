@@ -184,7 +184,7 @@ function metric(label, value, desc, cls = '') { return `<div class="card${cls ? 
 function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || s)}</span>`; }
 function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线' : '离线'}</span>`; }
 function warnNotice(title, body) { return `<div class="notice warn"><b>${title}</b><br>${body}</div>`; }
-const fmtTime = s => s ? String(s).replace('T', ' ').slice(0, 16) : '';
+const fmtTime = s => (s && !String(s).startsWith('0001-01-01')) ? String(s).replace('T', ' ').slice(0, 16) : '';
 const fmtFull = s => s ? String(s).replace('T', ' ').slice(0, 19) + ' UTC' : '';
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
