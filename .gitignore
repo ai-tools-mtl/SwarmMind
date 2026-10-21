@@ -1,3 +1,7 @@
+/hub
+/swarmmind-node
+/swarmmindctl
+/swarmmind-mcp
 # 构建产物（仅根目录的二进制与 dist）
 /dist/
 /hub
