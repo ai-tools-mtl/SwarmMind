@@ -26,6 +26,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/session"
 	"github.com/mtl802/swarmmind/internal/hub/store"
+	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
 // hubConfig configs/hub.yaml 结构（SPEC 五 hub 配置）。
@@ -134,8 +135,15 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		},
 	})
 	coreSvc, err = core.New(core.Config{
-		Store:         st,
-		Transport:     mgr,
+		Store:     st,
+		Transport: mgr,
+		// 群聊闭环（GROUP-RFC）：任务终态自动回流引用它的群（幂等由群存储的
+		// 已回流集合保证）；失败只记日志，不影响任务状态机。
+		OnTaskTerminal: func(t protocol.Task) {
+			if _, err := groups.RefluxTaskResult(t.ID, group.TaskTerminalBody(t)); err != nil {
+				log.Printf("[hub] 任务终态回流群失败 task=%s: %v", t.ID, err)
+			}
+		},
 		SweepInterval: time.Second,
 	})
 	if err != nil {

@@ -85,6 +85,9 @@ type ControlBatch struct {
 	SubmittedBy string `json:"submitted_by"`
 	// IdemKey 批次幂等键（可选，State.BatchIdems 的键）；空 = 不做批次幂等。
 	IdemKey string `json:"idem_key,omitempty"`
+	// GroupRef 可选群引用（GROUP-RFC 转任务闭环）：批次各子任务归属的协作群。
+	// 参与批次内容指纹（同键不同 group_ref 视为不同内容）。
+	GroupRef string `json:"group_ref,omitempty"`
 	// Status 生命周期：creating → complete（取值见 BatchStatusXxx）。
 	Status string `json:"status"`
 	// CreatedAt 批次创建时刻（UTC）。

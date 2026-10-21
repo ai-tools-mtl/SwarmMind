@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
 // TestCreateGroup 覆盖：g- 前缀 / 创建即 discussing / 默认预算 20 / 成员拷贝。
@@ -304,5 +306,215 @@ func TestInvalidMessages(t *testing.T) {
 		if _, err := s.PostMessage(g.ID, tc.from, tc.kind, tc.body); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("(%q,%q,%q) 应 ErrInvalid, got %v", tc.from, tc.kind, tc.body, err)
 		}
+	}
+}
+
+// TestAddTaskRef 覆盖（GROUP-RFC 转任务闭环）：登记追加去重（幂等）、随快照
+// 持久化（重启恢复）、未知群 ErrNotFound、空 task_id ErrInvalid、concluded 群
+// ErrConcluded。
+func TestAddTaskRef(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	g, _ := s.CreateGroup("goal", "admin", nil)
+	if err := s.AddTaskRef(g.ID, "t-1"); err != nil {
+		t.Fatalf("登记任务引用: %v", err)
+	}
+	// 重复登记幂等：不产生重复条目
+	if err := s.AddTaskRef(g.ID, " t-1 "); err != nil {
+		t.Fatalf("重复登记应幂等成功: %v", err)
+	}
+	if err := s.AddTaskRef(g.ID, "t-2"); err != nil {
+		t.Fatalf("登记第二条: %v", err)
+	}
+	got, ok := s.GetGroup(g.ID)
+	if !ok || len(got.TaskRefs) != 2 || got.TaskRefs[0] != "t-1" || got.TaskRefs[1] != "t-2" {
+		t.Fatalf("引用列表应 [t-1 t-2]（去重）, got %+v ok=%v", got.TaskRefs, ok)
+	}
+	// 参数与存在性校验
+	if err := s.AddTaskRef(g.ID, " "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("空 task_id 应 ErrInvalid, got %v", err)
+	}
+	if err := s.AddTaskRef("g-none", "t-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("未知群应 ErrNotFound, got %v", err)
+	}
+	// concluded 群拒绝登记（创建注记要求群可收消息）
+	if _, err := s.CloseGroup(g.ID, "admin"); err != nil {
+		t.Fatalf("关群: %v", err)
+	}
+	if err := s.AddTaskRef(g.ID, "t-3"); !errors.Is(err, ErrConcluded) {
+		t.Fatalf("concluded 群应 ErrConcluded, got %v", err)
+	}
+
+	// 重启恢复：引用列表随快照持久化
+	if err := s.Close(); err != nil {
+		t.Fatalf("关闭 store: %v", err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重启打开: %v", err)
+	}
+	defer s2.Close()
+	got2, _ := s2.GetGroup(g.ID)
+	if len(got2.TaskRefs) != 2 || got2.TaskRefs[0] != "t-1" || got2.TaskRefs[1] != "t-2" {
+		t.Fatalf("重启后引用列表应恢复, got %+v", got2.TaskRefs)
+	}
+	// 旧快照兼容：无 task_refs 字段的群读取为空列表不报错
+	g3, _ := s2.CreateGroup("legacy", "admin", nil)
+	if refs := (Group{}).TaskRefs; refs != nil {
+		t.Fatalf("零值 TaskRefs 应为 nil, got %v", refs)
+	}
+	if _, ok := s2.GetGroup(g3.ID); !ok {
+		t.Fatal("新群应可查")
+	}
+}
+
+// TestRefluxTaskResult 覆盖（GROUP-RFC 结果回流）：首次回流注入 from=hub 的
+// system 消息并返回 true；重复回流幂等（false、不重复入账）；未被引用任务
+// (false, nil)；agent 预算用尽后回流仍可达（system 不计预算、不改预算口径）；
+// concluded 群仍回流（hub 账本注记）；已回流集合持久化（重启后不二次回流）。
+func TestRefluxTaskResult(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	g, _ := s.CreateGroup("goal", "admin", nil)
+	if err := s.AddTaskRef(g.ID, "t-done"); err != nil {
+		t.Fatalf("登记: %v", err)
+	}
+
+	// 预算打满：agent 消息 20 条后用尽
+	for i := 0; i < DefaultMaxRounds; i++ {
+		if _, err := s.PostMessage(g.ID, "a", KindAgent, "round"); err != nil {
+			t.Fatalf("agent 消息 %d: %v", i+1, err)
+		}
+	}
+	if _, err := s.PostMessage(g.ID, "a", KindAgent, "over"); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("预算应已用尽, got %v", err)
+	}
+
+	// 首次回流：true + 恰好一条 system 消息（预算用尽不拦截 system 类）
+	ok, err := s.RefluxTaskResult("t-done", "任务 t-done 已完成：磁盘对比报告已生成")
+	if err != nil || !ok {
+		t.Fatalf("首次回流应 true, got %v err=%v", ok, err)
+	}
+	msgs, _ := s.ListMessages(g.ID, 0)
+	last := msgs[len(msgs)-1]
+	if last.Kind != KindSystem || last.From != RefluxFrom || last.Body != "任务 t-done 已完成：磁盘对比报告已生成" {
+		t.Fatalf("回流消息不符: %+v", last)
+	}
+
+	// 预算不受 system 影响：回流后 agent 仍在 21 条拒绝（预算口径只数 agent）
+	if _, err := s.PostMessage(g.ID, "a", KindAgent, "over2"); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("system 回流不得改变预算口径, got %v", err)
+	}
+
+	// 重复回流幂等：false、消息数不变
+	ok, err = s.RefluxTaskResult("t-done", "任务 t-done 已完成：磁盘对比报告已生成")
+	if err != nil || ok {
+		t.Fatalf("重复回流应 (false,nil), got %v err=%v", ok, err)
+	}
+	msgs2, _ := s.ListMessages(g.ID, 0)
+	if len(msgs2) != len(msgs) {
+		t.Fatalf("重复回流不得新增消息: %d → %d", len(msgs), len(msgs2))
+	}
+
+	// 未被引用任务：false nil（不报错）
+	if ok, err := s.RefluxTaskResult("t-orphan", "任务 t-orphan 已完成：x"); err != nil || ok {
+		t.Fatalf("未引用任务应 (false,nil), got %v err=%v", ok, err)
+	}
+	// 参数校验
+	if _, err := s.RefluxTaskResult(" ", "body"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("空 task_id 应 ErrInvalid, got %v", err)
+	}
+	if _, err := s.RefluxTaskResult("t-x", "  "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("空 body 应 ErrInvalid, got %v", err)
+	}
+	if _, err := s.RefluxTaskResult("t-x", strings.Repeat("a", MaxBodyBytes+1)); !errors.Is(err, ErrBodyTooLarge) {
+		t.Fatalf("超 8KiB 应 ErrBodyTooLarge, got %v", err)
+	}
+
+	// concluded 群仍回流（hub 账本注记，时间线保留可回溯）：另一条引用任务
+	if _, err := s.CloseGroup(g.ID, "admin"); err != nil {
+		t.Fatalf("关群: %v", err)
+	}
+	ok, err = s.RefluxTaskResult("t-done", "任务 t-done 执行失败：expired")
+	if err != nil || ok {
+		t.Fatalf("已回流任务关群后再调仍应幂等 false, got %v err=%v", ok, err)
+	}
+	g2, _ := s.CreateGroup("goal2", "admin", nil)
+	if err := s.AddTaskRef(g2.ID, "t-late"); err != nil {
+		t.Fatalf("登记: %v", err)
+	}
+	if _, err := s.CloseGroup(g2.ID, "admin"); err != nil {
+		t.Fatalf("关群 2: %v", err)
+	}
+	ok, err = s.RefluxTaskResult("t-late", "任务 t-late 已完成：晚到结果")
+	if err != nil || !ok {
+		t.Fatalf("concluded 群应仍可回流, got %v err=%v", ok, err)
+	}
+
+	// 已回流集合持久化：重启后同任务不再回流
+	if err := s.Close(); err != nil {
+		t.Fatalf("关闭 store: %v", err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重启打开: %v", err)
+	}
+	defer s2.Close()
+	if ok, err := s2.RefluxTaskResult("t-done", "任务 t-done 已完成：重放"); err != nil || ok {
+		t.Fatalf("重启后重复回流应幂等 false, got %v err=%v", ok, err)
+	}
+	msgs3, _ := s2.ListMessages(g.ID, 0)
+	n := 0
+	for _, m := range msgs3 {
+		if strings.Contains(m.Body, "任务 t-done") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("重启重放不得二次入账, 含 t-done 消息 %d 条", n)
+	}
+}
+
+// TestTaskBodyComposers 覆盖两组注记文案（GROUP-RFC group_task_created 语义）：
+// 创建注记截断 100 字；终态注记截断 200 字、状态词映射、空 FinalAnswer 回退。
+func TestTaskBodyComposers(t *testing.T) {
+	long := strings.Repeat("描", 150)
+	body := TaskCreatedBody("t-1", long)
+	if !strings.HasPrefix(body, "任务 t-1 已创建（来自群）：") {
+		t.Fatalf("创建注记格式不符: %q", body)
+	}
+	rs := []rune(strings.TrimPrefix(body, "任务 t-1 已创建（来自群）："))
+	if len(rs) != 101 || strings.TrimSuffix(string(rs), "…") != strings.Repeat("描", 100) {
+		t.Fatalf("描述应截断 100 字 + …, got %d 字", len(rs))
+	}
+
+	mk := func(status, answer, resErr string) protocol.Task {
+		return protocol.Task{ID: "t-9", Status: protocol.TaskStatus(status),
+			Result: &protocol.TaskResult{Status: status, FinalAnswer: answer, Error: resErr}}
+	}
+	if got := TaskTerminalBody(mk("completed", "报告内容", "")); got != "任务 t-9 已完成：报告内容" {
+		t.Fatalf("completed 注记不符: %q", got)
+	}
+	if got := TaskTerminalBody(mk("needs_review", "结果存疑", "")); got != "任务 t-9 待人工核对：结果存疑" {
+		t.Fatalf("needs_review 注记不符: %q", got)
+	}
+	// 空 FinalAnswer：回退错误码；连错误码也没有：占位
+	if got := TaskTerminalBody(mk("failed", "", "expired")); got != "任务 t-9 执行失败：expired" {
+		t.Fatalf("failed 注记应回退错误码: %q", got)
+	}
+	if got := TaskTerminalBody(mk("failed", "", "")); got != "任务 t-9 执行失败：（无最终答复）" {
+		t.Fatalf("全空应占位: %q", got)
+	}
+	// FinalAnswer 截断 200 字
+	ans := TaskTerminalBody(mk("completed", strings.Repeat("答", 300), ""))
+	rs = []rune(strings.TrimPrefix(ans, "任务 t-9 已完成："))
+	if len(rs) != 201 || strings.TrimSuffix(string(rs), "…") != strings.Repeat("答", 200) {
+		t.Fatalf("FinalAnswer 应截断 200 字 + …, got %d 字", len(rs))
 	}
 }

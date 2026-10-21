@@ -189,22 +189,41 @@ func newSessionID() (string, error) {
 
 // ---------- 五端点（SPEC 六表格） ----------
 
+// hubSubmitRequest POST /api/v1/tasks 请求体：TaskSubmitRequest 全字段 + 管理面
+// 扩展的 group_ref（GROUP-RFC 转任务闭环，协议帧 task_submit 不感知；嵌入展开
+// 后 target_node 等字段平铺解码，向后兼容）。
+type hubSubmitRequest struct {
+	protocol.TaskSubmitRequest
+	// GroupRef 可选群引用：任务创建成功后登记进群并注入系统消息；终态结果
+	// 自动回流该群（回流由 core 终态钩子接线，见 cmd/hub）。
+	GroupRef string `json:"group_ref,omitempty"`
+}
+
 // handleSubmit POST /api/v1/tasks：校验链在 core.Submit（顺序 SPEC 4.5/六）；
 // 202 新建 / 200 幂等命中 + dup / 409 同键不同内容 / 404 / 400 / 503。
 // submitted_by 会话固定 admin（SPEC 六.五 提交身份）：登录会话即控制台，身份
 // 由会话决定，忽略请求体自报（防伪造审计标签）；node 帧提交在 core 按连接
 // 身份覆盖为 node_id。
+//
+// group_ref 非空时先校验群存在且进行中（fail-fast，不产生孤儿任务），任务创建
+// 成功（非幂等命中）后登记入群并注入创建注记消息。
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
-	var req protocol.TaskSubmitRequest
+	var req hubSubmitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 TaskSubmitRequest JSON: "+err.Error())
 		return
 	}
 	req.SubmittedBy = adminIdentity
-	ack, err := s.cfg.Core.Submit(req, "")
+	if !s.groupRefCheck(w, req.GroupRef) {
+		return
+	}
+	ack, err := s.cfg.Core.Submit(req.TaskSubmitRequest, "")
 	if err != nil {
 		writeSubmitErr(w, err)
 		return
+	}
+	if !ack.Dup {
+		s.wireGroupTask(req.GroupRef, ack.TaskID, taskDesc(req.Input))
 	}
 	code := http.StatusAccepted
 	body := map[string]any{"task_id": ack.TaskID, "trace_id": ack.TraceID}
@@ -344,19 +363,26 @@ type controlOpRequest struct {
 	// IdemKey 可选批次幂等键：同键同内容重试返回原批次（200 + dup:true），
 	// 同键不同内容 409 conflict。
 	IdemKey string `json:"idem_key,omitempty"`
+	// GroupRef 可选群引用（GROUP-RFC 转任务闭环）：批次各子任务创建成功后
+	// 逐一登记进群并注入创建注记消息。
+	GroupRef string `json:"group_ref,omitempty"`
 }
 
 // handleControlCreate POST /api/v1/control-operations：两阶段持久化（骨架先于
 // 子任务落库），逐目标走 Submit 全链（离线/未暴露目标标 skipped 不阻塞其余）；
 // 202 返回 batch_id + items；幂等命中 200 + dup；submitted_by 会话固定 admin
-// （SPEC 六.五）。
+// （SPEC 六.五）。group_ref 非空时先校验群可收消息，批次新建（非 dup）成功后
+// 逐项登记入群。
 func (s *Server) handleControlCreate(w http.ResponseWriter, r *http.Request) {
 	var req controlOpRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {agent, targets, input}")
 		return
 	}
-	batch, err := s.cfg.Core.CreateControlBatch(req.Agent, req.Targets, req.Input, req.IdemKey, adminIdentity)
+	if !s.groupRefCheck(w, req.GroupRef) {
+		return
+	}
+	batch, err := s.cfg.Core.CreateControlBatch(req.Agent, req.Targets, req.Input, req.IdemKey, adminIdentity, req.GroupRef)
 	if err != nil {
 		switch {
 		case errors.Is(err, core.ErrInvalid):
@@ -368,6 +394,11 @@ func (s *Server) handleControlCreate(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "internal", "批次创建失败")
 		}
 		return
+	}
+	if !batch.Dup {
+		for _, it := range batch.Items {
+			s.wireGroupTask(req.GroupRef, it.TaskID, taskDesc(req.Input))
+		}
 	}
 	code := http.StatusAccepted
 	if batch.Dup {

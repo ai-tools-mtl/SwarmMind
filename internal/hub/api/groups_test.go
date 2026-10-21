@@ -9,6 +9,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mtl802/swarmmind/internal/protocol"
 
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
@@ -17,6 +20,7 @@ import (
 )
 
 // newGroupFixture 在标准基座上追加群存储接线，返回带群端点的 server。
+// 终态回流钩子与 cmd/hub 生产接线同款：任务终态 → group.RefluxTaskResult。
 func newGroupFixture(t *testing.T) *fixture {
 	t.Helper()
 	st, err := store.Open(t.TempDir())
@@ -30,7 +34,10 @@ func newGroupFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { _ = gs.Close() })
 	bus := transport.NewBus()
-	c, err := core.New(core.Config{Store: st, Transport: bus.Endpoint("hub"), SweepInterval: 0})
+	c, err := core.New(core.Config{Store: st, Transport: bus.Endpoint("hub"), SweepInterval: 0,
+		OnTaskTerminal: func(tk protocol.Task) {
+			_, _ = gs.RefluxTaskResult(tk.ID, group.TaskTerminalBody(tk))
+		}})
 	if err != nil {
 		t.Fatalf("构造 core 失败: %v", err)
 	}
@@ -190,4 +197,208 @@ func TestGroupEndpointsUnavailable(t *testing.T) {
 	if code, body := f.do(hc, http.MethodGet, "/api/v1/groups", ""); code != http.StatusServiceUnavailable || !strings.Contains(string(body), "group_unavailable") {
 		t.Fatalf("未接线应 503 group_unavailable, got %d: %s", code, body)
 	}
+}
+
+// groupMsgs 拉取群全量消息（断言辅助）：返回 (seq, kind, from, body) 列表。
+func (f *fixture) groupMsgs(hc *http.Client, groupID string) []struct {
+	Seq  int64  `json:"seq"`
+	Kind string `json:"kind"`
+	From string `json:"from"`
+	Body string `json:"body"`
+} {
+	f.t.Helper()
+	code, body := f.do(hc, http.MethodGet, "/api/v1/groups/"+groupID+"/messages?since=0", "")
+	if code != http.StatusOK {
+		f.t.Fatalf("拉群消息应 200, got %d: %s", code, body)
+	}
+	var out struct {
+		Messages []struct {
+			Seq  int64  `json:"seq"`
+			Kind string `json:"kind"`
+			From string `json:"from"`
+			Body string `json:"body"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		f.t.Fatalf("消息体解析: %v", err)
+	}
+	return out.Messages
+}
+
+// TestGroupTaskRefFlow 转任务闭环三件套（GROUP-RFC）HTTP 全链：
+//  1. POST /tasks 带 group_ref → 202 + 群内创建注记（kind=system）+ 群引用列表；
+//  2. 幂等重试 200 dup 不重复注记；未知群 404 / 已结束群 409 / 未接线 503；
+//  3. control-operations 带 group_ref → 子任务逐项注记；
+//  4. 任务终态（result 帧 / 清扫过期）自动回流群；重复终态事件只回流一次。
+func TestGroupTaskRefFlow(t *testing.T) {
+	f := newGroupFixture(t)
+	f.core.RegisterNode("nodeB", []protocol.AgentCard{echoCard(true)})
+	f.core.SetOnline("nodeB", true)
+	hc := f.loginClient(true)
+
+	// 建群
+	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"闭环验收","members":["echo"]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建群应 201, got %d: %s", code, body)
+	}
+	var g struct {
+		ID string `json:"group_id"`
+	}
+	if err := json.Unmarshal(body, &g); err != nil || g.ID == "" {
+		t.Fatalf("201 体不符: %s", body)
+	}
+
+	// ① POST /tasks + group_ref → 202；群内出现创建注记
+	submit := func(groupRef, idem string) (int, []byte) {
+		body := `{"target_node":"nodeB","target_agent":"echo","input":{"stdin":"对比双机磁盘"},"submitted_by":"tester","idem_key":"` + idem + `"`
+		if groupRef != "" {
+			body += `,"group_ref":"` + groupRef + `"`
+		}
+		return f.do(hc, http.MethodPost, "/api/v1/tasks", body+"}")
+	}
+	code, body = submit(g.ID, "loop-1")
+	if code != http.StatusAccepted {
+		t.Fatalf("带 group_ref 提交应 202, got %d: %s", code, body)
+	}
+	var ack struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(body, &ack); err != nil || ack.TaskID == "" {
+		t.Fatalf("202 体不符: %s", body)
+	}
+	msgs := f.groupMsgs(hc, g.ID)
+	if len(msgs) != 1 || msgs[0].Kind != "system" || msgs[0].From != "hub" ||
+		!strings.Contains(msgs[0].Body, "任务 "+ack.TaskID+" 已创建（来自群）") ||
+		!strings.Contains(msgs[0].Body, "对比双机磁盘") {
+		t.Fatalf("创建注记不符: %+v", msgs)
+	}
+	// 群对象携带引用列表（控制台/审计可见）
+	code, body = f.do(hc, http.MethodGet, "/api/v1/groups", "")
+	if code != http.StatusOK || !strings.Contains(string(body), `"task_refs":["`+ack.TaskID+`"]`) {
+		t.Fatalf("群列表应含 task_refs, got %d: %s", code, body)
+	}
+
+	// ② 幂等重试：200 dup、注记不重复
+	code, body = submit(g.ID, "loop-1")
+	if code != http.StatusOK || !strings.Contains(string(body), `"dup":true`) {
+		t.Fatalf("同键重试应 200 dup, got %d: %s", code, body)
+	}
+	if n := len(f.groupMsgs(hc, g.ID)); n != 1 {
+		t.Fatalf("幂等命中不得重复注记, got %d 条", n)
+	}
+	// 未知群 404 / 已结束群 409（fail-fast，不产生任务）
+	code, body = submit("g-none", "loop-2")
+	if code != http.StatusNotFound || !strings.Contains(string(body), "group_not_found") {
+		t.Fatalf("未知群 group_ref 应 404, got %d: %s", code, body)
+	}
+	code, body = f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"短命群"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建群 2 应 201, got %d", code)
+	}
+	var g2 struct {
+		ID string `json:"group_id"`
+	}
+	_ = json.Unmarshal(body, &g2)
+	if code, _ := f.do(hc, http.MethodPost, "/api/v1/groups/"+g2.ID+"/close", ""); code != http.StatusOK {
+		t.Fatalf("关群 2 应 200, got %d", code)
+	}
+	code, body = submit(g2.ID, "loop-3")
+	if code != http.StatusConflict || !strings.Contains(string(body), "group_concluded") {
+		t.Fatalf("已结束群 group_ref 应 409, got %d: %s", code, body)
+	}
+	// 未接线：group_ref 在无 Groups 基座上 503（既有提交方不带 group_ref 不受影响）
+	f2 := newFixture(t)
+	hc2 := f2.loginClient(true)
+	f2.core.RegisterNode("nodeB", []protocol.AgentCard{echoCard(true)})
+	code, body = f2.do(hc2, http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeB","target_agent":"echo","input":{},"submitted_by":"t","group_ref":"g-x"}`)
+	if code != http.StatusServiceUnavailable || !strings.Contains(string(body), "group_unavailable") {
+		t.Fatalf("未接线带 group_ref 应 503, got %d: %s", code, body)
+	}
+	code, _ = f2.do(hc2, http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeB","target_agent":"echo","input":{},"submitted_by":"t"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("未接线不带 group_ref 提交应照常 202, got %d", code)
+	}
+
+	// ③ control-operations + group_ref → 子任务逐项注记
+	code, body = f.do(hc, http.MethodPost, "/api/v1/control-operations",
+		`{"agent":"echo","targets":["nodeB"],"input":{"stdin":"批次巡检"},"idem_key":"loop-batch","group_ref":"`+g.ID+`"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("批次带 group_ref 应 202, got %d: %s", code, body)
+	}
+	var batch struct {
+		BatchID string `json:"batch_id"`
+		Items   []struct {
+			TaskID string `json:"task_id"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(body, &batch); err != nil || len(batch.Items) != 1 || batch.Items[0].TaskID == "" {
+		t.Fatalf("批次体不符: %s", body)
+	}
+	batchTask := batch.Items[0].TaskID
+	msgs = f.groupMsgs(hc, g.ID)
+	if len(msgs) != 2 || !strings.Contains(msgs[1].Body, "任务 "+batchTask+" 已创建（来自群）") {
+		t.Fatalf("批次子任务注记不符: %+v", msgs)
+	}
+	// 同键同内容重试：200 dup，注记不重复
+	code, body = f.do(hc, http.MethodPost, "/api/v1/control-operations",
+		`{"agent":"echo","targets":["nodeB"],"input":{"stdin":"批次巡检"},"idem_key":"loop-batch","group_ref":"`+g.ID+`"}`)
+	if code != http.StatusOK || !strings.Contains(string(body), `"dup":true`) {
+		t.Fatalf("批次幂等重试应 200 dup, got %d: %s", code, body)
+	}
+	if n := len(f.groupMsgs(hc, g.ID)); n != 2 {
+		t.Fatalf("批次幂等命中不得重复注记, got %d 条", n)
+	}
+
+	// ④a 终态回流：node 上报 result 帧 → 任务 completed → 群内回流注记
+	res := protocol.TaskResult{Status: protocol.ResultCompleted, ExitCode: 0, FinalAnswer: "双机磁盘对比已完成", FinishedAt: protocol.NowUTC()}
+	resPayload := mustJSON(t, protocol.TaskResultPayload{TaskID: ack.TaskID, Status: res.Status, Result: &res})
+	if err := f.bus.Endpoint("nodeB").Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub", Payload: resPayload,
+	}); err != nil {
+		t.Fatalf("发 result 帧: %v", err)
+	}
+	msgs = f.groupMsgs(hc, g.ID)
+	if len(msgs) != 3 || msgs[2].Kind != "system" ||
+		msgs[2].Body != "任务 "+ack.TaskID+" 已完成：双机磁盘对比已完成" {
+		t.Fatalf("终态回流注记不符: %+v", msgs)
+	}
+	// 重复终态事件（重发）：只回流一次
+	if err := f.bus.Endpoint("nodeB").Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub", Payload: resPayload,
+	}); err != nil {
+		t.Fatalf("重发 result 帧: %v", err)
+	}
+	if n := len(f.groupMsgs(hc, g.ID)); n != 3 {
+		t.Fatalf("重复终态不得二次回流, got %d 条", n)
+	}
+
+	// ④b 清扫置终态（expire）同样回流：批次子任务 ExpireAt 置过去 → Sweep
+	err := f.st.Update(func(st *store.State) error {
+		tk := st.Tasks[batchTask]
+		nt := tk.Clone()
+		nt.ExpireAt = time.Now().UTC().Add(-time.Minute)
+		st.Tasks[batchTask] = nt
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("置过期失败: %v", err)
+	}
+	f.core.Sweep()
+	msgs = f.groupMsgs(hc, g.ID)
+	if len(msgs) != 4 || msgs[3].Kind != "system" ||
+		msgs[3].Body != "任务 "+batchTask+" 执行失败：expired" {
+		t.Fatalf("过期回流注记不符: %+v", msgs)
+	}
+}
+
+// mustJSON 测试辅助。
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return b
 }

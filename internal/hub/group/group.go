@@ -34,6 +34,9 @@ const (
 	// MsgIDPrefix 群消息 ID 前缀。
 	MsgIDPrefix = "gm-"
 
+	// RefluxFrom 任务终态回流消息的发言者标识（hub 自身注记，非成员发言）。
+	RefluxFrom = "hub"
+
 	// MaxBodyBytes 单条消息体上限：8KiB（GROUP-RFC 三 独立信箱约定，按字节实测）。
 	MaxBodyBytes = 8 << 10
 	// DefaultMaxRounds 默认发言预算：agent 消息最多 20 条（MVP 简化护栏，
@@ -90,6 +93,9 @@ type Group struct {
 	// ClosedBy/ClosedAt 首次关闭审计；重复关闭幂等，不改写首次记录。
 	ClosedBy string     `json:"closed_by,omitempty"`
 	ClosedAt *time.Time `json:"closed_at,omitempty"`
+	// TaskRefs 群内任务引用列表（GROUP-RFC 六「结论转正式任务」：追加去重，
+	// 随快照持久化；终态回流据此反查任务归属群）。
+	TaskRefs []string `json:"task_refs,omitempty"`
 }
 
 // GroupMessage 群消息（GROUP-RFC 二）：seq 由 hub 组内单调分配，是历史
@@ -110,6 +116,9 @@ type state struct {
 	Messages map[string][]GroupMessage `json:"messages"`
 	// Seqs group_id → 已分配的最大 seq（重启后继续单调）。
 	Seqs map[string]int64 `json:"seqs"`
+	// Refluxed 已回流任务集合：task_id → true（终态回流幂等锚，随快照持久化，
+	// 重复终态事件/重启重放都只回流一次）。
+	Refluxed map[string]bool `json:"refluxed,omitempty"`
 }
 
 func newState() *state {
@@ -117,6 +126,7 @@ func newState() *state {
 		Groups:   make(map[string]Group),
 		Messages: make(map[string][]GroupMessage),
 		Seqs:     make(map[string]int64),
+		Refluxed: make(map[string]bool),
 	}
 }
 
@@ -185,12 +195,13 @@ func (s *Store) mutate(mutateFn func(next *state) error) error {
 	return nil
 }
 
-// clone 深拷贝状态（Group.Members 一并复制；string 等不可变值共享安全），
+// clone 深拷贝状态（Group.Members/TaskRefs 一并复制；string 等不可变值共享安全），
 // 消息切片 cap==len，追加时分配新底层数组，不污染已发布状态。
 func (st *state) clone() *state {
 	n := newState()
 	for id, g := range st.Groups {
 		g.Members = append(make([]string, 0, len(g.Members)), g.Members...)
+		g.TaskRefs = append(make([]string, 0, len(g.TaskRefs)), g.TaskRefs...)
 		n.Groups[id] = g
 	}
 	for id, msgs := range st.Messages {
@@ -198,6 +209,9 @@ func (st *state) clone() *state {
 	}
 	for id, sq := range st.Seqs {
 		n.Seqs[id] = sq
+	}
+	for id, ok := range st.Refluxed {
+		n.Refluxed[id] = ok
 	}
 	return n
 }
@@ -381,6 +395,100 @@ func (s *Store) ListGroups() []Group {
 	return out
 }
 
+// GetGroup 查单个群（存在与否第二返回值）。
+func (s *Store) GetGroup(groupID string) (Group, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.st.Groups[groupID]
+	return g, ok
+}
+
+// AddTaskRef 登记群内任务引用（GROUP-RFC 六「结论转正式任务」）：追加去重
+// （幂等，重复登记不产生重复条目），随快照持久化。concluded 群拒绝登记——
+// 转任务的创建注记消息要求群可收消息，与 PostMessage 护栏同口径。
+func (s *Store) AddTaskRef(groupID, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return fmt.Errorf("%w: task_id 必填", ErrInvalid)
+	}
+	return s.mutate(func(next *state) error {
+		g, ok := next.Groups[groupID]
+		if !ok {
+			return ErrNotFound
+		}
+		if g.Status == StatusConcluded {
+			return ErrConcluded
+		}
+		if taskRefIn(g.TaskRefs, taskID) {
+			return nil // 幂等命中：已登记
+		}
+		g.TaskRefs = append(g.TaskRefs, taskID)
+		next.Groups[groupID] = g
+		return nil
+	})
+}
+
+// RefluxTaskResult 任务终态回流群（GROUP-RFC 闭环「结果自动回流」）：查引用了
+// 该任务的群，注入一条 from=hub 的 kind=system 消息并记入已回流集合，单事务
+// 原子完成。幂等：同任务只回流一次（重复终态事件/重启重放返回 false）。
+//
+// 回流是 hub 自身的账本注记，绕过 concluded 拒收与 agent 发言预算（system 类
+// 本就不计预算）——群结束后时间线保留只读，但成员派发的任务结果仍须可回溯。
+// 任务未被任何群引用返回 (false, nil)。
+func (s *Store) RefluxTaskResult(taskID, body string) (bool, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return false, fmt.Errorf("%w: task_id 必填", ErrInvalid)
+	}
+	if strings.TrimSpace(body) == "" {
+		return false, fmt.Errorf("%w: body 不能为空", ErrInvalid)
+	}
+	if len(body) > MaxBodyBytes {
+		return false, fmt.Errorf("%w: %d 字节 > %d 字节", ErrBodyTooLarge, len(body), MaxBodyBytes)
+	}
+	var posted bool
+	err := s.mutate(func(next *state) error {
+		if next.Refluxed[taskID] {
+			return nil // 幂等命中：已回流
+		}
+		now := time.Now().UTC()
+		for gid, g := range next.Groups {
+			if !taskRefIn(g.TaskRefs, taskID) {
+				continue
+			}
+			msg := GroupMessage{
+				MsgID:     MsgIDPrefix + protocol.NewMessageID(),
+				GroupID:   gid,
+				Seq:       next.Seqs[gid] + 1,
+				From:      RefluxFrom,
+				Kind:      KindSystem,
+				Body:      body,
+				CreatedAt: now,
+			}
+			next.Messages[gid] = append(next.Messages[gid], msg)
+			next.Seqs[gid] = msg.Seq
+			posted = true
+		}
+		if posted {
+			next.Refluxed[taskID] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return posted, nil
+}
+
+// taskRefIn 引用列表包含判定（线性扫描；群内引用数为个位量级，不值得建索引）。
+func taskRefIn(refs []string, taskID string) bool {
+	for _, r := range refs {
+		if r == taskID {
+			return true
+		}
+	}
+	return false
+}
+
 // countAgent 统计 agent 消息数（发言预算计量口径）。
 func countAgent(msgs []GroupMessage) int {
 	n := 0
@@ -390,4 +498,50 @@ func countAgent(msgs []GroupMessage) int {
 		}
 	}
 	return n
+}
+
+// ---------- 群闭环消息文案（GROUP-RFC group_task_created 语义） ----------
+
+// 终态 → 人话状态词（与控制台 STATES 词典同口径）。
+var terminalLabels = map[string]string{
+	"completed":    "已完成",
+	"failed":       "执行失败",
+	"needs_review": "待人工核对",
+}
+
+// TaskCreatedBody 转任务创建注记：注入群的 kind=system 消息正文。
+// 格式：任务 {task_id} 已创建（来自群）：{描述截断 100 字（按 rune，UTF-8 安全）}。
+func TaskCreatedBody(taskID, desc string) string {
+	return fmt.Sprintf("任务 %s 已创建（来自群）：%s", taskID, truncateRunes(desc, 100))
+}
+
+// TaskTerminalBody 任务终态回流注记：格式「任务 {task_id} {状态}：{FinalAnswer
+// 截断 200 字}」；FinalAnswer 为空（如 expired/workdir_busy_timeout 类失败）时
+// 回退展示错误码，保证消息可读非空。
+func TaskTerminalBody(t protocol.Task) string {
+	label := terminalLabels[string(t.Status)]
+	if label == "" {
+		label = string(t.Status)
+	}
+	answer := ""
+	if t.Result != nil {
+		answer = t.Result.FinalAnswer
+		if answer == "" {
+			answer = t.Result.Error
+		}
+	}
+	if strings.TrimSpace(answer) == "" {
+		answer = "（无最终答复）"
+	}
+	return fmt.Sprintf("任务 %s %s：%s", t.ID, label, truncateRunes(answer, 200))
+}
+
+// truncateRunes 按 rune 截断（中文按字计，GROUP-RFC「截断 N 字」口径）；
+// 超长以 … 结尾。
+func truncateRunes(s string, n int) string {
+	rs := []rune(strings.TrimSpace(s))
+	if len(rs) <= n {
+		return string(rs)
+	}
+	return string(rs[:n]) + "…"
 }

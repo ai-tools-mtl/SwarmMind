@@ -906,8 +906,12 @@ function isBudgetExhausted(g, msgs) {
 }
 function groupMsgHtml(m) {
   const cls = m.kind === 'user' ? 'msg-user' : m.kind === 'system' ? 'msg-system' : 'msg-agent';
+  /* 转任务入口（GROUP-RFC 闭环）：user/agent 消息可转正式任务（系统注记与
+   * 结束群无入口）；能力目录为空时隐藏（没有可派发的执行者）。 */
+  const g = S.groups.find(x => x.group_id === S.groupId);
+  const canTask = g && g.status !== 'concluded' && (m.kind === 'user' || m.kind === 'agent') && S.directory.length;
   return `<li class="msg ${cls}" data-seq="${m.seq}">
-  <div class="msg-meta"><b>${esc(m.from)}</b> · ${esc(GROUP_KINDS[m.kind] || m.kind)} · ${esc(fmtFull(m.created_at))}</div>
+  <div class="msg-meta"><b>${esc(m.from)}</b> · ${esc(GROUP_KINDS[m.kind] || m.kind)} · ${esc(fmtFull(m.created_at))}${canTask ? ` · <button class="link" data-act="task-from-msg" data-seq="${m.seq}">转任务</button>` : ''}</div>
   <div class="msg-body">${esc(m.body)}</div>
   </li>`;
 }
@@ -1034,6 +1038,26 @@ function groupCreateModal() {
   <p class="footer-note">建群后自动打开群详情；成员智能体经节点侧接入批次后才会自动发言。</p>`);
 }
 
+/* taskFromMsgModal 转任务弹层（GROUP-RFC 闭环三件套之三）：预填消息内容为任务
+ * 描述，执行者取自能力目录；提交走 control-operations + group_ref —— 任务创建
+ * 后群时间线自动出现系统注记，终态结果自动回流本群（回流消息由 3s 增量轮询带上）。 */
+function taskFromMsgModal(seq) {
+  const G = S.groupView;
+  const m = G && G.id === S.groupId ? G.msgs.find(x => x.seq === seq) : null;
+  if (!m) { toast('找不到原消息，请刷新后重试'); return; }
+  if (!S.directory.length) { toast('能力目录为空：需要先在节点配置里开放能力'); return; }
+  openLayerPlain(`${modalHead('转正式任务')}
+  <div class="notice">把这条群消息派发成正式任务：创建成功后群里会出现系统消息，执行结果会自动回流本群。</div>
+  <p class="muted spaced">原消息：${esc(m.from)} · ${esc(fmtFull(m.created_at))}</p>
+  <label class="spaced">任务描述（预填自消息内容，可修改）<textarea id="task-desc" rows="5">${esc(m.body)}</textarea></label>
+  <label>执行者（能力目录）<select id="task-agent">${S.directory.map(d => {
+    const v = d.node_id + '/' + d.card.name;
+    return `<option value="${esc(v)}">${esc(d.card.name)}（${esc(d.node_id)}）— ${esc(d.card.description || '（无描述）')}</option>`;
+  }).join('')}</select></label>
+  <div class="actions spaced">${button('派发任务', 'task-from-msg-submit', 'primary', `data-seq="${seq}"`)}${button('取消', 'close', 'link')}</div>
+  <p class="footer-note">等价于「任务派发」页的单点派发：恢复密钥自动生成，目标离线或能力未开放会在提交结果中标出。</p>`);
+}
+
 /* ---------- 动作表（事件委托） ---------- */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
@@ -1088,6 +1112,31 @@ const ACT = {
     }
   },
   'group-send': () => sendGroupMsg(),
+  'task-from-msg': b => taskFromMsgModal(Number(b.dataset.seq)),
+  'task-from-msg-submit': async b => {
+    const desc = $('#task-desc')?.value.trim() || '';
+    if (!desc) { toast('请先填写任务描述'); $('#task-desc')?.focus(); return; }
+    const sel = $('#task-agent')?.value;
+    if (!sel) { toast('目录为空：先在节点配置里开放能力'); return; }
+    const [node, agent] = sel.split('/');
+    b.disabled = true; b.textContent = '派发中…';
+    const r = await api('POST', '/api/v1/control-operations', {
+      agent, targets: [node], input: { args: [], stdin: desc }, group_ref: S.groupId,
+    }).catch(() => null);
+    if (r && (r.code === 202 || r.code === 200)) {
+      closeLayer();
+      const it = (r.data?.items || [])[0] || {};
+      await pullGroupMessages();   // 创建注记立即上时间线，不等 3s 轮询
+      if (it.task_id) toast('任务已派发：' + it.task_id + ' · 结果完成后自动回流本群');
+      else if (it.skipped) toast('目标当前不可达（' + (it.skipped === 'offline' ? '节点离线' : '能力未开放') + '），未创建任务');
+      else toast('提交失败：' + esc(ERRORS[it.error] || it.error || '未知错误'));
+    } else if (r && r.data?.error === 'group_concluded') {
+      const g = S.groups.find(x => x.group_id === S.groupId);
+      if (g) g.status = 'concluded';
+      closeLayer(); render();
+      toast('群已结束，不能再转任务');
+    } else toast('派发失败：' + (r ? errLine(r.data) : '网络异常'));
+  },
   'group-close': () => {
     const g = S.groups.find(x => x.group_id === S.groupId);
     if (!g) return;

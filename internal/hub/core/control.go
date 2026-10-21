@@ -78,19 +78,19 @@ type BatchView struct {
 	Dup bool `json:"dup,omitempty"`
 }
 
-// batchContent 批次内容指纹载体：agent + 目标序表 + 输入（不含 idem_key 本身）。
-// 目标顺序敏感（items 顺序与请求一致，乱序视为不同内容）。字段名与 json tag
-// 固定，保证指纹跨版本稳定（同 mailbox/idem 口径）。
+// batchContent 批次内容指纹载体：agent + 目标序表 + 输入 + 群引用（不含 idem_key
+// 本身）。字段名与 json tag 固定，保证指纹跨版本稳定（同 mailbox/idem 口径）。
 type batchContent struct {
-	Agent   string             `json:"agent"`
-	Targets []string           `json:"targets"`
-	Input   protocol.TaskInput `json:"input"`
+	Agent    string             `json:"agent"`
+	Targets  []string           `json:"targets"`
+	Input    protocol.TaskInput `json:"input"`
+	GroupRef string             `json:"group_ref,omitempty"`
 }
 
 // batchContentHash 批次内容指纹：canonical JSON（encoding/json 确定性输出）的
 // SHA-256 hex。
-func batchContentHash(agent string, targets []string, input protocol.TaskInput) string {
-	b, err := json.Marshal(batchContent{Agent: agent, Targets: targets, Input: input.Clone()})
+func batchContentHash(agent string, targets []string, input protocol.TaskInput, groupRef string) string {
+	b, err := json.Marshal(batchContent{Agent: agent, Targets: targets, Input: input.Clone(), GroupRef: groupRef})
 	if err != nil {
 		// 纯标量+slice+map 结构，不可达；防御性返回空串（调用方按不同内容处理）
 		return ""
@@ -106,7 +106,7 @@ func storedBatchHash(b store.ControlBatch) string {
 	for i, it := range b.Items {
 		targets[i] = it.Target
 	}
-	return batchContentHash(b.Agent, targets, b.Input)
+	return batchContentHash(b.Agent, targets, b.Input, b.GroupRef)
 }
 
 // batchChildIdem 批次子任务派生幂等键：batch_id+序号（batch_id 全局唯一故键
@@ -150,15 +150,17 @@ func (c *Core) freezeAdmission(view *store.State, agent string, targets []string
 //     子任务）；同键不同内容 ErrBatchConflict；幂等预检 + 骨架事务内重检，
 //     并发同键由单写串行化收敛。
 //   - submittedBy 由调用方按会话身份传入（控制台固定 admin，SPEC 六.五）。
+//   - groupRef 可选群引用（GROUP-RFC 转任务闭环）：随批次落库并参与内容指纹；
+//     各子任务的入群登记由调用方在批次创建成功后完成（本包不感知群存储）。
 //   - 任一目标被跳过不影响整体成败；返回 202 批次视图（幂等命中 200）。
 //
 // 骨架落库后逐项回写失败（存储故障）时返回错误：已创建子任务已落库且各持派生
 // 幂等键，批次停留 creating，重启恢复收尾，不复跑。
-func (c *Core) CreateControlBatch(agent string, targets []string, input protocol.TaskInput, idemKey, submittedBy string) (*BatchView, error) {
+func (c *Core) CreateControlBatch(agent string, targets []string, input protocol.TaskInput, idemKey, submittedBy, groupRef string) (*BatchView, error) {
 	if agent == "" || len(targets) == 0 || submittedBy == "" {
 		return nil, ErrInvalid
 	}
-	fingerprint := batchContentHash(agent, targets, input)
+	fingerprint := batchContentHash(agent, targets, input, groupRef)
 
 	// 幂等预检（快读路径；权威判定在骨架事务内重检）
 	if idemKey != "" {
@@ -177,7 +179,7 @@ func (c *Core) CreateControlBatch(agent string, targets []string, input protocol
 
 	// 阶段 1：冻结准入 + 骨架单事务落库
 	decisions := c.freezeAdmission(c.st.View(), agent, targets)
-	batchID, dup, err := c.createBatchSkeleton(agent, targets, input, idemKey, submittedBy, fingerprint, decisions)
+	batchID, dup, err := c.createBatchSkeleton(agent, targets, input, idemKey, submittedBy, groupRef, fingerprint, decisions)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +209,7 @@ func (c *Core) CreateControlBatch(agent string, targets []string, input protocol
 // 快照 + 冻结 skip 判定 + status=creating + idem→batch_id 映射）。
 // 返回 (batch_id, dup)：dup=true 时 batch_id 为已存在批次 ID（同键同内容，
 // 并发幂等命中，本事务未写入任何数据）。
-func (c *Core) createBatchSkeleton(agent string, targets []string, input protocol.TaskInput, idemKey, submittedBy string, fingerprint string, decisions []admissionDecision) (string, bool, error) {
+func (c *Core) createBatchSkeleton(agent string, targets []string, input protocol.TaskInput, idemKey, submittedBy, groupRef, fingerprint string, decisions []admissionDecision) (string, bool, error) {
 	now := c.now()
 	batchID := "b-" + protocol.NewMessageID()
 	var (
@@ -242,6 +244,7 @@ func (c *Core) createBatchSkeleton(agent string, targets []string, input protoco
 			Input:       input.Clone(),
 			SubmittedBy: submittedBy,
 			IdemKey:     idemKey,
+			GroupRef:    groupRef,
 			Status:      BatchStatusCreating,
 			CreatedAt:   now,
 			Items:       items,
