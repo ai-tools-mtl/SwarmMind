@@ -137,7 +137,9 @@ HanaAgent / 其它 agent）接入后即可自然语言派单：
 
 - [x] V0：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
 - [x] 账户体系：密码登录、账户设置、PAT 令牌（GitHub 式）、恢复通道
-- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物
+- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物（七工具）
+- [x] A2A 兼容端点：外部 A2A 客户端发现并调用网内 agent（spec v0.2.6）
+- [x] 总理模式：复合目标一键派发，zcode 智能体自动分解/并行调度/汇总报告（P4.0）
 - [x] 跨云实测：腾讯云 ↔ 百度云 双节点、25ms 全链、产物跨机取回
 - [ ] P4 群聊：多 agent 会话、@提及派单、上下文包共享
 - [ ] P5 Git 集成：worktree 分配、commit 归属、PR 流程
