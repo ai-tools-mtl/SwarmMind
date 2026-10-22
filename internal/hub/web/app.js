@@ -134,8 +134,9 @@ const S = {
   groupsOff: false,            // hub 未接线群存储（端点 503）
 };
 function freshControl() {
-  return { view: 'form', stage: 'idle', agent: '', targets: {}, stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null,
-    primePrevAgent: '', primePrevBroadcast: false };
+  /* node/agent 分开存（两级选择：先机器后智能体）；primePrev* 勾总理前的原选择。 */
+  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null,
+    primePrevNode: '', primePrevAgent: '' };
 }
 function newIdem() {
   return 'ctrl-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -466,12 +467,15 @@ function nodesPage() {
     + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
     ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
     ${S.nodes.map(n => {
-      const caps = S.directory.filter(d => d.node_id === n.node_id).map(d => d.card.name);
-      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(c => `<span class="badge">${esc(c)}</span>`).join(' ') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`;
+      const caps = S.directory.filter(d => d.node_id === n.node_id);
+      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(d => {
+      const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
+      return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
+    }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
     : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
-    <p class="footer-note">每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
+    <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否对外开放由各机器 exposed 开关决定。每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
 }
 function enrollModal() {
   openLayerPlain(`${modalHead('生成接入配置 · V0 手工登记')}
@@ -652,31 +656,83 @@ function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
   const locked = C.stage === 'submitting' || C.stage === 'unknown';
-  const targets = Object.keys(C.targets).filter(k => C.targets[k]);
-  return head('任务派发', '把任务派给网内任意节点上的智能体或工具：zcode/codex 等编码智能体，或巡检脚本。')
+  return head('任务派发', '把任务派给网内任意节点上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
     <label class="checkline"><input type="checkbox" id="ctrl-prime"> 总理模式：勾选后由 zcode-dev 总理智能体自动分解目标、并行派发给网内多个能力、收集结果并产出汇总报告（适合复合目标；单点任务不必勾选）</label>
-    <label>选择智能体 / 能力<select id="ctrl-agent">${S.directory.length ? S.directory.map(d => {
-    const v = d.node_id + '/' + d.card.name;
-    return `<option value="${esc(v)}" ${C.agent === v ? 'selected' : ''}>${esc(d.card.name)}（${esc(d.node_id)}）— ${esc(d.card.description || '（无描述）')}</option>`;
-  }).join('') : '<option value="">目录为空：还没有节点开放能力</option>'}</select></label>
-    ${S.directory.length ? `<div class="row"><small class="muted">将在 <b id="ctrl-node-hint">${esc((S.directory[0] || {}).node_id || '')}</b> 上执行</small></div>` : '<div class="notice warn">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
-    <label class="checkline spaced" id="ctrl-broadcast-line"><input type="checkbox" id="ctrl-broadcast"> 广播到所有拥有同名能力的节点（默认只派给能力所属节点）</label>
+    <label class="spaced">第一步 · 执行机器<select id="ctrl-node">${ctrlNodeOptions()}</select></label>
+    <small class="muted">离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。</small>
+    <label class="spaced">第二步 · 执行智能体<select id="ctrl-agent" ${C.node ? '' : 'disabled'}>${ctrlAgentOptions(C.node)}</select></label>
+    <div class="row spaced" id="ctrl-summary-line">${ctrlSummaryHtml()}</div>
+    ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
     <div id="ctrl-feedback" class="statusline" role="status">${ctrlFeedback()}</div>
     <div class="actions">
-      <button class="primary" type="submit" ${C.stage === 'submitting' ? 'disabled' : ''}>${C.stage === 'submitting' ? '提交中… 请勿重复操作' : '运行巡检'}</button>
+      <button class="primary" type="submit" ${C.stage === 'submitting' ? 'disabled' : ''}>${C.stage === 'submitting' ? '提交中… 请勿重复操作' : '提交任务'}</button>
       ${C.stage === 'unknown' ? button('同键重试', 'ctrl-retry') + button('放弃等待', 'ctrl-abandon', 'link') : ''}
       ${C.unknownPending && C.stage !== 'unknown' ? button('同键重试上次未决提交', 'ctrl-retry') : ''}
     </div></form></section>
     ${C.message ? `<section class="card spaced">${C.message}</section>` : ''}
     <section class="card spaced"><h3>运行规则</h3>
-    <div class="step"><span>1</span><p>提交时锁定目标：离线或未开放能力的节点自动跳过，不影响其余目标。</p></div>
-    <div class="step"><span>2</span><p>每个目标节点上都是一笔正式任务，全程可追踪。</p></div>
-    <div class="step"><span>3</span><p>逐项结果见批次报告；任务进展在「任务监管」页跟踪。</p></div></section>`;
+    <div class="step"><span>1</span><p>单目标派发：任务只提交给你选定的机器上的选定智能体；离线机器暂不可选（提交端点不排队，上线后再派）。</p></div>
+    <div class="step"><span>2</span><p>提交后返回批次报告；任务在节点本机执行，「任务监管」页全程可追踪。</p></div>
+    <div class="step"><span>3</span><p>总理模式会自动定位总理载体（zcode-dev）所在机器，由总理分解目标并调度网内多节点执行。</p></div></section>`;
+}
+
+/* ---------- 派单两级选择（2026-10-22 定：先选机器，再选该机器上的智能体） ---------- */
+/* dispatchNodes 机器下拉数据源：在线优先置顶，同组内按 node_id 稳定排序。 */
+function dispatchNodes() {
+  return S.nodes.slice().sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (a.node_id < b.node_id ? -1 : 1));
+}
+/* ctrlNodeOptions 机器下拉选项：可选 = 在线且已开放能力。离线（提交端点直接
+ * skip、不排队）与在线但无开放能力（not_exposed）的机器禁选并在选项上注明原因。 */
+function ctrlNodeOptions() {
+  return '<option value="">请选择执行机器</option>' + dispatchNodes().map(n => {
+    const hasCaps = S.directory.some(d => d.node_id === n.node_id);
+    const dead = !n.online || !hasCaps;
+    const why = !n.online ? '（离线）' : hasCaps ? '' : '（无开放能力）';
+    const tip = !n.online ? '离线：提交会被跳过，暂不支持排队暂存' : hasCaps ? `在线 · epoch ${n.epoch} · 进行中 ${n.inflight} 笔` : '该机器尚未开放任何能力（node.yaml exposed）';
+    return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${S.C.node === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
+  }).join('');
+}
+/* ctrlAgentOptions 智能体下拉选项：只列所选机器上 exposed 的智能体（S.directory
+ * 按 node 过滤）；未选机器时占位项即「请先选择机器」，整个下拉同时禁用。 */
+function ctrlAgentOptions(nodeId) {
+  if (!nodeId) return '<option value="">请先选择机器</option>';
+  const list = S.directory.filter(d => d.node_id === nodeId);
+  if (!list.length) return '<option value="">该机器暂无开放能力</option>';
+  return '<option value="">请选择智能体</option>' + list.map(d => {
+    const tip = `输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
+    return `<option value="${esc(d.card.name)}" ${S.C.agent === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(d.card.name)} — ${esc(d.card.description || '（无描述）')}</option>`;
+  }).join('');
+}
+/* syncCtrlAgentSelect 机器切换联动（DOM 级更新，不整页重绘——与总理模式同款
+ * 手法，避免重绘重置已填内容）：按当前机器重建智能体选项，恢复此前选中的智能体
+ * （若仍属于该机器），并把选择持久化到 S.C。preferAgent 供总理模式精确指定。 */
+function syncCtrlAgentSelect(preferAgent) {
+  const nodeSel = $('#ctrl-node'), agentSel = $('#ctrl-agent');
+  if (!nodeSel || !agentSel) return;
+  const node = nodeSel.value || '';
+  agentSel.innerHTML = ctrlAgentOptions(node);
+  agentSel.disabled = !node;
+  const want = preferAgent !== undefined ? preferAgent : S.C.agent;
+  agentSel.value = want && [...agentSel.options].some(o => o.value === want) ? want : '';
+  S.C.node = node;
+  S.C.agent = agentSel.value;
+}
+/* ctrlSummaryHtml / updateCtrlSummary 派单摘要（提交前一句话确认）：机器与智能体
+ * 齐备时显示「将在 X 上用 Y 执行」，否则提示下一步先选什么。 */
+function ctrlSummaryHtml() {
+  const node = $('#ctrl-node')?.value || S.C.node || '', agent = $('#ctrl-agent')?.value || S.C.agent || '';
+  return node && agent
+    ? `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行</small>`
+    : '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
+}
+function updateCtrlSummary() {
+  const line = $('#ctrl-summary-line');
+  if (line) line.innerHTML = ctrlSummaryHtml();
 }
 function ctrlFeedback() {
   const C = S.C;
@@ -704,35 +760,34 @@ function controlResult() {
     <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
     </section>`;
 }
-/* applyPrimeMode 总理模式勾选联动（PRIME-DESIGN 8.1）：不整页重渲染（与
- * #ctrl-agent 同款 DOM 级更新，避免 5s 轮询式重置打断填写）。勾选：能力下拉
- * 自动选中 zcode-dev、执行节点提示同步、广播复选框隐藏并暂记勾选状态（总理
- * 自己编排多节点）；取消：全部恢复勾选前原状。 */
+/* applyPrimeMode 总理模式勾选联动（PRIME-DESIGN 8.1）：不整页重渲染（两级下拉
+ * 同款 DOM 级更新，避免 5s 轮询式重置打断填写）。勾选：暂记当前机器/智能体选择，
+ * 自动定位总理载体（zcode-dev）所在机器并选中它；取消：恢复勾选前原状（原机器
+ * 已不在可选列表则清空重选）。广播复选框已随两级派单模型移除（单目标语义）。 */
 function applyPrimeMode(on) {
-  const C = S.C;
-  const sel = $('#ctrl-agent'), hint = $('#ctrl-node-hint');
-  const bcLine = $('#ctrl-broadcast-line'), bc = $('#ctrl-broadcast'), ta = $('#ctrl-stdin');
-  if (sel && sel.options.length) {
+  const nodeSel = $('#ctrl-node');
+  if (nodeSel) {
     if (on) {
-      C.primePrevAgent = sel.value;
-      const opt = [...sel.options].find(o => o.value.includes(PRIME_AGENT_KEY));
-      if (opt) {
-        sel.value = opt.value;
-        if (hint) hint.textContent = opt.value.split('/')[0];
+      S.C.primePrevNode = nodeSel.value;
+      S.C.primePrevAgent = $('#ctrl-agent')?.value || '';
+      const entry = S.directory.find(d => d.card.name.includes(PRIME_AGENT_KEY));
+      if (entry) {
+        nodeSel.value = entry.node_id;
+        syncCtrlAgentSelect(entry.card.name);
       } else toast('网内暂无 ' + PRIME_AGENT_KEY + '（总理）能力：请先在节点开放该能力再使用总理模式');
     } else {
-      if (C.primePrevAgent && [...sel.options].some(o => o.value === C.primePrevAgent)) {
-        sel.value = C.primePrevAgent;
-        if (hint) hint.textContent = C.primePrevAgent.split('/')[0];
+      if (S.C.primePrevNode && [...nodeSel.options].some(o => o.value === S.C.primePrevNode)) {
+        nodeSel.value = S.C.primePrevNode;
+        syncCtrlAgentSelect(S.C.primePrevAgent);
+      } else {
+        nodeSel.value = '';
+        syncCtrlAgentSelect('');
       }
-      C.primePrevAgent = '';
+      S.C.primePrevNode = ''; S.C.primePrevAgent = '';
     }
+    updateCtrlSummary();
   }
-  if (bcLine) bcLine.hidden = on;
-  if (bc) {
-    if (on) { C.primePrevBroadcast = bc.checked; bc.checked = false; }
-    else bc.checked = C.primePrevBroadcast;
-  }
+  const ta = $('#ctrl-stdin');
   if (ta) ta.placeholder = on ? STDIN_PH_PRIME : STDIN_PH;
 }
 /* primeArgs 总理模式任务入参：PRIME 系统提示词 + 本次目标。模板含 {{GOAL}}
@@ -747,28 +802,20 @@ function primeArgs(goal) {
 async function submitControl() {
   const C = S.C;
   if (C.stage === 'submitting' || C.stage === 'unknown') return;
-  const sel = $('#ctrl-agent')?.value;
-  if (!sel) { toast('目录为空：先在节点配置里开放能力'); return; }
+  const node = $('#ctrl-node')?.value || '';
+  const agentName = $('#ctrl-agent')?.value || '';
+  if (!node) { toast('请先选择执行机器'); return; }
+  if (!agentName) { toast('请先选择该机器上的执行智能体'); return; }
   const prime = !!$('#ctrl-prime')?.checked;
-  const agentName = sel.split('/')[1];
-  const broadcast = !prime && $('#ctrl-broadcast')?.checked;   // 总理模式强制单点：编排由总理自己完成
-  const targets = broadcast
-    ? [...new Set(S.directory.filter(d => d.card.name === agentName).map(d => d.node_id))]
-    : [sel.split('/')[0]];
-  if (!targets.length) {
-    C.stage = 'idle'; C.unknownPending = false;
-    C.message = warnNotice('明确失败 · invalid_request', '没有可执行的目标节点。');
-    render(); toast('明确失败：请修正后重试'); return;
-  }
   C.stdin = $('#ctrl-stdin').value;
   if (prime && !C.stdin.trim()) { toast('总理模式需要填写任务描述（复合目标）'); return; }
-  C.agent = sel;
+  C.node = node; C.agent = agentName;
   C.unknownPending = false;
   C.stage = 'submitting'; C.message = '';
-  render(); toast(prime ? '已锁定表单：正在提交总理任期…' : '已锁定表单：正在提交巡检批次…');
+  render(); toast(prime ? '已锁定表单：正在提交总理任期…' : '已锁定表单：正在提交任务…');
   const body = {
     agent: agentName,
-    targets,
+    targets: [node],   // 两级选择：target_node=所选机器、target_agent=所选智能体，不再按能力反查节点
     input: prime
       ? { args: [primeArgs(C.stdin)], stdin: '' }   // 提示词走 args，stdin 置空
       : { args: [], stdin: C.stdin || '全网健康巡检：输出本机 agent、连接与资源健康摘要。' },
@@ -1329,12 +1376,8 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    if (e.target.id === 'ctrl-agent') {
-      const node = e.target.value.split('/')[0];
-      const hint = document.querySelector('#ctrl-node-hint');
-      if (hint) hint.textContent = node;
-      return;
-    }
+    if (e.target.id === 'ctrl-node') { syncCtrlAgentSelect(); updateCtrlSummary(); return; }   // 两级选择：切机器联动刷新智能体列表
+    if (e.target.id === 'ctrl-agent') { S.C.agent = e.target.value; updateCtrlSummary(); return; }
     if (e.target.id === 'ctrl-prime') { applyPrimeMode(e.target.checked); return; }
   });
   document.addEventListener('keydown', e => {
