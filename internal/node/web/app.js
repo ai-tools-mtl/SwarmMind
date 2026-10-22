@@ -113,8 +113,10 @@ async function loadAll() {
   S.status = st.data || null;
   S.agents = ag.data?.agents || [];
   S.tasks = tk.data?.tasks || [];
-  // 派单目录只含本机 agent（/api/v1/agents 无 network 键——node 无全网视图）
-  S.catalog = (dir.data?.local || []).filter(e => e.card?.exposed);
+  // 派单目录只含本机 agent（/api/v1/agents 无 network 键——node 无全网视图）。
+  // 建议修 10（2026-10-22）：standalone 本机主权——private（未暴露）能力也可本机
+  // 派单（exposed 只约束 hub 准入），目录不过滤；组网模式维持只列 exposed。
+  S.catalog = (dir.data?.local || []).filter(e => e.card?.exposed || S.status?.mode === 'standalone');
   // 列表徽章用实况：最近 8 条留痕并发补查（hub 是状态真相源，日志不缓存状态）
   const top = S.tasks.slice(0, 8);
   const live = await Promise.all(top.map(e =>
@@ -282,10 +284,10 @@ function overviewPage() {
     <div class="actions">${button('复制诊断信息', 'copy-diag')}${button('＋ 派单', 'go-tasks', 'primary')}</div></div>`;
   if (!S.agents.length) {
     return head + `<section class="card"><h2>三步把本机接入协作网</h2>
-      <p class="muted">本机还没有任何 agent。配置是文件化的（V0 不做网页表单编辑，明说只读）：</p>
-      <div class="step"><span>1</span><div><b>编辑 node.yaml</b><div class="muted">在 <code>agents:</code> 段登记本机 agent（command / workdir / timeout / 白名单），完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
-      <div class="step"><span>2</span><div><b>重启 node</b><div class="muted">配置随进程生效；重启不丢已确认的任务结果。</div></div></div>
-      <div class="step"><span>3</span><div><b>回到「我的服务」打开暴露开关</b><div class="muted">exposed=true 后能力进入全网目录（经 hub），别的机器就能派单给它。</div></div></div></section>`
+      <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
+      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「我的服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
+      <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
+      <div class="step"><span>3</span><div><b>钦定总理并派单</b><div class="muted">在「本机总理」区钦定一个 agent，随后即可在本机派单；需要网内调用时再开 exposed 开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '');
   }
   return head + `
@@ -319,13 +321,13 @@ function primeCard() {
   const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新总理凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；请立即配给总理的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个总理」重新走钦定。</small></div>` : '';
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
   if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
-  return head + `<small class="muted">编排接口（本机派单）仅此总理可调；其余凭证只读。</small>
+  return head + `<small class="muted">总理经 MCP 用 prime_token 本机派单；本机主人（local_token）在网页派单同样放行（2026-10-22 鉴权裁决）。declare/轮换/配置管理等管理面仅主人可操作。</small>
   <div class="row spaced">${button('轮换总理凭证', 'prime-rotate', 'link')}${button('换一个总理', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
 }
 /* 钦定选择视图（未钦定引导态与「换一个总理」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前总理将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 作为总理，它将获得本机编排权（submit 等编排接口仅此总理可调，其余凭证只读）。'}</small>
+  return `<small class="muted">${pa ? '当前总理将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 作为总理，它将经 MCP（prime_token）获得本机编排权；本机主人网页派单不依赖总理凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为总理', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
@@ -346,7 +348,7 @@ function recentTasksCard() {
   return `<section class="card"><div class="row"><h2>最近任务（本机派出的）</h2><small>${S.tasks.length} 条留痕</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${t ? badge(t.status) : '<span class="badge offline">状态待查</span>'}</td></tr>`; }).join('')}
-  </tbody></table></div><p class="footer-note">点击行查看详情；终态保留 24h，任务真相在 hub（本页实时补查）。</p>`
+  </tbody></table></div><p class="footer-note">点击行查看详情；任务真相在本机账本（本页实时补查），终态保留 24h。</p>`
     : `<div class="empty"><h2>还没有派过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
@@ -369,6 +371,10 @@ async function loadCfg() {
 }
 
 // cfgSave 保存全部：PUT 整表（服务端校验+round-trip 写盘+热重载/待应用分类）。
+// 功能性修复 4（2026-10-22）：应答 pending_restart=true 时**不重新 GET**——
+// GET /api/v1/local/config 回的是运行时基线（结构性变更待重启期间仍是旧表），
+// 重新 GET 会用旧表覆盖编辑副本（丢刚新增的 agent），用户再保存即把旧表写回盘
+// 覆盖新表。pending 时编辑副本保持权威（盘上已写入、重启后生效）。
 async function cfgSave(btn) {
   if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
@@ -378,9 +384,14 @@ async function cfgSave(btn) {
       S.cfg.pending = !!d.pending_restart;
       S.cfg.structural = d.structural || [];
       S.cfg.msg = d.note || (d.applied ? '已保存并热重载生效' : '已写入 node.yaml（待应用）');
-      await loadCfg();
-      S.cfg.structural = d.structural || []; // loadCfg 重建了 S.cfg（服务端 GET 不回传），恢复结构性原因供横幅展示
-      await loadAll().catch(() => {}); render();
+      if (d.pending_restart) {
+        S.cfg.msg = (d.note || '已写入 node.yaml（待应用）') + ' · 下方表格为你的最新编辑';
+        await loadAll().catch(() => {});
+        render();
+      } else {
+        await loadCfg();
+        await loadAll().catch(() => {}); render();
+      }
     } else {
       // 拒绝（校验/写盘失败）：编辑副本与展开的编辑表单原样保留，仅弹服务端错误
       alert('保存被拒：' + errLine(r.data));
@@ -437,12 +448,13 @@ function normalizeProfile(p) {
 function servicesPage() {
   const head = `<div class="page-head"><div><h1>我的服务</h1>
     <p class="muted">本机 agent 即服务：暴露开关主权在本机；关闭后<b>新任务</b>不再准入（404），已在执行/排队的任务照常跑到终态。</p></div></div>`;
-  if (!S.agents.length) {
-    return head + `<section class="card"><div class="empty"><h2>还没有可暴露的服务</h2>
-      <p class="muted">在 node.yaml 的 <code>agents:</code> 段登记后重启 node，这里就会出现开关。</p>${button('查看总览引导', 'go-overview', 'primary')}</div></section>`;
-  }
-  return head + S.agents.map(a => svcCard(a)).join('') +
-    `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` + cfgSection();
+  // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
+  // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
+  const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
+    <p class="muted">在下方「能力配置」点「＋ 新增 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p></div></section>`;
+  return head + empty + S.agents.map(a => svcCard(a)).join('') +
+    (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
+    cfgSection();
 }
 
 /* ---------- 能力配置编辑区（方案 3.5：yaml.Node round-trip + 热重载分类） ---------- */
@@ -455,7 +467,10 @@ function cfgSection() {
   if (c.unavailable) {
     return `<section class="card"><h2>能力配置</h2><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
   }
-  const pending = c.pending ? `<div class="notice warn spaced"><b>有结构性变更待应用</b>：${esc((c.structural || []).join('；') || '详见保存应答')}。
+  // 功能性修复 4：待应用横幅注明「下方表格为最新编辑」——pending 窗口期编辑
+  // 副本是用户意图的权威（盘上已是新表，运行时基线待重启收敛）。
+  const pending = c.pending ? `<div class="notice warn spaced"><b>已写入盘，重启后生效</b>：${esc((c.structural || []).join('；') || '详见保存应答')}。
+    下方表格为你的最新编辑（刷新页面会回到运行时基线——重启或重载前勿重复保存旧表）。
     ${button('应用并重启', 'cfg-restart', 'primary', c.supervised ? '' : '')}
     ${c.supervised ? '' : `<small class="muted">裸前台运行：请手动重启——<code>${esc(c.restart_cmd)}</code></small>`}</div>` : '';
   const msg = c.msg ? `<div class="notice ok spaced">${esc(c.msg)}</div>` : '';
@@ -558,11 +573,15 @@ async function setExposed(name, exposed, btn) {
 /* ---------- 页面③：派任务·我的任务（旅程②消费者） ---------- */
 function tasksPage() {
   const c = S.f;
+  // 建议修 10（2026-10-22）：standalone 本机主权——本机派单不经 hub，离线/信箱
+  // 语义不适用，目录与选中提示不渲染「离线进信箱」误导文案；组网模式维持现状。
+  const standalone = S.status?.mode === 'standalone';
   const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
     <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
   const opts = S.catalog.map(e => {
     const v = e.node_id + '|' + e.card.name;
-    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''}>${esc(e.card.name)} — ${esc(e.card.description || '（无描述）')} · ${esc(e.card.permission_mode || '—')}${e.online ? '' : ' · 离线（任务进信箱，重连后执行）'}</option>`;
+    const off = standalone || e.online ? '' : ' · 离线（任务进信箱，重连后执行）';
+    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''}>${esc(e.card.name)} — ${esc(e.card.description || '（无描述）')} · ${esc(e.card.permission_mode || '—')}${off}</option>`;
   }).join('');
   const target = S.catalog.find(e => e.node_id + '|' + e.card.name === c.target);
   const stageView = {
@@ -573,16 +592,17 @@ function tasksPage() {
     unknown: `<div class="notice warn"><b>结果未知 · 表单已锁定</b>：${esc(c.message)}<br>同一幂等键（<code>${esc(c.idem)}</code>）重试不会重复执行：${button('同键重试', 'form-resend', 'link')} · ${button('放弃这单', 'form-abandon', 'link')}</div>`,
   }[c.stage] || '';
   const formLocked = c.stage === 'submitting' || c.stage === 'unknown' || c.stage === 'acked';
+  const targetNote = target ? `<b>${esc(target.card.name)}</b> · ${esc(target.card.description || '（无描述）')} · 权限模式 <code>${esc(target.card.permission_mode || '—')}</code> · ${standalone ? '<span class="badge online">本机直执行</span>' : target.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线 · 排队等它回来</span>'}` : '';
   return head + `
   <section class="card" id="task-form"><h2>派任务</h2>
     ${S.catalog.length ? `
-    <label>本机服务（已暴露；派单目标只能是本机）<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个本机服务…</option>${opts}</select></label>
-    <div class="notice" ${target ? '' : 'hidden'}>${target ? `<b>${esc(target.card.name)}</b> · ${esc(target.card.description || '（无描述）')} · 权限模式 <code>${esc(target.card.permission_mode || '—')}</code> · ${target.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线 · 排队等它回来</span>'}` : ''}</div>
+    <label>本机服务${standalone ? '（本机主权：未暴露的能力也可本机派单）' : '（已暴露；派单目标只能是本机）'}<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个本机服务…</option>${opts}</select></label>
+    <div class="notice" ${target ? '' : 'hidden'}>${targetNote}</div>
     <label>任务描述（一段话讲清要做什么；以 prompt_text 交付给对方 agent）<textarea id="f-stdin" placeholder="例：审查这段代码的并发安全性，指出竞态并给出修复建议…" ${formLocked ? 'disabled' : ''}>${esc(c.stdin)}</textarea></label>
     <div class="row"><small class="muted">幂等键 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记并暴露本机能力；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记本机能力（standalone 下未暴露也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}`;
 }
@@ -591,7 +611,7 @@ function myTasksCard() {
   return `<section class="card"><div class="row"><h2>我的任务</h2><small>${rows.length} 条留痕 · 本机派出的全部任务</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>状态</th><th></th></tr></thead><tbody>
     ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${t ? badge(t.status) : '<span class="badge offline">点击查询</span>'}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id), 'link')}</td></tr>`; }).join('')}
-  </tbody></table></div><p class="footer-note">状态实时补查自 hub；终态保留 24h，过期任务号查询即 404。</p>`
+  </tbody></table></div><p class="footer-note">状态实时补查自本机账本；终态保留 24h，过期任务号查询即 404。</p>`
     : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">上方表单派第一单。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
 }
 
@@ -818,6 +838,14 @@ function closeDrawer() {
   S.drawer = null;
   $('#layer').innerHTML = '';
 }
+// taskOrigin 任务来源判定（功能性修复 7，2026-10-22）：以「我的任务」留痕的
+// origin 字段为准（后端自本地账本补）；留痕仅由本机派单写入，无 origin 的旧
+// 缓存/无账本条目按 local 处理——本机控制台列表里的任务默认走本机语义。
+function taskOrigin(taskID) {
+  const e = S.tasks.find(x => x.task_id === taskID);
+  return e && e.origin === 'hub' ? 'hub' : 'local';
+}
+
 async function refreshDrawer() {
   if (!S.drawer) return;
   const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(S.drawer.id)).catch(() => null);
@@ -832,17 +860,30 @@ async function refreshDrawer() {
   S.live[t.id] = t;
   const res = t.result;
   const errTxt = res?.error ? ERRORS[res.error.split(';')[0]] || res.error : '';
+  // 双路径语义（功能性修复 7）：本机任务（origin=local，本机账本真相源）产物区
+  // 从本机账本直出——产物文件就在本机 workdir/outputs 下，展示本机绝对路径；
+  // 仅 hub 下发任务保留「经 hub 取回」指引。
+  const local = taskOrigin(t.id) === 'local';
+  const agent = S.agents.find(x => x.name === t.target_agent);
+  const absPath = a => (agent?.workdir ? agent.workdir.replace(/\/+$/, '') + '/' : '') + a.path;
+  const artifactNote = local
+    ? `<p class="muted small">产物在本机：<code>${esc(absPath(res.artifacts[0]))}</code>${
+        res.artifacts.length > 1 ? `（共 ${res.artifacts.length} 个，均在本机 outputs 目录）` : '（workdir/outputs 下，本机直接打开即可，无需经 hub 取回）'}</p>`
+    : `<p class="muted small">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>`;
+  const reviewNote = local
+    ? `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对结论由本机主人在本控制台确认）。</div>`
+    : `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对记录在 hub 控制台登记）。</div>`;
   $('#drawer').innerHTML = `<div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2>${button('×', 'close-drawer', 'close')}</div>
-    <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 幂等键 ${esc(t.idem || '—')}</p>
+    <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 幂等键 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>
     <ul class="timeline" style="list-style:none;padding:0;margin:14px 0">
       <li>创建 ${esc(timeFull(t.created_at))} · 更新 ${esc(timeFull(t.updated_at))}</li>
       ${res ? `<li>开始 ${esc(timeFull(res.started_at))} · 结束 ${esc(timeFull(res.finished_at))} · 退出码 ${esc(res.exit_code)}</li>` : ''}
     </ul>
-    ${t.status === 'needs_review' ? `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对记录在 hub 控制台登记）。</div>` : ''}
+    ${t.status === 'needs_review' ? reviewNote : ''}
     ${errTxt || res?.error ? `<div class="notice warn"><b>${esc(errTxt || res.error)}</b> · <code>${esc(res.error)}</code></div>` : ''}
     ${!res ? `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
       : `<h3>最终答复 · FinalAnswer</h3><pre>${esc(res.final_answer || '（空）')}</pre>
-         ${res.artifacts?.length ? `<h3>产物（${res.artifacts.length} 个，保留至确认后 24h）</h3>${res.artifacts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(a.sha256.slice(0, 16))}…</small></div>`).join('')}<p class="muted small">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>` : ''}
+         ${res.artifacts?.length ? `<h3>产物（${res.artifacts.length} 个，保留至确认后 24h）</h3>${res.artifacts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(a.sha256.slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('')}${artifactNote}` : ''}
          <details><summary>诊断日志（stdout / stderr 尾部）</summary><pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre></details>`}
     <div class="row spaced"><small class="muted">终态自带下一步：</small>
       <span class="actions">${t.status === 'completed' ? button('查看全部任务', 'close-drawer', 'link') : t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') + button('查看全部任务', 'close-drawer', 'link') : button('查看全部任务', 'close-drawer', 'link')}</span></div>`;

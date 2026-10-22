@@ -51,9 +51,12 @@ func doJSON(t *testing.T, srv *httptest.Server, token, method, path, body string
 	return resp.StatusCode, string(b)
 }
 
-// TestAuthPrime403Priority 编排门 403 四分支（server.go authPrime，先认证后鉴权、
-// 拒绝理由按优先级给出）：setup 态 > 未钦定总理 > 总理凭证未配置 > 级别不足，
-// 各自人话信息可区分。四个分支均在编排门内拒绝（Service 可为 nil）。
+// TestAuthPrime403Priority 编排门 403 分支（server.go authOrchestrate，先认证后
+// 鉴权、拒绝理由按优先级给出）：setup 态 > 未钦定总理 > 总理凭证未配置，各自
+// 人话信息可区分。2026-10-22 鉴权模型裁决后编排双凭证（local/prime 皆可），
+// 原「凭证级别不足」403 分支已删除——三种拒绝分支均在编排门内拒绝（Service 可
+// 为 nil）。双凭证放行行为由 TestPrimeDeclareImmediateEffect /
+// TestPrimeRotateInvalidatesOldToken 的 202 断言覆盖。
 func TestAuthPrime403Priority(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -78,12 +81,6 @@ func TestAuthPrime403Priority(t *testing.T) {
 			cfg:   Config{NodeID: "nodeA", PrimeAgent: "echo", PrimeToken: "", LocalToken: "tok-local"},
 			token: "tok-local", // local_token 过认证（levelRead），命中 PrimeToken 空分支
 			want:  "总理凭证未配置",
-		},
-		{
-			name:  "凭证级别不足",
-			cfg:   Config{NodeID: "nodeA", PrimeAgent: "echo", PrimeToken: "tok-prime", LocalToken: "tok-local"},
-			token: "tok-local",
-			want:  "编排操作需总理凭证",
 		},
 	}
 	for _, tc := range cases {

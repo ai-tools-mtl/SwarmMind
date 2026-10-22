@@ -385,14 +385,16 @@ pass "node 本地 API 提交（prime_token 编排）→ 本地直执行 complete
 api GET "/api/v1/tasks/$LOCAL_TASK"
 if [ "$CODE" != "404" ]; then fail "本机自派任务不应出现在 hub 账本, got HTTP $CODE"; fi
 pass "本机自派任务 hub 不可见（本地账本为真相源，双路径隔离）"
-# 反向断言（矩阵 #14 环防护可测化）：local_token 调编排 → 403 prime_required
+# 反向断言（鉴权模型 v2 裁决反转：编排双凭证——local_token 是本机主人，
+# 派单合法 202；环防护由 declare 仅 local_token 保证，与编排无关）
 LC_CODE=$(curl -sS -o "$TMP/resp-local.json" -w '%{http_code}' -X POST \
   -H 'Authorization: Bearer '"$LOCAL_A_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"target_node":"nodeA","target_agent":"echo-demo","input":{"args":["denied"]},"submitted_by":"local-proc"}' \
+  -d '{"target_node":"nodeA","target_agent":"echo-demo","input":{"args":["local-dispatch"]},"submitted_by":"local-proc"}' \
   "http://127.0.0.1:${LOCAL_A_PORT}/api/v1/tasks")
-if [ "$LC_CODE" != "403" ]; then fail "local_token 调编排应 403, got $LC_CODE: $(cat "$TMP/resp-local.json")"; fi
-grep -q 'prime_required' "$TMP/resp-local.json" || fail "403 应答应含 prime_required: $(cat "$TMP/resp-local.json")"
-pass "local_token 调编排被拒（403 prime_required，凭证分级生效）"
+if [ "$LC_CODE" != "202" ]; then fail "local_token 派单应 202（编排双凭证）, got $LC_CODE: $(cat "$TMP/resp-local.json")"; fi
+LOCAL_TASK2=$(jget "$TMP/resp-local.json" task_id)
+wait_status_local "$LOCAL_TASK2" 'completed' 15
+pass "local_token 本机派单 202 并执行完成（编排双凭证，主人派单合法）"
 # 本地能力目录（边界方案 v2：node 无全网视图——只有本机目录，无 network 键）
 curl -sS -H 'Authorization: Bearer '"$LOCAL_B_TOKEN" \
   "http://127.0.0.1:${LOCAL_B_PORT}/api/v1/agents" > "$TMP/resp.json"

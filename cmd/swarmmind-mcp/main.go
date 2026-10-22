@@ -430,28 +430,28 @@ func toolSubmit(args map[string]any) (string, error) {
 	return fmt.Sprintf("任务已提交：%s（目标 %s @ %s）\n用 swarmmind_status 或 swarmmind_wait 查询结果。", out.TaskID, agent, node), nil
 }
 
-// taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。
-func taskStatus(taskID string) (string, bool) {
-	return renderTaskStatus(taskID, "hub", func(id string) (int, []byte, error) {
-		return hubAPI("GET", "/api/v1/tasks/"+id, nil)
-	})
-}
-
-// renderTaskStatus 通用任务状态渲染（hub/node 双后端共用；应答同为协议层 Task
-// 视图——hub 管理面与 node 本地账本 TaskView 字段一致）。src 为来源标签（错误
-// 文案用），hub 模式传 "hub" 保持原样。done=true 表示已到终态
-//（completed/failed/needs_review/cancelled）。
-func renderTaskStatus(taskID, src string, fetch func(string) (int, []byte, error)) (string, bool) {
-	code, data, err := fetch(taskID)
+// taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。行为保持不变
+//（node 模式见 nodeBackend.taskStatus——功能性修复 8 后两后端错误语义分叉）。
+func taskStatus(taskID string) (string, bool, error) {
+	code, data, err := hubAPI("GET", "/api/v1/tasks/"+taskID, nil)
 	if err != nil {
-		return "查询失败：" + err.Error(), false
+		// hub 既有语义：网络错误非终态、非 error——waitLoop 继续轮到超时。
+		return "查询失败：" + err.Error(), false, nil
 	}
 	if code == 404 {
-		return "任务不存在或已归档（终态保留 24 小时）。", true
+		return "任务不存在或已归档（终态保留 24 小时）。", true, nil
 	}
 	if code != 200 {
-		return fmt.Sprintf("%s 返回 %d: %s", src, code, truncate(data)), true
+		return fmt.Sprintf("hub 返回 %d: %s", code, truncate(data)), true, nil
 	}
+	text, done := renderTaskOK(taskID, data)
+	return text, done, nil
+}
+
+// renderTaskOK HTTP 200 任务视图渲染（hub/node 双后端共用；done=true 表示已到
+// 终态 completed/failed/needs_review/cancelled）。HTTP 错误分支在各自后端的
+// taskStatus 里（修复 8：node 侧 4xx/5xx 一律 error 透传，不再当终态）。
+func renderTaskOK(taskID string, data []byte) (string, bool) {
 	var t struct {
 		Status      string `json:"status"`
 		TargetAgent string `json:"target_agent"`
@@ -506,7 +506,10 @@ func toolWait(args map[string]any) (string, error) {
 }
 
 // waitLoop 轮询等待至终态（hub/node 双后端共用；status 各自后端注入）。
-func waitLoop(args map[string]any, status func(string) (string, bool)) (string, error) {
+// status 返回 error（功能性修复 8）：node 后端的 HTTP 4xx/5xx（含 401/403/404）
+// 属查询失败而非任务终态——立即以 error 上抛（tools/call 层 isError=true 返回），
+// 绝不当作终态结束条件或继续空转轮询。
+func waitLoop(args map[string]any, status func(string) (string, bool, error)) (string, error) {
 	taskID, _ := args["task_id"].(string)
 	if taskID == "" {
 		return "", fmt.Errorf("task_id 必填")
@@ -524,7 +527,10 @@ func waitLoop(args map[string]any, status func(string) (string, bool)) (string, 
 	}
 	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
 	for {
-		text, done := status(taskID)
+		text, done, err := status(taskID)
+		if err != nil {
+			return "", err
+		}
 		if done {
 			return text, nil
 		}
@@ -772,11 +778,21 @@ func (b nodeBackend) localNodeID() (string, error) {
 }
 
 // taskStatus 本机任务视图（GET /api/v1/tasks/{id}，账本直出；与 hub 管理面同
-// 协议层 Task 形态，渲染共用 renderTaskStatus）。
-func (b nodeBackend) taskStatus(taskID string) (string, bool) {
-	return renderTaskStatus(taskID, "本机 node", func(id string) (int, []byte, error) {
-		return b.nodeAPI("GET", "/api/v1/tasks/"+id, nil, b.primeToken)
-	})
+// 协议层 Task 形态，渲染共用 renderTaskOK）。
+// 错误语义（功能性修复 8，2026-10-22）：HTTP 4xx/5xx（含 401/403/404）与网络
+// 错误一律作为 error 上抛——tools/call 层 isError=true 返回、message 透传服务端
+// 原话（nodeAPIErr）；wait 轮询遇之立即返回，不得当作终态。与 hub 后端分叉：
+// hub 侧 404/非 200 沿用既有「文本+done」语义（wait 超时兜底）。
+func (b nodeBackend) taskStatus(taskID string) (string, bool, error) {
+	code, data, err := b.nodeAPI("GET", "/api/v1/tasks/"+taskID, nil, b.primeToken)
+	if err != nil {
+		return "", false, fmt.Errorf("本机 node 不可达（%v）", err)
+	}
+	if code != 200 {
+		return "", false, nodeAPIErr(code, data)
+	}
+	text, done := renderTaskOK(taskID, data)
+	return text, done, nil
 }
 
 // toolNodeArtifact 本机直取产物（GET /api/v1/tasks/{id}/artifacts/{index}，
@@ -801,6 +817,9 @@ func (b nodeBackend) toolArtifact(args map[string]any) (string, error) {
 }
 
 // call 本机六工具分发（未知工具回协议错误 -32602，与 hub 同型）。
+// 错误语义（功能性修复 8，2026-10-22）：node 后端一切 error（含 HTTP 401/403/404
+// 等本机 node 4xx/5xx 原话透传）→ isError=true；无「HTTP 错误当正常结果回文」
+// 的路径。无 err 且文本非空 → isError=false。
 func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rpcError) {
 	var (
 		text string
@@ -817,7 +836,7 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		if id, _ := args["task_id"].(string); id == "" {
 			return errResult("task_id 必填"), nil
 		} else {
-			text, _ = b.taskStatus(id)
+			text, _, err = b.taskStatus(id)
 		}
 	case "swarmmind_wait":
 		text, err = waitLoop(args, b.taskStatus)
@@ -1479,7 +1498,7 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		if id, _ := args["task_id"].(string); id == "" {
 			return errResult("task_id 必填"), nil
 		} else {
-			text, _ = taskStatus(id)
+			text, _, _ = taskStatus(id) // hub 既有语义：HTTP 错误折进文本（修复 8 后 node 侧分叉为 error）
 		}
 	case "swarmmind_wait":
 		text, err = toolWait(args)

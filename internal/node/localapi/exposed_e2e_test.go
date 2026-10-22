@@ -123,7 +123,8 @@ func TestExposedToggleE2E(t *testing.T) {
 	}).Handler())
 	t.Cleanup(srv.Close)
 
-	// doAs 指定凭证调用（编排操作需 prime_token；local_token 调编排 → 403，矩阵 #14）。
+	// doAs 指定凭证调用（编排双凭证：local_token 与 prime_token 皆可，2026-10-22
+	// 鉴权模型裁决；无凭证/错凭证仍 401）。
 	doAs := func(token, method, path, body string) (int, string) {
 		t.Helper()
 		req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
@@ -196,11 +197,11 @@ func TestExposedToggleE2E(t *testing.T) {
 		t.Fatal("重启后开关应保持为关（agents-state.json）")
 	}
 
-	// ---- 本机主权：exposed=false 不拦本机入口（zcode 主权裁决 + 方案 3.2：
-	// exposed 是对 hub 准入的开关，本机主人/总理派单不受其约束）；非总理凭证
-	// 调编排 → 403（矩阵 #14，环防护可测化） ----
-	if code, out = doAs("tok-local", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`); code != http.StatusForbidden || !strings.Contains(out, "prime_required") {
-		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", code, out)
+	// ---- 本机主权 + 编排双凭证（2026-10-22 鉴权模型裁决）：exposed=false 不拦
+	// 本机入口（exposed 只约束 hub 准入）；local_token（本机主人）与 prime_token
+	// 皆可编排——原「local_token 调编排 → 403」断言随裁决反转为主权 202 ----
+	if code, out = doAs("tok-local", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`); code != http.StatusAccepted {
+		t.Fatalf("关闭 exposed 后本机入口（local_token 主人）派单应 202（主权+双凭证）, got %d: %s", code, out)
 	}
 	code, out = doAs("tok-prime", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`)
 	if code != http.StatusAccepted {
@@ -225,10 +226,11 @@ func TestExposedToggleE2E(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &ack); err != nil || ack.TaskID == "" {
 		t.Fatalf("提交应答不符: %s", out)
 	}
-	// 我的任务留痕（submit_ack 成功即登记）：两条 —— exposed=false 时的主权
-	// 派单（无幂等键）与本条（idem loop7-1），均合法入账
-	if !waitFor(2*time.Second, func() bool { return len(taskLog.List()) == 2 }) {
-		t.Fatalf("提交成功应留痕（含 exposed=false 期间的主权派单）: %+v", taskLog.List())
+	// 我的任务留痕（submit_ack 成功即登记）：三条 —— exposed=false 期间的双凭证
+	// 主权派单（local_token 与 prime_token 各一笔，均无幂等键）与本条（idem
+	// loop7-1），均合法入账
+	if !waitFor(2*time.Second, func() bool { return len(taskLog.List()) == 3 }) {
+		t.Fatalf("提交成功应留痕（含 exposed=false 期间的双凭证主权派单）: %+v", taskLog.List())
 	}
 	// 已有任务语义佐证：关开关不影响在途任务——该任务应照常跑到终态 completed
 	if !waitFor(5*time.Second, func() bool {
