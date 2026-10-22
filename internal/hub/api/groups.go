@@ -152,6 +152,8 @@ func (s *Server) handleGroupList(w http.ResponseWriter, r *http.Request) {
 
 // handleGroupMessages GET /api/v1/groups/{id}/messages?since=N：增量拉取
 // （GROUP-RFC 三 group_sync 补齐语义：返回 seq > since 的消息，升序）。
+// pruned_before_seq 为滚动裁剪已丢消息的最大 seq（GROUP-RFC 三 200 条滚动
+// 窗口）：since 落在被裁区间时消息从现存最旧起返回，调用方据此对齐游标。
 func (s *Server) handleGroupMessages(w http.ResponseWriter, r *http.Request) {
 	if s.groupUnavailable(w) {
 		return
@@ -165,12 +167,12 @@ func (s *Server) handleGroupMessages(w http.ResponseWriter, r *http.Request) {
 		}
 		since = v
 	}
-	msgs, err := s.cfg.Groups.ListMessages(r.PathValue("id"), since)
+	msgs, prunedBefore, err := s.cfg.Groups.ListMessages(r.PathValue("id"), since)
 	if err != nil {
 		writeGroupErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "pruned_before_seq": prunedBefore})
 }
 
 // groupSayRequest 群发言请求体。from 为发言者标识；REST/MCP 发言只允许

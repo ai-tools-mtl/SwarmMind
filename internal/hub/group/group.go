@@ -39,6 +39,9 @@ const (
 
 	// MaxBodyBytes 单条消息体上限：8KiB（GROUP-RFC 三 独立信箱约定，按字节实测）。
 	MaxBodyBytes = 8 << 10
+	// MaxGroupMessages 群消息滚动窗口：组内只保留最新 200 条（GROUP-RFC 三
+	// 独立信箱约定），超出从最小 seq 起丢弃最旧，防 groups.json 无限膨胀。
+	MaxGroupMessages = 200
 	// DefaultMaxRounds 默认发言预算：agent 消息最多 20 条（MVP 简化护栏，
 	// GROUP-RFC 四.3 预算代码强制的最小集）。
 	DefaultMaxRounds = 20
@@ -110,12 +113,17 @@ type GroupMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// state 快照根结构（groups.json 内容）。Messages 按 seq 升序追加（append-only）。
+// state 快照根结构。Messages 按 seq 升序追加，超 MaxGroupMessages 滚动裁剪
+// （seq 单调账本 Seqs 不回退，窗口只在头部留缺口）。
 type state struct {
 	Groups   map[string]Group          `json:"groups"`
 	Messages map[string][]GroupMessage `json:"messages"`
-	// Seqs group_id → 已分配的最大 seq（重启后继续单调）。
+	// Seqs group_id → 已分配的最大 seq（重启后继续单调，不受裁剪影响）。
 	Seqs map[string]int64 `json:"seqs"`
+	// AgentMsgs group_id → 已入账 agent 消息总数（发言预算计量口径）。独立于
+	// 滚动窗口累计：窗口只保最新 200 条，旧 agent 消息被裁不能让预算「失忆」
+	// 重新放行。随快照持久化。
+	AgentMsgs map[string]int `json:"agent_msgs,omitempty"`
 	// Refluxed 已回流任务集合：task_id → true（终态回流幂等锚，随快照持久化，
 	// 重复终态事件/重启重放都只回流一次）。
 	Refluxed map[string]bool `json:"refluxed,omitempty"`
@@ -123,10 +131,11 @@ type state struct {
 
 func newState() *state {
 	return &state{
-		Groups:   make(map[string]Group),
-		Messages: make(map[string][]GroupMessage),
-		Seqs:     make(map[string]int64),
-		Refluxed: make(map[string]bool),
+		Groups:    make(map[string]Group),
+		Messages:  make(map[string][]GroupMessage),
+		Seqs:      make(map[string]int64),
+		AgentMsgs: make(map[string]int),
+		Refluxed:  make(map[string]bool),
 	}
 }
 
@@ -164,13 +173,20 @@ func loadState(path string) (*state, error) {
 		return nil, fmt.Errorf("group: 群状态快照损坏 %s: %w", path, err)
 	}
 	// 预算下界护栏：快照是唯一可能注入 MaxRounds<1 的入口（创建路径恒为
-	// DefaultMaxRounds 常量）。0/负值会使 countAgent()>=MaxRounds 恒真，预算在
-	// 首条 agent 消息前即「耗尽」，故加载时归一为默认 20；归一后的内存状态随
-	// 下次先写后见落盘覆盖手改值。
+	// DefaultMaxRounds 常量）。0/负值会使预算恒真判耗尽，故加载时归一为默认
+	// 20；归一后的内存状态随下次先写后见落盘覆盖手改值。
 	for id, g := range st.Groups {
 		if g.Budget.MaxRounds < 1 {
 			g.Budget.MaxRounds = DefaultMaxRounds
 			st.Groups[id] = g
+		}
+	}
+	// 旧快照迁移：滚动裁剪落地前快照无 agent_msgs 字段（零值），按现存消息
+	// 重新累计——旧快照从未裁剪、现存消息即全部历史，计数精确；迁移结果随
+	// 下次先写后见落盘持久化。
+	for id := range st.Groups {
+		if st.AgentMsgs[id] == 0 {
+			st.AgentMsgs[id] = countAgent(st.Messages[id])
 		}
 	}
 	return st, nil
@@ -205,14 +221,13 @@ func (s *Store) mutate(mutateFn func(next *state) error) error {
 	return nil
 }
 
-// clone 深拷贝状态（Group.Members/TaskRefs 一并复制；string 等不可变值共享安全），
-// 消息切片 cap==len，追加时分配新底层数组，不污染已发布状态。
+// clone 深拷贝状态（Group 的 Members/TaskRefs 经 cloneGroup 一并复制；string
+// 等不可变值共享安全），消息切片 cap==len，追加时分配新底层数组，不污染已
+// 发布状态。
 func (st *state) clone() *state {
 	n := newState()
 	for id, g := range st.Groups {
-		g.Members = append(make([]string, 0, len(g.Members)), g.Members...)
-		g.TaskRefs = append(make([]string, 0, len(g.TaskRefs)), g.TaskRefs...)
-		n.Groups[id] = g
+		n.Groups[id] = cloneGroup(g)
 	}
 	for id, msgs := range st.Messages {
 		n.Messages[id] = append(make([]GroupMessage, 0, len(msgs)), msgs...)
@@ -220,10 +235,36 @@ func (st *state) clone() *state {
 	for id, sq := range st.Seqs {
 		n.Seqs[id] = sq
 	}
+	for id, n2 := range st.AgentMsgs {
+		n.AgentMsgs[id] = n2
+	}
 	for id, ok := range st.Refluxed {
 		n.Refluxed[id] = ok
 	}
 	return n
+}
+
+// cloneGroup 深拷贝群对象：Members/TaskRefs 切片逐一复制（GroupMessage 等其余
+// 出口均为值类型，结构体赋值即拷贝）。读出口（GetGroup/ListGroups/CloseGroup/
+// CreateGroup 返回值）一律经此发布——否则调用方拿到与内部状态共享底层数组的
+// 切片引用，可绕过锁 append/改写污染 store（审查例证）。
+func cloneGroup(g Group) Group {
+	g.Members = append(make([]string, 0, len(g.Members)), g.Members...)
+	g.TaskRefs = append(make([]string, 0, len(g.TaskRefs)), g.TaskRefs...)
+	return g
+}
+
+// appendAndTrim 追加消息并执行 MaxGroupMessages 滚动裁剪（GROUP-RFC 三 独立
+// 信箱 200 条）：超窗口从最小 seq 起丢弃最旧，只保留最新 200 条。seq 账本
+// （Seqs）与 agent 预算计数（AgentMsgs）独立累计，不随裁剪回退。仅在持有锁的
+// mutate 事务内调用；裁剪随事务落盘，groups.json 不无限膨胀。落盘失败的副本
+// 整体丢弃，裁剪同样不生效（与写路径同一原子性）。
+func (st *state) appendAndTrim(groupID string, msg GroupMessage) {
+	msgs := append(st.Messages[groupID], msg)
+	if len(msgs) > MaxGroupMessages {
+		msgs = append(make([]GroupMessage, 0, MaxGroupMessages), msgs[len(msgs)-MaxGroupMessages:]...)
+	}
+	st.Messages[groupID] = msgs
 }
 
 // persistState 将新状态副本写入临时文件并 rename 原子替换快照（SPEC 4.7：
@@ -284,11 +325,12 @@ func (s *Store) CreateGroup(goal, host string, members []string) (Group, error) 
 	if err != nil {
 		return Group{}, err
 	}
-	return g, nil
+	return cloneGroup(g), nil
 }
 
-// PostMessage 发言：校验 → 预算/终态护栏 → 分配组内单调 seq → 落盘 → 返回。
-// 落盘失败不占用 seq（内存未变，重试重新分配）。
+// PostMessage 发言：校验 → 预算/终态护栏 → 分配组内单调 seq → 滚动裁剪
+// （超 MaxGroupMessages 丢最旧）→ 落盘 → 返回。
+// 落盘失败不占用 seq、不计预算（内存未变，重试重新分配）。
 func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, error) {
 	from = strings.TrimSpace(from)
 	if from == "" {
@@ -314,7 +356,9 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 		if g.Status == StatusConcluded {
 			return ErrConcluded
 		}
-		if kind == KindAgent && countAgent(next.Messages[groupID]) >= g.Budget.MaxRounds {
+		// 预算按 AgentMsgs 独立累计判定（非现存消息计数）：滚动窗口裁掉旧
+		// agent 消息不得让预算「失忆」重新放行。
+		if kind == KindAgent && next.AgentMsgs[groupID] >= g.Budget.MaxRounds {
 			return ErrBudgetExhausted
 		}
 		msg = GroupMessage{
@@ -326,7 +370,10 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 			Body:      body,
 			CreatedAt: time.Now().UTC(),
 		}
-		next.Messages[groupID] = append(next.Messages[groupID], msg)
+		if kind == KindAgent {
+			next.AgentMsgs[groupID]++
+		}
+		next.appendAndTrim(groupID, msg)
 		next.Seqs[groupID] = msg.Seq
 		return nil
 	})
@@ -336,25 +383,35 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 	return msg, nil
 }
 
-// ListMessages 增量拉取：返回 seq > sinceSeq 的消息（升序）。群不存在报
-// ErrNotFound；sinceSeq<0 按 0 处理（全量补齐语义，GROUP-RFC 三 group_sync）。
-func (s *Store) ListMessages(groupID string, sinceSeq int64) ([]GroupMessage, error) {
+// ListMessages 增量拉取：返回 seq > sinceSeq 的消息（升序）。第二返回值
+// prunedBeforeSeq 为滚动裁剪已丢消息的最大 seq（即现存最旧消息 Seq-1；从未
+// 裁剪时为 0）——sinceSeq < prunedBeforeSeq 说明请求区间有拉不回的缺口，调用方
+// 应按 prunedBeforeSeq 对齐游标（REST 响应以 pruned_before_seq 字段透出）。
+// 群不存在报 ErrNotFound；sinceSeq<0 按 0 处理（全量补齐语义，GROUP-RFC 三
+// group_sync）。
+func (s *Store) ListMessages(groupID string, sinceSeq int64) ([]GroupMessage, int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.st.Groups[groupID]; !ok {
-		return nil, ErrNotFound
+		return nil, 0, ErrNotFound
 	}
 	if sinceSeq < 0 {
 		sinceSeq = 0
 	}
 	msgs := s.st.Messages[groupID]
+	// 裁剪只从头部（最小 seq）丢、seq 从 1 连续分配，故现存最旧 Seq-1 即已裁
+	// 区间上界，无需额外持久化游标。
+	var prunedBefore int64
+	if len(msgs) > 0 {
+		prunedBefore = msgs[0].Seq - 1
+	}
 	out := make([]GroupMessage, 0, len(msgs))
 	for _, m := range msgs {
 		if m.Seq > sinceSeq {
 			out = append(out, m)
 		}
 	}
-	return out, nil
+	return out, prunedBefore, nil
 }
 
 // CloseGroup 结束群：discussing/forming → concluded（终态不可回退）。
@@ -385,16 +442,17 @@ func (s *Store) CloseGroup(groupID, by string) (Group, error) {
 	if err != nil {
 		return Group{}, err
 	}
-	return closed, nil
+	return cloneGroup(closed), nil
 }
 
-// ListGroups 全量群列表（按创建时间升序，同时刻按 ID 稳定排序）。
+// ListGroups 全量群列表（按创建时间升序，同时刻按 ID 稳定排序）。逐群深拷贝
+// 发布，调用方改写返回值不触及内部状态。
 func (s *Store) ListGroups() []Group {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]Group, 0, len(s.st.Groups))
 	for _, g := range s.st.Groups {
-		out = append(out, g)
+		out = append(out, cloneGroup(g))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -405,12 +463,15 @@ func (s *Store) ListGroups() []Group {
 	return out
 }
 
-// GetGroup 查单个群（存在与否第二返回值）。
+// GetGroup 查单个群（存在与否第二返回值）。深拷贝发布（cloneGroup）。
 func (s *Store) GetGroup(groupID string) (Group, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.st.Groups[groupID]
-	return g, ok
+	if !ok {
+		return Group{}, false
+	}
+	return cloneGroup(g), true
 }
 
 // AddTaskRef 登记群内任务引用（GROUP-RFC 六「结论转正式任务」）：追加去重
@@ -499,7 +560,7 @@ func (s *Store) RefluxTaskResult(taskID, body string) (bool, error) {
 				Body:      body,
 				CreatedAt: now,
 			}
-			next.Messages[gid] = append(next.Messages[gid], msg)
+			next.appendAndTrim(gid, msg)
 			next.Seqs[gid] = msg.Seq
 			posted = true
 		}

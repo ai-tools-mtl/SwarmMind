@@ -1,6 +1,7 @@
 package group
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -124,19 +125,19 @@ func TestListMessagesIncremental(t *testing.T) {
 			t.Fatalf("发言 %d: %v", i, err)
 		}
 	}
-	all, err := s.ListMessages(g.ID, 0)
+	all, _, err := s.ListMessages(g.ID, 0)
 	if err != nil || len(all) != 5 {
 		t.Fatalf("since=0 应全量 5 条, got %d err=%v", len(all), err)
 	}
-	inc, err := s.ListMessages(g.ID, 3)
+	inc, _, err := s.ListMessages(g.ID, 3)
 	if err != nil || len(inc) != 2 || inc[0].Seq != 4 || inc[1].Seq != 5 {
 		t.Fatalf("since=3 应返回 seq 4,5, got %+v err=%v", inc, err)
 	}
-	neg, err := s.ListMessages(g.ID, -1)
+	neg, _, err := s.ListMessages(g.ID, -1)
 	if err != nil || len(neg) != 5 {
 		t.Fatalf("负 since 应按 0 全量, got %d err=%v", len(neg), err)
 	}
-	if _, err := s.ListMessages("g-none", 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.ListMessages("g-none", 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("未知群应 ErrNotFound, got %v", err)
 	}
 }
@@ -209,7 +210,7 @@ func TestBudgetExhausted(t *testing.T) {
 		t.Fatalf("预算用尽后 system 消息不应受限: %v", err)
 	}
 	// 拒绝的消息不占 seq：下一条成功消息 seq 连续
-	before, _ := s.ListMessages(g.ID, 0)
+	before, _, _ := s.ListMessages(g.ID, 0)
 	m, err := s.PostMessage(g.ID, "admin", KindUser, "after")
 	if err != nil {
 		t.Fatalf("发言: %v", err)
@@ -288,7 +289,7 @@ func TestPersistRestartRecovery(t *testing.T) {
 	if len(groups) != 2 {
 		t.Fatalf("重启后应恢复 2 个群, got %d", len(groups))
 	}
-	msgs, err := s2.ListMessages(g1.ID, 0)
+	msgs, _, err := s2.ListMessages(g1.ID, 0)
 	if err != nil || len(msgs) != 3 {
 		t.Fatalf("重启后消息应恢复 3 条, got %d err=%v", len(msgs), err)
 	}
@@ -300,7 +301,7 @@ func TestPersistRestartRecovery(t *testing.T) {
 	if _, err := s2.PostMessage(g2.ID, "admin", KindUser, "x"); !errors.Is(err, ErrConcluded) {
 		t.Fatalf("恢复的已关闭群应拒收, got %v", err)
 	}
-	if _, err := s2.ListMessages("g-none", 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s2.ListMessages("g-none", 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("未知群应 ErrNotFound, got %v", err)
 	}
 }
@@ -467,7 +468,7 @@ func TestRefluxTaskResult(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("首次回流应 true, got %v err=%v", ok, err)
 	}
-	msgs, _ := s.ListMessages(g.ID, 0)
+	msgs, _, _ := s.ListMessages(g.ID, 0)
 	last := msgs[len(msgs)-1]
 	if last.Kind != KindSystem || last.From != RefluxFrom || last.Body != "任务 t-done 已完成：磁盘对比报告已生成" {
 		t.Fatalf("回流消息不符: %+v", last)
@@ -483,7 +484,7 @@ func TestRefluxTaskResult(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("重复回流应 (false,nil), got %v err=%v", ok, err)
 	}
-	msgs2, _ := s.ListMessages(g.ID, 0)
+	msgs2, _, _ := s.ListMessages(g.ID, 0)
 	if len(msgs2) != len(msgs) {
 		t.Fatalf("重复回流不得新增消息: %d → %d", len(msgs), len(msgs2))
 	}
@@ -535,7 +536,7 @@ func TestRefluxTaskResult(t *testing.T) {
 	if ok, err := s2.RefluxTaskResult("t-done", "任务 t-done 已完成：重放"); err != nil || ok {
 		t.Fatalf("重启后重复回流应幂等 false, got %v err=%v", ok, err)
 	}
-	msgs3, _ := s2.ListMessages(g.ID, 0)
+	msgs3, _, _ := s2.ListMessages(g.ID, 0)
 	n := 0
 	for _, m := range msgs3 {
 		if strings.Contains(m.Body, "任务 t-done") {
@@ -582,5 +583,183 @@ func TestTaskBodyComposers(t *testing.T) {
 	rs = []rune(strings.TrimPrefix(ans, "任务 t-9 已完成："))
 	if len(rs) != 201 || strings.TrimSuffix(string(rs), "…") != strings.Repeat("答", 200) {
 		t.Fatalf("FinalAnswer 应截断 200 字 + …, got %d 字", len(rs))
+	}
+}
+
+// TestReadInterfacesDeepCopy 覆盖（双审批 C 修 1）：全部 Group 读/写出口
+// （GetGroup/ListGroups/CreateGroup/CloseGroup）返回深拷贝——调用方对返回值
+// 的 Members/TaskRefs 改写元素或 append 都不得触及 store 内部状态（否则可绕过
+// 锁污染内部状态，审查例证）。
+func TestReadInterfacesDeepCopy(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	defer s.Close()
+
+	// CreateGroup 返回值污染
+	created, err := s.CreateGroup("goal", "admin", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("建群: %v", err)
+	}
+	created.Members[0] = "tampered"
+	created.Members = append(created.Members, "intruder")
+	if g, _ := s.GetGroup(created.ID); g.Members[0] != "a" || len(g.Members) != 2 {
+		t.Fatalf("CreateGroup 返回值污染不得入内: %+v", g.Members)
+	}
+
+	// GetGroup 返回值污染（含 TaskRefs）
+	if err := s.AddTaskRef(created.ID, "t-1"); err != nil {
+		t.Fatalf("登记: %v", err)
+	}
+	got, ok := s.GetGroup(created.ID)
+	if !ok {
+		t.Fatal("群应可查")
+	}
+	got.Members[0] = "tampered"
+	got.Members = append(got.Members, "intruder")
+	got.TaskRefs[0] = "tampered"
+	got.TaskRefs = append(got.TaskRefs, "t-intruder")
+	again, _ := s.GetGroup(created.ID)
+	if again.Members[0] != "a" || len(again.Members) != 2 ||
+		again.TaskRefs[0] != "t-1" || len(again.TaskRefs) != 1 {
+		t.Fatalf("GetGroup 返回值污染不得入内: members=%+v taskRefs=%+v", again.Members, again.TaskRefs)
+	}
+
+	// ListGroups 返回值污染
+	list := s.ListGroups()
+	list[0].Members[0] = "tampered"
+	list[0].Members = append(list[0].Members, "intruder")
+	list[0].TaskRefs[0] = "tampered"
+	if g, _ := s.GetGroup(created.ID); g.Members[0] != "a" || len(g.Members) != 2 || g.TaskRefs[0] != "t-1" {
+		t.Fatalf("ListGroups 返回值污染不得入内: %+v", g)
+	}
+
+	// CloseGroup 返回值污染
+	closed, err := s.CloseGroup(created.ID, "admin")
+	if err != nil {
+		t.Fatalf("关群: %v", err)
+	}
+	closed.Members[0] = "tampered"
+	closed.Members = append(closed.Members, "intruder")
+	if g, _ := s.GetGroup(created.ID); g.Members[0] != "a" || len(g.Members) != 2 {
+		t.Fatalf("CloseGroup 返回值污染不得入内: %+v", g.Members)
+	}
+}
+
+// TestRollingTrim 覆盖（双审批 C 修 2，GROUP-RFC 三 200 条滚动窗口）：
+// 210 条 → 只保最新 200 条（seq 11..210）、裁剪按 seq 从小到大丢；
+// ListMessages since 增量对被裁区间从现存最旧起返回并带 prunedBefore 游标；
+// agent 预算计数独立累计（旧 agent 消息被裁不得让预算失忆重新放行）；
+// 裁剪随先写后见落盘（快照恰好 200 条），重启恢复仍 200、seq 续接、预算仍耗尽；
+// 回流注入同受窗口约束（system 类也参与滚动）。
+func TestRollingTrim(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	g, _ := s.CreateGroup("goal", "admin", nil)
+
+	// 20 条 agent（seq 1..20，打满预算）+ 190 条 user（seq 21..210）= 210 条
+	for i := 0; i < DefaultMaxRounds; i++ {
+		if _, err := s.PostMessage(g.ID, "a", KindAgent, "round"); err != nil {
+			t.Fatalf("agent %d: %v", i+1, err)
+		}
+	}
+	for i := 0; i < 190; i++ {
+		if _, err := s.PostMessage(g.ID, "admin", KindUser, "filler"); err != nil {
+			t.Fatalf("user %d: %v", i+1, err)
+		}
+	}
+
+	// 全量拉取：恰 200 条，seq 11..210，prunedBefore=10
+	all, pruned, err := s.ListMessages(g.ID, 0)
+	if err != nil || len(all) != MaxGroupMessages {
+		t.Fatalf("滚动窗口应保留 %d 条, got %d err=%v", MaxGroupMessages, len(all), err)
+	}
+	if all[0].Seq != 11 || all[len(all)-1].Seq != 210 {
+		t.Fatalf("应保留最新 seq 11..210, got %d..%d", all[0].Seq, all[len(all)-1].Seq)
+	}
+	if pruned != 10 {
+		t.Fatalf("prunedBefore 应为 10, got %d", pruned)
+	}
+
+	// since 增量语义：since 落在被裁区间 → 从现存最旧起返回 + prunedBefore 点破缺口
+	trimmed, pb, err := s.ListMessages(g.ID, 5)
+	if err != nil || len(trimmed) != 200 || trimmed[0].Seq != 11 || pb != 10 {
+		t.Fatalf("since=5 < prunedBefore 应从 seq 11 起全量返回, got len=%d head=%d pb=%d err=%v", len(trimmed), trimmed[0].Seq, pb, err)
+	}
+	inc, pb2, err := s.ListMessages(g.ID, 15)
+	if err != nil || len(inc) != 195 || inc[0].Seq != 16 || pb2 != 10 {
+		t.Fatalf("since=15 应返回 seq 16..210, got len=%d head=%d pb=%d err=%v", len(inc), inc[0].Seq, pb2, err)
+	}
+	tail, _, err := s.ListMessages(g.ID, 209)
+	if err != nil || len(tail) != 1 || tail[0].Seq != 210 {
+		t.Fatalf("since=209 应只返回 seq 210, got %+v err=%v", tail, err)
+	}
+
+	// 预算独立累计：窗口内现存 agent 消息只剩 10 条（seq 11..20），若按现存
+	// 计数第 21 条 agent 会被误放行；独立计数应为 20 → 拒绝。
+	nAgent := 0
+	for _, m := range all {
+		if m.Kind == KindAgent {
+			nAgent++
+		}
+	}
+	if nAgent != 10 {
+		t.Fatalf("用例自检: 窗口内应剩 10 条 agent, got %d", nAgent)
+	}
+	if _, err := s.PostMessage(g.ID, "a", KindAgent, "over"); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("agent 消息被裁后预算不得失忆: got %v", err)
+	}
+	// user 发言不受影响，seq 续接 211（裁剪与被拒消息都不占 seq）
+	m211, err := s.PostMessage(g.ID, "admin", KindUser, "post-trim")
+	if err != nil || m211.Seq != 211 {
+		t.Fatalf("裁剪后 seq 应续接 211, got %d err=%v", m211.Seq, err)
+	}
+
+	// 回流注入（system）同受滚动窗口约束：窗口已满（seq 12..211）再入一条，
+	// 最旧 seq 12 被挤掉，回流消息占 seq 212
+	if err := s.AddTaskRef(g.ID, "t-r"); err != nil {
+		t.Fatalf("登记: %v", err)
+	}
+	if ok, err := s.RefluxTaskResult("t-r", "任务 t-r 已完成：回流"); err != nil || !ok {
+		t.Fatalf("回流: ok=%v err=%v", ok, err)
+	}
+	after, pb3, _ := s.ListMessages(g.ID, 0)
+	if len(after) != MaxGroupMessages || after[0].Seq != 13 || pb3 != 12 {
+		t.Fatalf("回流后应滚动为 seq 13..212, got len=%d head=%d pb=%d", len(after), after[0].Seq, pb3)
+	}
+	if last := after[len(after)-1]; last.Seq != 212 || last.Kind != KindSystem || last.From != RefluxFrom {
+		t.Fatalf("末条应为回流消息 seq 212, got %+v", last)
+	}
+
+	// 落盘裁剪：快照恰好 200 条消息（groups.json 不无限膨胀）
+	s.Close()
+	b, err := os.ReadFile(filepath.Join(dir, fileName))
+	if err != nil {
+		t.Fatalf("读快照: %v", err)
+	}
+	if n := bytes.Count(b, []byte(`"msg_id"`)); n != MaxGroupMessages {
+		t.Fatalf("快照应恰含 %d 条消息, got %d", MaxGroupMessages, n)
+	}
+
+	// 重启恢复：仍 200 条、prunedBefore 保持、seq 续接 213、预算仍耗尽
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重启打开: %v", err)
+	}
+	defer s2.Close()
+	recov, pb4, err := s2.ListMessages(g.ID, 0)
+	if err != nil || len(recov) != MaxGroupMessages || recov[0].Seq != 13 || pb4 != 12 {
+		t.Fatalf("重启后应恢复 %d 条 seq 13..212 pb=12, got len=%d head=%d pb=%d err=%v", MaxGroupMessages, len(recov), recov[0].Seq, pb4, err)
+	}
+	m213, err := s2.PostMessage(g.ID, "admin", KindUser, "post-restart")
+	if err != nil || m213.Seq != 213 {
+		t.Fatalf("重启后 seq 应续接 213, got %d err=%v", m213.Seq, err)
+	}
+	if _, err := s2.PostMessage(g.ID, "a", KindAgent, "over-after-restart"); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("重启后预算仍应耗尽（AgentMsgs 持久化）, got %v", err)
 	}
 }

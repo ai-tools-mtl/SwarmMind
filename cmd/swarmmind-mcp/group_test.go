@@ -237,3 +237,55 @@ func textOf(res map[string]any) string {
 	}
 	return ""
 }
+
+// TestGroupToolsTrimNotice 覆盖（双审批 C 修 2 六.六同步）：群消息滚动窗口
+// （GROUP-RFC 三 200 条）触发后，swarmmind_group_messages 人话输出标注裁剪
+// 位置——since 落在被裁区间时点破缺口并从现存最旧起返回；since 越过裁剪线时
+// 仅尾部提示。
+func TestGroupToolsTrimNotice(t *testing.T) {
+	realHub(t)
+
+	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "滚动窗口群"})
+	gid := gidFrom(t, out)
+
+	// 5 条 agent（计入预算）+ 200 条 user = 205 条 → 裁掉 seq 1..5
+	for i := 1; i <= 5; i++ {
+		mustCall(t, "swarmmind_group_say", map[string]any{"group_id": gid, "from": "a", "kind": "agent", "body": "round"})
+	}
+	for i := 6; i <= 205; i++ {
+		mustCall(t, "swarmmind_group_say", map[string]any{"group_id": gid, "from": "admin", "body": "filler"})
+	}
+
+	// since=0 落在被裁区间（pruned_before_seq=5）：从现存最旧 [#6] 起 200 条 + 点破缺口
+	out = mustCall(t, "swarmmind_group_messages", map[string]any{"group_id": gid, "since": float64(0)})
+	if !strings.Contains(out, "新增 200 条") || !strings.Contains(out, "[#6]") {
+		t.Fatalf("滚动窗口应保留 200 条从 [#6] 起, got head: %s", head(out, 120))
+	}
+	if !strings.Contains(out, "已被裁剪") || !strings.Contains(out, "seq≤5") || !strings.Contains(out, "since=0") {
+		t.Fatalf("应标注裁剪位置与缺口区间, got tail: %s", tail(out, 200))
+	}
+
+	// since=10 越过裁剪线：正常增量 195 条 + 尾部裁剪提示
+	out = mustCall(t, "swarmmind_group_messages", map[string]any{"group_id": gid, "since": float64(10)})
+	if !strings.Contains(out, "新增 195 条") || !strings.Contains(out, "[#11]") {
+		t.Fatalf("since=10 应返回 seq 11..205 共 195 条, got head: %s", head(out, 120))
+	}
+	if !strings.Contains(out, "seq≤5 的更早消息已被裁剪") {
+		t.Fatalf("应尾部提示裁剪线, got tail: %s", tail(out, 200))
+	}
+}
+
+// head/tail 取文本首/尾片段（断言输出可读）。
+func head(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
