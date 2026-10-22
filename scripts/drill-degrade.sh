@@ -2,10 +2,17 @@
 # SwarmMind 降级演练（P4 Gate 证据）：三类故障注入与恢复验证
 # 用法：./scripts/drill-degrade.sh（在 Mac 上运行，操作腾讯云 hub 与百度云 node）
 set -e
-HUB_SSH="ssh -i /Users/tl.m/Downloads/Mac2026.pem ubuntu@1.13.158.180"
-NODE_SSH="ssh -i /Users/tl.m/.ssh/id_ed25519 root@120.48.14.7"
+# 凭据一律环境变量注入，严禁硬编码（2026-10-22 P0 教训：admin_token 曾入 public 历史）
+HUB_HOST="${SWARM_HUB_HOST:?需 export SWARM_HUB_HOST=ubuntu@host}"
+HUB_KEY="${SWARM_HUB_KEY:?需 export SWARM_HUB_KEY=/path/to/key}"
+ADMIN_TOKEN="${SWARM_ADMIN_TOKEN:?需 export SWARM_ADMIN_TOKEN=...}"
+HUB_SSH="ssh -i $HUB_KEY $HUB_HOST"
+NODE_HOST="${SWARM_NODE_HOST:?需 export SWARM_NODE_HOST=root@host}"
+NODE_KEY="${SWARM_NODE_KEY:?需 export SWARM_NODE_KEY=/path/to/key}"
+NODE_SSH="ssh -i $NODE_KEY $NODE_HOST"
 PASS=0; FAIL=0
 check() { if [ "$2" = "$3" ]; then echo "✅ $1"; PASS=$((PASS+1)); else echo "❌ $1（期望 $3 实得 $2）"; FAIL=$((FAIL+1)); fi; }
+# 注意：所有断言一律用 check 函数，禁止裸 && || 链（shell 优先级陷阱：成功分支也会执行 FAIL++）
 
 echo "== 演练 1：hub 进程杀死 → systemd 自愈 → 节点自动重连 =="
 $HUB_SSH 'sudo systemctl kill -s SIGKILL swarmmind-hub'
@@ -13,7 +20,7 @@ sleep 8
 STATE=$($HUB_SSH 'systemctl is-active swarmmind-hub')
 check "hub 自愈重启" "$STATE" "active"
 RECONN=$($NODE_SSH 'sleep 5; tail -2 /var/log/swarmmind-node.log | grep -c "注册成功"')
-[ "$RECONN" -ge 1 ] && echo "✅ node 自动重连" && PASS=$((PASS+1)) || echo "❌ node 未重连" && FAIL=$((FAIL+1))
+if [ "$RECONN" -ge 1 ]; then echo "✅ node 自动重连"; PASS=$((PASS+1)); else echo "❌ node 未重连"; FAIL=$((FAIL+1)); fi
 
 echo "== 演练 2：node 执行中杀死 → 恢复 → needs_review 语义 =="
 $HUB_SSH 'curl -s -X POST http://127.0.0.1:8444/api/v1/login -H "Content-Type: application/json" -d "{\"token\":\"4380b93e2cb636f200cbcd758924ed62\"}" -c /tmp/hc -o /dev/null'
