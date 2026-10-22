@@ -53,6 +53,7 @@ type enrollBuilder struct {
 	sourceDir string
 	cacheDir  string
 	goBin     string        // go 工具链；空 = LookPath 现查（测试可注入假路径走失败路径）
+	goProxy   string        // 模块代理；空 = https://goproxy.cn,direct（国内可达兜底）
 	timeout   time.Duration // 单次编译超时（90s → 503）
 
 	commitOnce sync.Once
@@ -60,6 +61,14 @@ type enrollBuilder struct {
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // 缓存键 → 编译互斥（同 key 并发合并为一次编译）
+}
+
+// proxyOr 配置兜底：未配置时用国内可达镜像（goproxy.cn）+ 直连回退。
+func (b *enrollBuilder) proxyOr(def string) string {
+	if b.goProxy != "" {
+		return b.goProxy
+	}
+	return def
 }
 
 // 编译纪律常量。
@@ -287,6 +296,11 @@ func (b *enrollBuilder) compile(goos, goarch, dst string) error {
 		"GOARCH="+goarch,
 		"CGO_ENABLED=0",
 		"GOCACHE="+filepath.Join(b.cacheDir, "gocache"),
+		// 模块缓存持久化 + 国内镜像兜底：hub 服务用户首编译冷启动时，
+		// 默认 proxy.golang.org 在国内服务器不可达（2026-10-22 实测超时）
+		"GOPATH="+filepath.Join(b.cacheDir, "gopath"),
+		"GOMODCACHE="+filepath.Join(b.cacheDir, "gopath", "pkg", "mod"),
+		"GOPROXY="+b.proxyOr("https://goproxy.cn,direct"),
 		"GOTOOLCHAIN=local",
 	)
 	out, err := cmd.CombinedOutput()
