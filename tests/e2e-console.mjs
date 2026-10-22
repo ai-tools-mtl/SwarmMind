@@ -58,7 +58,7 @@ async function main() {
 
   // TC-E04 状态分布下钻 chips（2026-10-22 总览下钻重构：七态 chip 直达任务页对应筛选，无「全部」chip）
   const chips = await page.locator('.chip-link').count();
-  record('E04', '总览：状态分布下钻 chips（7 枚七态直达）', chips === 7, `实际 ${chips}`);
+  record('E04', '总览：状态分布下钻 chips（八态：七态+取消后新增 cancelled）', chips === 8, `实际 ${chips}`);
 
   // ---------- 节点接入页 ----------
   await page.click('button:has-text("节点接入")');
