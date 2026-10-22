@@ -48,7 +48,7 @@ const S = {
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 总理凭证轮换后的新凭证（仅此一次展示），
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
-         restart_cmd: '', config_path: '', structural: [], msg: '' },           // 能力配置编辑（方案 3.5）
+         restart_cmd: '', config_path: '', structural: [], msg: '', editing: false },  // 能力配置编辑（方案 3.5）；editing=编辑 details 展开中（轮询挂起重绘）
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -110,9 +110,22 @@ async function loadAll() {
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   try {
-    if (await loadAll()) render();
+    if (await loadAll()) {
+      syncCfgEditing();
+      if (S.cfg.editing) return; // 能力配置编辑中：数据照常刷，DOM 不动（防重绘丢未保存输入）
+      render();
+    }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
 }
+
+// syncCfgEditing 编辑态检测：能力配置任一「编辑」details 展开即为编辑中。
+// 以 DOM 为真相源（toggle 不冒泡，捕获监听 + 轮询前各同步一次，cfg 动作后也准）。
+function syncCfgEditing() {
+  S.cfg.editing = !!document.querySelector('.cfg-edit[open]');
+}
+document.addEventListener('toggle', e => {
+  if (e.target.classList?.contains('cfg-edit')) syncCfgEditing();
+}, true);
 
 /* ---------- 令牌门（本机管理令牌 = 本机控制台的登录） ---------- */
 async function tryToken(token) {
@@ -295,6 +308,7 @@ async function loadCfg() {
       agents: (d.agents || []).map(normalizeProfile),
       pending: !!d.pending_restart, supervised: d.supervised !== false,
       restart_cmd: d.restart_cmd || '', config_path: d.config_path || '', structural: [], msg: '',
+      editing: false, // render 重建 DOM 后编辑 details 全部闭合
     };
     render();
   } catch (e) { if (!e?.unauthorized) { S.cfg.unavailable = true; S.cfg.loaded = true; render(); } }
@@ -308,13 +322,14 @@ async function cfgSave(btn) {
     if (r.code === 200) {
       const d = r.data || {};
       S.cfg.pending = !!d.pending_restart;
+      S.cfg.structural = d.structural || [];
       S.cfg.msg = d.note || (d.applied ? '已保存并热重载生效' : '已写入 node.yaml（待应用）');
       await loadCfg();
+      S.cfg.structural = d.structural || []; // loadCfg 重建了 S.cfg（服务端 GET 不回传），恢复结构性原因供横幅展示
       await loadAll().catch(() => {}); render();
     } else {
-      S.cfg.msg = ''; render();
+      // 拒绝（校验/写盘失败）：编辑副本与展开的编辑表单原样保留，仅弹服务端错误
       alert('保存被拒：' + errLine(r.data));
-      await loadCfg(); render();
     }
   } catch (e) {
     if (!e?.unauthorized) alert('网络层失败：结果未知，请刷新后从文件重载核对');

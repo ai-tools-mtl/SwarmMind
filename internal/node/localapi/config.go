@@ -215,8 +215,9 @@ type configPutRequest struct {
 }
 
 // handlePutConfig PUT /api/v1/local/config：校验 → round-trip 写盘 → 分类 →
-// 热应用或标「待应用」。写盘成功但热应用失败（磁盘/回调错误）时运行时保持旧
-// 基线，应答 pending_restart=true（重启即收敛到新盘上配置）。
+// 热应用或标「待应用」。写盘成功但热应用未完成时，失败步骤之前的状态保持一致
+//（热重载失败 = 基线与运行时同为旧值），应答 pending_restart=true（重启即
+// 收敛到新盘上配置）。
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	ops := s.configPreflight(w)
 	if ops == nil {
@@ -314,7 +315,7 @@ func (s *Server) applyConfigTable(w http.ResponseWriter, ops *ConfigOps, agents 
 		writeJSON(w, http.StatusOK, map[string]any{
 			"written": ops.ConfigPath, "applied": false, "pending_restart": true,
 			"error": err.Error(),
-			"note":  "已写入 node.yaml，但热应用失败：运行时保持旧基线，重启后生效",
+			"note":  "已写入 node.yaml，但热应用未完成（原因见 error）：重启后按盘上新配置收敛生效，可在本页点「应用并重启」",
 		})
 		return
 	}
@@ -325,18 +326,19 @@ func (s *Server) applyConfigTable(w http.ResponseWriter, ops *ConfigOps, agents 
 	})
 }
 
-// applyHotConfig 普通字段热应用：基线整表替换（覆盖集一并清空——提交表即权威，
-// 否则盘上 yaml 与生效值分叉、重启回跳）→ 重建执行器换表 → 能力表尽力上报 hub
-//（组网态；离线失败静默，重连注册携全量能力表收敛）。
+// applyHotConfig 普通字段热应用（顺序即失败语义）：先重建执行器换表——失败时
+// 基线与运行时一致为旧值（磁盘已是新表，重启收敛）；成功后才整表替换基线提交
+//（覆盖集一并清空——提交表即权威，否则盘上 yaml 与生效值分叉、重启回跳）→
+// 能力表尽力上报 hub（组网态；离线失败静默，重连注册携全量能力表收敛）。
 func (s *Server) applyHotConfig(ops *ConfigOps, next []protocol.ExecProfile) error {
 	if s.cfg.Agents == nil {
 		return errors.New("未装配 agent 状态（装配方须传入 Agents）")
 	}
-	if err := s.cfg.Agents.ReplaceBaseline(next); err != nil {
-		return fmt.Errorf("基线落盘失败（运行时未变更）: %w", err)
-	}
 	if err := ops.ReloadExecutors(next); err != nil {
-		return fmt.Errorf("执行器热重载失败（重启后生效）: %w", err)
+		return fmt.Errorf("执行器热重载失败（基线与运行时保持旧值，重启后生效）: %w", err)
+	}
+	if err := s.cfg.Agents.ReplaceBaseline(next); err != nil {
+		return fmt.Errorf("基线落盘失败（执行器已按提交表运行，基线保持旧值，重启后收敛）: %w", err)
 	}
 	if s.cfg.CardsReporter != nil {
 		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards()) // 尽力上报；离线待重连收敛
@@ -380,18 +382,39 @@ func (s *Server) setPendingRestart(v bool) {
 
 // ---------- yaml.Node round-trip（保留注释与未知字段，矩阵 #19） ----------
 
+// agentFieldOrder 已知字段规范序（配置编辑字段全集；与示例配置同序）。补写缺失键
+// 按此序定位插入点；agentYAMLFields 由其派生，防两处漂移。
+var agentFieldOrder = []string{
+	"name", "kind", "command", "workdir", "agent_args", "timeout_sec",
+	"allow_args", "allow_env", "config_home", "description", "permission_mode", "exposed",
+}
+
+// agentFieldRank 字段规范序位（未知键 -1）。
+func agentFieldRank(key string) int {
+	for i, k := range agentFieldOrder {
+		if k == key {
+			return i
+		}
+	}
+	return -1
+}
+
 // agentYAMLFields 配置编辑已知的条目字段（原位更新范围）；条目内未知键原样
 // 保留（用户手写注释与自定义字段不丢）。
-var agentYAMLFields = map[string]bool{
-	"name": true, "kind": true, "command": true, "workdir": true, "agent_args": true,
-	"timeout_sec": true, "allow_args": true, "allow_env": true, "config_home": true,
-	"description": true, "permission_mode": true, "exposed": true,
-}
+var agentYAMLFields = func() map[string]bool {
+	m := make(map[string]bool, len(agentFieldOrder))
+	for _, k := range agentFieldOrder {
+		m[k] = true
+	}
+	return m
+}()
 
 // updateAgentsYAML 读入 node.yaml，原位更新顶层 agents 序列并重编码：
 //   - 顶层非 agents 键（含注释与未知字段）节点不动——保真核心；
 //   - 已有条目按 name 匹配：已知字段原位更新值（键序保留、键与值的注释保留），
-//     未知键原样保留；无法定位 name 的既有条目视为被删除；
+//     缺失的已知键按规范序补写（提交值非缺省才写，第三轮返工必须修 2——防
+//     「热重载生效、盘上未写、重启回跳」），未知键原样保留；无法定位 name 的
+//     既有条目视为被删除；
 //   - 新增条目按规范字段序追加；删除条目即从序列移除；整表为空时 agents 置空序列。
 //
 // 解析失败/顶层非映射/agents 非列表返回错误（调用方拒写，原文件不动）。
@@ -475,6 +498,9 @@ func entryName(entry *yaml.Node) string {
 // updateAgentEntry 原位更新单条目：已知字段换值节点（键节点与注释保留、未知键
 // 不动）；提交值缺省（空串/空列表/默认 true/false）且键已存在时写显式缺省值，
 // 保留键位与注释——最小改动，不重排不删键。
+// 补写缺失键（第三轮返工必须修 2）：原实现只遍历条目既有键——提交值里条目原本
+// 缺失的已知键永不落盘（热重载生效新值但盘上静默未写，重启回跳）。现对规范字段序
+// 的每个键：缺失且提交值非缺省 → 按规范位插入；缺失且缺省 → 不写（保持最小形态）。
 func updateAgentEntry(entry *yaml.Node, p AgentProfile) {
 	for i := 0; i+1 < len(entry.Content); i += 2 {
 		key := entry.Content[i].Value
@@ -488,6 +514,81 @@ func updateAgentEntry(entry *yaml.Node, p AgentProfile) {
 		nv.FootComment = old.FootComment
 		entry.Content[i+1] = nv
 	}
+	addMissingFields(entry, p)
+}
+
+// addMissingFields 补写条目缺失的已知键：提交值非缺省才写（缺省且键不存在 →
+// 不写，保持与新增条目一致的最小形态）；插入点按规范字段序（最后一个规范序在
+// 其前的既有键之后），既有键相对顺序与注释不动。
+func addMissingFields(entry *yaml.Node, p AgentProfile) {
+	for _, key := range agentFieldOrder {
+		if entryHasKey(entry, key) || agentFieldIsDefault(key, p) {
+			continue
+		}
+		insertAgentField(entry, key, agentFieldNode(key, p))
+	}
+}
+
+// entryHasKey 条目是否已有该键。
+func entryHasKey(entry *yaml.Node, key string) bool {
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		if entry.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+// insertAgentField 把 key: value 插到规范位（最后一个规范序在其前的既有键之后；
+// 无则插在映射头部——被 name 匹配命中的条目必有 name，实际不可达）。
+func insertAgentField(entry *yaml.Node, key string, value *yaml.Node) {
+	rank := agentFieldRank(key)
+	at := 0
+	for i := 0; i+1 < len(entry.Content); i += 2 {
+		if r := agentFieldRank(entry.Content[i].Value); r >= 0 && r < rank {
+			at = i + 2
+		}
+	}
+	entry.Content = append(entry.Content, nil, nil)
+	copy(entry.Content[at+2:], entry.Content[at:])
+	entry.Content[at] = &yaml.Node{Kind: yaml.ScalarNode, Value: key}
+	entry.Content[at+1] = value
+}
+
+// agentFieldIsDefault 字段缺省判定（与 newAgentEntry 的最小形态同口径）：缺省值
+// 且键不存在 → 不写。timeout_sec 校验强制正数，实际恒非缺省。
+func agentFieldIsDefault(field string, p AgentProfile) bool {
+	switch field {
+	case "name":
+		return p.Name == ""
+	case "kind":
+		k := p.Kind
+		if k == "" {
+			k = string(protocol.AgentKindCLI)
+		}
+		return k == string(protocol.AgentKindCLI)
+	case "command":
+		return p.Command == ""
+	case "workdir":
+		return p.Workdir == ""
+	case "agent_args":
+		return len(p.AgentArgs) == 0
+	case "timeout_sec":
+		return p.TimeoutSec <= 0
+	case "allow_args":
+		return !p.AllowArgs
+	case "allow_env":
+		return len(p.AllowEnv) == 0
+	case "config_home":
+		return p.ConfigHome == ""
+	case "description":
+		return p.Description == ""
+	case "permission_mode":
+		return p.PermissionMode == ""
+	case "exposed":
+		return p.Exposed == nil || *p.Exposed
+	}
+	return true
 }
 
 // newAgentEntry 新增条目：规范字段序；缺省值字段不写（kind=cli、allow_args=false、
