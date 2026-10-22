@@ -152,6 +152,13 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	defer coreSvc.Close()
 	mgr.Subscribe(coreSvc.HandleFrame)
 
+	// 群存储周期维护（2026-10-22 修复轮2）：启动即扫一次（恢复重启前的待补偿
+	// 回流队列），此后定时清理 24h 过期消息 + 重试补偿队列（GROUP-RFC 三 独立
+	// 轻量信箱约定兑现）。随优雅关闭先行停止（defer LIFO：先于 groups.Close）。
+	groupSweepStop := make(chan struct{})
+	defer close(groupSweepStop)
+	go groupSweepLoop(groups, groupSweepStop)
+
 	// node 会话监听（SPEC 二）
 	mux := http.NewServeMux()
 	mux.Handle("GET /ws/node", mgr)
@@ -230,6 +237,30 @@ func shutdownHub(apiSrv *http.Server, mgr *session.Manager, srv *http.Server, bu
 		log.Printf("[hub] 会话关闭异常: %v", err)
 	}
 	_ = srv.Shutdown(ctx)
+}
+
+// groupSweepInterval 群存储维护周期：24h 过期清理与补偿回流重试均非时敏，
+// 5 分钟一扫足够（回流失败入队见 OnTaskTerminal → RefluxTaskResult 失败路径）。
+const groupSweepInterval = 5 * time.Minute
+
+// groupSweepLoop 群存储维护循环：启动即扫一次（恢复待补偿回流队列），此后
+// 按周期执行，直至 stop 关闭（优雅关闭时由 defer 触发）。
+func groupSweepLoop(groups *group.Store, stop <-chan struct{}) {
+	if n := groups.Sweep(time.Now().UTC()); n > 0 {
+		log.Printf("[hub] 群存储启动清理：过期消息 %d 条", n)
+	}
+	tk := time.NewTicker(groupSweepInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tk.C:
+			if n := groups.Sweep(time.Now().UTC()); n > 0 {
+				log.Printf("[hub] 群存储周期清理：过期消息 %d 条", n)
+			}
+		}
+	}
 }
 
 // envDefault 环境变量读取（空值回落默认）。
