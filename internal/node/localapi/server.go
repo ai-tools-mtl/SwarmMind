@@ -6,9 +6,9 @@
 //   - GET /api/v1/tasks/{id}/artifacts/{index} 本机直取产物内容（方案 3.4，
 //     node MCP swarmmind_artifact 的后端；不经 hub 中继帧）；
 //   - GET /api/v1/agents 只返回本机能力目录（node 无全网视图）；
-//   - /api/v1/local/* 为本地控制台管理面（Loop 7，见 local.go）+ 总理凭证
-//     （prime.go）+ setup 向导（setup.go，仅 setup 模式装配）+ 能力配置编辑
-//     与热重载（config.go，方案 3.5）；
+//   - /api/v1/local/* 为本地控制台管理面（Loop 7，见 local.go）+ 总理凭证与
+//     钦定（prime.go：rotate 轮换 / declare 网页钦定）+ setup 向导（setup.go，
+//     仅 setup 模式装配）+ 能力配置编辑与热重载（config.go，方案 3.5）；
 //   - GET / 挂本地控制台前端（internal/node/web，embed）。
 //
 // 鉴权分级（方案 3.2.1 唯一总理）：local_token 只读（agents/status/tasks 类）；
@@ -67,8 +67,15 @@ type Config struct {
 	// prime_token，轮换经 SetPrimeToken 即时更新）。空 = 编排接口恒 403。
 	PrimeToken string
 	// PrimeAgent node.yaml prime_agent 声明（唯一总理，仅展示与激活开关；空 =
-	// 尚未钦定，编排接口保持 403，矩阵 #15）。
+	// 尚未钦定，编排接口保持 403，矩阵 #15）。构造初值；运行期经 SetPrimeAgent
+	// 即时更新（declare 钦定端点，prime.go）。
 	PrimeAgent string
+	// DeclareConfigPath node.yaml 路径（declare 钦定 round-trip 写盘目标，与
+	// ConfigOps/SetupOps 同纪律写启动时 --config 原路径；空 = declare 端点 503）。
+	DeclareConfigPath string
+	// LocalListen 本地 API 监听地址（declare 应答 mcp_config 的 SWARM_NODE_URL
+	// 数据源；仅展示，监听本体在装配方 net.Listen）。
+	LocalListen string
 	// Setup setup 模式：编排接口一律 403（无 agents 可编排，先完成接入与能力配置）。
 	Setup bool
 	// RotatePrime 总理凭证轮换回调（重生成 + 原子写盘，返回新凭证；装配方接线，
@@ -104,13 +111,31 @@ type Server struct {
 
 	// pendingRestartFlag 配置「待应用」状态（方案 3.5：结构性变更写盘未生效；
 	// muCfg 串行读写——重启即进程退出，内存态自然清零）。
+	// primeAgentName 当前总理声明（declare 钦定即时生效，同锁串行读写——钦定
+	// 是写盘即生效的轻量变更，不涉重启，与待应用标志生命周期一致）。
 	muCfg              sync.Mutex
 	pendingRestartFlag bool
+	primeAgentName     string
 }
 
 // New 构造本地 API 服务。
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg, primeTok: cfg.PrimeToken}
+	return &Server{cfg: cfg, primeTok: cfg.PrimeToken, primeAgentName: cfg.PrimeAgent}
+}
+
+// SetPrimeAgent 总理声明外部更新（declare 钦定即时生效；装配方/测试用）。
+func (s *Server) SetPrimeAgent(name string) {
+	s.muCfg.Lock()
+	s.primeAgentName = name
+	s.muCfg.Unlock()
+}
+
+// primeAgent 当前总理声明快照（authPrime 编排门与展示端点同读此处——钦定后
+// 下一请求即按新总理判定，不等重启）。
+func (s *Server) primeAgent() string {
+	s.muCfg.Lock()
+	defer s.muCfg.Unlock()
+	return s.primeAgentName
 }
 
 // SetPrimeToken 总理凭证外部重载（装配方/测试用）：更新须持 muPrime——轮换端点
@@ -197,6 +222,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/agents/reload", s.authLocal(s.handleAgentsReload))
 	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
 	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handlePrimeRotate))
+	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
 	mux.HandleFunc("POST /api/v1/local/setup/disconnect", s.authLocal(s.handleSetupDisconnect))
@@ -249,8 +275,8 @@ func (s *Server) authPrime(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusForbidden, "prime_required", "setup 模式编排接口未激活：请先在「接入中心端」完成接入并配置 agents")
 			return
 		}
-		if s.cfg.PrimeAgent == "" {
-			writeErr(w, http.StatusForbidden, "prime_required", "尚未钦定总理（node.yaml 未声明 prime_agent），编排接口未激活；本机主人可在 node.yaml 声明 prime_agent 并重启")
+		if s.primeAgent() == "" {
+			writeErr(w, http.StatusForbidden, "prime_required", "尚未钦定总理，编排接口未激活；本机主人可在控制台「本机总理」区钦定（写入 node.yaml prime_agent 即时生效，无需重启）")
 			return
 		}
 		if s.primeToken() == "" {
@@ -259,7 +285,7 @@ func (s *Server) authPrime(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if level != levelPrime {
 			writeErr(w, http.StatusForbidden, "prime_required",
-				fmt.Sprintf("编排操作需总理凭证 prime_token（本机总理：%s；local_token 仅只读，用 local_token 调编排接口 → 403）", s.cfg.PrimeAgent))
+				fmt.Sprintf("编排操作需总理凭证 prime_token（本机总理：%s；local_token 仅只读，用 local_token 调编排接口 → 403）", s.primeAgent()))
 			return
 		}
 		next(w, r)

@@ -275,7 +275,11 @@ func run(cfgPath, dataDirOverride string) error {
 		LocalToken: localToken,
 		PrimeToken: primeTok,
 		PrimeAgent: cfg.PrimeAgent,
-		RotatePrime: rotatePrime,
+		// declare 钦定端点（方案 3.2.1 网页化）：写启动时 --config 原路径 +
+		// 回填本机监听（应答 mcp_config 的 SWARM_NODE_URL 数据源）。
+		DeclareConfigPath: cfgPath,
+		LocalListen:       cfg.LocalListen,
+		RotatePrime:       rotatePrime,
 		ArtifactFetch: svc.FetchArtifactLocal,
 		ConfigOps: &localapi.ConfigOps{
 			ConfigPath: cfgPath, // 读改写启动时 --config 原路径（绝不写示例文件）

@@ -117,7 +117,7 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	st := localStatus{
 		NodeID:     s.cfg.NodeID,
 		Mode:       s.mode(),
-		PrimeAgent: s.cfg.PrimeAgent,
+		PrimeAgent: s.primeAgent(),
 		Online:     s.online(),
 		Epoch:      s.epoch(),
 		Ledger:     s.ledgerCounts(),
