@@ -92,6 +92,19 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .os-tabs .on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue);color:var(--blue);font-weight:650}
 .enroll-ok{padding:13px 16px;background:#e9f5ed;border:1px solid #c4e5d0;border-radius:9px;color:#35805a}
 .enroll-ok p{margin:6px 0 10px;color:#2f6b4b}
+/* Step3 部署方式三卡（radio 视觉：点状圆 + 描述行）；生成中转圈见 .spin */
+.enroll-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.enroll-mode{border-radius:10px;padding:12px 14px;text-align:left;display:flex;flex-direction:column;gap:5px;align-items:stretch}
+.enroll-mode .t{font-weight:650;display:flex;align-items:center;gap:8px;font-size:13px}
+.enroll-mode .dot{width:14px;height:14px;border-radius:50%;border:2px solid #c8cede;flex-shrink:0}
+.enroll-mode small{color:var(--muted);line-height:1.5}
+.enroll-mode.on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue)}
+.enroll-mode.on .dot{border-color:var(--blue);background:var(--blue);box-shadow:inset 0 0 0 2.5px white}
+.enroll-manual>summary{cursor:pointer;font-weight:650;color:var(--blue);padding:11px 14px;border:1px dashed var(--line);border-radius:10px;user-select:none}
+.enroll-manual[open]>summary{margin-bottom:6px}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:7px}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:719px){.enroll-modes{grid-template-columns:1fr}}
 @media(max-width:719px){.wiz-steps{gap:2px}.wiz-step{flex:none}.wiz-step:not(:last-child)::after{display:none}.wiz-step+.wiz-step{margin-left:12px}.enroll-row{grid-template-columns:1fr}.enroll-row small{border-left:0;border-top:1px dashed var(--line)}}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
 .drawer{width:min(700px,96vw);background:white;overflow:auto;padding:28px 32px;box-shadow:-15px 0 80px #23365320}

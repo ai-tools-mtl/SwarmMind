@@ -479,14 +479,16 @@ function nodesPage() {
 }
 /* ---------- 节点接入向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
  * Step1 节点身份（实时校验）→ Step2 hub 侧登记（本地生成 64 位随机令牌 + 可复制
- * hub.yaml 片段）→ Step3 目标机器安装配置（node.yaml 全真实值 + 分系统启动命令）
+ * hub.yaml 片段）→ Step3 安装配置（三方式卡：一键部署包/Docker 构建包 POST
+ * /api/v1/nodes/enroll-bundle 现场编译下载 zip，手动复制 node.yaml 降为折叠区）
  * → Step4 等待上线（3s 轮询节点列表，60s 未上线给排查提示）。
  * 状态存模块级 ENROLL，弹层内重开重渲染、不动页面路由；5s 全局轮询只重绘 #app
  * 不碰 #layer，向导 DOM 不会被轮询打断。令牌只存内存、关闭弹层即失——重开重新
  * 生成（openSSL 等价：32 字节 crypto.getRandomValues → 64 位 hex）。 */
-let ENROLL = null;   // { step, id, token, tokenFor, os, t0, timer }
+let ENROLL = null;   // { step, id, token, tokenFor, mode, plat, os, bundleDone, bundleRetried, t0, timer }
 function enrollModal() {
-  ENROLL = { step: 1, id: '', token: '', tokenFor: '', os: 'linux', t0: 0, timer: null };
+  ENROLL = { step: 1, id: '', token: '', tokenFor: '', mode: 'bundle', plat: 'linux-amd64', os: 'linux', bundleDone: null, bundleRetried: false, t0: 0, timer: null };
+  enrollBundleBusy = false;   // 上一会话若停在 503 重试等待期，忙标志随新会话作废
   openLayerPlain(enrollHtml());
   $('#enroll-id')?.focus();
 }
@@ -566,7 +568,7 @@ function enrollStep2() {
   <div class="row"><small class="muted">编辑服务器上的 hub.yaml → 粘贴上面两行 → 重启：<code>sudo systemctl restart swarmmind-hub</code></small>${button('复制 hub.yaml 片段', 'enroll-copy-hub')}</div>
   <div class="actions spaced">${button('已粘贴并重启 hub，下一步', 'enroll-pasted', 'primary')}</div>`;
 }
-/* ---- Step 3 目标机器安装配置：真实值 node.yaml（分系统 tab）+ 启动命令 ---- */
+/* ---- Step 3 安装配置：三方式卡（一键部署包/Docker 构建包/手动复制） ---- */
 const ENROLL_OS = { linux: 'Linux', macos: 'macOS', windows: 'Windows' };
 /* hub_url 从会话上下文自动推导：控制台与节点接入同端口，http(s) 页面 → ws(s)。
  * 注：node.yaml 实际字段为 local_listen（cmd/node/main.go）——旧弹层写的
@@ -606,7 +608,58 @@ swarmmind-node.exe --config node.yaml
 #   计划任务（开机启动）：schtasks /create /tn SwarmMindNode /rl highest /sc onstart /tr "swarmmind-node.exe --config node.yaml"
 #   或用服务包装器（如 NSSM）注册为 Windows 服务`,
 };
-function enrollStep3() {
+/* 方式卡与平台清单（plat 键 = <os>-<arch>，直传 enroll-bundle 请求体；docker
+ * 产物固定打包 linux 二进制——容器基座即 linux，见 enroll.go normalize）。 */
+const ENROLL_MODES = [
+  ['bundle', '一键部署包（推荐）', '下载 zip：二进制 + node.yaml + 安装脚本，解压一条命令装好'],
+  ['docker', 'Docker 挂载部署', '生成含 Dockerfile 与 docker-compose.yml 的构建包（二进制打进镜像，无需公共仓库）'],
+  ['manual', '手动复制配置', '自己放置二进制：复制 node.yaml 全文与分系统启动命令'],
+];
+const ENROLL_PLATS = {
+  bundle: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64'], ['darwin-arm64', 'macOS Apple Silicon'], ['darwin-amd64', 'macOS Intel'], ['windows-amd64', 'Windows amd64']],
+  docker: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64']],
+};
+function enrollModeCards() {
+  return `<div class="enroll-modes spaced">${ENROLL_MODES.map(([k, t, d]) =>
+    `<button type="button" class="enroll-mode${ENROLL.mode === k ? ' on' : ''}" data-act="enroll-mode" data-mode="${k}"><span class="t"><span class="dot"></span>${t}</span><small>${d}</small></button>`).join('')}</div>`;
+}
+function enrollPlatTabs() {
+  const plats = ENROLL_PLATS[ENROLL.mode === 'docker' ? 'docker' : 'bundle'];
+  if (!plats.some(([k]) => k === ENROLL.plat)) ENROLL.plat = plats[0][0];
+  return `<div class="os-tabs"><small class="muted" style="align-self:center">目标平台</small>${plats.map(([k, v]) =>
+    `<button type="button" data-act="enroll-plat" data-plat="${k}" class="${ENROLL.plat === k ? 'on' : ''}">${v}</button>`).join('')}</div>`;
+}
+/* enrollNextHtml 下载成功后的「接下来」三行（存 ENROLL.bundleDone，切卡回看仍在） */
+function enrollNextHtml() {
+  const d = ENROLL.bundleDone;
+  if (!d) return '';
+  const zipName = d.mode === 'docker' ? `swarmmind-node-docker-linux-${d.arch}.zip` : `swarmmind-node-${d.os}-${d.arch}.zip`;
+  const second = d.mode === 'docker'
+    ? { code: 'docker build -t swarmmind-node . && docker compose up -d', note: '构建镜像并启动；配置经 compose 挂载，改 node.yaml 后 docker compose restart 即可' }
+    : d.os === 'windows'
+      ? { code: '右键 install.bat →「以管理员身份运行」', note: '注册 Windows 服务并启动；脚本会自检管理员权限' }
+      : d.os === 'linux'
+        ? { code: 'sudo bash install.sh', note: '装到 /opt/swarmmind 并注册 systemd 服务' }
+        : { code: 'bash install.sh', note: '装到 ~/.swarmmind 并注册 launchd 用户服务（免 sudo）' };
+  return `<h3 class="spaced">接下来（3 步）</h3><div class="enroll-rows">
+  <div class="enroll-row"><code>解压 ${esc(zipName)}</code><small>得到 swarmmind-node 二进制、node.yaml（已填好真实值）与安装脚本</small></div>
+  <div class="enroll-row"><code>${esc(second.code)}</code><small>${second.note}</small></div>
+  <div class="enroll-row"><code>回本向导第 4 步</code><small>点下方「下一步」等待节点上线（3 秒一查，最多 60 秒）</small></div>
+  </div><small class="muted">包内 README.txt 有同样的三步与看状态命令。</small>`;
+}
+function enrollBundlePane() {
+  return `<div class="notice">按目标平台生成部署包并下载：hub 现场编译（结果缓存，同平台二次秒回），包内 node.yaml 已按这台机器填好真实值。</div>
+  ${enrollPlatTabs()}
+  <div class="actions spaced"><button type="button" data-act="enroll-bundle-dl" class="primary">生成并下载</button></div>
+  ${enrollNextHtml()}`;
+}
+function enrollDockerPane() {
+  return `<div class="notice">生成含 Dockerfile 与 docker-compose.yml 的构建包（二进制打进镜像，无需公共仓库）；目标机器装了 Docker 即可，平台固定 linux。</div>
+  ${enrollPlatTabs()}
+  <div class="actions spaced"><button type="button" data-act="enroll-bundle-dl" class="primary">生成并下载</button></div>
+  ${enrollNextHtml()}`;
+}
+function enrollManualPane() {
   const os = ENROLL.os in ENROLL_OS ? ENROLL.os : 'linux';
   const rows = [
     [`node_id: ${ENROLL.id}`, '第一步起的节点身份，会显示在节点列表'],
@@ -617,16 +670,83 @@ function enrollStep3() {
     ['data_dir: data', '任务文件与执行记录的存放位置'],
     ['concurrency: 2', '最多同时执行几个任务，2 适合个人机'],
   ];
-  return `<div class="notice">把 node.yaml 放到目标机器上（内容已按这台机器填好，无需改动即可用），再按系统选启动方式。</div>
+  return `<details class="enroll-manual"><summary>展开 node.yaml 全文与分系统启动命令（逐字段注释）</summary>
+  <div class="notice" style="margin-top:14px">把 node.yaml 放到目标机器上（内容已按这台机器填好，无需改动即可用），再按系统选启动方式。</div>
   <div class="os-tabs spaced">${Object.entries(ENROLL_OS).map(([k, v]) =>
-    `<button data-act="enroll-os" data-os="${k}" class="${os === k ? 'on' : ''}">${v}</button>`).join('')}</div>
+    `<button type="button" data-act="enroll-os" data-os="${k}" class="${os === k ? 'on' : ''}">${v}</button>`).join('')}</div>
   <div class="row"><h3>node.yaml（已填好真实值）</h3>${button('复制 node.yaml', 'enroll-copy-node')}</div>
   <div class="enroll-rows">${rows.map(([code, note]) =>
     `<div class="enroll-row"><code>${esc(code)}</code><small>${esc(note)}</small></div>`).join('')}</div>
   <small class="muted">「复制 node.yaml」得到的是可运行全文（含注释，不含右侧说明列）。</small>
-  <h3 class="spaced">启动命令（${ENROLL_OS[os]}）</h3>
-  <pre>${esc(ENROLL_START[os])}</pre>
+  <h3 class="spaced">启动命令（<span id="enroll-start-os">${ENROLL_OS[os]}</span>）</h3>
+  <pre id="enroll-start-pre">${esc(ENROLL_START[os])}</pre></details>`;
+}
+function enrollStep3() {
+  const pane = ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane();
+  return `${enrollModeCards()}${pane}
   <div class="actions spaced">${button('下一步', 'enroll-next3', 'primary')}</div>`;
+}
+/* ---- Step3 部署包下载：POST /api/v1/nodes/enroll-bundle → zip blob 落地 ---- */
+/* enrollBundleBusy 生成进行中（含 503 后 10s 自动重试的等待期）：锁住方式/平台
+ * 切换与重复点击；弹层重开（enrollModal 换新 ENROLL 对象）即整体作废。 */
+let enrollBundleBusy = false;
+function enrollSetDlBtn(label, busy) {
+  const btn = document.querySelector('[data-act="enroll-bundle-dl"]');
+  if (!btn) return;
+  btn.disabled = busy;
+  btn.innerHTML = busy ? `<span class="spin"></span>${esc(label)}` : esc(label);
+}
+async function enrollBundleDownload() {
+  if (!ENROLL || enrollBundleBusy) return;
+  if (!/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(ENROLL.id)) { toast('节点 ID 需为 2-32 位小写字母/数字/连字符才能生成部署包'); return; }
+  const [os, arch] = ENROLL.plat.split('-');
+  const mode = ENROLL.mode === 'docker' ? 'docker' : 'native';
+  enrollBundleBusy = true;
+  enrollSetDlBtn('正在生成 · 首次需现场编译，约半分钟…', true);
+  const reset = () => { enrollBundleBusy = false; enrollSetDlBtn('生成并下载', false); };
+  try {
+    const resp = await fetch('/api/v1/nodes/enroll-bundle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: ENROLL.id, register_token: ENROLL.token, hub_url: enrollHubUrl(), os, arch, mode }),
+      credentials: 'same-origin',
+    });
+    if (resp.status === 401) { sessionExpired(); enrollBundleBusy = false; return; }
+    if (resp.ok && (resp.headers.get('Content-Type') || '').includes('zip')) {
+      const name = /filename="([^"]+)"/.exec(resp.headers.get('Content-Disposition') || '')?.[1]
+        || `swarmmind-node-${mode === 'docker' ? 'docker-linux-' : ''}${os}-${arch}.zip`;
+      downloadBlob(await resp.blob(), name);
+      ENROLL.bundleDone = { mode, os, arch };
+      enrollBundleBusy = false;
+      if (ENROLL.step === 3 && modalOpen) openLayerPlain(enrollHtml());   // 展示「接下来」三行
+      toast('部署包已下载 —— 拷到目标机器解压，按「接下来」三步安装');
+      return;
+    }
+    const d = await resp.json().catch(() => null);
+    const code = d?.error || '';
+    if (resp.status === 503 && code === 'compile_timeout') {
+      if (!ENROLL.bundleRetried) {   // 编译排队（首次约半分钟到一分钟）：10s 后自动重试一次
+        ENROLL.bundleRetried = true;
+        toast('编译排队中，10 秒后自动重试');
+        enrollSetDlBtn('编译排队中 · 10 秒后自动重试…', true);
+        const cur = ENROLL;
+        setTimeout(() => {
+          if (ENROLL === cur && ENROLL.step === 3 && modalOpen) enrollBundleDownload();
+          else enrollBundleBusy = false;
+        }, 10000);
+        return;   // 忙标志保持到重试真正发出或作废
+      }
+      toast('编译仍在进行（首次约一分钟），请稍候再点「生成并下载」');
+    } else if (resp.status === 503 && code === 'compile_unavailable') {
+      toast('hub 服务器没装 go 工具链，无法生成部署包——请联系管理员安装 go 后重试，或改用「手动复制配置」');
+    } else {
+      toast('生成失败：' + (d ? errLine(d) : `HTTP ${resp.status}`));
+    }
+    reset();
+  } catch {
+    reset();
+    toast('网络异常：连不上 hub，无法生成部署包');
+  }
 }
 /* ---- Step 4 等待上线：3s 轮询节点列表，60s 未上线给排查提示 ---- */
 function enrollStep4() {
@@ -1365,7 +1485,31 @@ const ACT = {
     enrollGo(2);
   },
   'enroll-pasted': () => enrollGo(3),
-  'enroll-os': b => { ENROLL.os = b.dataset.os || 'linux'; openLayerPlain(enrollHtml()); },
+  /* 方式卡/平台切换（生成进行中锁住，防半途换平台错下二进制）；整层重绘即可 */
+  'enroll-mode': b => {
+    if (enrollBundleBusy) { toast('正在生成部署包，请稍候…'); return; }
+    if (!ENROLL) return;
+    const m = ENROLL_MODES.some(([k]) => k === b.dataset.mode) ? b.dataset.mode : 'bundle';
+    if (ENROLL.mode === m) return;
+    ENROLL.mode = m;
+    openLayerPlain(enrollHtml());
+  },
+  'enroll-plat': b => {
+    if (enrollBundleBusy) { toast('正在生成部署包，请稍候…'); return; }
+    if (!ENROLL) return;
+    ENROLL.plat = b.dataset.plat || 'linux-amd64';
+    openLayerPlain(enrollHtml());
+  },
+  'enroll-bundle-dl': () => enrollBundleDownload(),
+  /* 手动折叠区内的系统 tab：只局部更新启动命令，整层重绘会把 <details> 合上 */
+  'enroll-os': b => {
+    if (!ENROLL) return;
+    ENROLL.os = b.dataset.os || 'linux';
+    document.querySelectorAll('[data-act="enroll-os"]').forEach(x => x.classList.toggle('on', x === b));
+    const osEl = $('#enroll-start-os'), pre = $('#enroll-start-pre');
+    if (osEl) osEl.textContent = ENROLL_OS[ENROLL.os] || 'Linux';
+    if (pre) pre.textContent = ENROLL_START[ENROLL.os] || ENROLL_START.linux;
+  },
   'enroll-next3': () => { enrollGo(4); enrollStartWait(); },
   'enroll-copy-token': () => copyText(ENROLL?.token || '', '接入令牌'),
   'enroll-copy-hub': () => copyText(ENROLL ? `nodes:\n  ${ENROLL.id}: ${ENROLL.token}\n` : '', 'hub.yaml 片段'),
@@ -1575,13 +1719,15 @@ function openLayerPlain(content, slim) {
 }
 
 /* ---------- 文件导出 / 复制 ---------- */
-function exportJSON(data, name) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+function downloadBlob(blob, name) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url; a.download = name;
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function exportJSON(data, name) {
+  downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), name);
 }
 async function copyText(value, label) {
   try {
