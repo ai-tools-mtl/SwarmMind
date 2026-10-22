@@ -660,10 +660,7 @@ function controlPage() {
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
     <label class="checkline"><input type="checkbox" id="ctrl-prime"> 总理模式：勾选后由 zcode-dev 总理智能体自动分解目标、并行派发给网内多个能力、收集结果并产出汇总报告（适合复合目标；单点任务不必勾选）</label>
-    <label class="spaced">第一步 · 执行机器<select id="ctrl-node">${ctrlNodeOptions()}</select></label>
-    <small class="muted">离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。</small>
-    <label class="spaced">第二步 · 执行智能体<select id="ctrl-agent" ${C.node ? '' : 'disabled'}>${ctrlAgentOptions(C.node)}</select></label>
-    <div class="row spaced" id="ctrl-summary-line">${ctrlSummaryHtml()}</div>
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。' })}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
@@ -681,58 +678,128 @@ function controlPage() {
     <div class="step"><span>3</span><p>总理模式会自动定位总理载体（zcode-dev）所在机器，由总理分解目标并调度网内多节点执行。</p></div></section>`;
 }
 
-/* ---------- 派单两级选择（2026-10-22 定：先选机器，再选该机器上的智能体） ---------- */
-/* dispatchNodes 机器下拉数据源：在线优先置顶，同组内按 node_id 稳定排序。 */
+/* ---------- 智能体选择公共组件（2026-10-22 抽取：派单 / 建群 / 转任务三处共用） ----------
+ * 一套渲染与联动、两类形态：
+ * · 两级下拉（先选机器，再选该机器上的智能体，联动过滤）——派单页（ids='ctrl'）
+ *   与群聊转任务弹层（ids='task'）
+ * · 按机器分组的 checkbox 树（机器名做分组标题含在线状态，组内为该机器的 agent
+ *   项）——建群成员多选（multi: true）
+ * agentPickerHtml 渲染；bindAgentPicker 统一 change 联动（委托，全局绑一次覆盖三
+ * 处实例）；机器切换用 DOM 级更新不整页重绘（避免重置已填内容——与总理模式同款
+ * 手法）。可选机器 = 在线且已开放能力；离线（提交端点直接 skip、不排队）与在线但
+ * 无开放能力（not_exposed）的机器禁选并在选项上注明原因。 */
+/* dispatchNodes 机器数据源：在线优先置顶，同组内按 node_id 稳定排序。 */
 function dispatchNodes() {
   return S.nodes.slice().sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (a.node_id < b.node_id ? -1 : 1));
 }
-/* ctrlNodeOptions 机器下拉选项：可选 = 在线且已开放能力。离线（提交端点直接
- * skip、不排队）与在线但无开放能力（not_exposed）的机器禁选并在选项上注明原因。 */
-function ctrlNodeOptions() {
+/* pickerNodeOptions 两级下拉 · 机器选项；selected 为当前选中机器（整页重绘后恢复）。 */
+function pickerNodeOptions(selected) {
   return '<option value="">请选择执行机器</option>' + dispatchNodes().map(n => {
     const hasCaps = S.directory.some(d => d.node_id === n.node_id);
     const dead = !n.online || !hasCaps;
     const why = !n.online ? '（离线）' : hasCaps ? '' : '（无开放能力）';
     const tip = !n.online ? '离线：提交会被跳过，暂不支持排队暂存' : hasCaps ? `在线 · epoch ${n.epoch} · 进行中 ${n.inflight} 笔` : '该机器尚未开放任何能力（node.yaml exposed）';
-    return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${S.C.node === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
+    return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
-/* ctrlAgentOptions 智能体下拉选项：只列所选机器上 exposed 的智能体（S.directory
- * 按 node 过滤）；未选机器时占位项即「请先选择机器」，整个下拉同时禁用。 */
-function ctrlAgentOptions(nodeId) {
+/* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
+ * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。 */
+function pickerAgentOptions(nodeId, selected) {
   if (!nodeId) return '<option value="">请先选择机器</option>';
   const list = S.directory.filter(d => d.node_id === nodeId);
   if (!list.length) return '<option value="">该机器暂无开放能力</option>';
   return '<option value="">请选择智能体</option>' + list.map(d => {
     const tip = `输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
-    return `<option value="${esc(d.card.name)}" ${S.C.agent === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(d.card.name)} — ${esc(d.card.description || '（无描述）')}</option>`;
+    return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(d.card.name)} — ${esc(d.card.description || '（无描述）')}</option>`;
   }).join('');
 }
-/* syncCtrlAgentSelect 机器切换联动（DOM 级更新，不整页重绘——与总理模式同款
- * 手法，避免重绘重置已填内容）：按当前机器重建智能体选项，恢复此前选中的智能体
- * （若仍属于该机器），并把选择持久化到 S.C。preferAgent 供总理模式精确指定。 */
-function syncCtrlAgentSelect(preferAgent) {
-  const nodeSel = $('#ctrl-node'), agentSel = $('#ctrl-agent');
-  if (!nodeSel || !agentSel) return;
-  const node = nodeSel.value || '';
-  agentSel.innerHTML = ctrlAgentOptions(node);
-  agentSel.disabled = !node;
-  const want = preferAgent !== undefined ? preferAgent : S.C.agent;
-  agentSel.value = want && [...agentSel.options].some(o => o.value === want) ? want : '';
-  S.C.node = node;
-  S.C.agent = agentSel.value;
-}
-/* ctrlSummaryHtml / updateCtrlSummary 派单摘要（提交前一句话确认）：机器与智能体
+/* pickerSummaryHtml / updatePickerSummary 摘要行（提交前一句话确认）：机器与智能体
  * 齐备时显示「将在 X 上用 Y 执行」，否则提示下一步先选什么。 */
-function ctrlSummaryHtml() {
-  const node = $('#ctrl-node')?.value || S.C.node || '', agent = $('#ctrl-agent')?.value || S.C.agent || '';
+function pickerSummaryHtml(node, agent) {
   return node && agent
     ? `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行</small>`
     : '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
 }
-function updateCtrlSummary() {
-  const line = $('#ctrl-summary-line');
-  if (line) line.innerHTML = ctrlSummaryHtml();
+function updatePickerSummary(prefix) {
+  const line = $('#' + prefix + '-summary-line');
+  if (!line) return;
+  const node = $('#' + prefix + '-node')?.value || '', agent = $('#' + prefix + '-agent')?.value || '';
+  line.innerHTML = pickerSummaryHtml(node, agent);
+}
+/* agentPickerHtml 渲染入口。opts.ids 必填——生成 {ids}-node / {ids}-agent /
+ * {ids}-summary-line（两级下拉）与 {ids}-picker（多选树，含计数行）。opts.multi
+ * 选 checkbox 树形态；两级下拉下 opts.node / opts.agent 为当前选择（整页重绘后
+ * 恢复），opts.nodeHelp 为机器下拉下的补充说明（派单页的离线提示）。 */
+function agentPickerHtml(opts = {}) {
+  const ids = esc(opts.ids || '');
+  if (opts.multi) {
+    /* 分组树：按目录中出现的机器分组，含离线机器（建群只是选成员，不在此时派发）。 */
+    const nodes = [...new Set(S.directory.map(d => d.node_id))];
+    return `<div id="${ids}-picker" data-picker-multi data-picker-prefix="${ids}">
+    <div class="picker-grid">${nodes.map(nid => {
+      const n = S.nodes.find(x => x.node_id === nid);
+      return `<div class="picker-group">
+      <div class="picker-group-head"><b>${esc(nid)}</b>${n?.online ? onlineB(n) : '<span class="badge offline">离线</span>'}</div>
+      ${S.directory.filter(d => d.node_id === nid).map(d => `<label class="checkline"><input type="checkbox" data-picker-agent="${esc(nid + '/' + d.card.name)}"><span>${esc(d.card.name)}</span><small class="muted">${esc(d.card.description || '（无描述）')}</small></label>`).join('')}
+      </div>`;
+    }).join('')}</div>
+    <div class="row spaced"><small class="muted" data-picker-count>尚未勾选成员：可跨机器多选</small></div>
+    </div>`;
+  }
+  const node = opts.node || '', agent = opts.agent || '';
+  return `<label class="spaced">第一步 · 执行机器<select id="${ids}-node" data-picker="node" data-picker-prefix="${ids}">${pickerNodeOptions(node)}</select></label>
+  ${opts.nodeHelp ? `<small class="muted">${esc(opts.nodeHelp)}</small>` : ''}
+  <label class="spaced">第二步 · 执行智能体<select id="${ids}-agent" data-picker="agent" data-picker-prefix="${ids}" ${node ? '' : 'disabled'}>${pickerAgentOptions(node, agent)}</select></label>
+  <div class="row spaced" id="${ids}-summary-line">${pickerSummaryHtml(node, agent)}</div>`;
+}
+/* syncAgentPicker 机器切换联动（DOM 级更新）：按当前机器重建智能体选项，恢复此前
+ * 选中的智能体（若仍属于新机器）。preferAgent 供总理模式精确指定。返回新选择
+ * {node, agent} 由调用方决定持久化（组件本身不碰页面状态）。 */
+function syncAgentPicker(prefix, preferAgent) {
+  const nodeSel = $('#' + prefix + '-node'), agentSel = $('#' + prefix + '-agent');
+  if (!nodeSel || !agentSel) return { node: '', agent: '' };
+  const node = nodeSel.value || '';
+  const want = preferAgent !== undefined ? preferAgent : agentSel.value;   // 重建前旧选择
+  agentSel.innerHTML = pickerAgentOptions(node, want);
+  agentSel.disabled = !node;
+  agentSel.value = want && [...agentSel.options].some(o => o.value === want) ? want : '';
+  return { node, agent: agentSel.value };
+}
+/* pickerChecked 统计多选树勾选：agents 值 = node/agent（与建群 members 语义一致），
+ * nodeCount 为去重机器数。 */
+function pickerChecked(root) {
+  const agents = [...root.querySelectorAll('[data-picker-agent]:checked')].map(c => c.dataset.pickerAgent);
+  return { agents, nodeCount: new Set(agents.map(v => v.split('/')[0])).size };
+}
+/* updatePickerCount 勾选计数行：「已选 N 个智能体（M 台机器）」。 */
+function updatePickerCount(root) {
+  const line = root.querySelector('[data-picker-count]');
+  if (!line) return;
+  const st = pickerChecked(root);
+  line.textContent = st.agents.length ? `已选 ${st.agents.length} 个智能体（${st.nodeCount} 台机器）` : '尚未勾选成员：可跨机器多选';
+}
+/* bindAgentPicker(root, onChange)：组件联动绑定，change 委托在 root 上（bindEvents
+ * 对 document 绑一次，三处实例全部覆盖）。两级下拉：机器切换 → syncAgentPicker +
+ * 摘要行刷新，每次变化回调 {prefix, node, agent}；多选树：勾选变化 → 重算计数行，
+ * 回调 {prefix, agents, nodeCount}。 */
+function bindAgentPicker(root, onChange) {
+  if (!root) return;
+  root.addEventListener('change', e => {
+    const t = e.target, ds = t.dataset || {};
+    if (ds.picker === 'node') {
+      const sel = syncAgentPicker(ds.pickerPrefix);
+      updatePickerSummary(ds.pickerPrefix);
+      onChange?.({ prefix: ds.pickerPrefix, node: sel.node, agent: sel.agent });
+    } else if (ds.picker === 'agent') {
+      updatePickerSummary(ds.pickerPrefix);
+      onChange?.({ prefix: ds.pickerPrefix, node: $('#' + ds.pickerPrefix + '-node')?.value || '', agent: t.value });
+    } else if (ds.pickerAgent !== undefined && t.closest('[data-picker-multi]')) {
+      const box = t.closest('[data-picker-multi]');
+      updatePickerCount(box);
+      const st = pickerChecked(box);
+      onChange?.({ prefix: box.dataset.pickerPrefix, agents: st.agents, nodeCount: st.nodeCount });
+    }
+  });
 }
 function ctrlFeedback() {
   const C = S.C;
@@ -760,32 +827,35 @@ function controlResult() {
     <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
     </section>`;
 }
-/* applyPrimeMode 总理模式勾选联动（PRIME-DESIGN 8.1）：不整页重渲染（两级下拉
+/* applyPrimeMode 总理模式勾选联动（PRIME-DESIGN 8.1）：不整页重渲染（公共组件
  * 同款 DOM 级更新，避免 5s 轮询式重置打断填写）。勾选：暂记当前机器/智能体选择，
  * 自动定位总理载体（zcode-dev）所在机器并选中它；取消：恢复勾选前原状（原机器
  * 已不在可选列表则清空重选）。广播复选框已随两级派单模型移除（单目标语义）。 */
 function applyPrimeMode(on) {
   const nodeSel = $('#ctrl-node');
   if (nodeSel) {
+    /* 程序化设选（非用户 change 事件）：经组件联动后手动同步 S.C，语义与
+     * bindAgentPicker 的 onChange 持久化一致，保证后续整页重绘可恢复。 */
+    const setSel = (node, agent) => {
+      nodeSel.value = node;
+      const sel = syncAgentPicker('ctrl', agent);
+      S.C.node = sel.node; S.C.agent = sel.agent;
+      updatePickerSummary('ctrl');
+    };
     if (on) {
       S.C.primePrevNode = nodeSel.value;
       S.C.primePrevAgent = $('#ctrl-agent')?.value || '';
       const entry = S.directory.find(d => d.card.name.includes(PRIME_AGENT_KEY));
-      if (entry) {
-        nodeSel.value = entry.node_id;
-        syncCtrlAgentSelect(entry.card.name);
-      } else toast('网内暂无 ' + PRIME_AGENT_KEY + '（总理）能力：请先在节点开放该能力再使用总理模式');
+      if (entry) setSel(entry.node_id, entry.card.name);
+      else toast('网内暂无 ' + PRIME_AGENT_KEY + '（总理）能力：请先在节点开放该能力再使用总理模式');
     } else {
       if (S.C.primePrevNode && [...nodeSel.options].some(o => o.value === S.C.primePrevNode)) {
-        nodeSel.value = S.C.primePrevNode;
-        syncCtrlAgentSelect(S.C.primePrevAgent);
+        setSel(S.C.primePrevNode, S.C.primePrevAgent);
       } else {
-        nodeSel.value = '';
-        syncCtrlAgentSelect('');
+        setSel('', '');
       }
       S.C.primePrevNode = ''; S.C.primePrevAgent = '';
     }
-    updateCtrlSummary();
   }
   const ta = $('#ctrl-stdin');
   if (ta) ta.placeholder = on ? STDIN_PH_PRIME : STDIN_PH;
@@ -1072,25 +1142,24 @@ async function sendGroupMsg() {
     toast('发言超过 8KB 上限，请拆成多条发送');
   } else toast('发送失败：' + errLine(r.data));
 }
-/* groupCreateModal 建群弹层：goal 必填；成员从能力目录多选（值 = node/agent）；
- * 代理发言预算走服务端默认 20（MVP 建群端点不支持自定义，展示为只读避免假功能）。 */
+/* groupCreateModal 建群弹层：goal 必填；成员用智能体选择公共组件按机器分组多选
+ * （机器名做分组标题含在线状态，值 = node/agent）；代理发言预算走服务端默认 20
+ * （MVP 建群端点不支持自定义，展示为只读避免假功能）。 */
 function groupCreateModal() {
   openLayerPlain(`${modalHead('新建协作群')}
   <div class="notice">创建即进入「进行中」：你与成员智能体可在群内讨论，代理发言总轮数默认 20，用尽后等待人工决策。</div>
   <label class="spaced">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
   <h3>选择成员智能体（可多选）</h3>
-  ${S.directory.length ? `<div class="checkline-grid">${S.directory.map(d => {
-    const v = d.node_id + '/' + d.card.name;
-    return `<label class="checkline"><input type="checkbox" data-group-member="${esc(v)}"> ${esc(d.card.name)}（${esc(d.node_id)}）</label>`;
-  }).join('')}</div>` : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
+  ${S.directory.length ? agentPickerHtml({ ids: 'gnew', multi: true }) : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
   <label class="spaced">代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
   <div class="actions spaced">${button('创建群聊', 'group-create', 'primary')}${button('取消', 'close', 'link')}</div>
   <p class="footer-note">建群后自动打开群详情；成员智能体经节点侧接入批次后才会自动发言。</p>`);
 }
 
 /* taskFromMsgModal 转任务弹层（GROUP-RFC 闭环三件套之三）：预填消息内容为任务
- * 描述，执行者取自能力目录；提交走 control-operations + group_ref —— 任务创建
- * 后群时间线自动出现系统注记，终态结果自动回流本群（回流消息由 3s 增量轮询带上）。 */
+ * 描述，执行者用智能体选择公共组件的两级下拉（先选机器再选智能体，与派单页
+ * 一致）；提交走 control-operations + group_ref —— 任务创建后群时间线自动出现
+ * 系统注记，终态结果自动回流本群（回流消息由 3s 增量轮询带上）。 */
 function taskFromMsgModal(seq) {
   const G = S.groupView;
   const m = G && G.id === S.groupId ? G.msgs.find(x => x.seq === seq) : null;
@@ -1100,12 +1169,9 @@ function taskFromMsgModal(seq) {
   <div class="notice">把这条群消息派发成正式任务：创建成功后群里会出现系统消息，执行结果会自动回流本群。</div>
   <p class="muted spaced">原消息：${esc(m.from)} · ${esc(fmtFull(m.created_at))}</p>
   <label class="spaced">任务描述（预填自消息内容，可修改）<textarea id="task-desc" rows="5">${esc(m.body)}</textarea></label>
-  <label>执行者（能力目录）<select id="task-agent">${S.directory.map(d => {
-    const v = d.node_id + '/' + d.card.name;
-    return `<option value="${esc(v)}">${esc(d.card.name)}（${esc(d.node_id)}）— ${esc(d.card.description || '（无描述）')}</option>`;
-  }).join('')}</select></label>
+  ${agentPickerHtml({ ids: 'task' })}
   <div class="actions spaced">${button('派发任务', 'task-from-msg-submit', 'primary', `data-seq="${seq}"`)}${button('取消', 'close', 'link')}</div>
-  <p class="footer-note">等价于「任务派发」页的单点派发：恢复密钥自动生成，目标离线或能力未开放会在提交结果中标出。</p>`);
+  <p class="footer-note">等价于「任务派发」页的单点派发：恢复密钥自动生成；目标离线或能力未开放会在提交结果中标出。</p>`);
 }
 
 /* ---------- 动作表（事件委托） ---------- */
@@ -1147,7 +1213,8 @@ const ACT = {
   'group-create': async () => {
     const goal = $('#group-goal')?.value.trim() || '';
     if (!goal) { toast('请先填写协作目标'); $('#group-goal')?.focus(); return; }
-    const members = [...document.querySelectorAll('[data-group-member]:checked')].map(c => c.dataset.groupMember);
+    const box = $('#gnew-picker');
+    const members = box ? pickerChecked(box).agents : [];
     const btn = document.querySelector('[data-act="group-create"]');
     if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
     const r = await api('POST', '/api/v1/groups', { goal, members }).catch(() => null);
@@ -1166,9 +1233,9 @@ const ACT = {
   'task-from-msg-submit': async b => {
     const desc = $('#task-desc')?.value.trim() || '';
     if (!desc) { toast('请先填写任务描述'); $('#task-desc')?.focus(); return; }
-    const sel = $('#task-agent')?.value;
-    if (!sel) { toast('目录为空：先在节点配置里开放能力'); return; }
-    const [node, agent] = sel.split('/');
+    const node = $('#task-node')?.value || '', agent = $('#task-agent')?.value || '';
+    if (!node) { toast('请先选择执行机器'); return; }
+    if (!agent) { toast('请先选择该机器上的执行智能体'); return; }
     b.disabled = true; b.textContent = '派发中…';
     const r = await api('POST', '/api/v1/control-operations', {
       agent, targets: [node], input: { args: [], stdin: desc }, group_ref: S.groupId,
@@ -1376,9 +1443,13 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    if (e.target.id === 'ctrl-node') { syncCtrlAgentSelect(); updateCtrlSummary(); return; }   // 两级选择：切机器联动刷新智能体列表
-    if (e.target.id === 'ctrl-agent') { S.C.agent = e.target.value; updateCtrlSummary(); return; }
     if (e.target.id === 'ctrl-prime') { applyPrimeMode(e.target.checked); return; }
+  });
+  /* 智能体选择公共组件（派单 ctrl / 建群 gnew / 转任务 task）：机器切换联动、
+   * 摘要行与计数行统一走组件；派单页把选择持久化到 S.C（整页重绘后恢复），
+   * 弹层场景提交时直接读 DOM。 */
+  bindAgentPicker(document, info => {
+    if (info.prefix === 'ctrl' && info.node !== undefined) { S.C.node = info.node; S.C.agent = info.agent || ''; }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeLayer(); return; }

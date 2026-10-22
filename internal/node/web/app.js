@@ -430,6 +430,7 @@ document.addEventListener('click', e => {
   const btn = e.target.closest('button');
   const tr = e.target.closest('tr[data-task]');
   if (btn) {
+    if (btn.dataset.go) { location.hash = '#/' + btn.dataset.go; return; } // nav 导航按钮（data-go）
     const [act, arg] = (btn.dataset.act || '').split(':');
     switch (act) {
       case 'gate-enter': tryToken($('#gate-token').value.trim()); return;
