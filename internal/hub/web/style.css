@@ -67,6 +67,32 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .form-grid label{margin:0}
 .form-grid .full{grid-column:1/-1}
 @media(max-width:719px){.modal{width:94vw}.modal.slim{width:94vw}.modal.slim .actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}}
+/* 节点接入向导（2026-10-22 伦哥定：四步向导）——顶部步骤条（done 可点回退），
+ * 配置行「代码+右侧人话注释」两列网格，OS 三 tab，令牌展示行，绿色成功态 */
+.wiz-steps{display:flex;align-items:center;gap:6px;margin:6px 0 20px}
+.wiz-step{flex:1;display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted);border:0;background:transparent;padding:8px 0;text-align:left;white-space:nowrap}
+.wiz-step .n{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#f1f2f5;color:var(--muted);flex-shrink:0}
+.wiz-step:not(:last-child)::after{content:'';flex:1;height:2px;background:var(--line);margin:0 8px 0 4px;min-width:10px}
+.wiz-step.done{cursor:pointer}
+.wiz-step.done:hover{color:var(--blue)}
+.wiz-step.done .n{background:#e9f5ed;color:#35805a}
+.wiz-step.done:not(:last-child)::after{background:#bcd9c6}
+.wiz-step.on{color:var(--blue)}
+.wiz-step.on .n{background:var(--blue);color:white}
+.wiz-step.on:not(:last-child)::after{background:#c5cffd}
+.enroll-token-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.enroll-token-row code{font-size:13px;user-select:all;word-break:break-all;background:#f5f6f9;border:1px solid #e9ebf0;border-radius:8px;padding:10px 14px;flex:1;min-width:200px}
+.enroll-rows{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:12px 0}
+.enroll-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,320px)}
+.enroll-row+.enroll-row{border-top:1px solid var(--line)}
+.enroll-row code{padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere;color:#606b84;background:#fbfcfe}
+.enroll-row small{padding:10px 14px;color:var(--muted);border-left:1px dashed var(--line);display:flex;align-items:center;background:#fbfcfe}
+.os-tabs{display:flex;gap:6px}
+.os-tabs button{padding:6px 16px;font-size:12px}
+.os-tabs .on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue);color:var(--blue);font-weight:650}
+.enroll-ok{padding:13px 16px;background:#e9f5ed;border:1px solid #c4e5d0;border-radius:9px;color:#35805a}
+.enroll-ok p{margin:6px 0 10px;color:#2f6b4b}
+@media(max-width:719px){.wiz-steps{gap:2px}.wiz-step{flex:none}.wiz-step:not(:last-child)::after{display:none}.wiz-step+.wiz-step{margin-left:12px}.enroll-row{grid-template-columns:1fr}.enroll-row small{border-left:0;border-top:1px dashed var(--line)}}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
 .drawer{width:min(700px,96vw);background:white;overflow:auto;padding:28px 32px;box-shadow:-15px 0 80px #23365320}
 .close{font-size:20px;padding:2px 10px}
