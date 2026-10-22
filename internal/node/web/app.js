@@ -2,9 +2,10 @@
 /* SwarmMind Node 本地控制台（Loop 7，INTERACTION 客户端三旅程）。
  * 数据面：本机回环 /api/v1/*（Bearer local_token，令牌持于 localStorage）。
  * 页面：总览（旅程③运维）· 我的服务（旅程①服务提供者：exposed 开关三态）·
- * 派任务·我的任务（旅程②消费者：能力目录派单 + 留痕跟踪）。与 hub 控制台
- * 同交互闭环（INTERACTION 四：300ms 反馈、终态带下一步、结果未知锁表单、
- * 技术态配人话双语）。无框架原生 JS，hash 路由 SPA。 */
+ * 派任务·我的任务（旅程②消费者：本机服务派单 + 留痕跟踪；跨机协作经 hub，
+ * node 控制台不含全网目录——方案 v2 边界）。与 hub 控制台同交互闭环
+ * （INTERACTION 四：300ms 反馈、终态带下一步、结果未知锁表单、技术态配人话双语）。
+ * 无框架原生 JS，hash 路由 SPA。 */
 
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -39,7 +40,7 @@ const S = {
   agents: [],              // GET /api/v1/local/agents（本机 ExecProfile 视图）
   tasks: [],               // GET /api/v1/local/tasks（我的任务留痕）
   live: {},                // task_id → 最近一次实况状态（详情/列表徽章）
-  catalog: [],             // 派单目录（全网 exposed 能力）
+  catalog: [],             // 派单目录（本机 exposed 能力；node 无全网视图）
   snap: '',                // 轮询数据指纹：未变化不重绘
   drawer: null,            // 打开的任务详情 {id, timer}
   f: { stage: 'idle', target: '', stdin: '', idem: newIdem(), message: '' },   // 派单表单状态机
@@ -90,9 +91,8 @@ async function loadAll() {
   S.status = st.data || null;
   S.agents = ag.data?.agents || [];
   S.tasks = tk.data?.tasks || [];
-  const net = dir.data?.network;
-  const list = Array.isArray(net?.agents) ? net.agents : (dir.data?.local || []);
-  S.catalog = list.filter(e => e.card?.exposed);
+  // 派单目录只含本机 agent（/api/v1/agents 无 network 键——node 无全网视图）
+  S.catalog = (dir.data?.local || []).filter(e => e.card?.exposed);
   // 列表徽章用实况：最近 8 条留痕并发补查（hub 是状态真相源，日志不缓存状态）
   const top = S.tasks.slice(0, 8);
   const live = await Promise.all(top.map(e =>
@@ -194,25 +194,22 @@ function gateView() {
 function overviewPage() {
   const st = S.status;
   const led = st?.ledger || {};
-  const mb = st?.mailbox || {};
   const head = `<div class="page-head"><div><h1>总览</h1>
-    <p class="muted">本机 node 状态与最近任务；下一步：<b>＋派单</b> 把工作交给网内能力。</p></div>
+    <p class="muted">本机 node 状态与最近任务；下一步：<b>＋派单</b> 把工作交给本机服务。</p></div>
     <div class="actions">${button('复制诊断信息', 'copy-diag')}${button('＋ 派单', 'go-tasks', 'primary')}</div></div>`;
   if (!S.agents.length) {
     return head + `<section class="card"><h2>三步把本机接入协作网</h2>
       <p class="muted">本机还没有任何 agent。配置是文件化的（V0 不做网页表单编辑，明说只读）：</p>
       <div class="step"><span>1</span><div><b>编辑 node.yaml</b><div class="muted">在 <code>agents:</code> 段登记本机 agent（command / workdir / timeout / 白名单），完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>重启 node</b><div class="muted">配置随进程生效；重启不丢已确认的任务结果。</div></div></div>
-      <div class="step"><span>3</span><div><b>回到「我的服务」打开暴露开关</b><div class="muted">exposed=true 后能力进入全网目录，别的机器就能派单给它。</div></div></div></section>`;
+      <div class="step"><span>3</span><div><b>回到「我的服务」打开暴露开关</b><div class="muted">exposed=true 后能力进入全网目录（经 hub），别的机器就能派单给它。</div></div></div></section>`;
   }
   return head + `
-  <div class="grid cols4">
+  <div class="grid cols3">
     <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线' : '离线'}</span></div>
       <small class="muted">epoch ${esc(st?.epoch ?? 0)} · 掉线自动重连，重连后代次 +1</small></section>
     <section class="card"><h3>执行账本（三态）</h3><div class="mini-stat spaced"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div>
       <small class="muted">重启恢复：started 未完 → needs_review，绝不自动重跑</small></section>
-    <section class="card"><h3>信箱余量</h3><div class="metric">${mb.error ? '—' : esc(mb.remaining ?? '—')}<small> / ${esc(mb.quota ?? '?')} 条</small></div>
-      <small class="muted">${mb.error ? esc(mb.error) : `hub 侧离线信箱：已占 ${esc(mb.used ?? 0)} 条，满则新提交暂拒（503）`}</small></section>
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
   </div>
@@ -224,7 +221,7 @@ function recentTasksCard() {
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${t ? badge(t.status) : '<span class="badge offline">状态待查</span>'}</td></tr>`; }).join('')}
   </tbody></table></div><p class="footer-note">点击行查看详情；终态保留 24h，任务真相在 hub（本页实时补查）。</p>`
-    : `<div class="empty"><h2>还没有派过任务</h2><p class="muted">去「派任务」选一个网内能力，描述要做的事即可。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
+    : `<div class="empty"><h2>还没有派过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
@@ -245,7 +242,7 @@ function svcCard(a) {
     : a._synced === false
       ? `<div class="notice warn spaced" id="sync-${esc(a.name)}"><b>本机已生效 · 待同步</b>：hub 暂不可达，重连注册后自动生效（已排队任务不受影响）。</div>`
       : a._synced === true
-        ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
+        ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录（经 hub）。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
   return `<section class="card svc-card ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
     <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span></h2>
@@ -292,10 +289,10 @@ async function setExposed(name, exposed, btn) {
 function tasksPage() {
   const c = S.f;
   const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
-    <p class="muted">从能力目录选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
+    <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
   const opts = S.catalog.map(e => {
     const v = e.node_id + '|' + e.card.name;
-    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''}>${esc(e.card.name)} @ ${esc(e.node_id)} — ${esc(e.card.description || '（无描述）')} · ${esc(e.card.permission_mode || '—')}${e.online ? '' : ' · 离线（任务进信箱，重连后执行）'}</option>`;
+    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''}>${esc(e.card.name)} — ${esc(e.card.description || '（无描述）')} · ${esc(e.card.permission_mode || '—')}${e.online ? '' : ' · 离线（任务进信箱，重连后执行）'}</option>`;
   }).join('');
   const target = S.catalog.find(e => e.node_id + '|' + e.card.name === c.target);
   const stageView = {
@@ -309,13 +306,13 @@ function tasksPage() {
   return head + `
   <section class="card" id="task-form"><h2>派任务</h2>
     ${S.catalog.length ? `
-    <label>能力目录（网内已暴露的服务）<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个能力…</option>${opts}</select></label>
-    <div class="notice" ${target ? '' : 'hidden'}>${target ? `<b>${esc(target.card.name)} @ ${esc(target.node_id)}</b> · ${esc(target.card.description || '（无描述）')} · 权限模式 <code>${esc(target.card.permission_mode || '—')}</code> · ${target.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线 · 排队等它回来</span>'}` : ''}</div>
+    <label>本机服务（已暴露；派单目标只能是本机）<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个本机服务…</option>${opts}</select></label>
+    <div class="notice" ${target ? '' : 'hidden'}>${target ? `<b>${esc(target.card.name)}</b> · ${esc(target.card.description || '（无描述）')} · 权限模式 <code>${esc(target.card.permission_mode || '—')}</code> · ${target.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线 · 排队等它回来</span>'}` : ''}</div>
     <label>任务描述（一段话讲清要做什么；以 prompt_text 交付给对方 agent）<textarea id="f-stdin" placeholder="例：审查这段代码的并发安全性，指出竞态并给出修复建议…" ${formLocked ? 'disabled' : ''}>${esc(c.stdin)}</textarea></label>
     <div class="row"><small class="muted">幂等键 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>能力目录为空</h2><p class="muted">网内还没有已暴露的服务（或 hub 目录代理未配置）。可以先在「我的服务」暴露本机能力。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记并暴露本机能力；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}`;
 }

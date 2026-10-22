@@ -17,7 +17,7 @@ func TestCancelTaskStateMatrix(t *testing.T) {
 	nodeA := f.newNode("nodeA", agentsOf("echo"), false)
 
 	// submitted（在线直接投递）→ offered：取消成功且发帧
-	ack, err := f.core.Submit(submitReq("nodeA", "echo", "hello"), "admin")
+	ack, err := f.core.Submit(submitReq("nodeA", "echo", "hello"), "")
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestCancelTaskStateMatrix(t *testing.T) {
 	// 已终态（completed）取消：409 ErrNotCancellable
 	// 已终态（completed）取消：409 ErrNotCancellable（显式驱动完整生命周期）
 	nodeB := f.newNode("nodeB", agentsOf("echo"), false)
-	ack2, err := f.core.Submit(submitReq("nodeB", "echo", "world"), "admin")
+	ack2, err := f.core.Submit(submitReq("nodeB", "echo", "world"), "")
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCancelTaskStateMatrix(t *testing.T) {
 func TestCancelSubmittedOfflineWithdraws(t *testing.T) {
 	f := newHub(t)
 	f.registerOffline("nodeB", agentsOf("echo"))
-	ack, err := f.core.Submit(submitReq("nodeB", "echo", "hello"), "admin")
+	ack, err := f.core.Submit(submitReq("nodeB", "echo", "hello"), "")
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestCancelSubmittedOfflineWithdraws(t *testing.T) {
 func TestResultCancelledMerges(t *testing.T) {
 	f := newHub(t)
 	nodeA := f.newNode("nodeA", agentsOf("echo"), false)
-	ack, _ := f.core.Submit(submitReq("nodeA", "echo", "hello"), "admin")
+	ack, _ := f.core.Submit(submitReq("nodeA", "echo", "hello"), "")
 	if _, _, err := f.core.CancelTask(ack.TaskID, "先取消"); err != nil {
 		t.Fatalf("取消失败: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestResultCancelledMerges(t *testing.T) {
 func TestConflictErrCarriesTaskRef(t *testing.T) {
 	f := newHub(t)
 	nodeA := f.newNode("nodeA", agentsOf("echo"), false)
-	ack, _ := f.core.Submit(submitReq("nodeA", "echo", "hello"), "admin")
+	ack, _ := f.core.Submit(submitReq("nodeA", "echo", "hello"), "")
 	nodeA.result(ack.TaskID, protocol.TaskResult{Status: protocol.ResultCompleted, ExitCode: 0, FinishedAt: f.clock.Now()})
 	if got := f.taskOf(ack.TaskID).Status; got != protocol.StatusCompleted {
 		t.Fatalf("首次结果应完成, got %s", got)
@@ -131,7 +131,7 @@ func TestConflictErrCarriesTaskRef(t *testing.T) {
 func TestResendPendingCancelsOnRegister(t *testing.T) {
 	f := newHub(t)
 	f.registerOffline("nodeB", agentsOf("echo"))
-	ack, _ := f.core.Submit(submitReq("nodeB", "echo", "hello"), "admin")
+	ack, _ := f.core.Submit(submitReq("nodeB", "echo", "hello"), "")
 	if _, _, err := f.core.CancelTask(ack.TaskID, "离线期间取消"); err != nil {
 		t.Fatalf("取消失败: %v", err)
 	}

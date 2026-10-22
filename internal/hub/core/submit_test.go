@@ -43,46 +43,46 @@ func TestSubmitChainRejections(t *testing.T) {
 }
 
 // TestSubmitIdempotency idem 三分支 + 重复确认重放（SPEC 4.5：去重后必须重放 Ack）。
+// 边界方案 v2：node 只能本机派单——提交方=执行方=nodeB（离线，任务滞留信箱便于观察）。
 func TestSubmitIdempotency(t *testing.T) {
 	f := newHub(t)
-	f.registerOffline("nodeB", agentsOf("echo")) // 离线，任务留在信箱便于观察
-	nodeA := f.newNode("nodeA", agentsOf("unused"), false)
+	nodeB := f.newOfflineNode("nodeB", agentsOf("echo"))
 
 	req := submitReq("nodeB", "echo", "hello")
 	req.IdemKey = "demo-001"
 
-	ack1, err := f.core.Submit(req, "nodeA")
+	ack1, err := f.core.Submit(req, "nodeB")
 	if err != nil {
 		t.Fatalf("首次提交失败: %v", err)
 	}
 	if ack1.Dup {
 		t.Error("首次提交不应为 dup")
 	}
-	if len(nodeA.submitAcks) != 1 || nodeA.submitAcks[0].TaskID != ack1.TaskID {
-		t.Fatalf("node 提交方应收到 1 条 submit_ack, got %+v", nodeA.submitAcks)
+	if len(nodeB.submitAcks) != 1 || nodeB.submitAcks[0].TaskID != ack1.TaskID {
+		t.Fatalf("node 提交方应收到 1 条 submit_ack, got %+v", nodeB.submitAcks)
 	}
 
 	// 同键同内容：原 task_id + dup=true，且重放 submit_ack
-	ack2, err := f.core.Submit(req, "nodeA")
+	ack2, err := f.core.Submit(req, "nodeB")
 	if err != nil {
 		t.Fatalf("幂等重试失败: %v", err)
 	}
 	if !ack2.Dup || ack2.TaskID != ack1.TaskID || ack2.TraceID != ack1.TraceID {
 		t.Errorf("幂等命中应返回原 id/trace, got %+v want task=%s", ack2, ack1.TaskID)
 	}
-	if len(nodeA.submitAcks) != 2 || !nodeA.submitAcks[1].Dup {
-		t.Errorf("重复提交应重放 submit_ack(dup=true), got %+v", nodeA.submitAcks)
+	if len(nodeB.submitAcks) != 2 || !nodeB.submitAcks[1].Dup {
+		t.Errorf("重复提交应重放 submit_ack(dup=true), got %+v", nodeB.submitAcks)
 	}
 
 	// 同键不同内容：冲突
 	conflict := submitReq("nodeB", "echo", "CHANGED")
 	conflict.IdemKey = "demo-001"
-	if _, err := f.core.Submit(conflict, "nodeA"); !errors.Is(err, mailbox.ErrConflict) {
+	if _, err := f.core.Submit(conflict, "nodeB"); !errors.Is(err, mailbox.ErrConflict) {
 		t.Errorf("同键不同内容应 ErrConflict, got %v", err)
 	}
 	// 冲突帧已回给 node 提交方
-	if len(nodeA.errs) != 1 || nodeA.errs[0].Code != "conflict" {
-		t.Errorf("提交方应收到 err(conflict), got %+v", nodeA.errs)
+	if len(nodeB.errs) != 1 || nodeB.errs[0].Code != "conflict" {
+		t.Errorf("提交方应收到 err(conflict), got %+v", nodeB.errs)
 	}
 	// 冲突不产生新任务
 	if n := len(f.st.View().Tasks); n != 1 {
@@ -195,30 +195,30 @@ func TestSubmitStorageFull(t *testing.T) {
 }
 
 // TestNodeSubmitAckFrames node 会话提交方的帧面：submit_ack 到达、失败回 err 帧。
+// 边界方案 v2：node 只能本机派单——提交方=执行方=nodeB（离线，帧回执仍可达）。
 func TestNodeSubmitAckFrames(t *testing.T) {
 	f := newHub(t)
-	f.registerOffline("nodeB", agentsOf("echo"))
-	nodeA := f.newNode("nodeA", agentsOf("misc"), false)
+	nodeB := f.newOfflineNode("nodeB", agentsOf("echo"))
 
 	r := submitReq("nodeB", "echo")
 	r.TargetAgent = "no-such" // 目标不存在 → err(agent_not_exposed)
-	if _, err := f.core.Submit(r, "nodeA"); !errors.Is(err, ErrAgentNotExposed) {
+	if _, err := f.core.Submit(r, "nodeB"); !errors.Is(err, ErrAgentNotExposed) {
 		t.Fatalf("期望 ErrAgentNotExposed, got %v", err)
 	}
-	if len(nodeA.errs) != 1 || nodeA.errs[0].Code != protocol.CodeAgentNotExposed {
-		t.Fatalf("node 提交方应收到 err(agent_not_exposed), got %+v", nodeA.errs)
+	if len(nodeB.errs) != 1 || nodeB.errs[0].Code != protocol.CodeAgentNotExposed {
+		t.Fatalf("node 提交方应收到 err(agent_not_exposed), got %+v", nodeB.errs)
 	}
 	// 成功路径 → submit_ack
-	if _, err := f.core.Submit(submitReq("nodeB", "echo"), "nodeA"); err != nil {
+	if _, err := f.core.Submit(submitReq("nodeB", "echo"), "nodeB"); err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
-	if len(nodeA.submitAcks) != 1 || nodeA.submitAcks[0].Dup {
-		t.Errorf("应收到 1 条 submit_ack(dup=false), got %+v", nodeA.submitAcks)
+	if len(nodeB.submitAcks) != 1 || nodeB.submitAcks[0].Dup {
+		t.Errorf("应收到 1 条 submit_ack(dup=false), got %+v", nodeB.submitAcks)
 	}
 	// node 提交方身份覆盖：SubmittedBy=node_id
 	tasks := f.st.View().Tasks
 	for _, tk := range tasks {
-		if tk.SubmittedBy != "nodeA" {
+		if tk.SubmittedBy != "nodeB" {
 			t.Errorf("node 提交应覆盖 SubmittedBy=node_id, got %q", tk.SubmittedBy)
 		}
 	}
