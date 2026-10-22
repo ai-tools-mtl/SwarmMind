@@ -1,11 +1,30 @@
-// 总理凭证轮换（方案 3.2.1，2026-10-22）：控制台一键轮换 prime_token——重生成
-// → 原子写盘（data_dir/prime_token，0600）→ 即时重载（旧凭证下一请求即失效）。
-// 新凭证仅在应答中返回一次（与 hub 令牌创建同约定），持有人自行配给总理的
-// MCP 连接。换总理三步（文档口径）：改 node.yaml prime_agent 声明 → 轮换 →
-// 新总理配新凭证；运行中旧总理 MCP 连接下一请求 401/403。
+// 总理凭证与钦定（方案 3.2.1，2026-10-22）：
+//   - POST /api/v1/local/prime/rotate  控制台一键轮换 prime_token——重生成
+//     → 原子写盘（data_dir/prime_token，0600）→ 即时重载（旧凭证下一请求即
+//     失效）。新凭证仅在应答中返回一次（与 hub 令牌创建同约定），持有人自行
+//     配给总理的 MCP 连接。
+//   - POST /api/v1/local/prime/declare 控制台网页钦定总理——校验 agent 存在
+//     → yaml.Node round-trip 写 node.yaml 顶层 prime_agent（保真纪律同
+//     config.go）→ 即时生效（SetPrimeAgent）→ 自动轮换出新 prime_token（钦定
+//     即换凭证：旧持有者失效，钦定动作本身就是授权交接）→ 应答带 mcp_config
+//     配置片段，控制台展示后复制给总理 agent 即完成授权闭环。
+//
+// 换总理原三步（文档口径：改 node.yaml prime_agent 声明 → 轮换 → 新总理配新
+// 凭证）由 declare 一次收口；运行中旧总理 MCP 连接下一请求 401/403。
 package localapi
 
-import "net/http"
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
 
 // handlePrimeRotate POST /api/v1/local/prime/rotate：重生成总理凭证（仅
 // local_token 可调——轮换是本机主人操作，不随编排凭证下发）。
@@ -29,7 +48,195 @@ func (s *Server) handlePrimeRotate(w http.ResponseWriter, r *http.Request) {
 	s.muPrime.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"prime_token": tok,
-		"prime_agent": s.cfg.PrimeAgent,
+		"prime_agent": s.primeAgent(),
 		"note":        "新凭证仅此一次展示，请立即配给总理的 MCP 连接（SWARM_NODE_PRIME_TOKEN）；旧凭证已即时失效",
 	})
+}
+
+// primeDeclareRequest POST /api/v1/local/prime/declare 请求体。
+type primeDeclareRequest struct {
+	PrimeAgent string `json:"prime_agent"`
+}
+
+// handlePrimeDeclare POST /api/v1/local/prime/declare：网页钦定总理（仅
+// local_token 可调——钦定即凭据授予，本机主人操作，agent 面不可达）。
+//
+// 全程持 muPrime（锁序 muPrime→muCfg，包内无反向路径）：yaml 写盘、声明重载、
+// 凭证轮换在同一互斥段内完成——并发 declare/rotate 与之交错会出现盘上声明、
+// 内存声明、内存凭证、盘上凭证四方分叉（rotate 返工 #4 同型）。muPrime 覆盖
+// writeConfigFile（内部 writeConfigMu）：包内无「持 writeConfigMu 再取
+// muPrime」的路径，无锁序反转。
+//
+// 失败语义：yaml 写盘成功而轮换失败（磁盘/rand 故障，罕见）时声明已生效、
+// 旧凭证仍有效——重试 declare 即可（yaml 写幂等，轮换重做）；应答注明。
+func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.DeclareConfigPath == "" {
+		writeErr(w, http.StatusServiceUnavailable, "declare_disabled", "钦定未装配（装配方未接线 DeclareConfigPath）")
+		return
+	}
+	if s.cfg.RotatePrime == nil {
+		writeErr(w, http.StatusServiceUnavailable, "declare_disabled", "钦定未装配（RotatePrime 回调缺失，无法交接凭证）")
+		return
+	}
+	var req primeDeclareRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", `请求体须为 JSON {"prime_agent":"<本机 agent 名>"}`)
+		return
+	}
+	name := strings.TrimSpace(req.PrimeAgent)
+
+	// 1. 校验：非空且在本机 agents 配置中存在（人话提示列出可选名）。
+	if name == "" {
+		writeErr(w, http.StatusBadRequest, "invalid_request", s.declareHint("prime_agent 必填"))
+		return
+	}
+	if !s.agentConfigured(name) {
+		writeErr(w, http.StatusBadRequest, "invalid_request", s.declareHint(fmt.Sprintf("agent %q 不在本机配置中", name)))
+		return
+	}
+
+	s.muPrime.Lock()
+	defer s.muPrime.Unlock()
+
+	// 2. yaml.Node round-trip 写 node.yaml 顶层 prime_agent（注释与未知字段
+	//    保留；键不存在则追加；原子写盘 0600，纪律同 config.go/writeConfigFile）。
+	raw, err := os.ReadFile(s.cfg.DeclareConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
+		writeErr(w, http.StatusNotFound, "config_missing", "node.yaml 不存在（setup 模式请先完成接入向导）")
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "读取 node.yaml 失败: "+err.Error())
+		return
+	}
+	content, err := setPrimeAgentYAML(raw, name)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_config", err.Error()+"（未改动原文件）")
+		return
+	}
+	if err := writeConfigFile(s.cfg.DeclareConfigPath, string(content)); err != nil {
+		writeErr(w, http.StatusInternalServerError, "write_failed", "node.yaml 写盘失败（未改动原文件可重试）: "+err.Error())
+		return
+	}
+
+	// 3. 即时生效：编排门下一请求即按新总理判定（不等重启）。
+	s.SetPrimeAgent(name)
+
+	// 4. 钦定即换凭证：轮换出新 prime_token（旧持有者失效）并即时重载。
+	tok, err := s.cfg.RotatePrime() // 重生成 + 原子写盘（同 rotate 语义）
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal",
+			"钦定已写入 node.yaml 并生效，但凭证轮换失败（旧凭证仍有效，重试 declare 即可重做轮换）: "+err.Error())
+		return
+	}
+	s.primeTok = tok
+
+	// 5. 应答：三字段一次带全，控制台据此走「复制给总理」闭环。
+	writeJSON(w, http.StatusOK, map[string]any{
+		"prime_agent": name,
+		"prime_token": tok,
+		"mcp_config":  s.mcpConfig(tok),
+		"note":        "已写入 node.yaml prime_agent 并即时生效（无需重启）；新凭证仅此一次展示，请立即配给总理的 MCP 连接",
+	})
+}
+
+// agentConfigured name 是否在本机 agents 配置中（AgentState effective 视图，
+// 与目录/开关/注册能力表同源）。
+func (s *Server) agentConfigured(name string) bool {
+	for _, p := range s.effectiveProfiles() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// declareHint 400 提示附可选 agent 名（本机没配 agent 时指向能力配置入口）。
+func (s *Server) declareHint(reason string) string {
+	var names []string
+	for _, p := range s.effectiveProfiles() {
+		names = append(names, p.Name)
+	}
+	if len(names) == 0 {
+		return reason + "；本机尚未配置任何 agent，请先在「我的服务 → 能力配置」登记并重启"
+	}
+	return fmt.Sprintf("%s；可选 agent：%s", reason, strings.Join(names, "、"))
+}
+
+// mcpConfig 总理 MCP 连接片段（方案 3.4 node backend 配置口径）：command 探测
+// node 可执行文件同目录的 swarmmind-mcp；env 四键一次配齐，粘贴即用。
+func (s *Server) mcpConfig(primeTok string) map[string]any {
+	// LocalListen 含 IPv6 裸地址（如 "::1:8445"）时需方括号包裹 host 段，
+	// 否则拼出的 URL 非法（审查建议修，2026-10-22）。
+	listen := s.cfg.LocalListen
+	if i := strings.LastIndex(listen, ":"); i >= 0 && strings.Contains(listen[:i], ":") && !strings.HasPrefix(listen, "[") {
+		listen = "[" + listen[:i] + "]" + listen[i:]
+	}
+	return map[string]any{
+		"command": s.mcpCommand(),
+		"env": map[string]string{
+			"SWARM_TARGET":           "node",
+			"SWARM_NODE_URL":         "http://" + listen,
+			"SWARM_NODE_TOKEN":       s.cfg.LocalToken,
+			"SWARM_NODE_PRIME_TOKEN": primeTok,
+		},
+	}
+}
+
+// mcpCommand 探测本进程（node）同目录的 swarmmind-mcp：存在返回绝对路径，
+// 不存在返回占位符（部署形态二进制同目录放置；开发态明示需自行补路径）。
+func (s *Server) mcpCommand() string {
+	const placeholder = "<swarmmind-mcp 绝对路径>"
+	exe, err := os.Executable()
+	if err != nil {
+		return placeholder
+	}
+	name := "swarmmind-mcp"
+	if runtime.GOOS == "windows" {
+		name += ".exe" // Windows 产物带 .exe 后缀（与 enroll 打包同口径）
+	}
+	cand := filepath.Join(filepath.Dir(exe), name)
+	if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+		return cand
+	}
+	return placeholder
+}
+
+// setPrimeAgentYAML 读入 node.yaml，原位更新顶层 prime_agent 标量并重编码：
+// 其余顶层键（含注释与未知字段）节点一律不动——保真核心（clearHubURL 同型，
+// round-trip 最小子集）；键不存在则追加到映射尾部。
+// 解析失败/顶层非映射返回错误（调用方拒写，原文件不动）。
+func setPrimeAgentYAML(raw []byte, name string) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("解析 node.yaml 失败: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, errors.New("node.yaml 顶层不是文档，无法安全编辑")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, errors.New("node.yaml 顶层不是键值映射，无法安全编辑")
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "prime_agent" {
+			v := root.Content[i+1]
+			v.Value = name
+			v.Tag = "!!str"
+			v.Style = 0 // 清旧引号风格（如手编残留的 ""），按需由编码器重排
+			out, err := yaml.Marshal(&doc)
+			if err != nil {
+				return nil, fmt.Errorf("重编码 node.yaml 失败: %w", err)
+			}
+			return out, nil
+		}
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "prime_agent"},
+		strNode(name)) // 键不存在：追加（strNode 即 yaml.TagString 纯量，必要时编码器自动加引号）
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("重编码 node.yaml 失败: %w", err)
+	}
+	return out, nil
 }
