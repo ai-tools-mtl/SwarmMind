@@ -231,7 +231,7 @@ function render() {
     chip.textContent = S.status.online ? '中心端在线 · 重连 ' + S.status.epoch + ' 次' : 'hub 离线';
   }
   $('#app').innerHTML = !S.authed ? gateView() : layout(pageView());
-  if (S.drawer) refreshDrawer(); // 第六轮修复 3：抽屉打开时随全局数据刷新重取内容（原调 renderDrawer 未定义——开抽屉后任何 render 必崩，抽屉卡「加载中」）
+  if (S.drawer) refreshDrawer(S.drawer.seq); // 第六轮修复 3：抽屉打开时随全局数据刷新重取内容（传 seq：非当前抽屉会话的迟到应答由守卫丢弃）
 }
 // pageView 按路由出页面（setup 模式下 route() 已把页面收敛到 SETUP_PAGES）。
 function pageView() {
