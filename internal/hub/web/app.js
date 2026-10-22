@@ -173,7 +173,12 @@ async function api(method, path, body, opt = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
-  const data = await resp.json().catch(() => null);
+  // 响应体读取也纳入超时（Round 5 终审 #2）：头到体挂起同样会卡死轮询，
+  // 用 Promise.race 让 json() 也受 DATA_TIMEOUT_MS 约束
+  const data = await Promise.race([
+    resp.json().catch(() => null),
+    new Promise(res => { const t2 = setTimeout(() => res(undefined), DATA_TIMEOUT_MS); if (typeof t2.unref === 'function') t2.unref(); }),
+  ]).then(v => v === undefined ? null : v);
   if (resp.status === 401 && !opt.isLogin) {
     sessionExpired();
     throw { unauthorized: true, data };
@@ -216,15 +221,16 @@ async function loadResource(name, path, validate) {
     updateFreshness();
     return null;
   }
-  if (seq !== S.seq[name]) return null;     // 旧响应晚到：整体丢弃（不提交、不动新鲜度）
   const value = r.code === 200 ? validate(r.data) : null;
   if (value === null) {                     // 非 200 / 缺字段：不提交，保留旧快照并标陈旧
+    if (seq !== S.seq[name]) return null;   // 旧响应的结构不合格：同样不污染新鲜度
     S.fresh[name] = { ok: false, at: S.fresh[name]?.at || 0 };
     updateFreshness();
     return null;
   }
-  S.fresh[name] = { ok: true, at: Date.now() };
-  return value;
+  // Round 5 终审 #1：返回带 seq 的包裹，提交点（commit）二次校验——
+  // 杜绝「旧批资源在 Promise.all 尾声提交时回滚新批已提交数据」的跨资源交错竞态
+  return { __seq: seq, value, ok: true };
 }
 async function loadAll() {
   const [nodes, tasks, directory] = await Promise.all([
@@ -233,8 +239,12 @@ async function loadAll() {
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
   ]);
   let changed = false;
-  const commit = (name, value) => {
-    if (value === null) return;
+  const commit = (name, wrapped) => {
+    if (!wrapped || wrapped.value === null) return;
+    // 提交点二次 seq 校验（Round 5 终审 #1）：批内旧响应在 await 尾声才到时不得回滚新批
+    if (wrapped.__seq !== undefined && wrapped.__seq !== S.seq[name]) return;
+    const value = wrapped.value;
+    S.fresh[name] = { ok: true, at: Date.now() };   // 成功提交才记新鲜（与 seq 校验同点）
     const fp = JSON.stringify(value);
     if (fp === S.resSnap[name]) return;     // 该资源无变化：不触发重绘
     S.resSnap[name] = fp;
@@ -260,16 +270,29 @@ function ensureFreshnessEl() {
   right.prepend(sp);
 }
 /* updateFreshness 顶栏小字唯一写入点：时间取最陈旧资源的最近成功时刻（D1：
- * 顶栏显示最陈旧资源的状态），任一资源失败/超时追加「（陈旧）」；首屏尚无
- * 完整成功数据时不显示。 */
+ * 顶栏显示最陈旧资源的状态）；任一资源失败/超时追加「（陈旧）」；首屏尚未
+ * 成功加载的资源显示「尚未成功加载」而非隐藏（Round 5 终审 #3：首屏失败
+ * 也要可见，不能静默）。 */
 function updateFreshness() {
   const el = document.getElementById('freshness');
   if (!el) return;
-  const vals = Object.values(S.fresh);
-  if (!S.authed || vals.length < 3 || vals.some(f => !f || !f.at)) { el.hidden = true; return; }
-  const t = new Date(Math.min(...vals.map(f => f.at)));
-  const hh = String(t.getHours()).padStart(2, '0'), mm = String(t.getMinutes()).padStart(2, '0');
-  el.textContent = `数据更新于 ${hh}:${mm}` + (vals.some(f => !f.ok) ? '（陈旧）' : '');
+  if (!S.authed) { el.hidden = true; return; }
+  const names = Object.keys(S.fresh);
+  if (!names.length) { el.hidden = true; return; }
+  const pend = names.filter(n => !S.fresh[n] || !S.fresh[n].at);
+  if (pend.length === names.length) { el.hidden = true; return; }   // 全部从未成功：等首次结果
+  const failed = names.filter(n => S.fresh[n] && S.fresh[n].at && !S.fresh[n].ok);
+  const oks = names.filter(n => S.fresh[n] && S.fresh[n].ok && S.fresh[n].at);
+  let txt;
+  if (oks.length) {
+    const t = new Date(Math.min(...oks.map(f => f.at)));
+    const hh = String(t.getHours()).padStart(2, '0'), mm = String(t.getMinutes()).padStart(2, '0');
+    txt = `数据更新于 ${hh}:${mm}`;
+  } else {
+    txt = '数据尚未成功加载';
+  }
+  if (failed.length || pend.length) txt += `（陈旧：${[...failed, ...pend].join('/')}）`;
+  el.textContent = txt;
   el.hidden = false;
 }
 function byCreatedDesc(a, b) {
@@ -1115,7 +1138,9 @@ function swapModalContent(modal, content) {
   const pane = modal.firstElementChild;
   void modal.offsetWidth;
   requestAnimationFrame(() => { if (pane?.isConnected) pane.classList.add('in'); });
-  modal.focus();
+  // Round 5 建议修：换步后焦点入新步骤首个可交互元素（对齐 D4），无则退回容器
+  const first = modal.querySelector('input:not([type=hidden]), select, textarea, button:not([disabled])');
+  (first || modal).focus();
 }
 /* syncDrawer 任务抽屉同步：openTask / 轮询重绘共用。首次打开（层内无 drawer）
  * 走 layerOpenBegin 新世代 + playLayerOpen 入场动画并入焦点；抽屉已开时属受控

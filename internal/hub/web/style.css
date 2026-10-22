@@ -131,10 +131,12 @@ details{border-top:1px solid var(--hairline);padding-top:15px;margin:20px 0}summ
 details.adv-filter{margin:0 0 18px}
 /* ---- 表格（草案 B.4 + v3 定案）：表头靠 12.5px + ink-4 与数据分层（灰底表头废除）；
  * 数字 tabular-nums；行 hover 限定可点任务行；D6 定案：滚动归属页面主滚动，
- * .table-wrap 不限高（容器内 sticky 需求出现时再二选一）。 ---- */
-.table-wrap{overflow:auto}
+ * .table-wrap 不限高不裁剪（去掉 overflow:auto 避免形成独立滚动容器破坏 sticky）。
+ * Round 5 终审 #4：sticky 表头落地——页面主滚动，top 对齐 topbar 高度 84px；
+ * 不透明底色防内容穿透。 ---- */
+.table-wrap{overflow:visible}
 table{width:100%;border-collapse:collapse;text-align:left;font-size:var(--fs-table)}
-th{background:none;color:var(--ink-4);font-size:var(--fs-table);font-weight:550;white-space:nowrap}
+th{position:sticky;top:84px;z-index:5;background:var(--surface);color:var(--ink-4);font-size:var(--fs-table);font-weight:550;white-space:nowrap}
 th,td{padding:12px 14px;border-bottom:1px solid var(--hairline)}
 td{font-variant-numeric:tabular-nums}
 tbody tr[data-task]{cursor:pointer}
