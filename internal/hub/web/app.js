@@ -320,7 +320,7 @@ function button(label, act, cls = '', extra = '') { return `<button data-act="${
 function head(title, desc, action = '') {
   return `<div class="page-head"><div><h1>${title}</h1><p class="muted">${desc}</p></div><div class="actions">${action}</div></div>`;
 }
-function metric(label, value, desc, cls = '') { return `<div class="card${cls ? ' ' + cls : ''}"><small>${label}</small><div class="metric">${value}</div><small>${desc}</small></div>`; }
+function metric(label, value, desc, cls = '', attrs = '') { return `<div class="card${cls ? ' ' + cls : ''}"${attrs ? ` ${attrs} style="cursor:pointer"` : ''}><small>${label}</small><div class="metric">${value}</div><small>${desc}</small></div>`; }
 function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || GROUP_STATES[s] || s)}</span>`; }
 function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线' : '离线'}</span>`; }
 function warnNotice(title, body) { return `<div class="notice warn"><b>${title}</b><br>${body}</div>`; }
@@ -448,15 +448,15 @@ function overviewPage() {
   const online = S.nodes.filter(n => n.online).length;
   const nr = c.needs_review || 0;
   const offline = sortNodesStable(S.nodes.filter(n => !n.online));
-  const statChips = [''].concat(Object.keys(STATES)).map(s => s
-    ? `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}">${badge(s)} ${c[s] || 0}</button>`
-    : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('');
+  // 状态分布 chips = 下钻入口：点某个状态直达任务监管页对应筛选（总览无列表，就地筛选无意义）
+  const drillChips = Object.keys(STATES).map(s =>
+    `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link">${badge(s)} ${c[s] || 0} →</button>`).join('');
   return head('总览', `${online} / ${S.nodes.length} 台节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
     + `<div class="grid cols4">
-    ${metric('全网任务', S.tasks.length, '终态保留 24 小时')}
-    ${metric('正在执行', c.running || 0, '节点断线不会终止已开始的任务')}
-    ${metric('已完成', c.completed || 0, '含答复与产物')}
-    ${metric('等待核对', nr, nr ? '点击右侧待办处理' : '无需人工处理', nr ? 'review-card' : '')}
+    ${metric('全网任务', S.tasks.length, '查看全部 →', '', 'data-act="go" data-page="tasks"')}
+    ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
+    ${metric('已完成', c.completed || 0, c.completed ? '查看已完成 →' : '暂无完成任务', '', `data-act="go" data-page="tasks" data-status="completed"`)}
+    ${metric('等待核对', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'review-card' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
     </div>`
     + `<div class="grid cols2 spaced">
     <section class="card"><div class="row"><h2>中心端状态</h2><span class="badge online">在线</span></div>
@@ -473,9 +473,9 @@ function overviewPage() {
       ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务会暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看节点 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
     </div>`
-    + `<section class="card spaced"><div class="row"><h2>任务状态分布（七态）</h2>${button('查看全网任务 →', 'go', 'link', 'data-page="tasks"')}</div>
-    <div class="filters">${statChips}</div></section>`
-    + `<section class="card spaced"><div class="row"><h2>最近任务</h2>${button('查看全网任务 →', 'go', 'link', 'data-page="tasks"')}</div>
+    + `<section class="card spaced"><div class="row"><h2>任务状态分布</h2>${button('全部任务 →', 'go', 'link', 'data-page="tasks"')}</div>
+    <div class="filters">${drillChips}<small class="muted" style="align-self:center">点状态直达对应筛选的任务列表</small></div></section>`
+    + `<section class="card spaced"><div class="row"><h2>最近任务</h2>${button(`全部 ${S.tasks.length} 条任务 →`, 'go', 'link', 'data-page="tasks"')}</div>
     ${S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
 }
 
