@@ -98,7 +98,8 @@ func New(cfg Config) *Server {
 	return &Server{cfg: cfg, primeTok: cfg.PrimeToken}
 }
 
-// SetPrimeToken 总理凭证轮换后即时重载（旧凭证立即失效——下一请求按新凭证比对）。
+// SetPrimeToken 总理凭证外部重载（装配方/测试用）：更新须持 muPrime——轮换端点
+// （prime.go）在同一互斥段内完成生成、写盘与本字段更新，消除交错（返工 #4）。
 func (s *Server) SetPrimeToken(tok string) {
 	s.muPrime.Lock()
 	s.primeTok = tok

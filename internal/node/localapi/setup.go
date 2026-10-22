@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -59,9 +61,13 @@ func (s *Server) handleSetupParse(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_join_string", err.Error())
 		return
 	}
+	preview, err := renderSetupYaml(v, ops)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "渲染 node.yaml 预览失败: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"hub_url": v.HubURL, "node_id": v.NodeID,
-		"yaml_preview": renderSetupYaml(v, ops),
+		"hub_url": v.HubURL, "node_id": v.NodeID, "yaml_preview": preview,
 	})
 }
 
@@ -77,7 +83,12 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_join_string", err.Error())
 		return
 	}
-	if err := writeConfigFile(ops.ConfigPath, renderSetupYaml(v, ops)); err != nil {
+	content, err := renderSetupYaml(v, ops)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "渲染 node.yaml 失败（未改动原文件）: "+err.Error())
+		return
+	}
+	if err := writeConfigFile(ops.ConfigPath, content); err != nil {
 		writeErr(w, http.StatusInternalServerError, "write_failed", "node.yaml 写盘失败（未改动原文件则可重试）: "+err.Error())
 		return
 	}
@@ -114,7 +125,7 @@ func (s *Server) handleSetupDisconnect(w http.ResponseWriter, r *http.Request) {
 // setupPreflight 公共前置：装配存在性与请求体解析。
 func (s *Server) setupPreflight(w http.ResponseWriter, r *http.Request) (*SetupOps, setupRequest, bool) {
 	if s.cfg.SetupOps == nil {
-		writeErr(w, http.StatusServiceUnavailable, "setup_disabled", "setup 向导未装配（仅 node.yaml 不存在的首启模式提供）")
+		writeErr(w, http.StatusServiceUnavailable, "setup_disabled", "setup 向导未装配（装配方未接线 SetupOps）")
 		return nil, setupRequest{}, false
 	}
 	var req setupRequest
@@ -126,8 +137,13 @@ func (s *Server) setupPreflight(w http.ResponseWriter, r *http.Request) (*SetupO
 }
 
 // renderSetupYaml 渲染将写入的 node.yaml（agents 段留空——接入后在网页/手编添加；
-// data_dir 绝对路径化）。字段名与 cmd/node 的 nodeConfig 对齐。
-func renderSetupYaml(v protocol.JoinValues, ops *SetupOps) string {
+// data_dir 落盘前绝对路径化，防 cwd 漂移导致双 data_dir 双 token，方案 3.3）。
+// 字段名与 cmd/node 的 nodeConfig 对齐。
+//
+// 经 yaml.Node 编码器写出（返工 #10）：三元组值不再字符串拼接——含特殊字符时
+// 由编码器加引号转义，杜绝注入面；data_dir 绝对化失败作为错误向上传播（调用方
+// 返 500，不静默写相对路径）。
+func renderSetupYaml(v protocol.JoinValues, ops *SetupOps) (string, error) {
 	listen := ops.LocalListen
 	if listen == "" {
 		listen = "127.0.0.1:8445"
@@ -140,19 +156,36 @@ func renderSetupYaml(v protocol.JoinValues, ops *SetupOps) string {
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	if abs, err := filepath.Abs(dataDir); err == nil {
-		dataDir = abs // 防 cwd 漂移导致双 data_dir 双 token（方案 3.3）
+	abs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("data_dir 绝对路径化失败: %w", err)
 	}
-	return `# SwarmMind 节点配置（本机控制台接入向导写入；字段与 configs/node.example.yaml 对齐）
-node_id: ` + v.NodeID + `
-hub_url: ` + v.HubURL + `
-register_token: ` + v.Token + `
-hub_pubkey_fp: ""            # 留空 = 首次连接自动记录 hub 证书指纹（防中间人）
-local_listen: ` + listen + ` # 本机回环 API（node 只监听 127.0.0.1，不给公网）
-data_dir: ` + dataDir + `
-concurrency: ` + fmt.Sprint(conc) + `
-prime_agent: ""              # 钦定本机唯一总理（agent 名）；空 = 编排接口未激活（403）
+	root := &yaml.Node{Kind: yaml.MappingNode}
+	add := func(key, val, tag, comment string) {
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: val, LineComment: comment},
+		)
+	}
+	add("node_id", v.NodeID, "!!str", "")
+	add("hub_url", v.HubURL, "!!str", "")
+	add("register_token", v.Token, "!!str", "")
+	add("hub_pubkey_fp", "", "!!str", "留空 = 首次连接自动记录 hub 证书指纹（防中间人）")
+	add("local_listen", listen, "!!str", "本机回环 API（node 只监听 127.0.0.1，不给公网）")
+	add("data_dir", abs, "!!str", "")
+	add("concurrency", strconv.Itoa(conc), "!!int", "")
+	add("prime_agent", "", "!!str", "钦定本机唯一总理（agent 名）；空 = 编排接口未激活（403）")
+	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return "", fmt.Errorf("node.yaml 编码失败: %w", err)
+	}
+	return string(out) + agentsHintComment, nil
+}
 
+// agentsHintComment 落盘文件尾部的 agents 段示例（纯注释，yaml 语义无关；
+// 编码器不产出尾注，故拼接在编码结果之后）。
+const agentsHintComment = `
 # 能力（agents）段示例——这台机器有什么智能体就配什么，保存重启后自动注册到 hub：
 # agents:
 #   - name: my-agent
@@ -162,28 +195,61 @@ prime_agent: ""              # 钦定本机唯一总理（agent 名）；空 = �
 #     timeout_sec: 600
 #     description: 示例条目（照此格式增删；暂不配置也能上线，只是先不开放能力）
 `
+
+// writeConfigMu 配置写盘串行锁（返工 #5）：apply（向导落盘）与 disconnect（清
+// hub_url）的「读取-改写-提交」并发时串行化，杜绝两个提交交错。
+var writeConfigMu sync.Mutex
+
+// writeConfigFile 原子写配置文件（串行提交包装，见 writeConfigFileLocked）。
+func writeConfigFile(path, content string) error {
+	writeConfigMu.Lock()
+	defer writeConfigMu.Unlock()
+	return writeConfigFileLocked(path, content)
 }
 
-// writeConfigFile 原子写配置文件（临时文件 + rename + 0600：内嵌 register_token
-// 凭据，与 enroll 部署包同口径）。
-func writeConfigFile(path, content string) error {
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("创建配置目录失败: %w", err)
-		}
+// writeConfigFileLocked 原子写（调用方须持 writeConfigMu）：独占临时文件
+// （os.CreateTemp 同目录唯一名——固定 .tmp 名会在并发/残留场景被第二个写方
+// 复用，且已存在临时文件的权限不被 WriteFile 收紧，返工 #5）+ fsync + rename；
+// 权限显式 0600（内嵌 register_token 凭据，与 enroll 部署包同口径）。
+func writeConfigFileLocked(path, content string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // rename 成功后文件已不存在，Remove 报错无害
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("收紧临时文件权限失败: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
 		return fmt.Errorf("写临时文件失败: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("刷盘失败: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("关闭临时文件失败: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename 落盘失败: %w", err)
+	}
+	return nil
 }
 
 // clearHubURL yaml.Node 编辑既有配置：仅把顶层 hub_url 置空，注释与未知字段
 // 原样保留（node.yaml 是用户手编文件，不整文件重 marshal——3.5 round-trip 的
 // 最小子集）。文件不存在 / 顶层非映射 / hub_url 本就为空：分别返回明确错误或
-// 幂等成功。
+// 幂等成功。整段读改写持写盘锁（与 apply 串行，返工 #5）。
 func clearHubURL(path string) error {
+	writeConfigMu.Lock()
+	defer writeConfigMu.Unlock()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -211,7 +277,7 @@ func clearHubURL(path string) error {
 			if err != nil {
 				return fmt.Errorf("重编码配置失败: %w", err)
 			}
-			return writeConfigFile(path, string(out))
+			return writeConfigFileLocked(path, string(out))
 		}
 	}
 	return errors.New("配置中无 hub_url 字段（当前已是 standalone 形态）")

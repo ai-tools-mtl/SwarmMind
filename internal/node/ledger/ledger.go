@@ -57,6 +57,23 @@ var (
 	ErrWrongState = errors.New("ledger: 状态不允许该操作")
 	// ErrClosed 账本已关闭后再提交事务。
 	ErrClosed = errors.New("ledger: 已关闭")
+	// ErrIdemConflict 幂等键已被内容不同的任务占用（同键不同内容；
+	// AcceptOriginIdempotent 事务内查重的 conflict 三态）。
+	ErrIdemConflict = errors.New("ledger: 幂等键已被不同内容占用")
+)
+
+// IdemMatch 内容指纹比对结论（AcceptOriginIdempotent 的 match 回调返回值）。
+// 指纹口径由调用方定义（本地直执行镜像 hub ContentHash 四要素+群引用），账本
+// 只负责「事务内查重 + 入账」的原子性。
+type IdemMatch int
+
+const (
+	// IdemExact 同键同内容：幂等命中，dup 返回原条目。
+	IdemExact IdemMatch = iota
+	// IdemOtherGroup 仅群引用不同：换群重试，落为新任务（不 dup 不冲突）。
+	IdemOtherGroup
+	// IdemDifferent 同键不同内容：事务拒绝，返回 ErrIdemConflict。
+	IdemDifferent
 )
 
 // Origin 任务来源（方案 3.2 双路径模型，2026-10-22）：回传过滤的依据——
@@ -256,6 +273,46 @@ func (l *Ledger) AcceptOrigin(t protocol.Task, origin Origin) error {
 		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted, Origin: origin}
 		return nil
 	})
+}
+
+// AcceptOriginIdempotent 幂等入账（方案 3.2 本地直执行幂等，返工 #3）：同键查重
+// 与入账在同一 Update 事务内完成——查重三态在单写 goroutine 串行域内重检，消除
+// 「先扫快照再独立入账」两步之间的 TOCTOU 窗口（并发同键恰有一个新任务、其余
+// dup；并发同键异内容恰一成功一 conflict）。
+//   - idemKey 为空：无幂等语义，直接入账（等价 AcceptOrigin）；
+//   - 扫描作用域 = 同 origin 且 Task.IdemKey 相同的条目，逐条调 match 判定三态；
+//   - 返回 dup=true 时 dupTask 为命中的原任务（ID/TraceID 供 ack 回填），账本不变；
+//   - ErrIdemConflict：事务拒绝，账本不变。
+//
+// match 在写 goroutine 内调用：须为纯函数（无副作用、不阻塞、不得再触碰账本）。
+func (l *Ledger) AcceptOriginIdempotent(t protocol.Task, origin Origin, idemKey string,
+	match func(existing protocol.Task) IdemMatch) (dupTask protocol.Task, dup bool, err error) {
+	if idemKey == "" {
+		return protocol.Task{}, false, l.AcceptOrigin(t, origin)
+	}
+	err = l.Update(func(m map[string]Entry) error {
+		for _, e := range m {
+			if e.normalized().Origin != origin || e.Task.IdemKey != idemKey {
+				continue
+			}
+			switch match(e.Task) {
+			case IdemExact:
+				dupTask = e.Task.Clone()
+				dup = true
+				return nil
+			case IdemOtherGroup:
+				continue // 换群重试：不 dup 不冲突，继续看其余同键条目
+			default:
+				return ErrIdemConflict
+			}
+		}
+		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted, Origin: origin}
+		return nil
+	})
+	if err != nil {
+		return protocol.Task{}, false, err
+	}
+	return dupTask, dup, nil
 }
 
 // MarkStarted accepted→started（调用方须待成功后再发 task_started 并 spawn，SPEC 4.7）。
