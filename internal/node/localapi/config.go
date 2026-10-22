@@ -196,6 +196,12 @@ func classifyProfilesChange(cur, next []protocol.ExecProfile) []string {
 
 // handleGetConfig GET /api/v1/local/config：配置表 + 待应用状态（脱敏同目录规则：
 // 返回完整 ExecProfile——本机主人视角，与 GET /api/v1/local/agents 同口径）。
+//
+// 口径说明（功能性修复 4，2026-10-22）：本端点返回的 agents 恒为「运行时基线」
+//（Agents.Effective()——热重载成功后与盘上一致）。结构性变更「待应用」窗口期，
+// 盘上 node.yaml 已是新表，而运行时基线仍是旧表——本端点如实回旧基线，重启后
+// 收敛。前端约定：PUT 应答 pending_restart=true 时不得以本端点回包覆盖编辑副本
+//（编辑副本才是用户最新意图，见 web/app.js cfgSave）。
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	ops := s.cfg.ConfigOps
 	if ops == nil {

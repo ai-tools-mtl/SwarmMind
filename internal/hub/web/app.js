@@ -696,9 +696,19 @@ function enrollManualPane() {
   <h3 class="spaced">启动命令（<span id="enroll-start-os">${ENROLL_OS[os]}</span>）</h3>
   <pre id="enroll-start-pre">${esc(ENROLL_START[os])}</pre></details>`;
 }
+/* 接入串（功能性修复 6，2026-10-22：网页化接入路径，与部署包下载并列）——目标
+ * 机器已装 node 时，复制接入串到其本机控制台「接入中心端」粘贴即可完成接入，
+ * 免下载部署包。格式 swarmmind://join?hub=<wss>&node=<id>&token=<64hex>：hub/node
+ * 值 encodeURIComponent（node 侧 URLSearchParams 解码，protocol.ParseJoinString
+ * 同源校验）；token 64 位 hex 天然 URL 安全，无需编码。 */
+function enrollJoinString() {
+  return `swarmmind://join?hub=${encodeURIComponent(enrollHubUrl())}&node=${encodeURIComponent(ENROLL.id)}&token=${ENROLL.token}`;
+}
 function enrollStep3() {
   const pane = ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane();
-  return `${enrollModeCards()}${pane}
+  return `<div class="notice">目标机器已装 SwarmMind node？复制接入串，到它的本机控制台（<code>http://127.0.0.1:8445</code>）「接入中心端」粘贴、预览、保存即完成接入——无需下载部署包。</div>
+  <div class="row spaced">${button('复制接入串', 'enroll-copy-join', 'primary')}<small class="muted">网页化接入（推荐先试）；串内含这台机器的接入令牌，请勿外传。</small></div>
+  ${enrollModeCards()}${pane}
   <div class="actions spaced">${button('下一步', 'enroll-next3', 'primary')}</div>`;
 }
 /* ---- Step3 部署包下载：POST /api/v1/nodes/enroll-bundle → zip blob 落地 ---- */
@@ -1553,6 +1563,7 @@ const ACT = {
   'enroll-next3': () => { enrollGo(4); enrollStartWait(); },
   'enroll-copy-token': () => copyText(ENROLL?.token || '', '接入令牌'),
   'enroll-copy-hub': () => copyText(ENROLL ? `nodes:\n  ${ENROLL.id}: ${ENROLL.token}\n` : '', 'hub.yaml 片段'),
+  'enroll-copy-join': () => copyText(ENROLL ? enrollJoinString() : '', '接入串'),
   'enroll-copy-node': () => copyText(ENROLL ? enrollNodeYaml() : '', 'node.yaml'),
   'enroll-later': () => { closeLayer(); toast('已关闭 · 节点上线后可在节点列表查看'); },
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),

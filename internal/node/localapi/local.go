@@ -172,12 +172,35 @@ func (s *Server) ledgerCounts() map[string]int {
 }
 
 // handleLocalTasks GET /api/v1/local/tasks：本机提交任务留痕（新→旧）。任务
-// 当前状态由前端按 task_id 走 GET /api/v1/tasks/{id}（task_query 帧）补查——
-// hub 是任务状态真相源，日志不缓存状态，避免两处真相。
+// 当前状态由前端按 task_id 走 GET /api/v1/tasks/{id}（本地账本视图）补查；
+// 日志不缓存状态，避免两处真相。
+//
+// origin（功能性修复 7，2026-10-22）：逐条从本地账本补任务来源（local=本机派单、
+// hub=hub 下发）——控制台任务详情按双路径语义呈现（local 任务产物/核对全在本机，
+// 不指向 hub）。留痕仅由本机派单（handleSubmit）写入，账本条目已过期（终态保留
+// 24h）时按 local 呈现——历史留痕全部是本机派单，语义无例外。
 func (s *Server) handleLocalTasks(w http.ResponseWriter, r *http.Request) {
 	entries := []TaskLogEntry{}
 	if s.cfg.TaskLog != nil {
 		entries = s.cfg.TaskLog.List()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": entries})
+	views := make([]taskLogView, 0, len(entries))
+	for _, e := range entries {
+		v := taskLogView{TaskLogEntry: e, Origin: ledger.OriginLocal}
+		if s.cfg.Ledger != nil {
+			if o := s.cfg.Ledger.OriginOf(e.TaskID); o != "" {
+				v.Origin = o
+			}
+		}
+		views = append(views, v)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": views})
+}
+
+// taskLogView 留痕条目 + 任务来源（功能性修复 7）：origin 供前端区分双路径
+//（local=产物/核对在本机；hub=经 hub 链路）。
+type taskLogView struct {
+	TaskLogEntry
+	// Origin 任务来源（local|hub；ledger.Origin）。
+	Origin ledger.Origin `json:"origin"`
 }

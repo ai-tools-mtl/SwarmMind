@@ -7,6 +7,12 @@
 //      绝对路径化，防 cwd 漂移双 data_dir 双 token）→ HTTP 应答先返回 → 装配方
 //      延时优雅退出，launchd/systemd KeepAlive 拉起进入组网模式。
 //
+// apply 落盘分两路（功能性修复 1，2026-10-22）：盘上无文件（setup 新装）生成
+// 完整模板 renderSetupYaml；已有文件（standalone/组网重接入、换 hub）走
+// yaml.Node round-trip 合并 mergeJoinYAML——仅更新 hub_url/node_id/register_token
+// 三键 + local_listen/data_dir 规范化，agents/prime_agent/自定义 local_token/
+// base_env/注释全保留（接入不得覆盖用户手编配置）。
+//
 // disconnect（矩阵 #9「断开组网」的服务端）：组网控制台的断开入口——yaml.Node
 // 编辑仅清 hub_url（注释与未知字段保留），应答后延时重启回 standalone。
 //
@@ -15,9 +21,11 @@
 package localapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,7 +58,8 @@ type setupRequest struct {
 }
 
 // handleSetupParse POST /api/v1/local/setup/parse：解析接入串 → 三元组 + 预览
-// yaml（无副作用，可反复试）。非法输入 → 400 人话原因（矩阵 #11）。
+// yaml（无副作用，可反复试）。预览与 apply 同源 renderOrMergeSetupYaml——已有
+// 配置时预览即合并结果（所见即所存）。非法输入 → 400 人话原因（矩阵 #11）。
 func (s *Server) handleSetupParse(w http.ResponseWriter, r *http.Request) {
 	ops, req, ok := s.setupPreflight(w, r)
 	if !ok {
@@ -61,18 +70,24 @@ func (s *Server) handleSetupParse(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_join_string", err.Error())
 		return
 	}
-	preview, err := renderSetupYaml(v, ops)
+	writeConfigMu.Lock()
+	preview, err := renderOrMergeSetupYaml(v, ops) // 锁内读盘：预览 coherent 快照
+	writeConfigMu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "渲染 node.yaml 预览失败: "+err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hub_url": v.HubURL, "node_id": v.NodeID, "yaml_preview": preview,
+		"merged": fileExists(ops.ConfigPath),
 	})
 }
 
 // handleSetupApply POST /api/v1/local/setup/apply：校验 → 写盘（原路径 + 原子
 // 替换 + 0600）→ 回调装配方（延时优雅退出）→ 应答。写盘失败不退出、返回 500。
+// 已有配置走合并（功能性修复 1）：读-合并-写全程持 writeConfigMu（与 declare/
+// PUT config/disconnect 的读改写事务互斥——merge 引入读文件步骤后不再是无状态
+// 渲染，防并发事务各自读旧文件互相覆盖）。
 func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 	ops, req, ok := s.setupPreflight(w, r)
 	if !ok {
@@ -83,12 +98,13 @@ func (s *Server) handleSetupApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_join_string", err.Error())
 		return
 	}
-	content, err := renderSetupYaml(v, ops)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "渲染 node.yaml 失败（未改动原文件）: "+err.Error())
-		return
+	writeConfigMu.Lock()
+	content, err := renderOrMergeSetupYaml(v, ops)
+	if err == nil {
+		err = writeConfigFileLocked(ops.ConfigPath, content)
 	}
-	if err := writeConfigFile(ops.ConfigPath, content); err != nil {
+	writeConfigMu.Unlock()
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "write_failed", "node.yaml 写盘失败（未改动原文件则可重试）: "+err.Error())
 		return
 	}
@@ -122,18 +138,141 @@ func (s *Server) handleSetupDisconnect(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// setupPreflight 公共前置：装配存在性与请求体解析。
+// setupPreflight 公共前置：装配存在性与请求体解析。请求体容忍空 body 与 {}
+//（功能性修复 5：断开组网前端/脚本可发空体；parse/apply 的 join_string 缺失
+// 由 ParseJoinString 给出针对性 400），非空则必须是合法 JSON。
 func (s *Server) setupPreflight(w http.ResponseWriter, r *http.Request) (*SetupOps, setupRequest, bool) {
 	if s.cfg.SetupOps == nil {
 		writeErr(w, http.StatusServiceUnavailable, "setup_disabled", "setup 向导未装配（装配方未接线 SetupOps）")
 		return nil, setupRequest{}, false
 	}
 	var req setupRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", `请求体须为 JSON {"join_string":"swarmmind://join?…"}`)
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体读取失败（上限 64KiB）: "+err.Error())
 		return nil, setupRequest{}, false
 	}
+	if len(bytes.TrimSpace(b)) > 0 {
+		if err := json.Unmarshal(b, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid_request", `请求体须为 JSON {"join_string":"swarmmind://join?…"}`)
+			return nil, setupRequest{}, false
+		}
+	}
 	return s.cfg.SetupOps, req, true
+}
+
+// fileExists 路径存在性（parse 应答 merged 标记用；读错误按不存在呈现——预览
+// 场景不因权限问题误报「将合并」）。
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// renderOrMergeSetupYaml parse 预览与 apply 落盘共用的内容产出（功能性修复 1）：
+// 盘上无文件（setup 新装）→ 完整模板 renderSetupYaml；已有文件 → round-trip
+// 合并 mergeJoinYAML（仅三键 + 两键规范化，其余全保留）。读失败（权限等）作为
+// 错误上抛——绝不覆盖读不到的文件。须持 writeConfigMu 调用（apply 路径锁内
+// 读-合-写；parse 路径锁内取 coherent 快照）。
+func renderOrMergeSetupYaml(v protocol.JoinValues, ops *SetupOps) (string, error) {
+	raw, err := os.ReadFile(ops.ConfigPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return renderSetupYaml(v, ops)
+	}
+	if err != nil {
+		return "", fmt.Errorf("读取既有 node.yaml 失败（未改动原文件）: %w", err)
+	}
+	content, err := mergeJoinYAML(raw, v, ops)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+// mergeJoinYAML 既有配置的接入合并（功能性修复 1，2026-10-22）：node.yaml 是
+// 用户手编文件，重接入/换 hub 不再整文件重生成——yaml.Node round-trip 仅更新
+// hub_url/node_id/register_token 三键（已有键原位换值、键与值的注释保留、缺失
+// 则追加）+ local_listen/data_dir 规范化（缺失或空写默认；data_dir 相对路径
+// 落盘前绝对路径化，方案 3.3），agents/prime_agent/自定义 local_token/base_env/
+// 注释/未知字段全保留。解析失败/顶层非映射返回错误（调用方拒写，原文件不动）。
+func mergeJoinYAML(raw []byte, v protocol.JoinValues, ops *SetupOps) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("解析 node.yaml 失败（不动原文件，防覆盖手编配置）: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("node.yaml 顶层不是键值映射，无法安全编辑")
+	}
+	root := doc.Content[0]
+	setupSetKey(root, "node_id", v.NodeID, "!!str")
+	setupSetKey(root, "hub_url", v.HubURL, "!!str")
+	setupSetKey(root, "register_token", v.Token, "!!str")
+	// 规范化两键：local_listen 缺失/空 → 默认回环；data_dir 缺失/空 → 默认并
+	// 绝对路径化；已有非空 data_dir 仅在相对路径时绝对化（已有绝对路径不动）。
+	if setupKeyString(root, "local_listen") == "" {
+		listen := ops.LocalListen
+		if listen == "" {
+			listen = "127.0.0.1:8445"
+		}
+		setupSetKey(root, "local_listen", listen, "!!str")
+	}
+	dataDir := setupKeyString(root, "data_dir")
+	if dataDir == "" {
+		dataDir = ops.DataDir
+		if dataDir == "" {
+			dataDir = "data"
+		}
+	}
+	abs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("data_dir 绝对路径化失败: %w", err)
+	}
+	setupSetKey(root, "data_dir", abs, "!!str")
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return nil, fmt.Errorf("重编码 node.yaml 失败: %w", err)
+	}
+	return out, nil
+}
+
+// setupSetKey 顶层键更新/追加（mergeJoinYAML 专用）：已有键原位换值（键节点与
+// 注释保留；既有值为别名等非纯量节点时整体替换，防悬空别名引用——setPrimeAgentYAML
+// 修复 4 同型）；键不存在追加到映射尾部。
+func setupSetKey(root *yaml.Node, key, val, tag string) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			old := root.Content[i+1]
+			nv := &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: val}
+			nv.HeadComment = old.HeadComment
+			nv.LineComment = old.LineComment
+			nv.FootComment = old.FootComment
+			root.Content[i+1] = nv
+			return
+		}
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: val})
+}
+
+// setupKeyString 读顶层标量键文本（缺失/非纯量/引号空串 → ""；引号风格值按
+// 字面返回——mergeJoinYAML 仅用于 local_listen/data_dir 的「是否需要规范化」
+// 判定，风格前缀不影响空判定与 IsAbs 判定的正确性）。
+func setupKeyString(root *yaml.Node, key string) string {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			continue
+		}
+		n := root.Content[i+1]
+		if n.Kind != yaml.ScalarNode {
+			return ""
+		}
+		switch n.Value {
+		case "", "''", `""`:
+			return ""
+		}
+		return n.Value
+	}
+	return ""
 }
 
 // renderSetupYaml 渲染将写入的 node.yaml（agents 段留空——接入后在网页/手编添加；

@@ -96,15 +96,15 @@ func TestLocalAuthGate(t *testing.T) {
 		t.Fatalf("无令牌 PATCH exposed 应 401, got %d: %s", code, out)
 	}
 
-	// 编排分级（矩阵 #14）：local_token 调派单 → 403 prime_required（双路径下
-	// 本地直执行不依赖 hub，原 hub_unreachable 503 场景已随旧链路删除）
+	// 编排双凭证（2026-10-22 鉴权模型裁决）：local_token 调派单 → 过编排门到达
+	// 业务校验（fixture 无 runner → 404 agent_not_found，与 prime 同——本机主人
+	// 派单天然合法，原 prime 分级 403 断言已随裁决反转）
 	code, out := do("tok-local", http.MethodPost, "/api/v1/tasks",
 		`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
-	if code != http.StatusForbidden || !strings.Contains(out, "prime_required") {
-		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", code, out)
+	if code != http.StatusNotFound || !strings.Contains(out, protocol.CodeAgentNotFound) {
+		t.Fatalf("local_token 派单应过编排门到达业务校验（404 agent_not_found）, got %d: %s", code, out)
 	}
-	// 总理凭证过编排门：target 本机合法，但 fixture 无 runner → 404 agent_not_found
-	//（说明 prime 门与 D8 均已通过，到达业务校验层）
+	// 总理凭证同门：target 本机合法，404 agent_not_found（prime 门与 D8 均通过）
 	code, out = do("tok-prime", http.MethodPost, "/api/v1/tasks",
 		`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	if code != http.StatusNotFound || !strings.Contains(out, protocol.CodeAgentNotFound) {
@@ -177,8 +177,10 @@ func TestSubmitCrossNodeRejected(t *testing.T) {
 	}).Handler())
 	t.Cleanup(srv.Close)
 
-	// 分级先于校验：local_token 调编排 → 403 prime_required（矩阵 #14），
-	// 此时连 D8 都未执行——鉴权与业务校验的顺序由本断言钉死。
+	// 编排双凭证后 D8 先于业务校验（2026-10-22 裁决反转原「分级先于校验」断言）：
+	// local_token 派单跨节点目标 → 过编排门（本机主人放行）→ D8 边界锁 400。
+	// 鉴权与边界校验的顺序由本断言钉死：403 分级已不存在，400 说明认证+编排门+
+	// D8 全部按序生效。
 	reqL, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
 		strings.NewReader(`{"target_node":"nodeB","target_agent":"echo","submitted_by":"p"}`))
 	reqL.Header.Set("Authorization", "Bearer tok-local")
@@ -188,8 +190,8 @@ func TestSubmitCrossNodeRejected(t *testing.T) {
 	}
 	defer respL.Body.Close()
 	bL, _ := io.ReadAll(respL.Body)
-	if respL.StatusCode != http.StatusForbidden || !strings.Contains(string(bL), "prime_required") {
-		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", respL.StatusCode, bL)
+	if respL.StatusCode != http.StatusBadRequest {
+		t.Fatalf("local_token 跨节点派单应过编排门被 D8 拒 400, got %d: %s", respL.StatusCode, bL)
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",

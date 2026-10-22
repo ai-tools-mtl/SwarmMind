@@ -288,6 +288,46 @@ func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
 	}
 }
 
+// TestNodeBackendHTTPErrorIsError 功能性修复 8（2026-10-22）：node 后端对 HTTP
+// 4xx/5xx（含 404）一律 isError=true、message 透传服务端原话；swarmmind_wait 遇
+// HTTP 错误（非任务终态）立即返回，不当终态结束条件、不空转轮询到超时。
+func TestNodeBackendHTTPErrorIsError(t *testing.T) {
+	srv, _, _ := newLocalNode(t, "echo")
+	bd := newNodeBackendFor(srv.URL)
+	ghost := "t-" + strings.Repeat("0", 32)
+
+	// status 查不存在任务：localapi 404 task_not_found → isError + 服务端原话
+	text, isErr := callText(t, bd, "swarmmind_status", map[string]any{"task_id": ghost})
+	if !isErr {
+		t.Fatalf("404 应 isError=true: %s", text)
+	}
+	if !strings.Contains(text, "404") || !strings.Contains(text, "任务不存在") {
+		t.Fatalf("404 服务端原话透传缺关键词: %s", text)
+	}
+
+	// wait 遇 404：立即返回（<2s，timeout 给 30s 若误当非终态会空转到超时）
+	start := time.Now()
+	text, isErr = callText(t, bd, "swarmmind_wait", map[string]any{
+		"task_id": ghost, "timeout_sec": 30, "interval_sec": 1,
+	})
+	if !isErr {
+		t.Fatalf("wait 遇 404 应 isError=true: %s", text)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("wait 遇 HTTP 错误应立即返回, 耗时 %v: %s", el, text)
+	}
+	if !strings.Contains(text, "404") {
+		t.Fatalf("wait 错误应透传 404 原话: %s", text)
+	}
+
+	// node 不可达（网络层）：同样 isError=true 立即返回
+	srv.Close()
+	text, isErr = callText(t, bd, "swarmmind_status", map[string]any{"task_id": ghost})
+	if !isErr || !strings.Contains(text, "本机 node 不可达") {
+		t.Fatalf("不可达应 isError=true 且注明不可达（isErr=%v）: %s", isErr, text)
+	}
+}
+
 // TestNodeBackendReadOnlyPrimeToken 只读工具单凭证（安全审查修复 1 口径）：
 // 仅配 SWARM_NODE_PRIME_TOKEN 时只读工具（nodes/agents/status/wait/artifact）
 // 照常可用——localapi authRead 双收 prime_token，prime 认证级 ⊇ 只读。

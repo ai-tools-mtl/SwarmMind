@@ -11,9 +11,12 @@
 //     仅 setup 模式装配）+ 能力配置编辑与热重载（config.go，方案 3.5）；
 //   - GET / 挂本地控制台前端（internal/node/web，embed）。
 //
-// 鉴权分级（方案 3.2.1 唯一总理）：local_token 只读（agents/status/tasks 类）；
-// 编排操作（submit，后续 review/cancel）必须 prime_token——local_token 调编排
-// → 403 可测（环防护）。监听地址强制回环（代码校验，非文档约束）。
+// 鉴权分级（方案 3.2.1 v2 修订，2026-10-22 鉴权模型裁决）：local_token 只读 +
+// 本机主人管理面；编排端点（POST /api/v1/tasks，后续 review/cancel）双凭证皆可
+//（authOrchestrate：认证后 level ∈ {local, prime} 即放行）——网页是主人的操作
+// 界面，主人派单天然合法。环防护不受影响：declare/rotate/restart/PUT config/
+// reload/disconnect 仍仅 local_token（总理无主人的钥匙，不能自钦定/换人）；
+// 未持任何本机凭证的工人不能派单（401）。监听地址强制回环（代码校验，非文档约束）。
 package localapi
 
 import (
@@ -175,7 +178,8 @@ func ValidateListen(listenAddr string) error {
 }
 
 // 鉴权级别：levelNone 未认证；levelRead 只读（local_token 或 prime_token）；
-// levelPrime 编排（仅 prime_token）。
+// levelPrime 总理凭证。编排门（authOrchestrate）认级别集合 {levelRead,
+// levelPrime}——local_token 与 prime_token 皆可派单（2026-10-22 裁决）。
 type tokenLevel int
 
 const (
@@ -209,7 +213,7 @@ func bearer(r *http.Request) (string, bool) {
 // （令牌输入页必须可达，由前端持令牌调 /api/v1/*）；与 hub 控制台同约定。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/tasks", s.authPrime(s.handleSubmit))
+	mux.HandleFunc("POST /api/v1/tasks", s.authOrchestrate(s.handleSubmit))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.authRead(s.handleQuery))
 	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.authRead(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.authRead(s.handleAgents))
@@ -258,9 +262,11 @@ func (s *Server) authLocal(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// authPrime 编排门（方案 3.2.1 唯一总理）：先认证（401）后鉴权（403），拒绝
-// 理由按优先级人话给出——setup 模式未接入 > 未钦定总理 > 凭证级别不足。
-func (s *Server) authPrime(next http.HandlerFunc) http.HandlerFunc {
+// authOrchestrate 编排门（方案 3.2.1 v2，2026-10-22 鉴权模型裁决）：local_token
+// 与 prime_token 双凭证皆可（网页是主人的操作界面，主人派单天然合法；总理经
+// MCP 用 prime_token）。先认证（401）后鉴权（403），拒绝理由按优先级人话给出
+// ——setup 模式未接入 > 未钦定总理 > 总理凭证未配置。凭证级别不再是拒绝理由。
+func (s *Server) authOrchestrate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearer(r)
 		level := levelNone
@@ -281,11 +287,6 @@ func (s *Server) authPrime(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if s.primeToken() == "" {
 			writeErr(w, http.StatusForbidden, "prime_required", "总理凭证未配置（data_dir/prime_token 缺失且生成失败），编排接口未激活")
-			return
-		}
-		if level != levelPrime {
-			writeErr(w, http.StatusForbidden, "prime_required",
-				fmt.Sprintf("编排操作需总理凭证 prime_token（本机总理：%s；local_token 仅只读，用 local_token 调编排接口 → 403）", s.primeAgent()))
 			return
 		}
 		next(w, r)
