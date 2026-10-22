@@ -225,8 +225,8 @@ func TestA2AMessageSend(t *testing.T) {
 }
 
 // TestA2ATasksGet tasks/get 与状态映射表：submitted→submitted、running→working、
-// completed→completed、needs_review→input-required（原始状态保留）；未知任务
-// -32001；缺 id -32602。
+// completed→completed、failed→failed、cancelled→canceled（A2A 官方单 L 拼法，
+// 原始状态保留）、needs_review→input-required；未知任务 -32001；缺 id -32602。
 func TestA2ATasksGet(t *testing.T) {
 	f := newFixture(t)
 	f.core.RegisterNode("nodeB", []protocol.AgentCard{echoCard(true)})
@@ -257,6 +257,13 @@ func TestA2ATasksGet(t *testing.T) {
 	f.setTaskStatus(taskID, protocol.StatusFailed)
 	if task = get(taskID); task.Status.State != "failed" {
 		t.Fatalf("failed 应原样映射: %+v", task.Status)
+	}
+	// cancelled → canceled（回归：此前漏映射落 unknown，外部 A2A 客户端把已取消
+	// 终态当未知态挂起无法收尾）
+	f.setTaskStatus(taskID, protocol.StatusCancelled)
+	if task = get(taskID); task.Status.State != "canceled" ||
+		task.Metadata["swarmmind_status"] != "cancelled" {
+		t.Fatalf("cancelled 应映射 canceled 且保留原值: %+v", task)
 	}
 	f.makeNeedsReview(taskID)
 	if task = get(taskID); task.Status.State != "input-required" ||

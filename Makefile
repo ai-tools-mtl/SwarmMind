@@ -31,16 +31,19 @@ fmt:
 	gofmt -l -w .
 
 ## embed-nodes: 五平台 node 预编译产物 gzip 到 embedded/（供 hub 打包秒出，无需现场编译）
+## 任一平台构建/gzip 失败立即整体失败（set -e），产物非空校验（[ -s ]）——
+## 禁止「半数失败仍算成功」的静默残缺 embed（双审 2026-10-22）。
 EMBED_DIR := internal/hub/api/embedded
 NODE_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
 
 embed-nodes:
-	@mkdir -p $(EMBED_DIR)
-	@for t in $(NODE_TARGETS); do \
+	@set -e; mkdir -p $(EMBED_DIR); \
+	for t in $(NODE_TARGETS); do \
 	  os=$${t%%-*}; arch=$${t##*-}; ext=""; \
-	  [ "$$os" = "windows" ] && ext=".exe"; \
-	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /tmp/swarmmind-node-embed$$ext ./cmd/node; \
-	  gzip -9 -c /tmp/swarmmind-node-embed$$ext > $(EMBED_DIR)/node-$$t.gz; \
+	  if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /tmp/swarmmind-node-embed$$ext ./cmd/node || exit 1; \
+	  gzip -9 -c /tmp/swarmmind-node-embed$$ext > $(EMBED_DIR)/node-$$t.gz || exit 1; \
+	  [ -s $(EMBED_DIR)/node-$$t.gz ] || { echo "embed 失败：node-$$t.gz 为空" >&2; exit 1; }; \
 	  rm -f /tmp/swarmmind-node-embed$$ext; \
 	  echo "embedded node-$$t.gz $$(du -h $(EMBED_DIR)/node-$$t.gz | cut -f1)"; \
 	done

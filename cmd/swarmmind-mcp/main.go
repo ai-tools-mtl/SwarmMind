@@ -171,7 +171,7 @@ func tools() []toolDef {
 			"group_id": s("群 ID（swarmmind_group_list 可查）"),
 			"from":     s("发言者标识（谁在说话，如 coder / admin）"),
 			"body":     s("消息正文（8KiB 上限）"),
-			"kind":     s("消息类别（可选：user|agent|system，默认 user）"),
+			"kind":     s("消息类别（可选：user|agent，默认 user；system 为 hub 回流保留字，传入将被 400 拒绝）"),
 		}, "group_id", "from", "body")},
 		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐", InputSchema: obj(map[string]any{
 			"group_id": s("群 ID"),
