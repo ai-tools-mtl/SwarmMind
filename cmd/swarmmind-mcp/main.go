@@ -66,8 +66,11 @@ var (
 	startluxClient  *http.Client
 )
 
-func envDefault(key, def string) string {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+func envDefault(key, def string) string { return envGet(os.Getenv, key, def) }
+
+// envGet getenv 参数化的环境变量读取（trim 后取缺省；getenv 注入便于测试装配）。
+func envGet(getenv func(string) string, key, def string) string {
+	if v := strings.TrimSpace(getenv(key)); v != "" {
 		return v
 	}
 	return def
@@ -160,6 +163,64 @@ func (hubBackend) initResult() map[string]any {
 	}
 }
 
+// nodeBackend node 模式（standalone 单机编排入口，方案 3.4）：全部工具直连本机
+// 回环 localapi（端点契约见 internal/node/localapi），不经 hub。接入即总理——
+// 本机编排（submit）持 SWARM_NODE_PRIME_TOKEN，只读工具持 SWARM_NODE_TOKEN。
+type nodeBackend struct {
+	baseURL    string // 本机 node 地址（SWARM_NODE_URL，默认 http://127.0.0.1:8445）
+	token      string // local_token（只读工具；localapi authRead 同收 prime_token）
+	primeToken string // prime_token（编排工具 submit 专属；403 prime_required 原话透传）
+	client     *http.Client
+}
+
+// newNodeBackend 从环境变量装配 node 后端（getenv 注入便于测试）。
+func newNodeBackend(getenv func(string) string) nodeBackend {
+	return nodeBackend{
+		baseURL:    strings.TrimRight(envGet(getenv, "SWARM_NODE_URL", "http://127.0.0.1:8445"), "/"),
+		token:      strings.TrimSpace(getenv("SWARM_NODE_TOKEN")),
+		primeToken: strings.TrimSpace(getenv("SWARM_NODE_PRIME_TOKEN")),
+		client:     &http.Client{Timeout: client.Timeout},
+	}
+}
+
+func (nodeBackend) initResult() map[string]any {
+	return map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": "0.1.1"},
+		"instructions": "SwarmMind 本机编排入口（接入即总理：本机编排）。工具只作用于本机节点：" +
+			"swarmmind_submit 需总理凭证 SWARM_NODE_PRIME_TOKEN（node.yaml 声明 prime_agent 后编排接口才激活）；" +
+			"只读工具（nodes/agents/status/wait/artifact）用 SWARM_NODE_TOKEN。" +
+			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。",
+	}
+}
+
+// nodeTools node 模式工具清单：本机六件套（全网目录/群聊/decide 为 hub 专属）。
+func (nodeBackend) tools() []toolDef {
+	return []toolDef{
+		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机总理、hub 连接与执行账本三态计数", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_agents", Description: "查看本机可用能力（agent 目录）：本机提供哪些可调用的 agent、各自描述与今日执行次数", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（接入即总理：本机编排，需 SWARM_NODE_PRIME_TOKEN；返回 403 prime_required 即总理未钦定或凭证不符）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
+			"agent":    toolStr("目标 agent 名（swarmmind_agents 可查；只能是本机 agent）"),
+			"args":     toolArr("命令行参数（可选；agent 须 allow_args）"),
+			"stdin":    toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
+			"idem_key": toolStr("幂等键（可选；同键同内容重试不会重复执行）"),
+		}, "agent")},
+		{Name: "swarmmind_status", Description: "查询本机任务当前状态与结果（不等待）", InputSchema: toolObj(map[string]any{
+			"task_id": toolStr("任务 ID"),
+		}, "task_id")},
+		{Name: "swarmmind_wait", Description: "等待本机任务完成并返回最终结果（轮询至终态：completed/failed/needs_review/cancelled）", InputSchema: toolObj(map[string]any{
+			"task_id":      toolStr("任务 ID"),
+			"timeout_sec":  toolNum("最长等待秒数（默认 300，上限 1800）"),
+			"interval_sec": toolNum("轮询间隔秒数（默认 3）"),
+		}, "task_id")},
+		{Name: "swarmmind_artifact", Description: "取回本机任务产物文件内容（本机直取不经 hub 中继；文本类产物直接返回，任务需已完成且有产物登记）", InputSchema: toolObj(map[string]any{
+			"task_id": toolStr("任务 ID"),
+			"index":   toolNum("产物序号（从 0 开始，默认 0）"),
+		}, "task_id")},
+	}
+}
+
 /* ---------- 工具定义 ---------- */
 
 type toolDef struct {
@@ -168,65 +229,70 @@ type toolDef struct {
 	InputSchema map[string]any `json:"inputSchema"`
 }
 
+// 工具 schema 助手（hub/node 两清单共用）。
+func toolObj(props map[string]any, required ...string) map[string]any {
+	m := map[string]any{"type": "object", "properties": props}
+	if len(required) > 0 {
+		m["required"] = required
+	}
+	return m
+}
+
+func toolStr(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+
+func toolNum(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
+
+func toolArr(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
+}
+
 func tools() []toolDef {
-	obj := func(props map[string]any, required ...string) map[string]any {
-		m := map[string]any{"type": "object", "properties": props}
-		if len(required) > 0 {
-			m["required"] = required
-		}
-		return m
-	}
-	s := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
-	n := func(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
-	a := func(desc string) map[string]any {
-		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
-	}
 	return []toolDef{
-		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: obj(map[string]any{})},
-		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: obj(map[string]any{})},
-		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群", InputSchema: obj(map[string]any{
-			"node_id":   s("目标节点 ID（swarmmind_nodes 可查）"),
-			"agent":     s("目标 agent 名（swarmmind_agents 可查）"),
-			"args":      a("命令行参数（可选）"),
-			"stdin":     s("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id":  s("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
-			"idem_key":  s("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
-			"group_ref": s("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
+		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群", InputSchema: toolObj(map[string]any{
+			"node_id":   toolStr("目标节点 ID（swarmmind_nodes 可查）"),
+			"agent":     toolStr("目标 agent 名（swarmmind_agents 可查）"),
+			"args":      toolArr("命令行参数（可选）"),
+			"stdin":     toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
+			"trace_id":  toolStr("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
+			"idem_key":  toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
+			"group_ref": toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
 		}, "node_id", "agent")},
-		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: obj(map[string]any{
-			"task_id": s("任务 ID"),
+		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: toolObj(map[string]any{
+			"task_id": toolStr("任务 ID"),
 		}, "task_id")},
-		{Name: "swarmmind_wait", Description: "等待任务完成并返回最终结果（轮询至终态：completed/failed/needs_review/cancelled）", InputSchema: obj(map[string]any{
-			"task_id":      s("任务 ID"),
-			"timeout_sec":  n("最长等待秒数（默认 300，上限 1800）"),
-			"interval_sec": n("轮询间隔秒数（默认 3）"),
+		{Name: "swarmmind_wait", Description: "等待任务完成并返回最终结果（轮询至终态：completed/failed/needs_review/cancelled）", InputSchema: toolObj(map[string]any{
+			"task_id":      toolStr("任务 ID"),
+			"timeout_sec":  toolNum("最长等待秒数（默认 300，上限 1800）"),
+			"interval_sec": toolNum("轮询间隔秒数（默认 3）"),
 		}, "task_id")},
-		{Name: "swarmmind_artifact", Description: "取回任务产物文件内容（文本类产物；任务需已完成且有产物登记）", InputSchema: obj(map[string]any{
-			"task_id": s("任务 ID"),
-			"index":   n("产物序号（从 0 开始，默认 0）"),
+		{Name: "swarmmind_artifact", Description: "取回任务产物文件内容（文本类产物；任务需已完成且有产物登记）", InputSchema: toolObj(map[string]any{
+			"task_id": toolStr("任务 ID"),
+			"index":   toolNum("产物序号（从 0 开始，默认 0）"),
 		}, "task_id")},
-		{Name: "swarmmind_decide", Description: "分配决策查询：给定子任务描述与候选执行者列表，返回推荐执行者与置信度；云端决策模型（StartLux）不可用时自动降级本地规则，响应含 used_level 与 degraded 标记", InputSchema: obj(map[string]any{
-			"subtask_description": s("子任务描述（做什么，越具体越准）"),
-			"capability_options":  a("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
+		{Name: "swarmmind_decide", Description: "分配决策查询：给定子任务描述与候选执行者列表，返回推荐执行者与置信度；云端决策模型（StartLux）不可用时自动降级本地规则，响应含 used_level 与 degraded 标记", InputSchema: toolObj(map[string]any{
+			"subtask_description": toolStr("子任务描述（做什么，越具体越准）"),
+			"capability_options":  toolArr("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
 		}, "subtask_description", "capability_options")},
-		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。返回群 ID", InputSchema: obj(map[string]any{
-			"goal":    s("群目标（一句话说清要讨论出什么）"),
-			"members": a("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
+		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。返回群 ID", InputSchema: toolObj(map[string]any{
+			"goal":    toolStr("群目标（一句话说清要讨论出什么）"),
+			"members": toolArr("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
 		}, "goal")},
-		{Name: "swarmmind_group_list", Description: "查看全部协作群：群 ID、目标、状态（discussing 进行中 / concluded 已结束）、成员与发言预算", InputSchema: obj(map[string]any{})},
-		{Name: "swarmmind_group_say", Description: "在协作群里发一条消息。默认按 user（人转述）发言；agent 参与讨论请传 kind=agent（计入发言预算，默认 20 轮，用尽返回 budget_exhausted）", InputSchema: obj(map[string]any{
-			"group_id": s("群 ID（swarmmind_group_list 可查）"),
-			"from":     s("发言者标识（谁在说话，如 coder / admin）"),
-			"body":     s("消息正文（8KiB 上限）"),
-			"kind":     s("消息类别（可选：user|agent，默认 user；system 为 hub 回流保留字，传入将被 400 拒绝）"),
+		{Name: "swarmmind_group_list", Description: "查看全部协作群：群 ID、目标、状态（discussing 进行中 / concluded 已结束）、成员与发言预算", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_group_say", Description: "在协作群里发一条消息。默认按 user（人转述）发言；agent 参与讨论请传 kind=agent（计入发言预算，默认 20 轮，用尽返回 budget_exhausted）", InputSchema: toolObj(map[string]any{
+			"group_id": toolStr("群 ID（swarmmind_group_list 可查）"),
+			"from":     toolStr("发言者标识（谁在说话，如 coder / admin）"),
+			"body":     toolStr("消息正文（8KiB 上限）"),
+			"kind":     toolStr("消息类别（可选：user|agent，默认 user；system 为 hub 回流保留字，传入将被 400 拒绝）"),
 		}, "group_id", "from", "body")},
-		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐。群消息滚动只保留最新 200 条（GROUP-RFC 独立信箱约定），更早消息不可再拉，响应会标注裁剪位置 pruned_before_seq", InputSchema: obj(map[string]any{
-			"group_id": s("群 ID"),
-			"since":    n("已见最大 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
+		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐。群消息滚动只保留最新 200 条（GROUP-RFC 独立信箱约定），更早消息不可再拉，响应会标注裁剪位置 pruned_before_seq", InputSchema: toolObj(map[string]any{
+			"group_id": toolStr("群 ID"),
+			"since":    toolNum("已见最大 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
 		}, "group_id")},
-		{Name: "swarmmind_group_close", Description: "结束协作群：置 concluded 终态（不可回退、不再收消息）；重复关闭幂等。关闭者默认记为 mcp，可传 by 自定义审计署名", InputSchema: obj(map[string]any{
-			"group_id": s("群 ID"),
-			"by":       s("关闭者标识（可选，默认 mcp；记入群审计 closed_by，重复关闭不改写首次记录）"),
+		{Name: "swarmmind_group_close", Description: "结束协作群：置 concluded 终态（不可回退、不再收消息）；重复关闭幂等。关闭者默认记为 mcp，可传 by 自定义审计署名", InputSchema: toolObj(map[string]any{
+			"group_id": toolStr("群 ID"),
+			"by":       toolStr("关闭者标识（可选，默认 mcp；记入群审计 closed_by，重复关闭不改写首次记录）"),
 		}, "group_id")},
 	}
 }
@@ -366,15 +432,16 @@ func toolSubmit(args map[string]any) (string, error) {
 
 // taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。
 func taskStatus(taskID string) (string, bool) {
-	return renderTaskStatus(taskID, func(id string) (int, []byte, error) {
+	return renderTaskStatus(taskID, "hub", func(id string) (int, []byte, error) {
 		return hubAPI("GET", "/api/v1/tasks/"+id, nil)
 	})
 }
 
 // renderTaskStatus 通用任务状态渲染（hub/node 双后端共用；应答同为协议层 Task
-// 视图——hub 管理面与 node 本地账本 TaskView 字段一致）。done=true 表示已到
-// 终态（completed/failed/needs_review/cancelled）。
-func renderTaskStatus(taskID string, fetch func(string) (int, []byte, error)) (string, bool) {
+// 视图——hub 管理面与 node 本地账本 TaskView 字段一致）。src 为来源标签（错误
+// 文案用），hub 模式传 "hub" 保持原样。done=true 表示已到终态
+//（completed/failed/needs_review/cancelled）。
+func renderTaskStatus(taskID, src string, fetch func(string) (int, []byte, error)) (string, bool) {
 	code, data, err := fetch(taskID)
 	if err != nil {
 		return "查询失败：" + err.Error(), false
@@ -383,7 +450,7 @@ func renderTaskStatus(taskID string, fetch func(string) (int, []byte, error)) (s
 		return "任务不存在或已归档（终态保留 24 小时）。", true
 	}
 	if code != 200 {
-		return fmt.Sprintf("hub 返回 %d: %s", code, truncate(data)), true
+		return fmt.Sprintf("%s 返回 %d: %s", src, code, truncate(data)), true
 	}
 	var t struct {
 		Status      string `json:"status"`
@@ -435,6 +502,11 @@ func renderTaskStatus(taskID string, fetch func(string) (int, []byte, error)) (s
 }
 
 func toolWait(args map[string]any) (string, error) {
+	return waitLoop(args, taskStatus)
+}
+
+// waitLoop 轮询等待至终态（hub/node 双后端共用；status 各自后端注入）。
+func waitLoop(args map[string]any, status func(string) (string, bool)) (string, error) {
 	taskID, _ := args["task_id"].(string)
 	if taskID == "" {
 		return "", fmt.Errorf("task_id 必填")
@@ -452,7 +524,7 @@ func toolWait(args map[string]any) (string, error) {
 	}
 	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
 	for {
-		text, done := taskStatus(taskID)
+		text, done := status(taskID)
 		if done {
 			return text, nil
 		}
@@ -488,11 +560,15 @@ func toolArtifact(args map[string]any) (string, error) {
 		}
 		return "", fmt.Errorf("取回失败（hub %d）：%s", code, reason)
 	}
-	// 文本类直接返回；二进制给提示
+	return renderArtifact(data), nil
+}
+
+// renderArtifact 产物内容渲染（hub/node 双后端共用）：文本类直接返回；二进制给提示。
+func renderArtifact(data []byte) string {
 	if isText(data) {
-		return fmt.Sprintf("产物内容（%d 字节）：\n%s", len(data), truncateBytes(data, 8000)), nil
+		return fmt.Sprintf("产物内容（%d 字节）：\n%s", len(data), truncateBytes(data, 8000))
 	}
-	return fmt.Sprintf("产物为二进制（%d 字节），MCP 文本通道不展示；请经控制台取回。", len(data)), nil
+	return fmt.Sprintf("产物为二进制（%d 字节），MCP 文本通道不展示；请经控制台取回。", len(data))
 }
 
 func isText(b []byte) bool {
@@ -506,6 +582,262 @@ func isText(b []byte) bool {
 		}
 	}
 	return true
+}
+
+/* ---------- node 模式工具实现（本机回环 localapi 直连，方案 3.4） ---------- */
+
+// nodeAPI 本机 node API 调用：tok 由工具定级（只读=local_token 缺省回退
+// prime_token——localapi authRead 两者皆收；编排=prime_token）。
+func (b nodeBackend) nodeAPI(method, path string, body any, tok string) (int, []byte, error) {
+	return httpCall(b.baseURL, tok, b.client, method, path, body)
+}
+
+// readToken 只读工具凭证：local_token 优先，未配置回退 prime_token（authRead 同收）。
+func (b nodeBackend) readToken() string {
+	if b.token != "" {
+		return b.token
+	}
+	return b.primeToken
+}
+
+// nodeAPIErr node 端非 2xx → error：服务端 JSON 错误体 {error,message} 的原话
+// 透传；403 prime_required 特判附「检查总理配置」提示（接入即总理的故障入口）。
+func nodeAPIErr(code int, data []byte) error {
+	var e struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(data, &e)
+	if e.Error == "prime_required" {
+		msg := e.Message
+		if msg == "" {
+			msg = truncate(data)
+		}
+		return fmt.Errorf("本机 node 403 prime_required：%s\n请检查总理配置：node.yaml 已声明 prime_agent，且 SWARM_NODE_PRIME_TOKEN 与本机 data_dir/prime_token 一致（轮换后须同步新凭证）。", msg)
+	}
+	if e.Message != "" {
+		return fmt.Errorf("本机 node 返回 %d（%s）：%s", code, e.Error, e.Message)
+	}
+	return fmt.Errorf("本机 node 返回 %d: %s", code, truncate(data))
+}
+
+// toolNodeNodes 本机节点信息（GET /api/v1/local/status，单条）。
+func (b nodeBackend) toolNodes() (string, error) {
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.readToken())
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var st struct {
+		NodeID     string         `json:"node_id"`
+		Mode       string         `json:"mode"`
+		PrimeAgent string         `json:"prime_agent"`
+		Online     bool           `json:"online"`
+		Epoch      int64          `json:"epoch"`
+		Ledger     map[string]int `json:"ledger"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	mode := map[string]string{
+		"setup":      "setup（未接入，仅向导）",
+		"standalone": "standalone（本机自治，不连 hub）",
+		"networked":  "组网（外连 hub）",
+	}[st.Mode]
+	if mode == "" {
+		mode = st.Mode
+	}
+	var bld strings.Builder
+	fmt.Fprintf(&bld, "本机节点 %s\n形态：%s\nhub 连接：%s（epoch %d）\n", st.NodeID, mode, map[bool]string{true: "在线", false: "离线"}[st.Online], st.Epoch)
+	if st.PrimeAgent != "" {
+		fmt.Fprintf(&bld, "本机总理：%s（编排接口已激活，接入即总理）\n", st.PrimeAgent)
+	} else {
+		bld.WriteString("本机总理：未钦定（编排接口未激活，submit 将 403 prime_required）\n")
+	}
+	fmt.Fprintf(&bld, "执行账本三态：accepted %d / started %d / finished %d",
+		st.Ledger["accepted"], st.Ledger["started"], st.Ledger["finished"])
+	return bld.String(), nil
+}
+
+// toolNodeAgents 本机能力目录（GET /api/v1/local/agents：完整 ExecProfile 视图 +
+// 今日执行数；node 无全网视图）。
+func (b nodeBackend) toolAgents() (string, error) {
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/agents", nil, b.readToken())
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var out struct {
+		NodeID string `json:"node_id"`
+		Agents []struct {
+			Name       string `json:"name"`
+			Kind       string `json:"kind"`
+			Command    string `json:"command"`
+			TimeoutSec int    `json:"timeout_sec"`
+			AllowArgs  bool   `json:"allow_args"`
+			AllowEnv   []string `json:"allow_env"`
+			Desc       string `json:"description"`
+			Exposed    bool   `json:"exposed"`
+			TodayTasks int    `json:"today_tasks"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	if len(out.Agents) == 0 {
+		return fmt.Sprintf("本机 %s 还没有配置任何 agent（node.yaml agents 段为空）。", out.NodeID), nil
+	}
+	var bld strings.Builder
+	fmt.Fprintf(&bld, "本机 %s 共 %d 个 agent：\n", out.NodeID, len(out.Agents))
+	for _, a := range out.Agents {
+		desc := a.Desc
+		if desc == "" {
+			desc = "（无描述）"
+		}
+		vis := "仅本机"
+		if a.Exposed {
+			vis = "网内可调用"
+		}
+		fmt.Fprintf(&bld, "%s（%s，%s）：%.120s\n  command %s · 超时 %ds · 今日已执行 %d 次\n",
+			a.Name, a.Kind, vis, desc, a.Command, a.TimeoutSec, a.TodayTasks)
+	}
+	return bld.String(), nil
+}
+
+// toolNodeSubmit 本机派单（POST /api/v1/tasks，prime_token 编排门）：target_node
+// 自动补齐本机 node_id（node 本地 API 边界锁只收本机目标，调用方无需知道节点名）。
+func (b nodeBackend) toolSubmit(args map[string]any) (string, error) {
+	agent, _ := args["agent"].(string)
+	if strings.TrimSpace(agent) == "" {
+		return "", fmt.Errorf("agent 必填（目标只能是本机 agent）")
+	}
+	if b.primeToken == "" {
+		return "", fmt.Errorf("未配置 SWARM_NODE_PRIME_TOKEN：本机编排需总理凭证（接入即总理：本机编排）")
+	}
+	nodeID, err := b.localNodeID()
+	if err != nil {
+		return "", err
+	}
+	input := map[string]any{}
+	if raw, ok := args["args"].([]any); ok {
+		ss := make([]string, 0, len(raw))
+		for _, v := range raw {
+			ss = append(ss, fmt.Sprint(v))
+		}
+		input["args"] = ss
+	}
+	if stdin, ok := args["stdin"].(string); ok && stdin != "" {
+		input["stdin"] = stdin
+	}
+	body := map[string]any{
+		"target_node":  nodeID,
+		"target_agent": agent,
+		"input":        input,
+		"submitted_by": "mcp",
+	}
+	if idem, ok := args["idem_key"].(string); ok && idem != "" {
+		body["idem_key"] = idem
+	}
+	code, data, err := b.nodeAPI("POST", "/api/v1/tasks", body, b.primeToken)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 && code != 202 {
+		return "", nodeAPIErr(code, data)
+	}
+	var out struct {
+		TaskID string `json:"task_id"`
+		Dup    bool   `json:"dup"`
+	}
+	_ = json.Unmarshal(data, &out)
+	note := ""
+	if out.Dup {
+		note = "（幂等命中原任务，未重复执行）"
+	}
+	return fmt.Sprintf("任务已提交：%s%s（目标 %s @ 本机 %s）\n用 swarmmind_status 或 swarmmind_wait 查询结果。", out.TaskID, note, agent, nodeID), nil
+}
+
+// localNodeID 本机身份（GET /api/v1/local/status 的 node_id；submit 边界锁补齐用）。
+func (b nodeBackend) localNodeID() (string, error) {
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.readToken())
+	if err != nil {
+		return "", fmt.Errorf("本机 node 不可达（%v）", err)
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var st struct {
+		NodeID string `json:"node_id"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil || st.NodeID == "" {
+		return "", fmt.Errorf("本机 node 应答缺 node_id")
+	}
+	return st.NodeID, nil
+}
+
+// taskStatus 本机任务视图（GET /api/v1/tasks/{id}，账本直出；与 hub 管理面同
+// 协议层 Task 形态，渲染共用 renderTaskStatus）。
+func (b nodeBackend) taskStatus(taskID string) (string, bool) {
+	return renderTaskStatus(taskID, "本机 node", func(id string) (int, []byte, error) {
+		return b.nodeAPI("GET", "/api/v1/tasks/"+id, nil, b.readToken())
+	})
+}
+
+// toolNodeArtifact 本机直取产物（GET /api/v1/tasks/{id}/artifacts/{index}，
+// application/octet-stream；错误为 JSON 体，原话透传）。
+func (b nodeBackend) toolArtifact(args map[string]any) (string, error) {
+	taskID, _ := args["task_id"].(string)
+	if taskID == "" {
+		return "", fmt.Errorf("task_id 必填")
+	}
+	idx := 0
+	if v, ok := args["index"].(float64); ok {
+		idx = int(v)
+	}
+	code, data, err := b.nodeAPI("GET", fmt.Sprintf("/api/v1/tasks/%s/artifacts/%d", taskID, idx), nil, b.readToken())
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	return renderArtifact(data), nil
+}
+
+// call 本机六工具分发（未知工具回协议错误 -32602，与 hub 同型）。
+func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rpcError) {
+	var (
+		text string
+		err  error
+	)
+	switch name {
+	case "swarmmind_nodes":
+		text, err = b.toolNodes()
+	case "swarmmind_agents":
+		text, err = b.toolAgents()
+	case "swarmmind_submit":
+		text, err = b.toolSubmit(args)
+	case "swarmmind_status":
+		if id, _ := args["task_id"].(string); id == "" {
+			return errResult("task_id 必填"), nil
+		} else {
+			text, _ = b.taskStatus(id)
+		}
+	case "swarmmind_wait":
+		text, err = waitLoop(args, b.taskStatus)
+	case "swarmmind_artifact":
+		text, err = b.toolArtifact(args)
+	default:
+		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
+	}
+	if err != nil {
+		return errResult("操作失败：" + err.Error()), nil
+	}
+	return callResult(text), nil
 }
 
 /* ---------- swarmmind_decide：总理分配决策（L0 云端 → L2 规则兜底） ---------- */
@@ -1185,8 +1517,21 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 /* ---------- stdio 主循环 ---------- */
 
 func main() {
-	hubURL = strings.TrimSpace(os.Getenv("SWARM_HUB_URL"))
-	hubToken = strings.TrimSpace(os.Getenv("SWARM_HUB_TOKEN"))
+	// 装配分发（方案 3.4）：SWARM_TARGET 选 backend——hub（默认，完全向后兼容）
+	// 或 node（本机编排入口）；非法值启动即报错退出并列出合法值，绝不静默回退 hub。
+	var bd backend
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("SWARM_TARGET"))) {
+	case "", "hub":
+		hubURL = strings.TrimSpace(os.Getenv("SWARM_HUB_URL"))
+		hubToken = strings.TrimSpace(os.Getenv("SWARM_HUB_TOKEN"))
+		bd = hubBackend{}
+	case "node":
+		bd = newNodeBackend(os.Getenv)
+	default:
+		fmt.Fprintf(os.Stderr, "[swarmmind-mcp] SWARM_TARGET=%q 非法：合法值为 hub | node（不设默认 hub）\n",
+			os.Getenv("SWARM_TARGET"))
+		os.Exit(2)
+	}
 
 	startluxURL = envDefault("SWARM_STARTLUX_URL", "https://api.bamboonode.dev")
 	startluxKey = strings.TrimSpace(os.Getenv("SWARM_STARTLUX_KEY"))
@@ -1196,20 +1541,29 @@ func main() {
 	}
 	startluxClient = &http.Client{Timeout: startluxTimeout}
 
-	in := bufio.NewScanner(os.Stdin)
-	in.Buffer(make([]byte, 0, 1<<20), 16<<20)
-	out := bufio.NewWriter(os.Stdout)
-	defer out.Flush()
+	if err := runStdio(os.Stdin, os.Stdout, bd); err != nil {
+		fmt.Fprintf(os.Stderr, "[swarmmind-mcp] %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runStdio MCP stdio 主循环（newline-delimited JSON-RPC 2.0）：initialize /
+// tools/list / tools/call 全走 backend 分发（工具清单与调用语义按模式装配）。
+func runStdio(in io.Reader, out io.Writer, bd backend) error {
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
+	w := bufio.NewWriter(out)
+	defer w.Flush()
 
 	write := func(v any) {
 		b, _ := json.Marshal(v)
-		out.Write(b)
-		out.WriteByte('\n')
-		out.Flush()
+		w.Write(b)
+		w.WriteByte('\n')
+		w.Flush()
 	}
 
-	for in.Scan() {
-		line := bytes.TrimSpace(in.Bytes())
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
 			continue
 		}
@@ -1219,17 +1573,13 @@ func main() {
 		}
 		switch req.Method {
 		case "initialize":
-			write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
-				"protocolVersion": "2024-11-05",
-				"capabilities":    map[string]any{"tools": map[string]any{}},
-				"serverInfo":      map[string]any{"name": "swarmmind", "version": "0.1.1"},
-			}})
+			write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: bd.initResult()})
 		case "notifications/initialized", "notifications/cancelled":
 			// 通知，无需应答
 		case "ping":
 			write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}})
 		case "tools/list":
-			write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": tools()}})
+			write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": bd.tools()}})
 		case "tools/call":
 			var p struct {
 				Name      string         `json:"name"`
@@ -1239,7 +1589,7 @@ func main() {
 			if p.Arguments == nil {
 				p.Arguments = map[string]any{}
 			}
-			result, rpcErr := callTool(p.Name, p.Arguments)
+			result, rpcErr := bd.call(p.Name, p.Arguments)
 			if rpcErr != nil {
 				write(rpcResponse{JSONRPC: "2.0", ID: req.ID, Error: rpcErr})
 				continue
@@ -1251,4 +1601,5 @@ func main() {
 			}
 		}
 	}
+	return sc.Err()
 }
