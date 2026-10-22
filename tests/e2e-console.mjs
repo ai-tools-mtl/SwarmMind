@@ -56,9 +56,9 @@ async function main() {
   const focusOk = await page.locator('text=需要你关注').count() >= 1;
   record('E03', '总览：统计卡与「需要你关注」卡渲染', metricsOk && focusOk);
 
-  // TC-E04 状态分布芯片
-  const chips = await page.locator('[data-act="fchip"]').count();
-  record('E04', '总览：任务状态分布芯片（8 枚：全部+七态）', chips >= 8, `实际 ${chips}`);
+  // TC-E04 状态分布下钻 chips（2026-10-22 总览下钻重构：七态 chip 直达任务页对应筛选，无「全部」chip）
+  const chips = await page.locator('[data-act="go"][data-page="tasks"][data-status]').count();
+  record('E04', '总览：状态分布下钻 chips（7 枚七态直达）', chips === 7, `实际 ${chips}`);
 
   // ---------- 节点接入页 ----------
   await page.click('button:has-text("节点接入")');
