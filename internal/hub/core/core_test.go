@@ -105,6 +105,16 @@ func (f *hubFixture) registerOffline(name string, agents []protocol.AgentCard) {
 	f.core.SetOnline(name, false)
 }
 
+// newOfflineNode 注册并保持离线的受控 node：端点可收帧（观察 submit_ack/err
+// 回执），任务投递滞留信箱。
+func (f *hubFixture) newOfflineNode(name string, agents []protocol.AgentCard) *testNode {
+	f.t.Helper()
+	f.registerOffline(name, agents)
+	n := &testNode{t: f.t, ep: f.bus.Endpoint(name)}
+	n.ep.Subscribe(n.handle)
+	return n
+}
+
 func (n *testNode) handle(env *protocol.Envelope) {
 	switch env.Type {
 	case protocol.MsgTaskOffer:

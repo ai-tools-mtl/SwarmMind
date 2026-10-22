@@ -1,8 +1,8 @@
 // Package localapi 实现 node 本地回环 API（SPEC 六：默认 127.0.0.1:8445，仅本机
 // 进程可用）：POST /api/v1/tasks 与 GET /api/v1/tasks/{id} 经 WSS 会话转发为
-// task_submit/task_query 帧（语义与 hub 管理面一致，跨机互派闭环：本机进程 →
-// 本机 node → hub → 目标 node）；GET /api/v1/agents 返回本机能力目录并尽力代理
-// hub 全网目录；/api/v1/local/* 为本地控制台管理面（Loop 7，见 local.go）；
+// task_submit/task_query 帧（目标收敛为本机：提交仅限本机 agent、查询仅限本机
+// 任务，跨机协作经 hub 发起）；GET /api/v1/agents 只返回本机能力目录（node 无
+// 全网视图）；/api/v1/local/* 为本地控制台管理面（Loop 7，见 local.go）；
 // GET / 挂本地控制台前端（internal/node/web，embed）。
 //
 // 鉴权：本机管理令牌（node 配置 local_token，Authorization: Bearer）；监听地址
@@ -14,12 +14,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"strings"
-	"sync"
 	"time"
 
 	nodeweb "github.com/mtl802/swarmmind/internal/node/web"
@@ -31,9 +28,6 @@ import (
 
 // maxBodyBytes 请求体上限（与 hub 管理面同口径；提交体另有完整信封实测校验）。
 const maxBodyBytes = 4 << 20
-
-// hubProxyTimeout 全网目录代理的登录/取回时限（调度节拍，非协议常量）。
-const hubProxyTimeout = 10 * time.Second
 
 // Config Server 构造参数。
 type Config struct {
@@ -51,13 +45,6 @@ type Config struct {
 	// LocalToken 本机管理令牌（Authorization: Bearer；空 = 拒绝一切请求，装配方
 	// 在为空时生成并回填，见 cmd/node）。
 	LocalToken string
-	// HubAPIURL hub 管理面地址（如 http://127.0.0.1:8444）：GET /api/v1/agents 的
-	// 全网目录代理与 GET /api/v1/local/status 的信箱余量代理源；空 = 不代理。
-	// 已知限制（V0）：hub 管理面绑其主机回环，双机部署下需经公网反代可达
-	//（SPEC 六.五：node 配置指向带鉴权的反代地址）。
-	HubAPIURL string
-	// HubAPIToken hub 管理令牌（代理登录用；随 HubAPIURL 一起配置）。
-	HubAPIToken string
 	// CardsReporter 能力表上报钩子（Loop 7：开关变更即 card_update 上报 hub；
 	// 装配方接 service.SendCardUpdate）。nil = 开关仅本机生效。
 	CardsReporter func(cards []protocol.AgentCard) error
@@ -72,9 +59,6 @@ type Config struct {
 // Server node 本地 API。
 type Server struct {
 	cfg Config
-
-	hubMu     sync.Mutex
-	hubClient *http.Client // 携会话 cookie；登录失败/过期时重建
 }
 
 // New 构造本地 API 服务。
@@ -135,10 +119,17 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 
 // handleSubmit POST /api/v1/tasks：转 task_submit 帧 → submit_ack/err 帧。
 // 应答码与 hub 管理面对齐（202/200 dup/409/404/400/503）；hub 不可达 503。
+// 边界锁（方案 v2 D8）：node 本地 API 只能派给本机——target_node 非本机
+// node_id 直接 400 拒绝，不发帧、不留提交日志、不静默改写目标。
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	var req protocol.TaskSubmitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 TaskSubmitRequest JSON: "+err.Error())
+		return
+	}
+	if req.TargetNode != s.cfg.NodeID {
+		writeErr(w, http.StatusBadRequest, "invalid_request",
+			fmt.Sprintf("本机 API 仅可派单给本机 node %s（收到 target_node=%q；跨机派单经 hub 发起）", s.cfg.NodeID, req.TargetNode))
 		return
 	}
 	ctx := r.Context()
@@ -184,116 +175,18 @@ type localAgentEntry struct {
 }
 
 // handleAgents GET /api/v1/agents：本机能力目录（本机意愿，含未暴露；由
-// AgentState effective 视图生成，与注册/开关同源）+ hub 全网目录代理（best
-// effort；不可达时以 error 字段如实呈现，不影响本机目录）。
+// AgentState effective 视图生成，与注册/开关同源）。node 无全网视图——不代理
+// hub 目录（方案 v2：封侧门，全网目录唯一出口在 hub 侧）。
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	online := s.online()
 	local := make([]localAgentEntry, 0)
 	for _, card := range service.CardsFromProfiles(s.effectiveProfiles()) {
 		local = append(local, localAgentEntry{Card: card, NodeID: s.cfg.NodeID, Online: online})
 	}
-	body := map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id": s.cfg.NodeID,
 		"local":   local,
-	}
-	if s.cfg.HubAPIURL != "" {
-		network, err := s.fetchHubAgents()
-		if err != nil {
-			body["network"] = map[string]any{"error": err.Error()}
-		} else {
-			body["network"] = network
-		}
-	} else {
-		body["network"] = map[string]any{"error": "未配置 hub_api_url，全网目录代理不可用"}
-	}
-	writeJSON(w, http.StatusOK, body)
-}
-
-// fetchHubAgents 代理 hub 全网目录：惰性登录（会话 cookie 复用），401 时重登一次。
-func (s *Server) fetchHubAgents() (any, error) {
-	client, err := s.hubSession()
-	if err != nil {
-		return nil, err
-	}
-	body, status, err := s.hubGetPath(client, "/api/v1/agents")
-	if err != nil {
-		return nil, err
-	}
-	if status == http.StatusUnauthorized { // 会话过期：重登一次
-		if client, err = s.hubLogin(true); err != nil {
-			return nil, err
-		}
-		if body, status, err = s.hubGetPath(client, "/api/v1/agents"); err != nil {
-			return nil, err
-		}
-	}
-	if status != http.StatusOK {
-		return nil, fmt.Errorf("hub 目录查询失败（HTTP %d）", status)
-	}
-	var out any
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("hub 目录解析失败: %w", err)
-	}
-	return out, nil
-}
-
-// hubGetPath GET hub 管理面指定路径（目录代理与信箱余量代理共用）。
-func (s *Server) hubGetPath(client *http.Client, path string) ([]byte, int, error) {
-	resp, err := client.Get(strings.TrimSuffix(s.cfg.HubAPIURL, "/") + path)
-	if err != nil {
-		return nil, 0, fmt.Errorf("hub 目录不可达: %w", err)
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("hub 目录读取失败: %w", err)
-	}
-	return b, resp.StatusCode, nil
-}
-
-// hubSession 取（或建）带会话的 hub 客户端；未登录先登录。
-func (s *Server) hubSession() (*http.Client, error) {
-	s.hubMu.Lock()
-	defer s.hubMu.Unlock()
-	if s.hubClient != nil {
-		return s.hubClient, nil
-	}
-	return s.hubLoginLocked()
-}
-
-// hubLogin 重建会话（force=true 时丢弃旧会话）。
-func (s *Server) hubLogin(force bool) (*http.Client, error) {
-	s.hubMu.Lock()
-	defer s.hubMu.Unlock()
-	if force {
-		s.hubClient = nil
-	}
-	if s.hubClient != nil {
-		return s.hubClient, nil
-	}
-	return s.hubLoginLocked()
-}
-
-// hubLoginLocked 登录并缓存客户端（调用方持 hubMu）。
-func (s *Server) hubLoginLocked() (*http.Client, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: hubProxyTimeout, Jar: jar}
-	loginURL := strings.TrimSuffix(s.cfg.HubAPIURL, "/") + "/api/v1/login"
-	body := map[string]string{"token": s.cfg.HubAPIToken}
-	b, _ := json.Marshal(body)
-	resp, err := client.Post(loginURL, "application/json", strings.NewReader(string(b)))
-	if err != nil {
-		return nil, fmt.Errorf("hub 登录不可达: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub 登录失败（HTTP %d）：核对 hub_api_token", resp.StatusCode)
-	}
-	s.hubClient = client
-	return client, nil
+	})
 }
 
 // writeRemoteErr 数据面错误 → HTTP 状态（与 hub 管理面错误码对齐）。

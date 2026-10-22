@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -201,7 +202,6 @@ func TestLocalAgentsAndStatus(t *testing.T) {
 		Epoch      int64          `json:"epoch"`
 		LastSyncAt *time.Time     `json:"last_sync_at"`
 		Ledger     map[string]int `json:"ledger"`
-		Mailbox    map[string]any `json:"mailbox"`
 	}
 	if err := json.Unmarshal([]byte(out), &ls); err != nil {
 		t.Fatal(err)
@@ -212,8 +212,11 @@ func TestLocalAgentsAndStatus(t *testing.T) {
 	if ls.Ledger["accepted"] != 3 || ls.Ledger["started"] != 0 || ls.Ledger["finished"] != 0 {
 		t.Fatalf("账本三态计数不符: %+v", ls.Ledger)
 	}
-	if ls.Mailbox["error"] == "" {
-		t.Fatalf("未配代理时信箱应如实呈现 error: %s", out)
+	// 边界方案 v2（D6）：信箱余量/投递窗口是 hub 侧事实，响应不得再含这些键
+	for _, gone := range []string{`"mailbox"`, `"inflight"`} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("local/status 不得含 %s 键: %s", gone, out)
+		}
 	}
 
 	// 状态文件路径约定：AgentState 指向 dataDir（agents-state.json 由此派生）
