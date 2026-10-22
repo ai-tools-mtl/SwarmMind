@@ -104,6 +104,7 @@ type Ledger struct {
 	ch         chan *txnReq
 	cur        atomic.Pointer[map[string]Entry]
 	writerDone chan struct{}
+	cancels    *cancelTombstones // 取消墓碑 sidecar（cancels.go；与账本同 data_dir/flock）
 
 	mu       sync.Mutex
 	closed   bool
@@ -143,6 +144,12 @@ func open(dataDir string, inject func(string) error) (*Ledger, *Recovery, error)
 		_ = lock.Release()
 		return nil, nil, err
 	}
+	cancels, err := openCancelTombstones(dataDir)
+	if err != nil {
+		_ = lock.Release()
+		return nil, nil, err
+	}
+	l.cancels = cancels
 	l.cur.Store(&entries)
 	go l.writeLoop()
 	rec, err := l.recover(protocol.NowUTC())
@@ -315,6 +322,28 @@ func (l *Ledger) CleanupAcked(now time.Time) (int, error) {
 		return 0, err
 	}
 	return removed, nil
+}
+
+// ---------- 取消墓碑（cancels.go；task_cancel 先于 task_offer 的执行窗口封堵） ----------
+
+// AddCancelTombstone 登记取消墓碑并持久化（幂等）：task_cancel 命中「不在账本」
+// 的任务时由 service.handleTaskCancel 调用——随后同 task_id 的 task_offer 到达即
+// 拒绝执行（handleOffer 查 HasCancelTombstone）。
+func (l *Ledger) AddCancelTombstone(taskID string) error {
+	return l.cancels.add(taskID, protocol.NowUTC())
+}
+
+// HasCancelTombstone 报告任务是否带未消费的取消墓碑。
+func (l *Ledger) HasCancelTombstone(taskID string) bool { return l.cancels.has(taskID) }
+
+// ClearCancelTombstone 消费墓碑（幂等）：cancelled 终态落盘成功后清除——账本
+// 条目此后由 ErrDuplicate 挡住重复执行，墓碑使命完成。
+func (l *Ledger) ClearCancelTombstone(taskID string) error { return l.cancels.clear(taskID) }
+
+// CleanupCancelTombstones 清理超保留期的墓碑（TTL 兜底；加载与新增时已顺带清理，
+// 此方法供调用方周期触发的显式入口）。
+func (l *Ledger) CleanupCancelTombstones(now time.Time) error {
+	return l.cancels.cleanup(now, protocol.TerminalRetention)
 }
 
 // Update 提交一个先写后见事务（模式同 hub store，SPEC 4.7）。mutate 在新副本上执行。

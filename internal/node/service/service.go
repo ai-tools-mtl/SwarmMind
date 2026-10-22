@@ -175,10 +175,16 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 
 // handleOffer 任务投递入口（SPEC 4.3/4.7）：重复 offer 幂等；未知 agent 直达
 // failed 终态（不进重推循环）；正常路径 accepted 落盘 → ack → 异步执行。
+// 取消墓碑命中（task_cancel 先于本 offer 到达，cancel.go）→ 拒绝执行，直接以
+// cancelled/user_cancelled 落终态回传（2026-10-22 修复轮2）。
 func (s *Service) handleOffer(env *protocol.Envelope) {
 	var task protocol.Task
 	if err := json.Unmarshal(env.Payload, &task); err != nil || task.ID == "" {
 		log.Printf("[node] task_offer 载荷解析失败: %v", err)
+		return
+	}
+	if s.cfg.Ledger.HasCancelTombstone(task.ID) {
+		s.finishCancelledOffer(task)
 		return
 	}
 	err := s.cfg.Ledger.Accept(task)

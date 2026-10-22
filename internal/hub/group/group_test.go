@@ -173,7 +173,7 @@ func TestCloseGroupTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复关闭应幂等成功, got %v", err)
 	}
-	if again.ClosedBy != "admin" || again.ClosedAt != closed.ClosedAt {
+	if again.ClosedBy != "admin" || again.ClosedAt == nil || closed.ClosedAt == nil || !again.ClosedAt.Equal(*closed.ClosedAt) {
 		t.Fatalf("重复关闭不得改写首次审计: %+v vs %+v", again, closed)
 	}
 	// 未知群 / 空 by

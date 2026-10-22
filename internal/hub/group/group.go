@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +43,10 @@ const (
 	// MaxGroupMessages 群消息滚动窗口：组内只保留最新 200 条（GROUP-RFC 三
 	// 独立信箱约定），超出从最小 seq 起丢弃最旧，防 groups.json 无限膨胀。
 	MaxGroupMessages = 200
+	// MaxMessageAge 群消息过期时长：24h（GROUP-RFC 三 独立轻量信箱约定）。
+	// PostMessage 与 Sweep 双路清理，与 200 条滚动裁剪并存；seq 从 1 连续分配、
+	// created_at 随 seq 单调，超龄消息恒为前缀，裁剪语义与滚动窗口一致。
+	MaxMessageAge = 24 * time.Hour
 	// DefaultMaxRounds 默认发言预算：agent 消息最多 20 条（MVP 简化护栏，
 	// GROUP-RFC 四.3 预算代码强制的最小集）。
 	DefaultMaxRounds = 20
@@ -113,8 +118,9 @@ type GroupMessage struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// state 快照根结构。Messages 按 seq 升序追加，超 MaxGroupMessages 滚动裁剪
-// （seq 单调账本 Seqs 不回退，窗口只在头部留缺口）。
+// state 快照根结构。Messages 按 seq 升序追加，超 MaxGroupMessages 滚动裁剪、
+// 超 MaxMessageAge（24h）过期清理，二者并存且均为前缀丢弃（seq 单调账本 Seqs
+// 不回退，窗口只在头部留缺口）。
 type state struct {
 	Groups   map[string]Group          `json:"groups"`
 	Messages map[string][]GroupMessage `json:"messages"`
@@ -127,15 +133,26 @@ type state struct {
 	// Refluxed 已回流任务集合：task_id → true（终态回流幂等锚，随快照持久化，
 	// 重复终态事件/重启重放都只回流一次）。
 	Refluxed map[string]bool `json:"refluxed,omitempty"`
+	// RefluxPending 回流失败待补偿队列（2026-10-22 修复轮2）：task_id → 待重试
+	// 条目（持久化，随快照落盘）。RefluxTaskResult 失败（存储错误等）时入队，
+	// Sweep 周期重试，成功即清——终态回流不再因瞬时存储故障永久丢失。
+	RefluxPending map[string]*RefluxPending `json:"reflux_pending,omitempty"`
+}
+
+// RefluxPending 待补偿回流条目：终态注记正文与入队时刻（审计）。
+type RefluxPending struct {
+	Body     string    `json:"body"`
+	QueuedAt time.Time `json:"queued_at"`
 }
 
 func newState() *state {
 	return &state{
-		Groups:    make(map[string]Group),
-		Messages:  make(map[string][]GroupMessage),
-		Seqs:      make(map[string]int64),
-		AgentMsgs: make(map[string]int),
-		Refluxed:  make(map[string]bool),
+		Groups:        make(map[string]Group),
+		Messages:      make(map[string][]GroupMessage),
+		Seqs:          make(map[string]int64),
+		AgentMsgs:     make(map[string]int),
+		Refluxed:      make(map[string]bool),
+		RefluxPending: make(map[string]*RefluxPending),
 	}
 }
 
@@ -241,16 +258,25 @@ func (st *state) clone() *state {
 	for id, ok := range st.Refluxed {
 		n.Refluxed[id] = ok
 	}
+	for id, e := range st.RefluxPending {
+		cp := *e // 结构体值拷贝（Body string + time.Time，无引用内层）
+		n.RefluxPending[id] = &cp
+	}
 	return n
 }
 
-// cloneGroup 深拷贝群对象：Members/TaskRefs 切片逐一复制（GroupMessage 等其余
-// 出口均为值类型，结构体赋值即拷贝）。读出口（GetGroup/ListGroups/CloseGroup/
-// CreateGroup 返回值）一律经此发布——否则调用方拿到与内部状态共享底层数组的
-// 切片引用，可绕过锁 append/改写污染 store（审查例证）。
+// cloneGroup 深拷贝群对象：Members/TaskRefs 切片逐一复制，ClosedAt *time.Time
+// 指针新分配（否则调用方经返回值解引用写穿 store 内部状态，2026-10-22 修复轮2
+// 补齐）。读出口（GetGroup/ListGroups/CloseGroup/CreateGroup 返回值）一律经此
+// 发布——否则调用方拿到与内部状态共享底层数据的引用，可绕过锁改写污染 store
+// （审查例证）。
 func cloneGroup(g Group) Group {
 	g.Members = append(make([]string, 0, len(g.Members)), g.Members...)
 	g.TaskRefs = append(make([]string, 0, len(g.TaskRefs)), g.TaskRefs...)
+	if g.ClosedAt != nil {
+		t := *g.ClosedAt
+		g.ClosedAt = &t
+	}
 	return g
 }
 
@@ -328,8 +354,8 @@ func (s *Store) CreateGroup(goal, host string, members []string) (Group, error) 
 	return cloneGroup(g), nil
 }
 
-// PostMessage 发言：校验 → 预算/终态护栏 → 分配组内单调 seq → 滚动裁剪
-// （超 MaxGroupMessages 丢最旧）→ 落盘 → 返回。
+// PostMessage 发言：校验 → 预算/终态护栏 → 分配组内单调 seq → 24h 过期清理 +
+// 滚动裁剪（超 MaxGroupMessages 丢最旧，二者并存）→ 落盘 → 返回。
 // 落盘失败不占用 seq、不计预算（内存未变，重试重新分配）。
 func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, error) {
 	from = strings.TrimSpace(from)
@@ -356,8 +382,8 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 		if g.Status == StatusConcluded {
 			return ErrConcluded
 		}
-		// 预算按 AgentMsgs 独立累计判定（非现存消息计数）：滚动窗口裁掉旧
-		// agent 消息不得让预算「失忆」重新放行。
+		// 预算按 AgentMsgs 独立累计判定（非现存消息计数）：滚动窗口/过期清理
+		// 裁掉旧 agent 消息不得让预算「失忆」重新放行。
 		if kind == KindAgent && next.AgentMsgs[groupID] >= g.Budget.MaxRounds {
 			return ErrBudgetExhausted
 		}
@@ -372,6 +398,11 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 		}
 		if kind == KindAgent {
 			next.AgentMsgs[groupID]++
+		}
+		// 24h 过期清理与滚动裁剪并存（GROUP-RFC 三 独立信箱约定）：超龄消息
+		// 先行丢弃，再落新消息（过期与滚动均为前缀丢弃，prunedBefore 口径不变）
+		if kept, n := pruneExpiredMessages(next.Messages[groupID], msg.CreatedAt); n > 0 {
+			next.Messages[groupID] = kept
 		}
 		next.appendAndTrim(groupID, msg)
 		next.Seqs[groupID] = msg.Seq
@@ -531,6 +562,11 @@ func (s *Store) RemoveTaskRef(groupID, taskID string) error {
 // 回流是 hub 自身的账本注记，绕过 concluded 拒收与 agent 发言预算（system 类
 // 本就不计预算）——群结束后时间线保留只读，但成员派发的任务结果仍须可回溯。
 // 任务未被任何群引用返回 (false, nil)。
+//
+// 失败补偿（2026-10-22 修复轮2）：存储失败（落盘错误/store 关闭）时把该任务
+// 记入持久化待补偿队列（EnqueueRefluxPending，内存先记账+尽力落盘），Sweep
+// 周期重试，成功即清——终态回流不再因瞬时存储故障永久丢失（终态钩子对同一
+// 任务只触发一次，失败即无重放机会）。
 func (s *Store) RefluxTaskResult(taskID, body string) (bool, error) {
 	if strings.TrimSpace(taskID) == "" {
 		return false, fmt.Errorf("%w: task_id 必填", ErrInvalid)
@@ -543,36 +579,145 @@ func (s *Store) RefluxTaskResult(taskID, body string) (bool, error) {
 	}
 	var posted bool
 	err := s.mutate(func(next *state) error {
-		if next.Refluxed[taskID] {
-			return nil // 幂等命中：已回流
-		}
-		now := time.Now().UTC()
-		for gid, g := range next.Groups {
-			if !taskRefIn(g.TaskRefs, taskID) {
-				continue
-			}
-			msg := GroupMessage{
-				MsgID:     MsgIDPrefix + protocol.NewMessageID(),
-				GroupID:   gid,
-				Seq:       next.Seqs[gid] + 1,
-				From:      RefluxFrom,
-				Kind:      KindSystem,
-				Body:      body,
-				CreatedAt: now,
-			}
-			next.appendAndTrim(gid, msg)
-			next.Seqs[gid] = msg.Seq
-			posted = true
-		}
-		if posted {
-			next.Refluxed[taskID] = true
-		}
+		posted = postRefluxLocked(next, taskID, body, time.Now().UTC())
 		return nil
 	})
 	if err != nil {
+		if enqErr := s.EnqueueRefluxPending(taskID, body); enqErr != nil {
+			// 双失败（存储持续不可用且入队也失败）：仅返回原错误，由调用方日志兜底
+			return false, err
+		}
 		return false, err
 	}
 	return posted, nil
+}
+
+// postRefluxLocked 回流落账（须在 mutate 事务副本上执行）：向引用该任务的全部
+// 群注入 system 注记并记入已回流集合。返回是否发生了回流（未被引用或已回流
+// 返回 false）。
+func postRefluxLocked(next *state, taskID, body string, now time.Time) bool {
+	if next.Refluxed[taskID] {
+		return false // 幂等命中：已回流
+	}
+	posted := false
+	for gid, g := range next.Groups {
+		if !taskRefIn(g.TaskRefs, taskID) {
+			continue
+		}
+		msg := GroupMessage{
+			MsgID:     MsgIDPrefix + protocol.NewMessageID(),
+			GroupID:   gid,
+			Seq:       next.Seqs[gid] + 1,
+			From:      RefluxFrom,
+			Kind:      KindSystem,
+			Body:      body,
+			CreatedAt: now,
+		}
+		next.appendAndTrim(gid, msg)
+		next.Seqs[gid] = msg.Seq
+		posted = true
+	}
+	if posted {
+		next.Refluxed[taskID] = true
+	}
+	return posted
+}
+
+// EnqueueRefluxPending 回流失败补偿入队（幂等）：内存先记账——补偿机制不得
+// 依赖引发失败的同一段存储——再整体落盘快照供重启恢复。落盘失败保留内存
+// 条目并返回错误（调用方日志兜底；内存条目由本轮 Sweep 重试，落盘点延迟到
+// 下一次成功写入）。
+func (s *Store) EnqueueRefluxPending(taskID, body string) error {
+	if strings.TrimSpace(taskID) == "" {
+		return fmt.Errorf("%w: task_id 必填", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrClosed
+	}
+	if _, ok := s.st.RefluxPending[taskID]; ok {
+		return nil // 幂等命中：已在队列
+	}
+	s.st.RefluxPending[taskID] = &RefluxPending{Body: body, QueuedAt: time.Now().UTC()}
+	next := s.st.clone()
+	if err := s.persistState(next); err != nil {
+		return err // 内存条目已记账，落盘失败不回滚（见函数注释）
+	}
+	s.st = next
+	return nil
+}
+
+// Sweep 周期维护入口（hub 主循环定时调用，2026-10-22 修复轮2）：
+//   - 群消息 24h 过期清理（GROUP-RFC 三 独立轻量信箱约定；与滚动裁剪并存）；
+//   - 待补偿回流重试：回流成功或确认无补偿对象即出队（幂等集合挡重复）。
+//
+// 返回本次过期清理的消息条数。单事务完成：落盘失败整体放弃（内存不变，下轮
+// 重来）。启动时（重启恢复补偿队列）与每轮 SweepInterval 调用一次。
+func (s *Store) Sweep(now time.Time) int {
+	pruned := 0
+	// mutate 失败（落盘错误）不得静默：补偿重试与过期清理会随副本丢弃，
+	// 留日志供排查（下轮 Sweep 会再来）
+	if err := s.mutate(func(next *state) error {
+		for gid, msgs := range next.Messages {
+			if kept, n := pruneExpiredMessages(msgs, now); n > 0 {
+				next.Messages[gid] = kept
+				pruned += n
+			}
+		}
+		retryRefluxPendingLocked(next, now)
+		return nil
+	}); err != nil {
+		log.Printf("[group] Sweep 落盘失败（本轮清理/补偿重试丢弃，下轮重试）: %v", err)
+	}
+	return pruned
+}
+
+// retryRefluxPendingLocked 待补偿回流重试（须在 mutate 事务副本上执行）：
+//   - 已在已回流集合 → 直接出队（幂等集合兜底，如双路回流竞争后到者）；
+//   - 重试回流成功 → 出队；
+//   - 无任何群引用该任务（群已删除等，补偿无对象）→ 放弃出队；
+//   - 其余（回流因预算等被拦——system 类不受预算约束，正常不会发生）→ 保留下轮再试。
+func retryRefluxPendingLocked(next *state, now time.Time) {
+	for id, e := range next.RefluxPending {
+		if next.Refluxed[id] {
+			delete(next.RefluxPending, id)
+			continue
+		}
+		if postRefluxLocked(next, id, e.Body, now) {
+			delete(next.RefluxPending, id)
+			continue
+		}
+		if !anyGroupRefs(next, id) {
+			delete(next.RefluxPending, id)
+		}
+	}
+}
+
+// anyGroupRefs 报告是否有群引用该任务（补偿对象存在性判定）。
+func anyGroupRefs(st *state, taskID string) bool {
+	for _, g := range st.Groups {
+		if taskRefIn(g.TaskRefs, taskID) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneExpiredMessages 24h 过期裁剪：返回保留消息与丢弃条数。seq 从 1 连续
+// 分配、created_at 随 seq 单调（PostMessage/回流统一 nowUTC），超龄消息恒为
+// 前缀——裁剪语义与滚动窗口一致（头部丢弃，ListMessages 的 pruned_before_seq
+// 口径不变）；恰好 24h 整的消息保留（「超」才过期）。
+func pruneExpiredMessages(msgs []GroupMessage, now time.Time) ([]GroupMessage, int) {
+	idx := 0
+	for idx < len(msgs) && msgs[idx].CreatedAt.Add(MaxMessageAge).Before(now) {
+		idx++
+	}
+	if idx == 0 {
+		return msgs, 0
+	}
+	kept := append(make([]GroupMessage, 0, len(msgs)-idx), msgs[idx:]...)
+	return kept, idx
 }
 
 // taskRefIn 引用列表包含判定（线性扫描；群内引用数为个位量级，不值得建索引）。

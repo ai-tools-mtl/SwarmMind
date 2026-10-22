@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"sync"
 
@@ -17,7 +18,11 @@ import (
 //     执行 goroutine 在任一等待点（workdir 互斥/并发槽/进程执行）观察到取消，
 //     killProcessGroup 整组终止，账本写 finished(cancelled/user_cancelled) 后回
 //     task_result(cancelled)（走既有三段确认，task_result→result_ack）；
-//   - 已终态或不在账本：回 task_cancelled 幂等 ack（无可取消对象）；
+//   - 已终态：回 task_cancelled 幂等 ack（无可取消对象）；
+//   - 不在账本（取消先于投递）：除回 task_cancelled ack 外落持久化取消墓碑
+//     （ledger cancels.json）——随后同 task_id 的 task_offer 后到时查墓碑拒绝
+//     执行，直接以 cancelled/user_cancelled 落终态回传（finishCancelledOffer），
+//     堵死「取消先于 offer，offer 后到仍执行」窗口（2026-10-22 修复轮2）；
 //   - 在途注册表未命中但账本仍 accepted/started（等待点放弃的窄窗口/关闭竞态）：
 //     直接账本落 cancelled 终态并回传；与执行 goroutine 的落盘竞争由账本
 //     「先到为准」收敛（ErrWrongState → 回幂等 ack）。
@@ -111,10 +116,20 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 		ce.trigger()
 		return
 	}
-	// 2) 已终态或不在账本：幂等 ack（无可取消对象；结果由重发链路闭合）
+	// 2) 已终态或不在账本：幂等 ack（无可取消对象；结果由重发链路闭合）。
+	//    不在账本（取消先于投递）额外落取消墓碑并持久化：随后同 task_id 的
+	//    task_offer 后到时查墓碑拒绝执行（finishCancelledOffer，handleOffer），
+	//    堵死「取消先于 offer，offer 后到仍执行」窗口（2026-10-22 修复轮2）。
 	e, ok := s.cfg.Ledger.Get(p.TaskID)
 	if !ok || e.State == ledger.StateFinished {
-		log.Printf("[node] 取消幂等命中（已终态/不存在）task=%s state=%s", p.TaskID, e.State)
+		if !ok {
+			if err := s.cfg.Ledger.AddCancelTombstone(p.TaskID); err != nil {
+				log.Printf("[node] 取消墓碑落盘失败 task=%s: %v", p.TaskID, err)
+			}
+			log.Printf("[node] 取消命中未入账任务，落墓碑防后到 offer 执行 task=%s", p.TaskID)
+		} else {
+			log.Printf("[node] 取消幂等命中（已终态）task=%s state=%s", p.TaskID, e.State)
+		}
 		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
 		return
 	}
@@ -160,4 +175,34 @@ func (s *Service) finishCancelledBeforeRun(taskID string) bool {
 	}
 	s.sendResult(taskID, res)
 	return true
+}
+
+// finishCancelledOffer 取消先于投递（offer 命中取消墓碑）的收口：任务不再执行，
+// 以 cancelled/user_cancelled 落账本终态并回传 task_result——hub 侧该任务已
+// cancelled 且无结果，收敛表 cancelled 分支合并真实数据。落盘成功即消费墓碑
+// （账本条目此后由 ErrDuplicate 挡重复执行）；落盘失败保留墓碑，重复 offer 再试。
+func (s *Service) finishCancelledOffer(task protocol.Task) {
+	res := protocol.TaskResult{
+		Status:     protocol.ResultCancelled,
+		ExitCode:   protocol.ExitCodeNotRun,
+		Error:      protocol.CodeUserCancelled,
+		FinishedAt: protocol.NowUTC(),
+	}
+	if err := s.cfg.Ledger.Accept(task); err != nil && !errors.Is(err, ledger.ErrDuplicate) {
+		// 账本写入失败（磁盘等）：不 ack 不发结果，保留墓碑，hub 回退重推（SPEC 4.5）
+		log.Printf("[node] 墓碑收口入账失败 task=%s: %v", task.ID, err)
+		return
+	}
+	if err := s.cfg.Ledger.MarkFinished(task.ID, res); err != nil {
+		// 已有终态（先到为准）：墓碑使命已尽（ErrDuplicate 挡重复），清墓碑，
+		// 结果由重发链路闭合
+		log.Printf("[node] 墓碑收口落终态未生效（先到终态为准）task=%s: %v", task.ID, err)
+		_ = s.cfg.Ledger.ClearCancelTombstone(task.ID)
+		return
+	}
+	if err := s.cfg.Ledger.ClearCancelTombstone(task.ID); err != nil {
+		log.Printf("[node] 清取消墓碑失败 task=%s: %v", task.ID, err)
+	}
+	log.Printf("[node] 任务在取消后投递（墓碑命中），不执行 task=%s", task.ID)
+	s.sendResult(task.ID, res)
 }
