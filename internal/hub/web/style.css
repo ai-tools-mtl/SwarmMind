@@ -63,6 +63,7 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .timeline{list-style:none;padding:0;margin:14px 0}.timeline li{padding:0 0 18px 22px;border-left:2px solid #e4e9fb;position:relative}
 .timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--blue)}
 .artifact{padding:12px 0;border-bottom:1px solid var(--line)}
+.cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}
 .toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#27334a;color:white;padding:12px 22px;border-radius:10px;z-index:100;box-shadow:0 5px 30px #0002;max-width:90vw}
 .footer-note{font-size:11px;color:var(--muted);margin-top:25px}
 .chip{font-size:11px;color:#8390a8;letter-spacing:1px}
