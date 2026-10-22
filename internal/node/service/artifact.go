@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -16,6 +17,47 @@ import (
 
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
+
+// 本机取回哨兵错误（FetchArtifactLocal 返回；localapi 按 HTTP 状态映射：
+// 404 task_not_found / 404 artifact_not_found / 409 artifact_mismatch）。
+var (
+	ErrTaskNotFound     = errors.New("任务不存在或已过保留期")
+	ErrArtifactNotFound = errors.New("产物不存在（任务无终态结果/下标越界/文件丢失）")
+	ErrArtifactMismatch = errors.New("产物内容与登记不一致（SHA-256/大小）")
+)
+
+// FetchArtifactLocal 本机直接取回产物内容（localapi GET
+// /api/v1/tasks/{id}/artifacts/{index} 数据面，方案 3.4 node MCP
+// swarmmind_artifact 的后端）：本地账本定位终态 → ArtifactRoots 解析本机路径 →
+// SHA-256 校验 → 返回内容。不经 hub 中继帧（离线自治）。
+func (s *Service) FetchArtifactLocal(taskID string, index int) (protocol.Artifact, []byte, error) {
+	e, ok := s.cfg.Ledger.Get(taskID)
+	if !ok {
+		return protocol.Artifact{}, nil, ErrTaskNotFound
+	}
+	if e.Result == nil || index < 0 || index >= len(e.Result.Artifacts) {
+		return protocol.Artifact{}, nil, ErrArtifactNotFound
+	}
+	meta := e.Result.Artifacts[index]
+	root, ok := s.artifactRootFor(e.Task.TargetAgent)
+	if !ok {
+		// 配置漂移（agent 已从本机移除）：产物根不可知，按不存在处理
+		return protocol.Artifact{}, nil, ErrArtifactNotFound
+	}
+	data, err := readArtifactFile(root, meta)
+	if err != nil {
+		return meta, nil, artifactSentinel(err)
+	}
+	return meta, data, nil
+}
+
+// artifactSentinel 取回失败 → 包内哨兵错误（localapi 映射 HTTP 状态）。
+func artifactSentinel(err error) error {
+	if ae, ok := err.(*artifactError); ok && ae.code == protocol.CodeArtifactMismatch {
+		return ErrArtifactMismatch
+	}
+	return ErrArtifactNotFound
+}
 
 // handleArtifactFetch 执行 node 侧取回：账本定位任务终态 → 解析本机绝对路径
 // （AgentRoots[TargetAgent] = workdir）→ 校验哈希 → base64 回帧。全程不阻塞执行
@@ -34,7 +76,7 @@ func (s *Service) handleArtifactFetch(env *protocol.Envelope) {
 	}
 	meta := e.Result.Artifacts[p.Index]
 
-	root, ok := s.cfg.ArtifactRoots[e.Task.TargetAgent]
+	root, ok := s.artifactRootFor(e.Task.TargetAgent)
 	if !ok {
 		// 配置漂移（agent 已从本机移除）：产物根不可知，按不存在处理
 		s.sendErrReply(env.MessageID, protocol.CodeArtifactNotFound, "agent 不在本机配置，无法定位产物")

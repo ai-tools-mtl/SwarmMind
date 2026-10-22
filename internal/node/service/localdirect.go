@@ -51,8 +51,8 @@ func (s *Service) SubmitLocalDirect(req protocol.TaskSubmitRequest) (*protocol.S
 	if req.TargetNode == "" || req.TargetAgent == "" || req.SubmittedBy == "" {
 		return nil, &RemoteError{Code: "invalid", Msg: "target_node / target_agent / submitted_by 均为必填"}
 	}
-	// 2. 目标必须在本机配置（D8 语义：本机入口只派本机 agent）
-	if _, ok := s.cfg.Runners[req.TargetAgent]; !ok {
+	// 2. 目标必须在本机配置（D8 语义：本机入口只派本机 agent；热重载换表读侧）
+	if _, ok := s.runnerFor(req.TargetAgent); !ok {
 		return nil, &RemoteError{Code: protocol.CodeAgentNotFound,
 			Msg: fmt.Sprintf("agent %q 不在本机配置中（本地派单目标只能本机 agent；配置漂移请更新 node.yaml）", req.TargetAgent)}
 	}

@@ -1,24 +1,35 @@
 // swarmmind-mcp：SwarmMind 的 MCP（Model Context Protocol）stdio 服务。
 //
 // 目的（2026-10-21 验收反馈）：让任意 agent（小零/师者/zcode/codex…）通过 MCP
-// 直接向 SwarmMind 网派任务、等结果、取产物——agent 网络的统一入口。
+// 直接向 SwarmMind 派任务、等结果、取产物——agent 网络的统一入口。
 //
 // 协议：MCP stdio transport（newline-delimited JSON-RPC 2.0），手写实现，
 // 零第三方依赖（对齐 SPEC 依赖白名单哲学）。
 //
-// 配置（环境变量）：
+// 目标模式（方案 3.4 backend 分叉，2026-10-22）：SWARM_TARGET 选装配
+//（backend interface 两实现，工具路由按模式裁剪，不散落 if）：
 //
-//	SWARM_HUB_URL   管理面地址，如 http://127.0.0.1:8444
-//	SWARM_HUB_TOKEN 访问令牌（smsw_… PAT 或 admin_token）
+//	SWARM_TARGET=hub（默认，完全向后兼容）——连 hub 管理面：
+//	  SWARM_HUB_URL   管理面地址，如 http://127.0.0.1:8444
+//	  SWARM_HUB_TOKEN 访问令牌（smsw_… PAT 或 admin_token）
+//	SWARM_TARGET=node——连本机 node（standalone 单机编排入口，端点契约
+//	  对照 internal/node/localapi；stdio 传输天然仅本机可达）：
+//	  SWARM_NODE_URL         本机 node 地址（默认 http://127.0.0.1:8445）
+//	  SWARM_NODE_TOKEN       local_token（只读工具：nodes/agents/status/wait/artifact）
+//	  SWARM_NODE_PRIME_TOKEN prime_token（编排工具：submit；接入即总理）
+//
+// 通用（两模式）：
+//
 //	SWARM_STARTLUX_URL          StartLux-Decision 云端地址（默认 https://api.bamboonode.dev）
 //	SWARM_STARTLUX_KEY          Bamboo API key（空 = L0 视为不可用，直接走 L2 规则分配）
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具（12 个）：nodes / agents / submit / status / wait / artifact / decide
-// + group_create / group_list / group_say / group_messages / group_close
-// （群聊协作空间，GROUP-RFC 六 MVP：有目标的多 agent 持续讨论空间，创建即
-// discussing，concluded 终态；agent 发言预算默认 20 轮，消息体 8KiB 上限）。
+// 工具：hub 模式 12 个（不变）——nodes / agents / submit / status / wait /
+// artifact / decide + group_create / group_list / group_say / group_messages /
+// group_close（群聊协作空间，GROUP-RFC 六 MVP）。node 模式 6 个——nodes（本机
+// 节点信息单条）/ agents（本机目录）/ submit（本机派单，prime_token）/ status /
+// wait / artifact（本机直取）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
 // 失败自动降级 L2 本地规则分配（关键词匹配 + inflight 负载决胜），永不停摆，响应标注 used_level。
@@ -88,6 +99,12 @@ type rpcResponse struct {
 /* ---------- hub API 客户端 ---------- */
 
 func hubAPI(method, path string, body any) (int, []byte, error) {
+	return httpCall(hubURL, hubToken, client, method, path, body)
+}
+
+// httpCall 通用 REST 调用（hub/node 两后端共用）：Bearer 鉴权 + JSON 体 +
+// 8MiB 应答上限。client 由调用方给定（hub 共享全局 client，node 自带）。
+func httpCall(baseURL, token string, cl *http.Client, method, path string, body any) (int, []byte, error) {
 	var rd io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -96,21 +113,51 @@ func hubAPI(method, path string, body any) (int, []byte, error) {
 		}
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, strings.TrimRight(hubURL, "/")+path, rd)
+	req, err := http.NewRequest(method, strings.TrimRight(baseURL, "/")+path, rd)
 	if err != nil {
 		return 0, nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+hubToken)
+	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := client.Do(req)
+	resp, err := cl.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	return resp.StatusCode, data, err
+}
+
+/* ---------- backend 分叉（方案 3.4）：工具清单 + 调用分发按模式装配 ---------- */
+
+// backend MCP 后端：hub（全网管理面）与 node（本机编排入口）两实现。工具路由
+// 按模式整体裁剪，不在工具清单里散落 if（zcode 审查 #6）。
+type backend interface {
+	// tools 本模式工具清单（tools/list 应答体）。
+	tools() []toolDef
+	// call 单工具分发（tools/call 应答体；rpcErr 非 nil 时回协议错误）。
+	call(name string, args map[string]any) (map[string]any, *rpcError)
+	// initResult initialize 应答体（node 模式附 instructions 说明总理语义）。
+	initResult() map[string]any
+}
+
+// hubBackend hub 模式（默认）：全网派发中枢管理面，现有 12 工具行为零变化。
+type hubBackend struct{}
+
+func (hubBackend) tools() []toolDef { return tools() }
+
+func (hubBackend) call(name string, args map[string]any) (map[string]any, *rpcError) {
+	return callTool(name, args)
+}
+
+func (hubBackend) initResult() map[string]any {
+	return map[string]any{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]any{"tools": map[string]any{}},
+		"serverInfo":      map[string]any{"name": "swarmmind", "version": "0.1.1"},
+	}
 }
 
 /* ---------- 工具定义 ---------- */
@@ -317,9 +364,18 @@ func toolSubmit(args map[string]any) (string, error) {
 	return fmt.Sprintf("任务已提交：%s（目标 %s @ %s）\n用 swarmmind_status 或 swarmmind_wait 查询结果。", out.TaskID, agent, node), nil
 }
 
-// taskStatus 拉取并汇总单个任务的可读状态。
+// taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。
 func taskStatus(taskID string) (string, bool) {
-	code, data, err := hubAPI("GET", "/api/v1/tasks/"+taskID, nil)
+	return renderTaskStatus(taskID, func(id string) (int, []byte, error) {
+		return hubAPI("GET", "/api/v1/tasks/"+id, nil)
+	})
+}
+
+// renderTaskStatus 通用任务状态渲染（hub/node 双后端共用；应答同为协议层 Task
+// 视图——hub 管理面与 node 本地账本 TaskView 字段一致）。done=true 表示已到
+// 终态（completed/failed/needs_review/cancelled）。
+func renderTaskStatus(taskID string, fetch func(string) (int, []byte, error)) (string, bool) {
+	code, data, err := fetch(taskID)
 	if err != nil {
 		return "查询失败：" + err.Error(), false
 	}
