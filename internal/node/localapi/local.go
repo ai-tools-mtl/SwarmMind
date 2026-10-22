@@ -94,12 +94,18 @@ func (s *Server) handleSetExposed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// localStatus 本机状态总览（旅程③）。node 只呈现本机事实：连接/epoch/账本/
-// 最近同步；信箱余量与投递窗口是 hub 侧事实，不在此代理展示（方案 v2 D6）。
+// localStatus 本机状态总览（旅程③）。node 只呈现本机事实：形态/总理声明/
+// 连接/epoch/账本/最近同步；信箱余量与投递窗口是 hub 侧事实，不在此代理展示
+//（方案 v2 D6）。
 type localStatus struct {
 	NodeID string `json:"node_id"`
-	Online bool   `json:"online"`
-	Epoch  int64  `json:"epoch"`
+	// Mode 运行形态（setup|standalone|networked，方案 3.1 三态）。
+	Mode string `json:"mode"`
+	// PrimeAgent 本机唯一总理声明（node.yaml prime_agent；空 = 未钦定，
+	// 编排接口未激活——控制台据此展示「本机总理：〈名〉」或提示，方案 3.2.1）。
+	PrimeAgent string         `json:"prime_agent"`
+	Online     bool           `json:"online"`
+	Epoch      int64          `json:"epoch"`
 	// LastSyncAt 最近一次注册成功时刻（最近同步）；从未注册为 null。
 	LastSyncAt *time.Time `json:"last_sync_at"`
 	// Ledger 账本三态计数（accepted/started/finished，SPEC 4.8）。
@@ -109,10 +115,12 @@ type localStatus struct {
 // handleLocalStatus GET /api/v1/local/status：本机运维视图。
 func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	st := localStatus{
-		NodeID: s.cfg.NodeID,
-		Online: s.online(),
-		Epoch:  s.epoch(),
-		Ledger: s.ledgerCounts(),
+		NodeID:     s.cfg.NodeID,
+		Mode:       s.mode(),
+		PrimeAgent: s.cfg.PrimeAgent,
+		Online:     s.online(),
+		Epoch:      s.epoch(),
+		Ledger:     s.ledgerCounts(),
 	}
 	if s.cfg.LastRegisteredAt != nil {
 		if at, ok := s.cfg.LastRegisteredAt(); ok {
@@ -120,6 +128,17 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, st)
+}
+
+// mode 运行形态（Setup 装配优先；未装配 Mode 按 networked 呈现）。
+func (s *Server) mode() string {
+	if s.cfg.Setup {
+		return ModeSetup
+	}
+	if s.cfg.Mode == ModeStandalone {
+		return ModeStandalone
+	}
+	return ModeNetworked
 }
 
 // online / epoch / ledgerCounts 状态字段装配。

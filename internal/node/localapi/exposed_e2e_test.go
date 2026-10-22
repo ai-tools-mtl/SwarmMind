@@ -118,16 +118,19 @@ func TestExposedToggleE2E(t *testing.T) {
 		Epoch:            client.Epoch,
 		LastRegisteredAt: client.LastRegisteredAt,
 		LocalToken:       "tok-local",
+		PrimeToken:       "tok-prime",
+		PrimeAgent:       "echo",
 	}).Handler())
 	t.Cleanup(srv.Close)
 
-	do := func(method, path, body string) (int, string) {
+	// doAs 指定凭证调用（编排操作需 prime_token；local_token 调编排 → 403，矩阵 #14）。
+	doAs := func(token, method, path, body string) (int, string) {
 		t.Helper()
 		req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Authorization", "Bearer tok-local")
+		req.Header.Set("Authorization", "Bearer "+token)
 		if body != "" {
 			req.Header.Set("Content-Type", "application/json")
 		}
@@ -138,6 +141,10 @@ func TestExposedToggleE2E(t *testing.T) {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
+	}
+	// do 本机管理操作（local_token 级：exposed 开关、只读查询）。
+	do := func(method, path, body string) (int, string) {
+		return doAs("tok-local", method, path, body)
 	}
 	hubExposed := func() bool {
 		rec := hubStore.View().Nodes["nodeA"]
@@ -189,10 +196,15 @@ func TestExposedToggleE2E(t *testing.T) {
 		t.Fatal("重启后开关应保持为关（agents-state.json）")
 	}
 
-	// ---- 新任务 404 agent_not_exposed（SPEC 4.9：执行准入关闭） ----
-	code, out = do(http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`)
-	if code != http.StatusNotFound || !strings.Contains(out, protocol.CodeAgentNotExposed) {
-		t.Fatalf("关闭后新任务应 404 agent_not_exposed, got %d: %s", code, out)
+	// ---- 本机主权：exposed=false 不拦本机入口（zcode 主权裁决 + 方案 3.2：
+	// exposed 是对 hub 准入的开关，本机主人/总理派单不受其约束）；非总理凭证
+	// 调编排 → 403（矩阵 #14，环防护可测化） ----
+	if code, out = doAs("tok-local", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`); code != http.StatusForbidden || !strings.Contains(out, "prime_required") {
+		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", code, out)
+	}
+	code, out = doAs("tok-prime", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("关闭 exposed 后本机入口（总理）派单应 202（主权在本机）, got %d: %s", code, out)
 	}
 
 	// ---- 重开开关：网内恢复可派单；提交 202 且本机留痕 ----
@@ -203,7 +215,7 @@ func TestExposedToggleE2E(t *testing.T) {
 	if !waitFor(5*time.Second, hubExposed) {
 		t.Fatal("重开后 hub 注册表应 exposed=true")
 	}
-	code, out = do(http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester","idem_key":"loop7-1"}`)
+	code, out = doAs("tok-prime", http.MethodPost, "/api/v1/tasks", `{"target_node":"nodeA","target_agent":"echo","input":{"args":["hi"]},"submitted_by":"tester","idem_key":"loop7-1"}`)
 	if code != http.StatusAccepted {
 		t.Fatalf("重开后提交应 202, got %d: %s", code, out)
 	}
@@ -213,9 +225,10 @@ func TestExposedToggleE2E(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &ack); err != nil || ack.TaskID == "" {
 		t.Fatalf("提交应答不符: %s", out)
 	}
-	// 我的任务留痕（submit_ack 成功即登记）
-	if !waitFor(2*time.Second, func() bool { return len(taskLog.List()) == 1 }) {
-		t.Fatalf("提交成功应留痕: %+v", taskLog.List())
+	// 我的任务留痕（submit_ack 成功即登记）：两条 —— exposed=false 时的主权
+	// 派单（无幂等键）与本条（idem loop7-1），均合法入账
+	if !waitFor(2*time.Second, func() bool { return len(taskLog.List()) == 2 }) {
+		t.Fatalf("提交成功应留痕（含 exposed=false 期间的主权派单）: %+v", taskLog.List())
 	}
 	// 已有任务语义佐证：关开关不影响在途任务——该任务应照常跑到终态 completed
 	if !waitFor(5*time.Second, func() bool {
