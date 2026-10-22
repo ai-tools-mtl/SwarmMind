@@ -517,9 +517,10 @@ function enrollModal() {
  * 预填（用户到 Step3 前通常已返回）；后端未装配（503，旧 hub）或网络失败回落旧
  * 推导 enrollHubUrl()，向导仍可用。用户手改后 hubTouched 锁定，迟到应答不覆盖。 */
 async function enrollFetchHubUrl() {
+  const sess = ENROLL;   // 会话引用：弹层重开（enrollModal 换新 ENROLL）后，旧请求的迟到应答不得覆盖新会话预填
   const r = await api('GET', '/api/v1/nodes/enroll-info').catch(() => null);
   const url = r && r.code === 200 ? (r.data?.node_ws_url || '') : '';
-  if (!url || !ENROLL || ENROLL.hubTouched) return;
+  if (!url || !ENROLL || ENROLL !== sess || ENROLL.hubTouched) return;
   ENROLL.hubUrl = url;
   const inp = $('#enroll-hub-url');
   if (inp) {
