@@ -66,10 +66,6 @@ type Service struct {
 	wsByAgent map[string]string
 	wsLocks   wsMutex
 
-	// 在途本地请求表（Loop 4，localreq.go）：请求帧 mid → 应答通道。
-	muPend  sync.Mutex
-	pending map[string]chan *protocol.Envelope
-
 	// 在途任务取消表（task_cancel 生命周期，cancel.go）：task_id → 取消开关。
 	// execute 登记goroutine 注销；handleTaskCancel 依此触发执行中断。
 	muCancels sync.Mutex
@@ -91,7 +87,6 @@ func New(cfg Config, tr transport.Transport) *Service {
 		ctx:        ctx,
 		stop:       stop,
 		resendKick: make(chan struct{}, 1),
-		pending:    make(map[string]chan *protocol.Envelope),
 		cancels:    make(map[string]*cancelEntry),
 		wsByAgent:  make(map[string]string, len(cfg.ArtifactRoots)),
 		wsLocks:    newWsMutex(),
@@ -151,16 +146,11 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 	case protocol.MsgResultAck:
 		s.handleResultAck(env)
 	case protocol.MsgErr:
-		// 本地请求（SubmitLocal/QueryLocal）的 err 应答按 ReplyTo 关联投递；
-		// 无关联的走原路径（result_conflict 置 closed 停重传等）
-		if !s.deliverLocal(env) {
-			s.handleErr(env)
-		}
+		s.handleErr(env)
 	case protocol.MsgSubmitAck, protocol.MsgTaskStatus:
-		// 本地提交/查询应答（Loop 4）：按 ReplyTo 关联投递，无关联忽略
-		if !s.deliverLocal(env) {
-			log.Printf("[node] 忽略无关联应答帧 type=%s reply=%s", env.Type, env.ReplyTo)
-		}
+		// 双路径后 node 不再发起 task_submit/task_query（本地直执行 + 账本视图
+		// 直出，方案 3.2）：应答帧只可能来自旧版对端或异常，记录忽略
+		log.Printf("[node] 忽略帧 type=%s（本地直执行路径不产生此应答）", env.Type)
 	case protocol.MsgArtifactFetch:
 		s.handleArtifactFetch(env)
 	case protocol.MsgResultEvent, protocol.MsgRegisterAck, protocol.MsgArtifactData:
@@ -408,8 +398,14 @@ func (s *Service) Execute(task protocol.Task) {
 }
 
 // ResendPending 立即重发账本全部未确认结果（同步，测试与 worker 内部用）。
+// origin 过滤（方案 3.2，zcode 审查补强）：只有 hub 下发（origin=hub）的结果
+// 才回传 hub——standalone 期本地任务的结果帧在切换组网后不得成批推 hub
+//（local 来源条目落终态即自确认，正常不在队列；此处为双保险并免日志噪音）。
 func (s *Service) ResendPending() {
 	for _, e := range s.cfg.Ledger.PendingResend() {
+		if e.Origin != ledger.OriginHub {
+			continue
+		}
 		log.Printf("[node] 重发未确认结果 task=%s", e.Task.ID)
 		s.sendResult(e.Task.ID, *e.Result)
 	}
@@ -458,13 +454,28 @@ func (s *Service) resendLoop() {
 	}
 }
 
-// sendRef 发送 {task_id} 引用帧（task_ack/task_started）。
+// originOf 任务来源（快照读零拷贝；不在账本返回 ""，按非 local 处理——hub 链路
+// 的迟到帧仍走回传语义）。
+func (s *Service) originOf(taskID string) ledger.Origin {
+	return s.cfg.Ledger.OriginOf(taskID)
+}
+
+// sendRef 发送 {task_id} 引用帧（task_ack/task_started）。origin 堵点（方案 3.2）：
+// local 任务不向 hub 发任何帧——hub 不认识本机自派任务，帧只会换来 task_not_found
+// 噪音；本机任务的过程可见性由账本视图直出（ledger.TaskView）。
 func (s *Service) sendRef(typ, taskID string) {
+	if s.originOf(taskID) == ledger.OriginLocal {
+		return
+	}
 	s.send(typ, protocol.TaskRef{TaskID: taskID})
 }
 
-// sendResult 发送 task_result 帧（SPEC 4.2 载荷）。
+// sendResult 发送 task_result 帧（SPEC 4.2 载荷）。origin 堵点同 sendRef：
+// local 任务的结果只回写本地账本，绝不推 hub（含取消/中断收尾等所有路径）。
 func (s *Service) sendResult(taskID string, res protocol.TaskResult) {
+	if s.originOf(taskID) == ledger.OriginLocal {
+		return
+	}
 	s.send(protocol.MsgTaskResult, protocol.TaskResultPayload{
 		TaskID: taskID, Status: res.Status, Result: &res,
 	})
@@ -493,6 +504,21 @@ func (s *Service) send(typ string, payload any) {
 // isBenignSendErr 对端不存在/本端已关闭的发送失败：链路自愈语义覆盖（SPEC 4.5）。
 func isBenignSendErr(err error) bool {
 	return errors.Is(err, transport.ErrNoEndpoint) || errors.Is(err, transport.ErrClosed)
+}
+
+// sendWithID 以指定 mid 发帧（帧关联键；card_update 上报用）。
+func (s *Service) sendWithID(typ, mid string, payload any) error {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("载荷编码失败 type=%s: %w", typ, err)
+	}
+	return s.tr.Send("hub", &protocol.Envelope{
+		Version:   protocol.ProtocolVersion,
+		Type:      typ,
+		MessageID: mid,
+		To:        "hub",
+		Payload:   b,
+	})
 }
 
 // trEndpointIdentity 端点本端身份（计量用；membus/WSS 均经 Send 覆盖 From，

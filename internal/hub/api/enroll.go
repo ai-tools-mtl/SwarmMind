@@ -31,16 +31,16 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
 // EnrollConfig 部署包编译参数（Config.Enroll；nil 时端点 503 降级，旧构造方不感知）。
@@ -170,40 +170,21 @@ type enrollRequest struct {
 	Mode          string `json:"mode"` // native|docker；空 = native
 }
 
-// node_id ^[a-z0-9-]{2,32}$、token 64 位 hex：与接入向导前端校验对齐；二者会
-// 原样渲染进 node.yaml 与文件名，超界即拒（400）。
-var (
-	enrollNodeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$`) // 2-32 位，首尾必须字母数字（禁连字符开头/结尾、禁单字符）
-	enrollTokenRe  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-)
-
-// validHubURL hub_url 白名单：ws(s):// + 非 host 空 + 全串无可打印 ASCII 之外
-// 的字符（控制字符/空格/引号/反斜杠一律拒——它是 yaml 纯量与 Content-Disposition
-// 的原料，超界即注入面）。
-func validHubURL(s string) bool {
-	if s == "" || len(s) > 512 {
-		return false
-	}
-	for _, r := range s {
-		if r <= 0x20 || r == 0x7f || r == '"' || r == '\\' {
-			return false
-		}
-	}
-	u, err := url.Parse(s)
-	return err == nil && (u.Scheme == "ws" || u.Scheme == "wss") && u.Host != ""
-}
+// node_id/token/hub_url 三条白名单已下沉 protocol 包同源（方案 3.6，2026-10-22）：
+// 本处只调用 protocol.ValidXxx，规则改动一处生效、两端不漂移。三者会原样渲染进
+// node.yaml 与文件名，超界即拒（400）。
 
 // normalize 校验请求并归一（mode 空回落 native；docker 模式固定打包 linux
 // 二进制——容器基座即 linux，os 字段不参与 docker 产物）。非法返回人话原因。
 func (r *enrollRequest) normalize() (osArg, archArg, mode string, err error) {
-	if !enrollNodeIDRe.MatchString(r.NodeID) {
-		return "", "", "", fmt.Errorf("node_id 须为 2-32 位小写字母/数字/连字符")
+	if !protocol.ValidNodeID(r.NodeID) {
+		return "", "", "", protocol.ErrJoinNodeID
 	}
-	if !enrollTokenRe.MatchString(r.RegisterToken) {
-		return "", "", "", fmt.Errorf("register_token 须为 64 位十六进制")
+	if !protocol.ValidToken(r.RegisterToken) {
+		return "", "", "", protocol.ErrJoinToken
 	}
-	if !validHubURL(r.HubURL) {
-		return "", "", "", fmt.Errorf("hub_url 须为可解析的 ws:// 或 wss:// 地址")
+	if !protocol.ValidHubURL(r.HubURL) {
+		return "", "", "", protocol.ErrJoinHubURL
 	}
 	// Windows 暂撤（2026-10-22 双审决断：安装链路未经真实机验证，撤下待开发
 	// 完整后再开放；内置 windows 产物与打包代码保留，未来开放即用）。

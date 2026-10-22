@@ -1,17 +1,14 @@
 package service
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/store"
@@ -20,8 +17,9 @@ import (
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
-// 本地请求关联与产物取回单测（Loop 4）：SubmitLocal/QueryLocal 走真 hub core +
-// membus 同步链；artifact 取回走真账本 + 本地文件。
+// hub→node 帧取回产物单测（Loop 4 遗产，2026-10-22 随双路径改造精简：
+// 原 SubmitLocal/QueryLocal 帧往返用例随 localreq.go 删除——本地派单已改
+// 本地直执行（localdirect_test.go），产物取回帧链路不变故保留）。
 
 // recorder 帧录制器（双向订阅并发触达，带锁）。
 type recorder struct {
@@ -32,8 +30,8 @@ type recorder struct {
 func (r *recorder) record(env *protocol.Envelope) {
 	cp := *env
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.frames = append(r.frames, &cp)
-	r.mu.Unlock()
 }
 
 func (r *recorder) ofTypes(typ string) *protocol.Envelope {
@@ -45,6 +43,12 @@ func (r *recorder) ofTypes(typ string) *protocol.Envelope {
 		}
 	}
 	return nil
+}
+
+func (r *recorder) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.frames = nil
 }
 
 // newLocalFixture 真 hub（core）+ node service 全链基座（membus 同步）。
@@ -95,86 +99,6 @@ func newLocalFixture(t *testing.T) (*core.Core, *Service, *ledger.Ledger, *recor
 	}
 	c.SetOnline("nodeA", true)
 	return c, svc, led, rec, nodeEP, artRoot
-}
-
-func TestSubmitLocalAndQueryLocal(t *testing.T) {
-	_, svc, _, rec, _, _ := newLocalFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req := protocol.TaskSubmitRequest{
-		TargetNode: "nodeA", TargetAgent: "echo", SubmittedBy: "local-proc",
-		Input: protocol.TaskInput{Args: []string{"hi"}}, IdemKey: "loc-1",
-	}
-	ack, err := svc.SubmitLocal(ctx, req)
-	if err != nil {
-		t.Fatalf("SubmitLocal 失败: %v", err)
-	}
-	if ack.TaskID == "" || ack.TraceID == "" || ack.Dup {
-		t.Fatalf("submit_ack 不符: %+v", ack)
-	}
-	// 请求-应答关联：submit_ack.ReplyTo = task_submit 的 mid
-	submit := rec.ofTypes(protocol.MsgTaskSubmit)
-	ackFrame := rec.ofTypes(protocol.MsgSubmitAck)
-	if submit == nil || ackFrame == nil || ackFrame.ReplyTo != submit.MessageID {
-		t.Fatalf("task_submit/submit_ack 未按 ReplyTo 成对: submit=%v ack=%v", submit, ackFrame)
-	}
-
-	// 幂等命中：Dup=true 且同 task_id（同键重试安全，SPEC 4.5）
-	ack2, err := svc.SubmitLocal(ctx, req)
-	if err != nil || !ack2.Dup || ack2.TaskID != ack.TaskID {
-		t.Fatalf("幂等命中不符: ack=%+v err=%v", ack2, err)
-	}
-
-	// 查询：task_status 回完整任务（无 runner → agent_not_found 失败终态）。
-	// 执行异步（并发 goroutine），轮询至终态（有上限替代固定 sleep）。
-	var task *protocol.Task
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var qerr error
-		task, qerr = svc.QueryLocal(ctx, ack.TaskID)
-		if qerr != nil {
-			t.Fatalf("QueryLocal 失败: %v", qerr)
-		}
-		if task.Status.Terminal() {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("任务未在期限内到达终态: %+v", task)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if task.ID != ack.TaskID || task.Status != protocol.StatusFailed || task.Result == nil ||
-		task.Result.Error != protocol.CodeAgentNotFound {
-		t.Fatalf("task_status 不符: %+v", task)
-	}
-
-	// 查无此任务 → RemoteError(task_not_found)
-	_, err = svc.QueryLocal(ctx, "t-missing")
-	var re *RemoteError
-	if !errors.As(err, &re) || re.Code != protocol.CodeTaskNotFound {
-		t.Fatalf("应报 RemoteError(task_not_found), got %v", err)
-	}
-}
-
-func TestSubmitLocalHubUnreachable(t *testing.T) {
-	t.Helper()
-	bus := transport.NewBus()
-	led, _, err := ledger.Open(filepath.Join(t.TempDir(), "ledger"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = led.Close() })
-	ep := bus.Endpoint("lonely") // bus 上无 "hub" 端点 → Send ErrNoEndpoint
-	svc := New(Config{Ledger: led, Runners: map[string]Runner{}}, ep)
-	t.Cleanup(svc.Close)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	_, err = svc.SubmitLocal(ctx, protocol.TaskSubmitRequest{TargetNode: "x", TargetAgent: "y", SubmittedBy: "z"})
-	if !errors.Is(err, ErrHubUnreachable) {
-		t.Fatalf("应报 ErrHubUnreachable, got %v", err)
-	}
 }
 
 // artifactEntry 在账本落 finished 条目（含产物登记）并写对应文件；返回登记与文件目录。
@@ -265,9 +189,7 @@ func TestHandleArtifactFetchMismatchAndMissing(t *testing.T) {
 	_ = led.MarkStarted("t-art-3")
 	bad := protocol.Artifact{Path: "../../escape.txt", Sha256: "00", Size: 2}
 	_ = led.MarkFinished("t-art-3", protocol.TaskResult{Status: protocol.ResultCompleted, Artifacts: []protocol.Artifact{bad}})
-	rec.mu.Lock()
-	rec.frames = nil
-	rec.mu.Unlock()
+	rec.reset()
 	svc.HandleFrame(fetchEnvelope("mid-3", "t-art-3", 0))
 	errFrame = rec.ofTypes(protocol.MsgErr)
 	if errFrame == nil || errFrame.Err == nil || errFrame.Err.Code != protocol.CodeArtifactMismatch {
@@ -275,13 +197,10 @@ func TestHandleArtifactFetchMismatchAndMissing(t *testing.T) {
 	}
 
 	// 任务不存在 → err(artifact_not_found)
-	rec.mu.Lock()
-	rec.frames = nil
-	rec.mu.Unlock()
+	rec.reset()
 	svc.HandleFrame(fetchEnvelope("mid-4", "t-none", 0))
 	errFrame = rec.ofTypes(protocol.MsgErr)
 	if errFrame == nil || errFrame.Err == nil || errFrame.Err.Code != protocol.CodeArtifactNotFound {
 		t.Fatalf("应回 err(artifact_not_found): %+v", errFrame)
 	}
 }
-

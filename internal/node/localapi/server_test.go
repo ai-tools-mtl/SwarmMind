@@ -60,6 +60,8 @@ func TestLocalAuthGate(t *testing.T) {
 		Agents:     newState(t, t.TempDir(), []protocol.ExecProfile{echoProfileLocal(t)}),
 		Online:     func() bool { return false },
 		LocalToken: "tok-local",
+		PrimeToken: "tok-prime",
+		PrimeAgent: "echo",
 	}).Handler())
 	t.Cleanup(srv.Close)
 
@@ -94,15 +96,23 @@ func TestLocalAuthGate(t *testing.T) {
 		t.Fatalf("无令牌 PATCH exposed 应 401, got %d: %s", code, out)
 	}
 
-	// hub 不可达 → 503 hub_unreachable（目标为本机，已过 D8 边界锁）
+	// 编排分级（矩阵 #14）：local_token 调派单 → 403 prime_required（双路径下
+	// 本地直执行不依赖 hub，原 hub_unreachable 503 场景已随旧链路删除）
 	code, out := do("tok-local", http.MethodPost, "/api/v1/tasks",
 		`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
-	if code != http.StatusServiceUnavailable || !strings.Contains(out, protocol.CodeHubUnreachable) {
-		t.Fatalf("hub 不可达应 503 hub_unreachable, got %d: %s", code, out)
+	if code != http.StatusForbidden || !strings.Contains(out, "prime_required") {
+		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", code, out)
+	}
+	// 总理凭证过编排门：target 本机合法，但 fixture 无 runner → 404 agent_not_found
+	//（说明 prime 门与 D8 均已通过，到达业务校验层）
+	code, out = do("tok-prime", http.MethodPost, "/api/v1/tasks",
+		`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
+	if code != http.StatusNotFound || !strings.Contains(out, protocol.CodeAgentNotFound) {
+		t.Fatalf("总理派单应过编排门到达业务校验（404 agent_not_found）, got %d: %s", code, out)
 	}
 
-	// 坏请求体 → 400
-	if code, _ = do("tok-local", http.MethodPost, "/api/v1/tasks", `not-json`); code != http.StatusBadRequest {
+	// 坏请求体 → 400（总理凭证，请求体解析在编排门之后）
+	if code, _ = do("tok-prime", http.MethodPost, "/api/v1/tasks", `not-json`); code != http.StatusBadRequest {
 		t.Fatalf("坏请求体应 400, got %d", code)
 	}
 
@@ -162,12 +172,29 @@ func TestSubmitCrossNodeRejected(t *testing.T) {
 		Agents:     newState(t, t.TempDir(), []protocol.ExecProfile{echoProfileLocal(t)}),
 		TaskLog:    tl,
 		LocalToken: "tok-local",
+		PrimeToken: "tok-prime",
+		PrimeAgent: "echo",
 	}).Handler())
 	t.Cleanup(srv.Close)
 
+	// 分级先于校验：local_token 调编排 → 403 prime_required（矩阵 #14），
+	// 此时连 D8 都未执行——鉴权与业务校验的顺序由本断言钉死。
+	reqL, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
+		strings.NewReader(`{"target_node":"nodeB","target_agent":"echo","submitted_by":"p"}`))
+	reqL.Header.Set("Authorization", "Bearer tok-local")
+	respL, err := http.DefaultClient.Do(reqL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer respL.Body.Close()
+	bL, _ := io.ReadAll(respL.Body)
+	if respL.StatusCode != http.StatusForbidden || !strings.Contains(string(bL), "prime_required") {
+		t.Fatalf("local_token 调编排应 403 prime_required, got %d: %s", respL.StatusCode, bL)
+	}
+
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
 		strings.NewReader(`{"target_node":"nodeB","target_agent":"echo","submitted_by":"p"}`))
-	req.Header.Set("Authorization", "Bearer tok-local")
+	req.Header.Set("Authorization", "Bearer tok-prime")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -187,18 +214,18 @@ func TestSubmitCrossNodeRejected(t *testing.T) {
 		t.Fatalf("错误信息应如实回显违规目标（不静默改写）: %s", b)
 	}
 
-	// 本机目标不被此锁误伤（链路本身另见 service 包全链测试）
+	// 本机目标不被此锁误伤：总理凭证过 D8 后到达业务校验层（fixture 无 runner
+	// → 404 agent_not_found；本地直执行不再经 hub，无 hub_unreachable 场景）
 	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
 		strings.NewReader(`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`))
-	req2.Header.Set("Authorization", "Bearer tok-local")
+	req2.Header.Set("Authorization", "Bearer tok-prime")
 	resp2, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp2.Body.Close()
-	_ = resp2.Body.Close()
-	// bus 上无 "hub" 端点 → hub_unreachable（503），而非 400——边界锁只拦外机目标
-	if resp2.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("本机目标应放行进入转发链（此处 hub 不可达 503）, got %d", resp2.StatusCode)
+	b2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound || !strings.Contains(string(b2), protocol.CodeAgentNotFound) {
+		t.Fatalf("本机目标应过 D8 到达业务校验（404 agent_not_found）, got %d: %s", resp2.StatusCode, b2)
 	}
 }

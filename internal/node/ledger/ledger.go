@@ -59,6 +59,19 @@ var (
 	ErrClosed = errors.New("ledger: 已关闭")
 )
 
+// Origin 任务来源（方案 3.2 双路径模型，2026-10-22）：回传过滤的依据——
+// local 任务的结果/重发/needs_review 一律不得推给 hub（standalone 期账本条目
+// 在切换组网后会成批触发 task_not_found 噪音）。
+type Origin string
+
+const (
+	// OriginHub hub 经 WSS 下发（task_offer 链路）；既有账本文件无 origin 字段，
+	// 反序列化为零值空串——Get 时归一为 hub（见 Entry.normalized）。
+	OriginHub Origin = "hub"
+	// OriginLocal 本机派单（localapi 本地直执行，方案 3.2）。
+	OriginLocal Origin = "local"
+)
+
 // Entry 账本条目（SPEC 4.8）：task_id → {task 完整, state, result?, result_acked}，
 // 另含重传终止标记 closed（SPEC 4.5）与首次确认时刻 first_acked_at（保留期限基准，SPEC 4.6）。
 type Entry struct {
@@ -66,9 +79,13 @@ type Entry struct {
 	Task protocol.Task `json:"task"`
 	// State 账本状态（accepted|started|finished）。
 	State EntryState `json:"state"`
+	// Origin 任务来源（local|hub）：回传过滤依据（方案 3.2）。空 = 旧版账本条目
+	// （origin 字段引入前落盘），一律视为 hub——老条目全部走 hub 回传链路，行为不变。
+	Origin Origin `json:"origin,omitempty"`
 	// Result 终态结果（state=finished 时非 nil）。
 	Result *protocol.TaskResult `json:"result,omitempty"`
-	// ResultAcked hub 已确认终态持久化（收到 result_ack 置位）。
+	// ResultAcked hub 已确认终态持久化（收到 result_ack 置位）。local 任务落终态
+	// 即自确认（结果消费方就是本机账本，落盘即送达；见 MarkFinished）。
 	ResultAcked bool `json:"result_acked"`
 	// FirstAckedAt 首次收到 result_ack 的时刻（UTC）。仅在未 acked→acked 迁移时写入一次，
 	// 重复 Ack 不更新：终态保留 24h 从首次确认起算，重复确认不重置窗口（SPEC 4.6）。
@@ -76,6 +93,14 @@ type Entry struct {
 	// Closed 重传终止标记（SPEC 4.5）：task_result 被 hub 拒收（result_conflict /
 	// expired 终态拒绝）后置位并持久化，停止重发；记录保留作冲突审计，不删除、不参与清理。
 	Closed bool `json:"closed"`
+}
+
+// normalized 归一 origin：空（旧版条目）视为 hub。
+func (e Entry) normalized() Entry {
+	if e.Origin == "" {
+		e.Origin = OriginHub
+	}
+	return e
 }
 
 // Clone 深拷贝条目（容器逐层复制），供先写后见事务构造新副本。
@@ -161,6 +186,8 @@ func open(dataDir string, inject func(string) error) (*Ledger, *Recovery, error)
 }
 
 // loadEntries 读取并解析账本；文件不存在视为空账本（首次启动）。
+// origin 逐条归一：旧版账本条目无 origin 字段，一律视为 hub（老条目继续走
+// hub 回传链路，行为不变）。
 func loadEntries(path string) (map[string]Entry, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -172,6 +199,9 @@ func loadEntries(path string) (map[string]Entry, error) {
 	entries := map[string]Entry{}
 	if err := json.Unmarshal(b, &entries); err != nil {
 		return nil, fmt.Errorf("ledger: 账本损坏 %s: %w", path, err)
+	}
+	for id, e := range entries {
+		entries[id] = e.normalized()
 	}
 	return entries, nil
 }
@@ -189,6 +219,13 @@ func (l *Ledger) Get(taskID string) (Entry, bool) {
 	return e.Clone(), ok
 }
 
+// OriginOf 查任务来源（快照读，零拷贝；发送堵点高频调用用此，勿用 Get）。
+// 任务不在账本返回 ""（调用方按非 local 处理——hub 链路迟到帧仍走回传语义）。
+func (l *Ledger) OriginOf(taskID string) Origin {
+	e := l.View()[taskID]
+	return e.Origin
+}
+
 // PendingResend 返回 finished、未 acked 且未 closed 的条目（重发队列；SPEC 4.5：每次重连
 // 成功后立即重发，此后每 60s 一次，直至 result_ack；收到 result_conflict / expired 拒绝后
 // 调用方 MarkResendClosed 置位，条目退出队列，不再重发）。
@@ -204,12 +241,19 @@ func (l *Ledger) PendingResend() []Entry {
 
 // Accept 将任务写入账本（state=accepted；调用方须待本方法成功后再发 task_ack，SPEC 4.7）。
 // 重复 task_id 返回 ErrDuplicate 且账本不变（重复 offer 只执行一次，SPEC 4.3 / DoD 8）。
+// origin 记 hub（task_offer 链路专用；本地直执行走 AcceptOrigin）。
 func (l *Ledger) Accept(t protocol.Task) error {
+	return l.AcceptOrigin(t, OriginHub)
+}
+
+// AcceptOrigin 按来源入账（方案 3.2 双路径）：Accept 的带 origin 变体。
+// 本地直执行记 OriginLocal，hub 下发记 OriginHub；重复 task_id 返回 ErrDuplicate。
+func (l *Ledger) AcceptOrigin(t protocol.Task, origin Origin) error {
 	return l.Update(func(m map[string]Entry) error {
 		if _, ok := m[t.ID]; ok {
 			return ErrDuplicate
 		}
-		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted}
+		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted, Origin: origin}
 		return nil
 	})
 }
@@ -235,6 +279,10 @@ func (l *Ledger) MarkStarted(taskID string) error {
 // （accepted 直达 finished 用于未 spawn 即失败的路径，如 policy_denied / expired）。
 // 调用方须待成功后再发 task_result（SPEC 4.7）；重复终态返回 ErrWrongState，
 // 由调用方按「以先到为准」的幂等语义处理（SPEC 4.3 收敛表）。
+//
+// local 来源条目落终态即自确认（ResultAcked=true，方案 3.2）：结果消费方就是
+// 本机账本，落盘即送达——不经 hub 确认，天然退出重发队列（切换组网后不成批
+// 推 hub），终态 24h 清理（CleanupAcked）同样按 first_acked_at 起算收敛。
 func (l *Ledger) MarkFinished(taskID string, res protocol.TaskResult) error {
 	return l.Update(func(m map[string]Entry) error {
 		e, ok := m[taskID]
@@ -248,7 +296,15 @@ func (l *Ledger) MarkFinished(taskID string, res protocol.TaskResult) error {
 		ne.State = StateFinished
 		r := res.Clone()
 		ne.Result = &r
-		ne.ResultAcked = false
+		if ne.Origin == "" {
+			ne.Origin = OriginHub // 防御：未归一条目按 hub 处理
+		}
+		if ne.Origin == OriginLocal {
+			ne.ResultAcked = true
+			ne.FirstAckedAt = protocol.NowUTC()
+		} else {
+			ne.ResultAcked = false
+		}
 		m[taskID] = ne
 		return nil
 	})
