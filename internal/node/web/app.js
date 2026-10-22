@@ -45,6 +45,8 @@ const S = {
   drawer: null,            // 打开的任务详情 {id, timer}
   f: { stage: 'idle', target: '', stdin: '', idem: newIdem(), message: '' },   // 派单表单状态机
   focusForm: false,
+  wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
+  primeNew: '',            // 总理凭证轮换后的新凭证（仅此一次展示），
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -131,10 +133,13 @@ async function tryToken(token) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务']];
+const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务'], ['wizard', '接入']];
+// setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
+const SETUP_PAGES = [['wizard', '接入向导'], ['overview', '本机环境']];
 function route() {
   const h = (location.hash || '#/overview').replace(/^#\//, '');
-  S.page = PAGES.some(p => p[0] === h) ? h : 'overview';
+  const allowed = S.authed && S.status?.mode === 'setup' ? SETUP_PAGES : PAGES;
+  S.page = allowed.some(p => p[0] === h) ? h : allowed[0][0];
   render();
 }
 window.addEventListener('hashchange', route);
@@ -158,11 +163,12 @@ function timeFull(iso) {
   return isNaN(d) ? esc(iso) : d.toLocaleString('zh-CN', { hour12: false });
 }
 
-/* ---------- 布局（shell + 侧栏导航） ---------- */
-function layout(content) {
+/* ---------- 布局（shell + 侧栏导航；setup 模式导航裁剪为向导+本机环境） ---------- */
+function layout(content, pages = (S.status?.mode === 'setup' ? SETUP_PAGES : PAGES)) {
   const online = S.status?.online;
+  const nums = ['①', '②', '③', '④'];
   return `<div class="shell"><aside><div class="workspace"><strong>${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
-  <nav>${PAGES.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${['①', '②', '③'][PAGES.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
+  <nav>${pages.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${nums[pages.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
   <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
   <main>${content}</main></div>`;
@@ -178,9 +184,15 @@ function render() {
     chip.className = 'badge ' + (S.status.online ? 'online' : 'offline');
     chip.textContent = S.status.online ? '中心端在线 · 重连 ' + S.status.epoch + ' 次' : 'hub 离线';
   }
-  $('#app').innerHTML = !S.authed ? gateView() : layout(
-    S.page === 'overview' ? overviewPage() : S.page === 'services' ? servicesPage() : tasksPage());
+  $('#app').innerHTML = !S.authed ? gateView() : layout(pageView());
   if (S.drawer) renderDrawer();
+}
+// pageView 按路由出页面（setup 模式下 route() 已把页面收敛到 SETUP_PAGES）。
+function pageView() {
+  if (S.page === 'wizard') return wizardPage();
+  if (S.page === 'services') return servicesPage();
+  if (S.page === 'tasks') return tasksPage();
+  return overviewPage();
 }
 function gateView() {
   return `<main><div class="card login"><div class="mark">⌘</div><h1>SwarmMind Node 本地控制台</h1>
@@ -188,6 +200,33 @@ function gateView() {
   <label>本机管理令牌<input id="gate-token" type="password" placeholder="local_token" autocomplete="off"></label>
   ${button('进入控制台', 'gate-enter', 'primary')}
   <p class="footer-note">仅本机回环可达；令牌只存本浏览器（localStorage），不出本机。</p></div></main>`;
+}
+
+/* ---------- 接入向导（方案 3.3：粘贴接入串 → 预览 node.yaml → 保存落盘重启；
+ * setup 模式的首启页，standalone/组网经「接入」页可重新接入/切换 hub） ---------- */
+function wizardPage() {
+  const w = S.wiz;
+  const locked = w.stage === 'previewing' || w.stage === 'saving' || w.stage === 'done';
+  const stageView = {
+    idle: '',
+    previewing: `<div class="statusline"><span class="badge offered">解析中…</span></div>`,
+    saving: `<div class="statusline"><span class="badge offered">保存中…</span></div>`,
+    done: `<div class="notice ok"><b>已写入 <code>${esc(w.written)}</code></b>：node 将在数秒后自动重启进入组网模式（保活拉起）。若为裸前台运行，请手动重启进程后刷新本页。</div>`,
+    failed: `<div class="notice warn"><b>保存失败</b>：${esc(w.msg)}</div>`,
+  }[w.stage] || '';
+  const preview = w.preview ? `<label>预览：将写入的 node.yaml（agents 段留空，接入后在网页/手编添加）<textarea readonly rows="12" class="mono">${esc(w.preview.yaml_preview)}</textarea></label>` : '';
+  return `<div class="page-head"><div><h1>接入中心端</h1>
+    <p class="muted">从 hub 控制台「接入向导 → 复制接入串」拿到 <code>swarmmind://join?…</code>，粘贴到下面完成接入（写入前可反复预览）。</p></div></div>
+  <section class="card">
+    <label>接入串<textarea id="wiz-join" rows="3" placeholder="swarmmind://join?hub=wss%3A%2F%2F…&node=…&token=…" ${locked ? 'disabled' : ''}>${esc(w.join)}</textarea></label>
+    <div class="row">
+      ${button(w.preview ? '重新预览' : '预览', 'wiz-preview', w.preview ? '' : 'primary', locked ? 'disabled' : '')}
+      ${w.preview && w.stage !== 'done' ? button('保存并重启', 'wiz-apply', 'primary', locked ? 'disabled' : '') : ''}
+    </div>
+    ${w.preview ? `<div class="notice ok"><b>识别结果</b>：hub <code>${esc(w.preview.hub_url)}</code> · 本机节点 <code>${esc(w.preview.node_id)}</code></div>` : ''}
+    ${preview}${stageView}
+    <p class="footer-note">本页与保存接口同样受本机管理令牌保护（data_dir/local_token）——免鉴权写配置等于把 agent 执行权交给任何本机进程。保存即写回启动时的配置路径，node 随后自动重启；本机历史任务不受影响。</p>
+  </section>`;
 }
 
 /* ---------- 页面①：总览（旅程③运维 + 三步引导空态） ---------- */
@@ -213,7 +252,21 @@ function overviewPage() {
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
   </div>
-  ${recentTasksCard()}`;
+  ${primeCard()}${recentTasksCard()}`;
+}
+/* 本机总理 + 形态管理（方案 3.1/3.2.1：总理明示与一键轮换；组网断开入口，矩阵 #9/#18） */
+function primeCard() {
+  const st = S.status;
+  const pa = st?.prime_agent || '';
+  const modeTxt = st?.mode === 'standalone' ? 'standalone（本机自治，不连 hub）'
+    : st?.mode === 'setup' ? 'setup（未接入）' : '组网在线';
+  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新总理凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；换总理三步：改 node.yaml prime_agent → 轮换 → 新总理配新凭证（SWARM_NODE_PRIME_TOKEN）。</small></div>` : '';
+  return `<section class="card"><div class="row"><h2>本机总理 · 形态</h2>
+    <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
+  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机总理</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>
+  <small class="muted">${pa ? '编排接口（本机派单）仅此总理可调；其余凭证只读。' : '尚未钦定总理：node.yaml 声明 prime_agent 并重启后编排接口才激活（当前恒 403）。'}</small>
+  <div class="row spaced">${button('轮换总理凭证', 'prime-rotate', 'link')}</div>${newTok}
+  <p class="footer-note">断开组网后：hub 信箱内未收任务将待过期；本机历史任务不受影响，本机派单照常可用。</p></section>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -353,6 +406,130 @@ async function submitForm() {
   render();
 }
 
+/* ---------- 接入向导 / 总理轮换 / 断开组网动作 ----------
+ * 端点契约（localapi，均 Bearer local_token）：POST /api/v1/local/setup/parse|apply|
+ * disconnect（setup.go）、POST /api/v1/local/prime/rotate（prime.go）。全部走 api()
+ * 封装与 toast 通道；向导失败信息在页内 stageView 呈现（可反复重试）。 */
+
+/* parseJoin 接入串前端先验（即时人话反馈）；后端 ParseJoinString 同源白名单复核
+ * （protocol/validate.go：node_id 2-32 位小写、token 64hex、hub_url ws(s)://）。 */
+function parseJoin(raw) {
+  const s = (raw || '').trim();
+  const PFX = 'swarmmind://join?';
+  if (!s.startsWith(PFX)) throw new Error('格式须为 swarmmind://join?hub=…&node=…&token=…（从 hub 控制台接入向导复制）');
+  const q = new URLSearchParams(s.slice(PFX.length));
+  const hub = q.get('hub'), node = q.get('node'), token = q.get('token');
+  if (!hub || !node || !token) throw new Error('hub / node / token 三个参数缺一不可');
+  if (!/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(node)) throw new Error('node_id 须为 2-32 位小写字母/数字/连字符');
+  if (!/^[0-9a-f]{64}$/.test(token)) throw new Error('token 须为 64 位十六进制');
+  if (!/^wss?:\/\/\S+$/.test(hub)) throw new Error('hub_url 须为可解析的 ws:// 或 wss:// 地址');
+  return { hub, node, token };
+}
+
+async function wizPreview() {
+  S.wiz.join = $('#wiz-join')?.value ?? S.wiz.join; // 粘贴后未触发 input 时的兜底同步
+  try {
+    parseJoin(S.wiz.join);
+  } catch (e) {
+    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = e.message; render(); return;
+  }
+  S.wiz.stage = 'previewing'; render();
+  try {
+    const r = await api('POST', '/api/v1/local/setup/parse', { join_string: S.wiz.join });
+    if (r.code === 200) {
+      S.wiz.preview = r.data; S.wiz.stage = 'idle';
+    } else {
+      S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = errLine(r.data);
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = e.network ? '本机 API 不可达' : '解析失败';
+  }
+  render();
+}
+
+async function wizApply() {
+  if (!S.wiz.preview) return;
+  S.wiz.join = $('#wiz-join')?.value ?? S.wiz.join;
+  let v;
+  try {
+    v = parseJoin(S.wiz.join);
+  } catch (e) {
+    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = e.message; render(); return;
+  }
+  // 预览后接入串被改过 → 作废预览，防「所见非所存」（后端仍会复核，这里管体验）
+  if (v.hub !== S.wiz.preview.hub_url || v.node !== S.wiz.preview.node_id) {
+    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = '接入串在预览后被修改，请重新预览'; render(); return;
+  }
+  if (!confirm('保存将写入 node.yaml 并重启 node 进入组网模式，确认保存？')) return;
+  S.wiz.stage = 'saving'; render();
+  try {
+    const r = await api('POST', '/api/v1/local/setup/apply', { join_string: S.wiz.join });
+    if (r.code === 200) {
+      S.wiz.stage = 'done'; S.wiz.written = r.data?.written || '';
+      toast('node.yaml 已写入，节点即将重启');
+      // 后端 1.5s 后退出重启（setupRestartDelay）+ 进程拉起窗口；主动补两刷，
+      // 错过由 5s 轮询兜底
+      setTimeout(() => { S.snap = ''; pollTick(); }, 6000);
+      setTimeout(() => { S.snap = ''; pollTick(); }, 12000);
+    } else {
+      S.wiz.stage = 'failed'; S.wiz.msg = errLine(r.data);
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    S.wiz.stage = 'failed';
+    S.wiz.msg = e.network ? '网络层失败，是否已写入不确定——勿重复提交，稍后刷新本页确认' : '保存失败';
+  }
+  render();
+}
+
+async function primeRotate(btn) {
+  if (!confirm('轮换总理凭证？旧凭证将立即失效，总理的 MCP 连接需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
+  if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
+  try {
+    const r = await api('POST', '/api/v1/local/prime/rotate');
+    if (r.code === 200) {
+      S.primeNew = r.data?.prime_token || '';
+      toast('已轮换 · 新凭证仅此一次展示，请立即复制');
+    } else {
+      toast('轮换失败 · ' + errLine(r.data));
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    toast(e.network ? '本机 API 不可达' : '轮换失败');
+  }
+  render();
+  if (btn && document.contains(btn)) btn.disabled = false;
+}
+
+async function netDisconnect(btn) {
+  if (!confirm('断开组网并重启进入 standalone（本机自治）？\n\nhub 信箱内未收任务将留在 hub 待过期；本机历史任务不受影响，本机派单照常可用。')) return;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/v1/local/setup/disconnect');
+    if (r.code === 200) {
+      toast(r.data?.note || '已清空 hub_url，node 即将重启进入 standalone');
+      setTimeout(() => { S.snap = ''; pollTick(); }, 6000);
+      setTimeout(() => { S.snap = ''; pollTick(); }, 12000);
+    } else {
+      toast('断开失败 · ' + errLine(r.data));
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    toast(e.network ? '本机 API 不可达' : '断开失败');
+  }
+  if (btn && document.contains(btn)) btn.disabled = false;
+}
+
+async function copyPrimeToken() {
+  try {
+    await navigator.clipboard.writeText(S.primeNew);
+    toast('新总理凭证已复制 · 旧凭证已失效，请立即配给总理的 MCP 连接');
+  } catch (e) {
+    toast('复制失败——浏览器未授权剪贴板');
+  }
+}
+
 /* ---------- 任务详情抽屉 ---------- */
 async function openDrawer(taskID) {
   closeDrawer();
@@ -437,6 +614,11 @@ document.addEventListener('click', e => {
       case 'go-services': location.hash = '#/services'; return;
       case 'focus-form': focusForm(); return;
       case 'copy-diag': copyDiagnostics(); return;
+      case 'wiz-preview': wizPreview(); return;
+      case 'wiz-apply': wizApply(); return;
+      case 'prime-rotate': primeRotate(btn); return;
+      case 'net-disconnect': netDisconnect(btn); return;
+      case 'copy-prime-token': copyPrimeToken(); return;
       case 'logout':
         localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = ''; render(); return;
       case 'expose-on': case 'expose-off': setExposed(arg, act === 'expose-on', btn); return;
@@ -461,6 +643,7 @@ document.addEventListener('click', e => {
 document.addEventListener('input', e => {
   if (e.target.id === 'f-target') { S.f.target = e.target.value; render(); }
   if (e.target.id === 'f-stdin') S.f.stdin = e.target.value;
+  if (e.target.id === 'wiz-join') S.wiz.join = e.target.value;
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());

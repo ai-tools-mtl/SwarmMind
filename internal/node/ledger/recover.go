@@ -65,7 +65,16 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 					ne := e.Clone()
 					ne.State = StateFinished
 					ne.Result = down
-					ne.ResultAcked = false
+					if e.normalized().Origin == OriginLocal {
+						// local 条目恢复降级为终态时本机消费即送达（返工 #6）：
+						// ResultAcked=true + FirstAckedAt=now，不进重发队列——
+						// 否则 standalone 期滞留，切换组网后成批推 hub 换 task_not_found
+						// 噪音（hub 下发条目保持未 acked，重发链路不变）。
+						ne.ResultAcked = true
+						ne.FirstAckedAt = now
+					} else {
+						ne.ResultAcked = false
+					}
 					m[id] = ne
 				}
 			}

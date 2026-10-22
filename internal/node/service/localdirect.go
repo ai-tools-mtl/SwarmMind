@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -32,16 +33,18 @@ func (e *RemoteError) Error() string {
 }
 
 // SubmitLocalDirect 本地直执行提交（localapi POST /api/v1/tasks 数据面）：
-// 校验 → 幂等查重（本地账本，origin=local 作用域）→ 本地构造任务入账 →
-// 交本地调度执行。成功返回 SubmitAck 同型载荷（Dup=true 表示幂等命中原任务）。
+// 校验 → 本地构造任务 → 幂等查重+入账（同一账本事务内，返工 #3）→ 交本地调度
+// 执行。成功返回 SubmitAck 同型载荷（Dup=true 表示幂等命中原任务）。
 //
 // 校验链（对齐 hub 提交链语义，边界锁沿用裁剪方案 D8）：
 //  1. 目标字段非空（target_node 非本机已在 localapi 拒绝，不经此）；
 //  2. 目标 agent 必须在本机配置（Runners）——非本机 agent 拒绝（D8 校验语义）；
 //     已配置但 exposed=false 不拦：exposed 是对 hub 准入的开关，本机主人派单
 //     不受其约束（主权在本机）；
-//  3. 幂等键查重：同键同内容 → dup 返回原任务；同键仅群引用不同 → 新任务
-//     （与 hub 批 B 口径一致）；同键其余内容不同 → conflict；
+//  3. 幂等查重与入账原子化（账本 AcceptOriginIdempotent，单写事务内重检三态）：
+//     同键同内容 → dup 返回原任务；同键仅群引用不同 → 新任务（与 hub 批 B 口径
+//     一致）；同键其余内容不同 → conflict。查重不在事务外预扫——并发同键提交
+//     在写 goroutine 串行域内收敛，恰有一个新任务，其余 dup/conflict；
 //  4. 入账（origin=local）成功后才执行（账本为准，先写后见）。
 func (s *Service) SubmitLocalDirect(req protocol.TaskSubmitRequest) (*protocol.SubmitAckPayload, error) {
 	// 1. 目标字段存在
@@ -53,15 +56,7 @@ func (s *Service) SubmitLocalDirect(req protocol.TaskSubmitRequest) (*protocol.S
 		return nil, &RemoteError{Code: protocol.CodeAgentNotFound,
 			Msg: fmt.Sprintf("agent %q 不在本机配置中（本地派单目标只能本机 agent；配置漂移请更新 node.yaml）", req.TargetAgent)}
 	}
-	// 3. 幂等查重（本地账本 origin=local 作用域）
-	if req.IdemKey != "" {
-		if ack, err := s.localIdemLookup(req); err != nil {
-			return nil, err
-		} else if ack != nil {
-			return ack, nil
-		}
-	}
-	// 4. 本地构造任务并入账（镜像 hub newTask：ID/时间本机生成，ExpireAt=+7d）
+	// 3. 本地构造任务（镜像 hub newTask：ID/时间本机生成，ExpireAt=+7d）
 	now := protocol.NowUTC()
 	task := protocol.Task{
 		ID:          protocol.NewTaskID(),
@@ -77,41 +72,45 @@ func (s *Service) SubmitLocalDirect(req protocol.TaskSubmitRequest) (*protocol.S
 		UpdatedAt:   now,
 		ExpireAt:    now.Add(protocol.TaskRetention),
 	}
-	if err := s.cfg.Ledger.AcceptOrigin(task, ledger.OriginLocal); err != nil {
+	// 4. 幂等查重+入账（同一账本事务，TOCTOU 消除——返工 #3）
+	if req.IdemKey != "" {
+		want, wantBase := localContentHash(req), localBaseContentHash(req)
+		dupTask, dup, err := s.cfg.Ledger.AcceptOriginIdempotent(task, ledger.OriginLocal, req.IdemKey,
+			func(existing protocol.Task) ledger.IdemMatch {
+				er := storedRequest(existing)
+				switch {
+				case localContentHash(er) == want:
+					return ledger.IdemExact
+				case localBaseContentHash(er) == wantBase:
+					return ledger.IdemOtherGroup // 仅群引用不同（换群重试）→ 新任务
+				default:
+					return ledger.IdemDifferent
+				}
+			})
+		if errors.Is(err, ledger.ErrIdemConflict) {
+			return nil, &RemoteError{Code: "conflict",
+				Msg: fmt.Sprintf("幂等键 %q 已被内容不同的本机任务占用（同键不同内容）", req.IdemKey)}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("本地入账失败: %w", err)
+		}
+		if dup {
+			return &protocol.SubmitAckPayload{TaskID: dupTask.ID, TraceID: dupTask.TraceID, Dup: true}, nil
+		}
+	} else if err := s.cfg.Ledger.AcceptOrigin(task, ledger.OriginLocal); err != nil {
 		return nil, fmt.Errorf("本地入账失败: %w", err)
 	}
 	s.execute(task)
 	return &protocol.SubmitAckPayload{TaskID: task.ID, TraceID: task.TraceID}, nil
 }
 
-// localIdemLookup 本地幂等查重：扫描账本 origin=local 条目中同 IdemKey 者。
-// 命中同键同内容 → dup ack；同键仅群引用不同 → 新任务（nil, nil）；同键内容
-// 不同 → conflict。指纹口径镜像 hub mailbox.ContentHash（四要素+群引用），
-// 但作用域独立（本地账本），跨端不要求逐字节一致。
-func (s *Service) localIdemLookup(req protocol.TaskSubmitRequest) (*protocol.SubmitAckPayload, error) {
-	want := localContentHash(req)
-	wantBase := localBaseContentHash(req)
-	for _, e := range s.cfg.Ledger.View() {
-		if e.Origin != ledger.OriginLocal || e.Task.IdemKey != req.IdemKey {
-			continue
-		}
-		t := e.Task
-		if localContentHash(protocol.TaskSubmitRequest{
-			TargetNode: t.TargetNode, TargetAgent: t.TargetAgent,
-			Input: t.Input, SubmittedBy: t.SubmittedBy, GroupRef: t.GroupRef,
-		}) == want {
-			return &protocol.SubmitAckPayload{TaskID: t.ID, TraceID: t.TraceID, Dup: true}, nil
-		}
-		if localBaseContentHash(protocol.TaskSubmitRequest{
-			TargetNode: t.TargetNode, TargetAgent: t.TargetAgent,
-			Input: t.Input, SubmittedBy: t.SubmittedBy,
-		}) == wantBase {
-			continue // 仅群引用不同（换群重试）：不 dup 不冲突，落为新任务
-		}
-		return nil, &RemoteError{Code: "conflict",
-			Msg: fmt.Sprintf("幂等键 %q 已被内容不同的本机任务占用（同键不同内容）", req.IdemKey)}
+// storedRequest 由账本条目任务还原提交请求视图（幂等指纹比对用；字段与
+// localContent/localGroupContent 指纹载体严格对应）。
+func storedRequest(t protocol.Task) protocol.TaskSubmitRequest {
+	return protocol.TaskSubmitRequest{
+		TargetNode: t.TargetNode, TargetAgent: t.TargetAgent,
+		Input: t.Input, SubmittedBy: t.SubmittedBy, GroupRef: t.GroupRef,
 	}
-	return nil, nil
 }
 
 // localContent 全量指纹载体（字段与 json tag 与 protocol 严格一致，指纹跨版本稳定）。

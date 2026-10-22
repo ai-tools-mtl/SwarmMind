@@ -128,6 +128,56 @@ func TestLedgerRecoveryFinishedUnacked(t *testing.T) {
 	}
 }
 
+// TestLedgerRecoveryOriginLocalSelfAck origin 自确认分化（返工 #6 收口）：
+// started + origin=local 重启恢复降级 needs_review 即自确认（ResultAcked=true +
+// FirstAckedAt 落值，不进 Resend——本机消费即送达）；origin=hub 同场景保持未
+// acked 并进 Resend（重发链路回传 hub，SPEC 4.8「并回传」不变）。
+func TestLedgerRecoveryOriginLocalSelfAck(t *testing.T) {
+	dir := t.TempDir()
+	now := protocol.NowUTC()
+	seedLedger(t, dir, func(l *Ledger) {
+		local := sampleTask("t-local", now.Add(time.Hour))
+		if err := l.AcceptOrigin(local, OriginLocal); err != nil {
+			t.Fatalf("seed local AcceptOrigin: %v", err)
+		}
+		if err := l.MarkStarted("t-local"); err != nil {
+			t.Fatalf("seed local MarkStarted: %v", err)
+		}
+		hub := sampleTask("t-hub", now.Add(time.Hour))
+		if err := l.AcceptOrigin(hub, OriginHub); err != nil {
+			t.Fatalf("seed hub AcceptOrigin: %v", err)
+		}
+		if err := l.MarkStarted("t-hub"); err != nil {
+			t.Fatalf("seed hub MarkStarted: %v", err)
+		}
+	})
+
+	l, rec := mustOpen(t, dir)
+	eLocal, ok := l.Get("t-local")
+	if !ok || eLocal.State != StateFinished || eLocal.Result == nil ||
+		eLocal.Result.Status != protocol.ResultNeedsReview ||
+		eLocal.Result.Error != protocol.CodeNodeRestartedMidway {
+		t.Fatalf("local 条目应降级 needs_review: ok=%v %+v", ok, eLocal)
+	}
+	if !eLocal.ResultAcked {
+		t.Error("origin=local 降级终态应自确认（ResultAcked=true，本机消费即送达）")
+	}
+	if eLocal.FirstAckedAt.IsZero() {
+		t.Error("自确认应落 FirstAckedAt（24h 清理起算点）")
+	}
+	eHub, ok := l.Get("t-hub")
+	if !ok || eHub.State != StateFinished || eHub.Result == nil ||
+		eHub.Result.Status != protocol.ResultNeedsReview {
+		t.Fatalf("hub 条目应降级 needs_review: ok=%v %+v", ok, eHub)
+	}
+	if eHub.ResultAcked {
+		t.Error("origin=hub 降级终态应保持未 acked（走重发链路回传 hub）")
+	}
+	if len(rec.Resend) != 1 || rec.Resend[0].Task.ID != "t-hub" {
+		t.Fatalf("Resend 应仅含 origin=hub 条目 t-hub: %+v", rec.Resend)
+	}
+}
+
 // TestLedgerRecoveryMixed 多任务混合状态恢复：各态互不干扰（三态覆盖的合并场景）。
 func TestLedgerRecoveryMixed(t *testing.T) {
 	dir := t.TempDir()

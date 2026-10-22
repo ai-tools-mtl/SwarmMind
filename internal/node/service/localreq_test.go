@@ -51,6 +51,19 @@ func (r *recorder) reset() {
 	r.frames = nil
 }
 
+// count 指定类型帧的条数（出站批量断言「恰 N 条」用）。
+func (r *recorder) count(typ string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, e := range r.frames {
+		if e.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
 // newLocalFixture 真 hub（core）+ node service 全链基座（membus 同步）。
 // 返回 artRoot 为 ArtifactRoots["echo"] 的产物根目录（测试写产物文件用）。
 func newLocalFixture(t *testing.T) (*core.Core, *Service, *ledger.Ledger, *recorder, *transport.Endpoint, string) {
