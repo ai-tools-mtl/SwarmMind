@@ -182,9 +182,12 @@ async function loadAll() {
     api('GET', '/api/v1/tasks'),
     api('GET', '/api/v1/directory'),
   ]);
-  const nodes = n.data?.nodes || [];
+  /* 后端 ListNodes/ListDirectory 按 Go map 遍历序返回（每次调用都不同），先归一化
+   * 再存状态：① 渲染位置稳定（sortNodesStable 注释）；② snap 只反映真实数据变化，
+   * 否则顺序抖动会让 changed 永真、每 5s 无谓整页重绘（闪烁观感同源）。 */
+  const nodes = sortNodesStable(n.data?.nodes || []);
   const tasks = (t.data?.tasks || []).slice().sort(byCreatedDesc);
-  const directory = d.data?.directory || [];
+  const directory = sortDirectoryStable(d.data?.directory || []);
   const snap = JSON.stringify([nodes, tasks, directory]);
   const changed = snap !== S.snap;
   S.nodes = nodes; S.tasks = tasks; S.directory = directory; S.snap = snap;
@@ -197,6 +200,21 @@ function byCreatedDesc(a, b) {
 function byGroupCreatedDesc(a, b) {
   const x = a.created_at || '', y = b.created_at || '';
   return x < y ? 1 : x > y ? -1 : (a.group_id < b.group_id ? -1 : 1);
+}
+/* sortNodesStable 全站唯一节点排序（2026-10-22 伦哥反馈：节点页两台机器每次轮询
+ * 位置互换像 BUG）。根因：hub ListNodes/ListDirectory 遍历 Go map 返回序随机，
+ * 前端又拿原始序渲染。规则：在线在前、离线在后（分组），组内按 node_id 字母序
+ * 固定排——排序键只用这两个稳定字段，轮询重绘位置永不互换（上/下线跨组除外）；
+ * epoch/inflight 等活跃字段只进颜色与徽章，不进排序键。节点页表格 / 总览离线
+ * 名单 / 派单机器下拉 / 建群分组树统一走本函数。node_id 全网唯一，比较为全序。 */
+function sortNodesStable(list = S.nodes) {
+  return list.slice().sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (a.node_id < b.node_id ? -1 : 1));
+}
+/* sortDirectoryStable 目录条目排序（node_id → card.name）：loadAll 归一化用——
+ * 目录序随 map 遍历抖动会让行内能力徽章换位、snap 快照永远不同，整页每 5s 重绘。 */
+function sortDirectoryStable(list) {
+  return list.slice().sort((a, b) => a.node_id < b.node_id ? -1 : a.node_id > b.node_id ? 1
+    : (a.card?.name || '') < (b.card?.name || '') ? -1 : 1);
 }
 /* ---------- 群聊数据加载（GROUP-RFC 六）：进群聊页时拉取（同 tokens 页模式） ---------- */
 async function loadGroups() {
@@ -429,7 +447,7 @@ function overviewPage() {
   const c = stateCounts();
   const online = S.nodes.filter(n => n.online).length;
   const nr = c.needs_review || 0;
-  const offline = S.nodes.filter(n => !n.online);
+  const offline = sortNodesStable(S.nodes.filter(n => !n.online));
   const statChips = [''].concat(Object.keys(STATES)).map(s => s
     ? `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}">${badge(s)} ${c[s] || 0}</button>`
     : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('');
@@ -466,7 +484,7 @@ function nodesPage() {
   return head('节点接入', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('生成接入配置', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
     ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
-    ${S.nodes.map(n => {
+    ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
       return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(d => {
       const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
@@ -974,9 +992,9 @@ function controlPage() {
  * 无开放能力（not_exposed）的机器禁选并在选项上注明原因。
  * 宽屏化（2026-10-22 伦哥定）：两级下拉包 .form-grid 成对并排、成员树两列流式
  * （<720px 均回纵向单列）——只动布局，选择联动行为不变。 */
-/* dispatchNodes 机器数据源：在线优先置顶，同组内按 node_id 稳定排序。 */
+/* dispatchNodes 机器数据源：统一走 sortNodesStable（在线在前，组内 node_id 字母序）。 */
 function dispatchNodes() {
-  return S.nodes.slice().sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (a.node_id < b.node_id ? -1 : 1));
+  return sortNodesStable();
 }
 /* pickerNodeOptions 两级下拉 · 机器选项；selected 为当前选中机器（整页重绘后恢复）。 */
 function pickerNodeOptions(selected) {
@@ -1019,13 +1037,15 @@ function updatePickerSummary(prefix) {
 function agentPickerHtml(opts = {}) {
   const ids = esc(opts.ids || '');
   if (opts.multi) {
-    /* 分组树：按目录中出现的机器分组，含离线机器（建群只是选成员，不在此时派发）。 */
-    const nodes = [...new Set(S.directory.map(d => d.node_id))];
+    /* 分组树：按目录中出现的机器分组，含离线机器（建群只是选成员，不在此时派发）；
+     * 组序统一 sortNodesStable（在线在前、组内 node_id 字母序），不再随目录返回序漂移。 */
+    const capNodes = new Set(S.directory.map(d => d.node_id));
+    const nodes = sortNodesStable(S.nodes.filter(n => capNodes.has(n.node_id)));
     return `<div id="${ids}-picker" data-picker-multi data-picker-prefix="${ids}">
-    <div class="picker-grid">${nodes.map(nid => {
-      const n = S.nodes.find(x => x.node_id === nid);
+    <div class="picker-grid">${nodes.map(n => {
+      const nid = n.node_id;
       return `<div class="picker-group">
-      <div class="picker-group-head"><b>${esc(nid)}</b>${n?.online ? onlineB(n) : '<span class="badge offline">离线</span>'}</div>
+      <div class="picker-group-head"><b>${esc(nid)}</b>${n.online ? onlineB(n) : '<span class="badge offline">离线</span>'}</div>
       ${S.directory.filter(d => d.node_id === nid).map(d => `<label class="checkline"><input type="checkbox" data-picker-agent="${esc(nid + '/' + d.card.name)}"><span>${esc(d.card.name)}</span><small class="muted">${esc(d.card.description || '（无描述）')}</small></label>`).join('')}
       </div>`;
     }).join('')}</div>
