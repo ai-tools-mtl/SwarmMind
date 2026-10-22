@@ -648,3 +648,127 @@ func TestReloadAndPutConfigConcurrentNoClobber(t *testing.T) {
 		t.Fatalf("终态表应与最后一次成功 PUT 的提交表完全一致（reload 以旧表覆盖回盘）:\n got %+v\nwant %+v\n%s", doc, want, b)
 	}
 }
+
+// TestGetConfigServesDiskTableWhilePending（第六轮修复 1）：PUT 结构性变更进入
+// 待应用窗口后，GET /api/v1/local/config 必须回盘上 node.yaml 的新表（用户最新
+// 提交的真相源）并标 pending=true——原实现恒回运行时旧基线，前端刷新拿到旧表
+// 再保存即把盘上新表覆盖回旧值（丢提交）。读盘失败（文件损坏）回退运行时基线
+//（pending=false，pending_restart 仍如实为真）。
+func TestGetConfigServesDiskTableWhilePending(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "node.yaml")
+	workdir := filepath.Join(dir, "work")
+	initial := `node_id: nodeA
+agents:
+  - name: alpha
+    command: /bin/echo
+    workdir: ` + workdir + `
+`
+	if err := writeConfigFile(cfgPath, initial); err != nil {
+		t.Fatal(err)
+	}
+	st := newState(t, t.TempDir(), []protocol.ExecProfile{{
+		Name: "alpha", Kind: protocol.AgentKindCLI, Command: "/bin/echo", Workdir: workdir, Exposed: true,
+	}})
+	ops := &ConfigOps{
+		ConfigPath: cfgPath, Supervised: true,
+		ReloadExecutors: func([]protocol.ExecProfile) error { return nil },
+	}
+	svc := New(Config{NodeID: "nodeA", Mode: ModeStandalone, Agents: st, LocalToken: "tok-local", ConfigOps: ops})
+	srv := httptest.NewServer(svc.Handler())
+	t.Cleanup(srv.Close)
+
+	get := func(t *testing.T) map[string]any {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/local/config", nil)
+		req.Header.Set("Authorization", "Bearer tok-local")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET config 应 200, got %d", resp.StatusCode)
+		}
+		var out map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			t.Fatalf("GET 应答须为 JSON: %v", err)
+		}
+		return out
+	}
+	agentNames := func(t *testing.T, out map[string]any) []string {
+		t.Helper()
+		raw, _ := json.Marshal(out["agents"])
+		var ps []AgentProfile
+		if err := json.Unmarshal(raw, &ps); err != nil {
+			t.Fatalf("agents 解码失败: %v (%s)", err, raw)
+		}
+		names := make([]string, 0, len(ps))
+		for _, p := range ps {
+			names = append(names, p.Name)
+		}
+		return names
+	}
+
+	// 基线：非 pending 回运行时基线（= 盘上旧表），pending=false
+	out := get(t)
+	if names := agentNames(t, out); len(names) != 1 || names[0] != "alpha" {
+		t.Fatalf("非 pending 应回运行时基线 [alpha], got %v (%v)", names, out)
+	}
+	if out["pending"] != false || out["pending_restart"] != false {
+		t.Fatalf("基线态 pending/pending_restart 均应 false: %v", out)
+	}
+
+	// PUT 追加 beta（结构性变更）：应答 pending_restart=true；盘上已是 alpha+beta，
+	// 运行时基线仍 [alpha]
+	putBody, _ := json.Marshal(configPutRequest{Agents: []AgentProfile{
+		{Name: "alpha", Kind: "cli", Command: "/bin/echo", Workdir: workdir, TimeoutSec: 60},
+		{Name: "beta", Kind: "cli", Command: "/bin/echo", Workdir: workdir, TimeoutSec: 60},
+	}})
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/v1/local/config", strings.NewReader(string(putBody)))
+	req.Header.Set("Authorization", "Bearer tok-local")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var putOut struct {
+		PendingRestart bool `json:"pending_restart"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&putOut); err != nil {
+		t.Fatalf("PUT 应答须为 JSON: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !putOut.PendingRestart {
+		t.Fatalf("结构性 PUT 应 200 + pending_restart=true, got %d %+v", resp.StatusCode, putOut)
+	}
+
+	// 待应用窗口期 GET（模拟前端刷新）：必须回盘上新表 [alpha beta] 且 pending=true
+	out = get(t)
+	if out["pending"] != true || out["pending_restart"] != true {
+		t.Fatalf("pending 窗口期 GET 应标 pending=true 且 pending_restart=true: %v", out)
+	}
+	if names := agentNames(t, out); len(names) != 2 || names[0] != "alpha" || names[1] != "beta" {
+		t.Fatalf("pending 窗口期 GET 应回盘上新表 [alpha beta]（防刷新丢提交）, got %v", names)
+	}
+
+	// 读盘失败回退：盘上文件破坏为非法 yaml → GET 回运行时基线、pending=false
+	//（pending_restart 状态字段仍如实为真）
+	if err := os.WriteFile(cfgPath, []byte("agents: [unclosed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out = get(t)
+	if out["pending"] != false || out["pending_restart"] != true {
+		t.Fatalf("读盘失败应回退运行时口径（pending=false、pending_restart=true）: %v", out)
+	}
+	if names := agentNames(t, out); len(names) != 1 || names[0] != "alpha" {
+		t.Fatalf("读盘失败应回运行时基线 [alpha], got %v", names)
+	}
+
+	// 重启收敛（模拟标志复位）：GET 回运行时口径且 pending_restart=false
+	svc.setPendingRestart(false)
+	out = get(t)
+	if out["pending"] != false || out["pending_restart"] != false {
+		t.Fatalf("标志复位后应回运行时口径: %v", out)
+	}
+}

@@ -503,12 +503,37 @@ function nodesPage() {
  * 状态存模块级 ENROLL，弹层内重开重渲染、不动页面路由；5s 全局轮询只重绘 #app
  * 不碰 #layer，向导 DOM 不会被轮询打断。令牌只存内存、关闭弹层即失——重开重新
  * 生成（openSSL 等价：32 字节 crypto.getRandomValues → 64 位 hex）。 */
-let ENROLL = null;   // { step, id, token, tokenFor, mode, plat, os, bundleDone, bundleRetried, t0, timer }
+let ENROLL = null;   // { step, id, token, tokenFor, hubUrl, hubTouched, mode, plat, os, bundleDone, bundleRetried, t0, timer }
 function enrollModal() {
-  ENROLL = { step: 1, id: '', token: '', tokenFor: '', mode: 'bundle', plat: 'linux-amd64', os: 'linux', bundleDone: null, bundleRetried: false, t0: 0, timer: null };
+  ENROLL = { step: 1, id: '', token: '', tokenFor: '', hubUrl: '', hubTouched: false, mode: 'bundle', plat: 'linux-amd64', os: 'linux', bundleDone: null, bundleRetried: false, t0: 0, timer: null };
   enrollBundleBusy = false;   // 上一会话若停在 503 重试等待期，忙标志随新会话作废
   openLayerPlain(enrollHtml());
   $('#enroll-id')?.focus();
+  enrollFetchHubUrl();
+}
+/* 第六轮修复 2：hub_url 真相源在后端——节点接入入口（node_listen，如 :64310）与
+ * 管理台（api_listen，如 :64309）是两个端口，前端按控制台地址推导接入地址必错，
+ * 生成的接入串/部署包/手动配置全部连不上。弹层打开即取 GET /api/v1/nodes/enroll-info
+ * 预填（用户到 Step3 前通常已返回）；后端未装配（503，旧 hub）或网络失败回落旧
+ * 推导 enrollHubUrl()，向导仍可用。用户手改后 hubTouched 锁定，迟到应答不覆盖。 */
+async function enrollFetchHubUrl() {
+  const r = await api('GET', '/api/v1/nodes/enroll-info').catch(() => null);
+  const url = r && r.code === 200 ? (r.data?.node_ws_url || '') : '';
+  if (!url || !ENROLL || ENROLL.hubTouched) return;
+  ENROLL.hubUrl = url;
+  const inp = $('#enroll-hub-url');
+  if (inp) {
+    inp.value = url;   // 用户已到 Step3 且未手改：就地更新预填值
+    const paneEl = document.getElementById('enroll-pane');
+    if (paneEl && ENROLL.step === 3) {
+      paneEl.innerHTML = enrollModeCards()
+        + (ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane());
+    }
+  }
+}
+/* enrollUrlOrDefault 接入地址现行值：用户编辑值 > 后端预填值 > 本地推导（兜底）。 */
+function enrollUrlOrDefault() {
+  return ENROLL?.hubUrl || enrollHubUrl();
 }
 function enrollGo(step) {
   if (!ENROLL) return;
@@ -592,16 +617,18 @@ function enrollStep2() {
 /* Windows 暂撤（2026-10-22 双审决断：安装链路未经真实机验证，enroll 后端已拒
  * os=windows）；ENROLL_OS/ENROLL_START 的 windows 项一并撤下，后端开放时同步恢复。 */
 const ENROLL_OS = { linux: 'Linux', macos: 'macOS' };
-/* hub_url 从会话上下文自动推导：控制台与节点接入同端口，http(s) 页面 → ws(s)。
- * 注：node.yaml 实际字段为 local_listen（cmd/node/main.go）——旧弹层写的
- * api_listen 是 yaml 解码会静默忽略的错名，本向导一并纠正。 */
+/* hub_url 兜底推导（第六轮修复 2 后降级为后备）：仅当后端未提供真实接入地址
+ * （旧 hub 503 / 网络失败）时使用——按控制台地址推导在管理台与节点接入分端口
+ * 部署下必错，正常路径一律以后端 enroll-info 预填为准。注：node.yaml 实际字段为
+ * local_listen（cmd/node/main.go）——旧弹层写的 api_listen 是 yaml 解码会静默
+ * 忽略的错名，本向导一并纠正。 */
 function enrollHubUrl() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   return `${proto}://${location.host || '127.0.0.1:8443'}/ws/node`;
 }
 function enrollNodeYaml() {
   return `node_id: ${ENROLL.id}
-hub_url: ${enrollHubUrl()}
+hub_url: ${enrollUrlOrDefault()}
 register_token: ${ENROLL.token}
 hub_pubkey_fp: ""            # 留空 = 首次连接自动记录 hub 证书指纹（防中间人）
 local_listen: 127.0.0.1:8445
@@ -678,7 +705,7 @@ function enrollManualPane() {
   const os = ENROLL.os in ENROLL_OS ? ENROLL.os : 'linux';
   const rows = [
     [`node_id: ${ENROLL.id}`, '第一步起的节点身份，会显示在节点列表'],
-    [`hub_url: ${enrollHubUrl()}`, 'hub 的连接地址（内网用 ws://，公网建议配证书后用 wss://）· 已按当前控制台地址自动填好'],
+    [`hub_url: ${enrollUrlOrDefault()}`, 'hub 的连接地址（内网用 ws://，公网建议配证书后用 wss://）· 已按节点接入入口自动填好，可在上方面板手改'],
     [`register_token: ${ENROLL.token}`, '第二步生成的令牌，证明这台机器被允许接入'],
     ['hub_pubkey_fp: ""', 'hub 证书指纹，留空则首次连接自动记录（防中间人劫持）'],
     ['local_listen: 127.0.0.1:8445', '本机管理端口，只给本机工具用，默认即可'],
@@ -702,13 +729,15 @@ function enrollManualPane() {
  * 值 encodeURIComponent（node 侧 URLSearchParams 解码，protocol.ParseJoinString
  * 同源校验）；token 64 位 hex 天然 URL 安全，无需编码。 */
 function enrollJoinString() {
-  return `swarmmind://join?hub=${encodeURIComponent(enrollHubUrl())}&node=${encodeURIComponent(ENROLL.id)}&token=${ENROLL.token}`;
+  return `swarmmind://join?hub=${encodeURIComponent(enrollUrlOrDefault())}&node=${encodeURIComponent(ENROLL.id)}&token=${ENROLL.token}`;
 }
 function enrollStep3() {
   const pane = ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane();
   return `<div class="notice">目标机器已装 SwarmMind node？复制接入串，到它的本机控制台（<code>http://127.0.0.1:8445</code>）「接入中心端」粘贴、预览、保存即完成接入——无需下载部署包。</div>
+  <label class="spaced">hub 接入地址（node.yaml 的 hub_url；已按 hub 节点接入入口自动填好，跨机访问或改过端口时可手改，接入串 / node.yaml / 部署包同步使用此值）
+  <input id="enroll-hub-url" value="${esc(enrollUrlOrDefault())}" autocomplete="off" spellcheck="false"></label>
   <div class="row spaced">${button('复制接入串', 'enroll-copy-join', 'primary')}<small class="muted">网页化接入（推荐先试）；串内含这台机器的接入令牌，请勿外传。</small></div>
-  ${enrollModeCards()}${pane}
+  <div id="enroll-pane">${enrollModeCards()}${pane}</div>
   <div class="actions spaced">${button('下一步', 'enroll-next3', 'primary')}</div>`;
 }
 /* ---- Step3 部署包下载：POST /api/v1/nodes/enroll-bundle → zip blob 落地 ---- */
@@ -744,7 +773,7 @@ async function enrollBundleDownload() {
     const resp = await fetch('/api/v1/nodes/enroll-bundle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ node_id: ENROLL.id, register_token: ENROLL.token, hub_url: enrollHubUrl(), os, arch, mode }),
+      body: JSON.stringify({ node_id: ENROLL.id, register_token: ENROLL.token, hub_url: enrollUrlOrDefault(), os, arch, mode }),
       credentials: 'same-origin',
     });
     if (stale()) return;   // 旧会话响应：丢弃（新会话已重置忙标志与按钮）
@@ -1821,6 +1850,19 @@ function bindEvents() {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; preserveFocus(() => render()); return; }
     if (e.target.id === 'enroll-id') enrollValidateId();
+    if (e.target.id === 'enroll-hub-url') {
+      if (ENROLL) {
+        ENROLL.hubUrl = e.target.value.trim(); ENROLL.hubTouched = true;
+        // 第六轮收尾：就地刷新 Step3 的地址消费点（接入串/node.yaml 预览/手动面板），
+        // 不重开弹层（保输入焦点）。重开式同步（enrollGo(3)）会丢焦点，弃用。
+        const paneEl = document.getElementById('enroll-pane');
+        if (paneEl && ENROLL.step === 3) {
+          paneEl.innerHTML = enrollModeCards()
+            + (ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane());
+        }
+      }
+      return;
+    }
     if (e.target.id === 'ctrl-stdin') S.C.stdin = e.target.value;
   });
   document.addEventListener('change', e => {

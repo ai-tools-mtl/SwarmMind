@@ -51,6 +51,20 @@ type Config struct {
 	// Enroll 节点部署包编译参数（POST /api/v1/nodes/enroll-bundle，enroll.go）；
 	// nil 时该端点统一 503 降级（旧构造方与既有测试不感知）。
 	Enroll *EnrollConfig
+	// NodeEntry 节点接入入口（GET /api/v1/nodes/enroll-info，第六轮修复 2）：
+	// 接入向导生成 hub_url 的真相源——管理台（api_listen）与节点入口（node_listen）
+	// 是两个端口，前端按控制台地址推导接入地址必错（接入串按串连不上 hub）。
+	// nil 时该端点 503，前端回落本地推导（旧构造方不感知）。
+	NodeEntry *NodeEntryConfig
+}
+
+// NodeEntryConfig 节点接入入口描述（cmd/hub 从 hub 配置推导：协议 + node_listen）。
+type NodeEntryConfig struct {
+	// Scheme 接入协议：ws|wss（insecure_loopback=true → ws；TLS 模式 → wss）。
+	Scheme string
+	// Listen 节点会话监听地址（host:port；host 空 = 全接口。回环绑定即仅本机
+	// 节点可连——insecure_loopback 模式经 session.ValidateLoopback 强制）。
+	Listen string
 }
 
 // Server 管理面 HTTP 服务。
@@ -98,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.auth(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.auth(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/nodes", s.auth(s.handleNodes))
+	mux.HandleFunc("GET /api/v1/nodes/enroll-info", s.auth(s.handleEnrollInfo))                       // 节点接入入口地址（第六轮修复 2，enroll.go）
 	mux.HandleFunc("POST /api/v1/nodes/enroll-bundle", s.auth(s.handleEnroll)) // 部署包生成（enroll.go）
 	mux.HandleFunc("POST /api/v1/tasks/{id}/review", s.auth(s.handleReview))
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))

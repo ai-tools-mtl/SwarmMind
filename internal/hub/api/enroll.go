@@ -30,6 +30,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -219,6 +220,57 @@ func (r *enrollRequest) normalize() (osArg, archArg, mode string, err error) {
 }
 
 // ---------- HTTP 端点 ----------
+
+// handleEnrollInfo GET /api/v1/nodes/enroll-info：节点接入入口真实地址（接入向导
+// Step3 的 hub_url 预填数据源，第六轮修复 2）。管理台（api_listen）与节点入口
+// （node_listen）端口不同，前端原按控制台地址推导接入地址——生成的接入串/
+// node.yaml 全部指到管理台端口，节点按串接入连不上。host 规则：node_listen 显式
+// 绑定回环（insecure_loopback 模式经 session.ValidateLoopback 强制）时仅本机
+// 节点可连，一律回环字面量；全接口或显式外部绑定取请求 Host 的主机名（浏览器
+// 可达本机之所经，节点入口与管理台同主机可达）。路径 /ws/node 与 cmd/hub 的
+// 会话路由同源（mux.Handle("GET /ws/node")）。503 = NodeEntry 未装配（旧构造方），
+// 前端回落本地推导。
+func (s *Server) handleEnrollInfo(w http.ResponseWriter, r *http.Request) {
+	e := s.cfg.NodeEntry
+	if e == nil || e.Listen == "" {
+		writeErr(w, http.StatusServiceUnavailable, "enroll_info_disabled",
+			"hub 未配置节点接入入口（api.Config.NodeEntry），无法提供真实接入地址")
+		return
+	}
+	host, port, err := net.SplitHostPort(e.Listen)
+	if err != nil || port == "" {
+		writeErr(w, http.StatusInternalServerError, "internal", "节点接入入口地址非法: "+e.Listen)
+		return
+	}
+	if host != "127.0.0.1" && host != "::1" {
+		// 非回环绑定：host 取请求主机名（去端口与 IPv6 方括号）；请求无 Host（罕见）
+		// 回落 127.0.0.1，至少本机接入可用。
+		if h := enrollReqHost(r); h != "" {
+			host = h
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+	scheme := e.Scheme
+	if scheme != "ws" {
+		scheme = "wss" // 未配置协议按 TLS 模式默认（insecure 部署显式传 ws）
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_ws_url": scheme + "://" + net.JoinHostPort(host, port) + "/ws/node",
+	})
+}
+
+// enrollReqHost 请求 Host 的主机名部分（IPv6 形态 [::1]:p 与裸主机名都归一）。
+func enrollReqHost(r *http.Request) string {
+	h := strings.TrimSpace(r.Host)
+	if h == "" {
+		return ""
+	}
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		return hh
+	}
+	return strings.Trim(h, "[]")
+}
 
 // handleEnroll POST /api/v1/nodes/enroll-bundle：校验 → 取/编译缓存二进制 →
 // zip 组装 → 附件流。400 参数非法 / 401 未登录（auth 中间件）/ 503 未启用或

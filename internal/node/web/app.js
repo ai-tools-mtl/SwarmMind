@@ -231,7 +231,7 @@ function render() {
     chip.textContent = S.status.online ? '中心端在线 · 重连 ' + S.status.epoch + ' 次' : 'hub 离线';
   }
   $('#app').innerHTML = !S.authed ? gateView() : layout(pageView());
-  if (S.drawer) renderDrawer();
+  if (S.drawer) refreshDrawer(); // 第六轮修复 3：抽屉打开时随全局数据刷新重取内容（原调 renderDrawer 未定义——开抽屉后任何 render 必崩，抽屉卡「加载中」）
 }
 // pageView 按路由出页面（setup 模式下 route() 已把页面收敛到 SETUP_PAGES）。
 function pageView() {
@@ -363,7 +363,10 @@ async function loadCfg() {
       loaded: true, unavailable: false,
       agents: (d.agents || []).map(normalizeProfile),
       pending: !!d.pending_restart, supervised: d.supervised !== false,
-      restart_cmd: d.restart_cmd || '', config_path: d.config_path || '', structural: [], msg: '',
+      restart_cmd: d.restart_cmd || '', config_path: d.config_path || '', structural: [],
+      // pending=true（第六轮修复 1）：本表读自盘上 node.yaml = 用户最新提交；
+      // 待应用窗口期刷新页面拿到的不再是被覆盖前的旧运行时表。
+      msg: d.pending ? '下方表格为盘上最新提交（结构性变更待重启生效），可直接继续编辑或「应用并重启」' : '',
       editing: false, // render 重建 DOM 后编辑 details 全部闭合
     };
     render();
@@ -372,9 +375,9 @@ async function loadCfg() {
 
 // cfgSave 保存全部：PUT 整表（服务端校验+round-trip 写盘+热重载/待应用分类）。
 // 功能性修复 4（2026-10-22）：应答 pending_restart=true 时**不重新 GET**——
-// GET /api/v1/local/config 回的是运行时基线（结构性变更待重启期间仍是旧表），
-// 重新 GET 会用旧表覆盖编辑副本（丢刚新增的 agent），用户再保存即把旧表写回盘
-// 覆盖新表。pending 时编辑副本保持权威（盘上已写入、重启后生效）。
+// 编辑副本才是用户最新意图，重新 GET 会用它覆盖编辑中的表单（丢未保存输入）。
+// 第六轮修复 1 后 pending 窗口期 GET 已回盘上表（=用户已保存的提交），刷新页面
+// 不再丢提交；本处保持不 GET 只是保护编辑中副本，与后端口径互补。
 async function cfgSave(btn) {
   if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
@@ -469,8 +472,10 @@ function cfgSection() {
   }
   // 功能性修复 4：待应用横幅注明「下方表格为最新编辑」——pending 窗口期编辑
   // 副本是用户意图的权威（盘上已是新表，运行时基线待重启收敛）。
+  // 第六轮修复 1 后刷新页面 GET 的也是盘上表（=同一份最新提交），旧文案
+  // 「刷新会回到运行时基线、勿重复保存」已随该修复作废。
   const pending = c.pending ? `<div class="notice warn spaced"><b>已写入盘，重启后生效</b>：${esc((c.structural || []).join('；') || '详见保存应答')}。
-    下方表格为你的最新编辑（刷新页面会回到运行时基线——重启或重载前勿重复保存旧表）。
+    下方表格为盘上最新提交（此刻刷新页面得到的也是它）；在此基础上继续编辑保存即可，或点「应用并重启」使新表生效。
     ${button('应用并重启', 'cfg-restart', 'primary', c.supervised ? '' : '')}
     ${c.supervised ? '' : `<small class="muted">裸前台运行：请手动重启——<code>${esc(c.restart_cmd)}</code></small>`}</div>` : '';
   const msg = c.msg ? `<div class="notice ok spaced">${esc(c.msg)}</div>` : '';
@@ -821,21 +826,28 @@ async function copyPrimeMcp() {
 }
 
 /* ---------- 任务详情抽屉 ---------- */
+let drawerSeq = 0;       // 抽屉会话序号：防被关/被换（codex 第三轮复测）
+let drawerReqSeq = 0;    // 抽屉内请求序号：同抽屉多次刷新的乱序应答守卫（同上）
 async function openDrawer(taskID) {
   closeDrawer();
+  const seq = ++drawerSeq;
   $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="drawer"><p class="muted">加载中…</p></div></div>`;
   $('#layer').addEventListener('click', e => { if (e.target.classList.contains('overlay')) closeDrawer(); });
-  S.drawer = { id: taskID, timer: null };
-  await refreshDrawer();
-  if (!S.drawer) return; // 首刷前已被关闭
+  S.drawer = { id: taskID, timer: null, seq };
+  await refreshDrawer(seq);
+  // 迟到守卫：首刷返回前抽屉被关闭（S.drawer=null）或被更快的新抽屉替换（seq 不符）
+  if (!S.drawer || S.drawer.seq !== seq) return;
   S.drawer.timer = setInterval(() => {
-    const t = S.drawer?.task;
-    if (S.drawer && (!t || !TERMINAL.has(t.status))) refreshDrawer();
+    const d = S.drawer;
+    if (!d || d.seq !== seq) { clearInterval(S.drawer.timer); return; } // 被替换：自清，防泄漏
+    const t = d.task;
+    if (S.drawer && (!t || !TERMINAL.has(t.status))) refreshDrawer(seq);
   }, 5000);
 }
 function closeDrawer() {
   if (S.drawer?.timer) clearInterval(S.drawer.timer);
   S.drawer = null;
+  drawerSeq++;   // 在途 refreshDrawer 应答全部作废
   $('#layer').innerHTML = '';
 }
 // taskOrigin 任务来源判定（功能性修复 7，2026-10-22）：以「我的任务」留痕的
@@ -846,9 +858,12 @@ function taskOrigin(taskID) {
   return e && e.origin === 'hub' ? 'hub' : 'local';
 }
 
-async function refreshDrawer() {
-  if (!S.drawer) return;
-  const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(S.drawer.id)).catch(() => null);
+async function refreshDrawer(seq) {
+  const drawer = S.drawer;   // 捕获会话引用：seq 不符（被关/被换）则迟到应答丢弃
+  if (!drawer || drawer.seq !== seq) return;
+  const reqSeq = ++drawerReqSeq;   // 请求级序号：同抽屉多次刷新，仅最新应答可渲染
+  const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(drawer.id)).catch(() => null);
+  if (!S.drawer || S.drawer.seq !== seq || reqSeq !== drawerReqSeq) return;
   if (!r || r.code !== 200) {
     $('#drawer').innerHTML = `<div class="row"><h2>${esc(S.drawer.id)}</h2>${button('×', 'close-drawer', 'close')}</div>
       <div class="notice warn">任务查询失败${r ? ' · ' + errLine(r.data) : '（网络）'}。可能已过保留期（终态 24h / 离线 7 天）。</div>
@@ -866,7 +881,10 @@ async function refreshDrawer() {
   const local = taskOrigin(t.id) === 'local';
   const agent = S.agents.find(x => x.name === t.target_agent);
   const absPath = a => (agent?.workdir ? agent.workdir.replace(/\/+$/, '') + '/' : '') + a.path;
-  const artifactNote = local
+  // 产物说明段仅在有产物时计算（第六轮修复 3）：无产物完成/运行中/needs_review 的
+  // res.artifacts 为 null/空数组——原实现无条件读 res.artifacts[0] 直接 TypeError，
+  // 抽屉卡「加载中」；下方模板只在 res.artifacts?.length 为真时插值本段，空串不渲染。
+  const artifactNote = !res?.artifacts?.length ? '' : local
     ? `<p class="muted small">产物在本机：<code>${esc(absPath(res.artifacts[0]))}</code>${
         res.artifacts.length > 1 ? `（共 ${res.artifacts.length} 个，均在本机 outputs 目录）` : '（workdir/outputs 下，本机直接打开即可，无需经 hub 取回）'}</p>`
     : `<p class="muted small">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>`;

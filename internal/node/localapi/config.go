@@ -197,10 +197,13 @@ func classifyProfilesChange(cur, next []protocol.ExecProfile) []string {
 // handleGetConfig GET /api/v1/local/config：配置表 + 待应用状态（脱敏同目录规则：
 // 返回完整 ExecProfile——本机主人视角，与 GET /api/v1/local/agents 同口径）。
 //
-// 口径说明（功能性修复 4，2026-10-22）：本端点返回的 agents 恒为「运行时基线」
-//（Agents.Effective()——热重载成功后与盘上一致）。结构性变更「待应用」窗口期，
-// 盘上 node.yaml 已是新表，而运行时基线仍是旧表——本端点如实回旧基线，重启后
-// 收敛。前端约定：PUT 应答 pending_restart=true 时不得以本端点回包覆盖编辑副本
+// 口径说明（功能性修复 4，2026-10-22；第六轮修复 1 再修）：非 pending 时返回
+// 运行时基线（Agents.Effective()，热重载成功后与盘上一致）。结构性变更「待应用」
+// 窗口期，盘上 node.yaml 已是新表而运行时基线仍是旧表——改读盘上 node.yaml 解析
+// agents 返回（盘上 = 用户最新提交的真相源），并以 pending=true 标注本口径；
+// 读盘/解析失败回退运行时基线。原实现恒回运行时旧表：PUT pending 后刷新页面，
+// 前端拿到旧表再保存即把盘上新表覆盖回旧值（丢提交）。
+// 前端约定：PUT 应答 pending_restart=true 时仍不得以本端点回包覆盖编辑副本
 //（编辑副本才是用户最新意图，见 web/app.js cfgSave）。
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	ops := s.cfg.ConfigOps
@@ -208,14 +211,45 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "config_disabled", "配置编辑未装配（装配方未接线 ConfigOps）")
 		return
 	}
+	agents := s.effectiveProfiles()
+	pending := false
+	if s.pendingRestart() {
+		if disk, err := s.diskAgentProfiles(ops); err == nil {
+			agents = disk
+			pending = true
+		} // 读盘/解析失败：回退运行时基线（pending_restart 状态字段仍如实为真）
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node_id":         s.cfg.NodeID,
 		"config_path":     ops.ConfigPath,
 		"pending_restart": s.pendingRestart(),
+		"pending":         pending,
 		"supervised":      ops.Supervised,
 		"restart_cmd":     ops.RestartCmd,
-		"agents":          s.effectiveProfiles(),
+		"agents":          agents,
 	})
+}
+
+// diskAgentProfiles 读盘上 node.yaml 解析 agents 并转 ExecProfile（GET 在 pending
+// 窗口期的真相源：盘上 = 用户最新提交）。文件不存在/读失败/解析失败返回错误，
+// 调用方回退运行时口径。写盘走临时文件+rename 原子替换（writeConfigFileLocked），
+// 并发读只会看到旧表或新表之一的完整内容，故不持 writeConfigMu。
+func (s *Server) diskAgentProfiles(ops *ConfigOps) ([]protocol.ExecProfile, error) {
+	raw, err := os.ReadFile(ops.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Agents []AgentProfile `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		return nil, err
+	}
+	out := make([]protocol.ExecProfile, 0, len(parsed.Agents))
+	for _, p := range parsed.Agents {
+		out = append(out, p.ToExecProfile())
+	}
+	return out, nil
 }
 
 // configPutRequest PUT /api/v1/local/config 请求体（整表提交）。

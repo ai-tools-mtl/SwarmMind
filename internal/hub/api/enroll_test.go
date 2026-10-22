@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -601,4 +602,90 @@ func names(files map[string]*zip.File) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestEnrollInfo（第六轮修复 2）：GET /api/v1/nodes/enroll-info 回节点接入入口
+// 真实地址——回环绑定（insecure_loopback 强制形态）一律回环字面量（请求主机名
+// 在该形态下不可达）；全接口/非回环绑定取请求主机名（节点入口与管理台同主机
+// 可达，浏览器所在主机名即对的）；IPv6 方括号形态保持；NodeEntry 未装配 503
+//（旧构造方，前端回落本地推导）；端点受管理面鉴权保护。
+func TestEnrollInfo(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	bus := transport.NewBus()
+	c, err := core.New(core.Config{Store: st, Transport: bus.Endpoint("hub"), SweepInterval: 0})
+	if err != nil {
+		t.Fatalf("构造 core 失败: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	bus.Endpoint("hub").Subscribe(c.HandleFrame)
+
+	mkSrv := func(e *NodeEntryConfig) *httptest.Server {
+		srv := httptest.NewServer(New(Config{Core: c, AdminToken: "test-admin-token", NodeEntry: e}).Handler())
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	loginGet := func(srv *httptest.Server, reqHost string) (int, string) {
+		t.Helper()
+		jar, _ := cookiejar.New(nil)
+		hc := &http.Client{Jar: jar}
+		resp, err := hc.Post(srv.URL+"/api/v1/login", "application/json", strings.NewReader(`{"token":"test-admin-token"}`))
+		if err != nil {
+			t.Fatalf("登录失败: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("登录应 200, got %d", resp.StatusCode)
+		}
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/nodes/enroll-info", nil)
+		req.Host = reqHost
+		resp, err = hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		buf := &bytes.Buffer{}
+		_, _ = buf.ReadFrom(resp.Body)
+		return resp.StatusCode, buf.String()
+	}
+
+	// 回环绑定：管理台 :64309 ≠ 节点入口 :64310 的典型误配场景——按请求主机名
+	// 生成的地址连不上，必须回环字面量 + 节点入口端口
+	code, body := loginGet(mkSrv(&NodeEntryConfig{Scheme: "ws", Listen: "127.0.0.1:64310"}), "console.example:64309")
+	if code != http.StatusOK || !strings.Contains(body, `"node_ws_url":"ws://127.0.0.1:64310/ws/node"`) {
+		t.Fatalf("回环绑定应回 ws://127.0.0.1:64310/ws/node, got %d %s", code, body)
+	}
+
+	// 全接口绑定：取请求主机名；协议未配置按 TLS 模式缺省 wss
+	code, body = loginGet(mkSrv(&NodeEntryConfig{Listen: ":8443"}), "hub.corp.example:8444")
+	if code != http.StatusOK || !strings.Contains(body, `"node_ws_url":"wss://hub.corp.example:8443/ws/node"`) {
+		t.Fatalf("全接口绑定应回请求主机名 + wss, got %d %s", code, body)
+	}
+
+	// IPv6 回环：方括号形态保持
+	code, body = loginGet(mkSrv(&NodeEntryConfig{Scheme: "ws", Listen: "[::1]:64310"}), "console.example:64309")
+	if code != http.StatusOK || !strings.Contains(body, `"node_ws_url":"ws://[::1]:64310/ws/node"`) {
+		t.Fatalf("IPv6 回环应回 ws://[::1]:64310/ws/node, got %d %s", code, body)
+	}
+
+	// NodeEntry 未装配（旧构造方）：503，前端回落本地推导
+	code, body = loginGet(mkSrv(nil), "console.example:64309")
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("NodeEntry 未装配应 503, got %d %s", code, body)
+	}
+
+	// 未登录一律 401（与其它管理面端点同门）
+	jar, _ := cookiejar.New(nil)
+	hc := &http.Client{Jar: jar}
+	resp, err := hc.Get(mkSrv(&NodeEntryConfig{Scheme: "ws", Listen: "127.0.0.1:64310"}).URL + "/api/v1/nodes/enroll-info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("未登录应 401, got %d", resp.StatusCode)
+	}
 }
