@@ -23,7 +23,7 @@ RECONN=$($NODE_SSH 'sleep 5; tail -2 /var/log/swarmmind-node.log | grep -c "注�
 if [ "$RECONN" -ge 1 ]; then echo "✅ node 自动重连"; PASS=$((PASS+1)); else echo "❌ node 未重连"; FAIL=$((FAIL+1)); fi
 
 echo "== 演练 2：node 执行中杀死 → 恢复 → needs_review 语义 =="
-$HUB_SSH 'curl -s -X POST http://127.0.0.1:8444/api/v1/login -H "Content-Type: application/json" -d "{\"token\":\"4380b93e2cb636f200cbcd758924ed62\"}" -c /tmp/hc -o /dev/null'
+$HUB_SSH 'curl -s -X POST http://127.0.0.1:8444/api/v1/login -H "Content-Type: application/json" -d "{\"token\":\"$ADMIN_TOKEN\"}" -c /tmp/hc -o /dev/null'
 TID=$($HUB_SSH 'curl -s -b /tmp/hc -X POST http://127.0.0.1:8444/api/v1/tasks -H "Content-Type: application/json" -d "{\"target_node\":\"baidu-node\",\"target_agent\":\"sleeper\",\"input\":{\"args\":[\"90\"]},\"submitted_by\":\"drill\"}"' | python3 -c "import sys,json;print(json.load(sys.stdin)['task_id'])")
 sleep 3
 $NODE_SSH 'pkill -x swarmmind-node'
