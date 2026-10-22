@@ -1,9 +1,12 @@
 // enroll.go 部署包生成测试：请求校验矩阵 / node.yaml 渲染 / zip 结构（native 与
-// docker）/ 编译缓存命中 / 错误路径（编译失败、超时、go 工具链缺失）。
+// docker）/ 内置预编译产物命中与未命中兜底 / 编译缓存命中 / 错误路径（编译失败、
+// 超时、go 工具链缺失）。
 //
 // 真实编译用例用最小 fixture module（无第三方依赖，linux-amd64 交叉可编），
 // TestMain 里建包级共享 GOCACHE：首个真实编译付全款，其余秒回；其余 zip 结构
-// 用例直接驱动 writeBundleZip（假二进制文件即可），不触发 go 工具链。
+// 用例直接驱动 writeBundleZip（假二进制文件即可），不触发 go 工具链。现场编译
+// 路径用例一律经 noPrebuilt 强制绕开内置产物（本机跑过 make embed-nodes 时
+// linux-amd64 等平台会命中）；预编译命中路径另有专测（无内置产物环境自动跳过）。
 package api
 
 import (
@@ -11,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,8 +65,20 @@ func writeFixtureModule(t *testing.T, dir string, broken bool) {
 }
 
 // newEnrollFixture 带 Enroll 配置的管理面测试基座（复用 server_test.go 的 fixture
-// 结构；srcDir/cacheDir 由用例给定，cacheDir 传 "" 走独立临时目录）。
+// 结构；srcDir/cacheDir 由用例给定，cacheDir 传 "" 走独立临时目录）。基座强制
+// noPrebuilt 聚焦现场编译兜底路径——否则跑过 make embed-nodes 的机器上 linux-amd64
+// 等平台会被内置产物截胡；预编译命中路径见 newEnrollFixturePrebuilt。
 func newEnrollFixture(t *testing.T, srcDir, cacheDir string) *fixture {
+	return newEnrollFixtureS(t, srcDir, cacheDir, true)
+}
+
+// newEnrollFixturePrebuilt 同 newEnrollFixture，但保留内置预编译产物查找（默认
+// 生产行为），供命中路径专测使用。
+func newEnrollFixturePrebuilt(t *testing.T, srcDir, cacheDir string) *fixture {
+	return newEnrollFixtureS(t, srcDir, cacheDir, false)
+}
+
+func newEnrollFixtureS(t *testing.T, srcDir, cacheDir string, forceCompile bool) *fixture {
 	t.Helper()
 	if cacheDir == "" {
 		cacheDir = t.TempDir()
@@ -79,10 +95,14 @@ func newEnrollFixture(t *testing.T, srcDir, cacheDir string) *fixture {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	bus.Endpoint("hub").Subscribe(c.HandleFrame)
-	srv := httptest.NewServer(New(Config{
+	s := New(Config{
 		Core: c, AdminToken: "test-admin-token",
 		Enroll: &EnrollConfig{SourceDir: srcDir, CacheDir: cacheDir},
-	}).Handler())
+	})
+	if forceCompile {
+		s.enroll.noPrebuilt = true
+	}
+	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return &fixture{t: t, bus: bus, st: st, core: c, srv: srv}
 }
@@ -245,7 +265,7 @@ func TestNativeZipStructure(t *testing.T) {
 	for _, tc := range cases {
 		var buf bytes.Buffer
 		zw := zip.NewWriter(&buf)
-		if err := writeBundleZip(zw, "native", tc.goos, "amd64", dummy, v); err != nil {
+		if err := writeBundleZip(zw, "native", tc.goos, "amd64", dummy, nil, v); err != nil {
 			t.Fatalf("%s: %v", tc.goos, err)
 		}
 		if err := zw.Close(); err != nil {
@@ -292,7 +312,7 @@ func TestDockerZipStructure(t *testing.T) {
 	v := enrollVals{NodeID: "build-linux", Token: strings.Repeat("ef", 32), HubURL: "wss://hub.example.com/ws/node"}
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	if err := writeBundleZip(zw, "docker", "linux", "arm64", dummy, v); err != nil {
+	if err := writeBundleZip(zw, "docker", "linux", "arm64", dummy, nil, v); err != nil {
 		t.Fatal(err)
 	}
 	if err := zw.Close(); err != nil {
@@ -320,6 +340,55 @@ func TestDockerZipStructure(t *testing.T) {
 	// docker 固定 linux 二进制：exe 名不带 .exe 后缀且可执行位在
 	if files["swarmmind-node"].Mode()&0o111 == 0 {
 		t.Fatal("docker 包内二进制应有可执行位")
+	}
+}
+
+// ---------- 内置预编译产物：命中直出 / 未命中兜底 ----------
+
+// TestPrebuiltNodeHit 命中路径：本机跑过 make embed-nodes 有真实产物时可测；
+// 无产物环境（fresh clone）跳过——未命中兜底语义由既有编译用例覆盖。
+func TestPrebuiltNodeHit(t *testing.T) {
+	if _, err := fs.Stat(embedFS, "embedded/node-linux-amd64.gz"); err != nil {
+		t.Skip("本机无内置预编译产物（未跑 make embed-nodes），跳过命中用例")
+	}
+	data, ok := prebuiltNode("linux", "amd64")
+	if !ok || len(data) == 0 {
+		t.Fatalf("内置产物应命中且非空, ok=%v len=%d", ok, len(data))
+	}
+	if !bytes.HasPrefix(data, []byte("\x7fELF")) {
+		t.Fatalf("linux-amd64 内置产物应为 ELF, got %q", data[:min(16, len(data))])
+	}
+}
+
+func TestPrebuiltNodeMiss(t *testing.T) {
+	if data, ok := prebuiltNode("plan9", "mips"); ok {
+		t.Fatalf("不存在的平台不应命中, len=%d", len(data))
+	}
+}
+
+// TestEnrollPrebuiltBundle 端到端命中：sourceDir 故意不存在——若错误地走了现场
+// 编译会 500，200 即证明二进制来自 embed；并断言未写编译缓存（跳过缓存语义）。
+func TestEnrollPrebuiltBundle(t *testing.T) {
+	if _, err := fs.Stat(embedFS, "embedded/node-linux-amd64.gz"); err != nil {
+		t.Skip("本机无内置预编译产物（未跑 make embed-nodes），跳过端到端命中用例")
+	}
+	cacheDir := t.TempDir()
+	f := newEnrollFixturePrebuilt(t, filepath.Join(t.TempDir(), "no-such-src"), cacheDir)
+	hc := f.loginClient(true)
+	resp, data := f.doFull(hc, http.MethodPost, "/api/v1/nodes/enroll-bundle", enrollGoodReq)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("命中内置产物应 200, got %d: %s", resp.StatusCode, data)
+	}
+	files := readZip(t, data)
+	bin := files["swarmmind-node"]
+	if bin == nil {
+		t.Fatalf("zip 缺二进制（有 %v）", names(files))
+	}
+	if got := zipEntryText(t, bin); !strings.HasPrefix(got, "\x7fELF") {
+		t.Fatalf("内置产物应为 ELF, got %q", got[:min(16, len(got))])
+	}
+	if bins, _ := filepath.Glob(filepath.Join(cacheDir, "bins", "*")); len(bins) != 0 {
+		t.Fatalf("命中内置产物不应写编译缓存: %v", bins)
 	}
 }
 
@@ -401,6 +470,7 @@ func TestEnrollCompileFailureUnit(t *testing.T) {
 	src := t.TempDir()
 	writeFixtureModule(t, src, true)
 	b := newEnrollBuilder(&EnrollConfig{SourceDir: src, CacheDir: t.TempDir()})
+	b.noPrebuilt = true // linux-amd64 在内置产物集合内，强制走现场编译兜底路径
 	_, err := b.binary("linux", "amd64")
 	var ee *enrollError
 	if err == nil {
@@ -418,7 +488,8 @@ func TestEnrollCompileTimeout(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "src")
 	writeFixtureModule(t, src, false)
 	b := newEnrollBuilder(&EnrollConfig{SourceDir: src, CacheDir: t.TempDir()})
-	b.timeout = 1 // 纳秒级超时：必走超时路径（linux-arm64 未被他用例编译，必未命中缓存）
+	b.noPrebuilt = true // linux-arm64 在内置产物集合内，强制走现场编译兜底路径
+	b.timeout = 1       // 纳秒级超时：必走超时路径（linux-arm64 未被他用例编译，必未命中缓存）
 	_, err := b.binary("linux", "arm64")
 	var ee *enrollError
 	if !errors.As(err, &ee) || ee.status != http.StatusServiceUnavailable || ee.code != "compile_timeout" {
@@ -434,6 +505,7 @@ func TestEnrollGoBinMissing(t *testing.T) {
 	writeFixtureModule(t, src, false)
 	b := newEnrollBuilder(&EnrollConfig{SourceDir: src, CacheDir: t.TempDir()})
 	b.goBin = "/nonexistent/go-toolchain-xyz" // 注入假工具链路径 → exec 失败
+	b.noPrebuilt = true                       // linux-amd64 在内置产物集合内，强制走现场编译兜底路径
 	_, err := b.binary("linux", "amd64")
 	var ee *enrollError
 	if !errors.As(err, &ee) || ee.status != http.StatusInternalServerError || ee.code != "compile_failed" {

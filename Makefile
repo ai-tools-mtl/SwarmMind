@@ -30,8 +30,23 @@ vet:
 fmt:
 	gofmt -l -w .
 
+## embed-nodes: 五平台 node 预编译产物 gzip 到 embedded/（供 hub 打包秒出，无需现场编译）
+EMBED_DIR := internal/hub/api/embedded
+NODE_TARGETS := linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64
+
+embed-nodes:
+	@mkdir -p $(EMBED_DIR)
+	@for t in $(NODE_TARGETS); do \
+	  os=$${t%%-*}; arch=$${t##*-}; ext=""; \
+	  [ "$$os" = "windows" ] && ext=".exe"; \
+	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /tmp/swarmmind-node-embed$$ext ./cmd/node; \
+	  gzip -9 -c /tmp/swarmmind-node-embed$$ext > $(EMBED_DIR)/node-$$t.gz; \
+	  rm -f /tmp/swarmmind-node-embed$$ext; \
+	  echo "embedded node-$$t.gz $$(du -h $(EMBED_DIR)/node-$$t.gz | cut -f1)"; \
+	done
+
 ## release: 四平台交叉构建到 dist/（linux hub/node、macOS node、Windows node/ctl）
-release:
+release: embed-nodes
 	@mkdir -p dist
 	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-hub-linux-amd64 ./cmd/hub
 	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-linux-amd64 ./cmd/node
@@ -51,10 +66,12 @@ HUB_SSH   ?= ubuntu@1.13.158.180
 HUB_KEY   ?= /Users/tl.m/Downloads/Mac2026.pem
 HUB_SRC   ?= /opt/swarmmind-src
 
-deploy-hub:
+deploy-hub: embed-nodes
 	@$(MAKE) -s release GOOS=linux
 	git bundle create /tmp/swarmmind.bundle main
 	scp -i $(HUB_KEY) /tmp/swarmmind.bundle $(HUB_SSH):/tmp/swarmmind.bundle
+	ssh -i $(HUB_KEY) $(HUB_SSH) 'mkdir -p /tmp/swarmmind-embedded'
+	scp -q -i $(HUB_KEY) $(EMBED_DIR)/*.gz $(HUB_SSH):/tmp/swarmmind-embedded/
 	ssh -i $(HUB_KEY) $(HUB_SSH) 'set -e; \
 	  export PATH=$$PATH:/usr/local/go/bin GOPROXY=https://goproxy.cn,direct; \
 	  git config --global --add safe.directory $(HUB_SRC) 2>/dev/null || true; \
@@ -65,6 +82,8 @@ deploy-hub:
 	    sudo git clone -q /tmp/swarmmind.bundle $(HUB_SRC); \
 	  fi; \
 	  cd $(HUB_SRC) && echo "构建自: $$(git log --oneline -1)"; \
+	  sudo mkdir -p $(HUB_SRC)/internal/hub/api/embedded; \
+	  sudo cp /tmp/swarmmind-embedded/*.gz $(HUB_SRC)/internal/hub/api/embedded/ 2>/dev/null || echo "（无预编译产物，enroll 将走现场编译兑底）"; \
 	  sudo /usr/local/go/bin/go build -o /opt/swarmmind/hub.new ./cmd/hub; \
 	  sudo systemctl stop swarmmind-hub; \
 	  sudo mv /opt/swarmmind/hub.new /opt/swarmmind/hub && sudo chmod +x /opt/swarmmind/hub; \

@@ -1,11 +1,14 @@
 // 节点部署包生成（2026-10-22，接入向导 Step3 数据源）。
 //
 // POST /api/v1/nodes/enroll-bundle（管理端鉴权）：按 {node_id, register_token,
-// hub_url, os, arch, mode} 现场交叉编译 node 二进制并打包 zip——native 模式
-// （二进制 + node.yaml + install.sh/install.bat + README）或 docker 模式
-// （Dockerfile + docker-compose.yml + linux 二进制 + node.yaml + README）。
-// 编译结果按 (os,arch,commit) 缓存到 CacheDir 复用，同 key 并发只编译一次；
-// 编译超时（90s）返回 503 提示稍后重试（首次编译约一分钟）。
+// hub_url, os, arch, mode} 组装部署包 zip——native 模式（二进制 + node.yaml +
+// install.sh/install.bat + README）或 docker 模式（Dockerfile + docker-compose.yml
+// + linux 二进制 + node.yaml + README）。二进制来源优先级：内置预编译产物
+// （make embed-nodes 生成五平台 gzip 到 embedded/，go:embed 进 hub 二进制，
+// 命中秒出包，跳过编译/缓存/互斥）→ 未命中（开发环境未跑 embed-nodes、或
+// 平台不在内置集合）现场交叉编译兜底，编译结果按 (os,arch,commit) 缓存到
+// CacheDir 复用，同 key 并发只编译一次；编译超时（90s）返回 503 提示稍后
+// 重试（首次编译约一分钟）。
 //
 // 安全约束：
 //   - go build 参数全部代码拼装（exec.Command("go", "build", ...)），不经 shell，
@@ -18,7 +21,9 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,6 +66,44 @@ type enrollBuilder struct {
 
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // 缓存键 → 编译互斥（同 key 并发合并为一次编译）
+
+	noPrebuilt bool // true = 跳过内置产物查找，强制现场编译兜底路径（测试注入）
+}
+
+// prebuiltBinary 内置预编译产物查找入口（noPrebuilt 时恒未命中，测试用）。
+func (b *enrollBuilder) prebuiltBinary(goos, goarch string) ([]byte, bool) {
+	if b.noPrebuilt {
+		return nil, false
+	}
+	return prebuiltNode(goos, goarch)
+}
+
+// ---------- 内置预编译产物 ----------
+
+// embedFS make embed-nodes 生成的五平台 node 预编译产物（gzip）+ 占位文件。
+// placeholder.txt 保证目录非空可编译；产物本身不入库（.gitignore 排除），
+// 未生成时（开发环境 fresh clone）目录内只有占位文件，查找恒未命中走现场编译。
+//
+//go:embed all:embedded
+var embedFS embed.FS
+
+// prebuiltNode 取内置预编译 node 二进制（embedded/node-<goos>-<goarch>.gz 解压
+// 原文）。对应平台无内置产物时 ok=false，调用方走现场编译兜底。
+func prebuiltNode(goos, goarch string) ([]byte, bool) {
+	f, err := embedFS.Open(fmt.Sprintf("embedded/node-%s-%s.gz", goos, goarch))
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, false
+	}
+	data, err := io.ReadAll(gz)
+	if err != nil {
+		return nil, false
+	}
+	return data, true
 }
 
 // proxyOr 配置兜底：未配置时用国内可达镜像（goproxy.cn）+ 直连回退。
@@ -182,16 +225,27 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	binPath, err := s.enroll.binary(osArg, archArg)
-	if err != nil {
-		var ee *enrollError
-		if errors.As(err, &ee) {
-			writeErr(w, ee.status, ee.code, ee.msg)
-		} else {
-			log.Printf("[hub] 部署包编译异常: %v", err)
-			writeErr(w, http.StatusInternalServerError, "internal", "部署包生成失败")
+	// 二进制来源：内置预编译产物优先（秒出包，跳过编译/缓存/互斥）；未命中
+	// （未跑 make embed-nodes 或平台不在内置集合）走现场编译兜底。
+	var binPath string
+	var binData []byte
+	if data, ok := s.enroll.prebuiltBinary(osArg, archArg); ok {
+		binData = data
+		log.Printf("[hub] 部署包使用内置预编译产物 %s/%s（commit %s）", osArg, archArg, s.enroll.commit())
+	} else {
+		log.Printf("[hub] 部署包无内置预编译产物 %s/%s，走现场编译兜底", osArg, archArg)
+		var err error
+		binPath, err = s.enroll.binary(osArg, archArg)
+		if err != nil {
+			var ee *enrollError
+			if errors.As(err, &ee) {
+				writeErr(w, ee.status, ee.code, ee.msg)
+			} else {
+				log.Printf("[hub] 部署包编译异常: %v", err)
+				writeErr(w, http.StatusInternalServerError, "internal", "部署包生成失败")
+			}
+			return
 		}
-		return
 	}
 	filename := fmt.Sprintf("%s-%s-%s.zip", enrollBinName, osArg, archArg) // native：SPEC 六命名
 	if mode == "docker" {
@@ -200,7 +254,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	vals := enrollVals{NodeID: req.NodeID, Token: req.RegisterToken, HubURL: req.HubURL}
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	if err := writeBundleZip(zw, mode, osArg, archArg, binPath, vals); err != nil {
+	if err := writeBundleZip(zw, mode, osArg, archArg, binPath, binData, vals); err != nil {
 		log.Printf("[hub] 部署包 zip 组装失败: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal", "部署包生成失败")
 		return
@@ -275,7 +329,8 @@ func (b *enrollBuilder) compile(goos, goarch, dst string) error {
 		}
 		if err != nil {
 			return &enrollError{http.StatusServiceUnavailable, "compile_unavailable",
-				"hub 服务器未安装 go 工具链，无法编译部署包（安装 go 或设置 SWARM_SOURCE_DIR 后重启）"}
+				"hub 服务器未安装 go 工具链，无法编译部署包（安装 go 或设置 SWARM_SOURCE_DIR 后重启，" +
+					"或运行 make embed-nodes 后重新构建 hub 以内置预编译产物）"}
 		}
 		goBin = p
 	}
@@ -396,13 +451,20 @@ type enrollVals struct {
 
 // writeBundleZip 打包部署包。native：二进制 + node.yaml + 安装脚本 + README；
 // docker：Dockerfile + docker-compose.yml + linux 二进制 + node.yaml + README。
-// 二进制经 io.Copy 从磁盘流式入包，不整块进内存。
-func writeBundleZip(zw *zip.Writer, mode, goos, goarch, binPath string, v enrollVals) error {
+// 二进制来源二选一：binData 非空（内置预编译产物，内存直入包）或 binPath
+// （现场编译产物，io.Copy 从磁盘流式入包，不整块进内存）。
+func writeBundleZip(zw *zip.Writer, mode, goos, goarch, binPath string, binData []byte, v enrollVals) error {
 	exe := enrollBinName
 	if mode != "docker" && goos == "windows" {
 		exe += ".exe"
 	}
-	if err := zipEntryFromFile(zw, exe, 0o755, binPath); err != nil {
+	var err error
+	if binData != nil {
+		err = zipEntryFromBytes(zw, exe, 0o755, binData)
+	} else {
+		err = zipEntryFromFile(zw, exe, 0o755, binPath)
+	}
+	if err != nil {
 		return err
 	}
 	if err := zipEntry(zw, "node.yaml", 0o644, renderNodeYaml(v)); err != nil {
@@ -609,14 +671,12 @@ func readmeTxt(mode, goos, goarch string) string {
 
 // zipEntry 写入内存条目（mode 走 zip 外部属性，保证 install.sh 落地可执行）。
 func zipEntry(zw *zip.Writer, name string, mode fs.FileMode, data string) error {
-	h := &zip.FileHeader{Name: name, Method: zip.Deflate}
-	h.SetMode(mode)
-	f, err := zw.CreateHeader(h)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(f, strings.NewReader(data))
-	return err
+	return zipEntryStream(zw, name, mode, strings.NewReader(data))
+}
+
+// zipEntryFromBytes 内存字节条目（内置预编译产物直入包）。
+func zipEntryFromBytes(zw *zip.Writer, name string, mode fs.FileMode, data []byte) error {
+	return zipEntryStream(zw, name, mode, bytes.NewReader(data))
 }
 
 // zipEntryFromFile 磁盘文件流式入包（二进制不整块进内存）。
@@ -626,12 +686,17 @@ func zipEntryFromFile(zw *zip.Writer, name string, mode fs.FileMode, path string
 		return fmt.Errorf("打开编译产物 %s 失败: %w", path, err)
 	}
 	defer src.Close()
+	return zipEntryStream(zw, name, mode, src)
+}
+
+// zipEntryStream 流式写单条目（mode 走 zip 外部属性）。
+func zipEntryStream(zw *zip.Writer, name string, mode fs.FileMode, r io.Reader) error {
 	h := &zip.FileHeader{Name: name, Method: zip.Deflate}
 	h.SetMode(mode)
 	f, err := zw.CreateHeader(h)
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, src)
+	_, err = io.Copy(f, r)
 	return err
 }
