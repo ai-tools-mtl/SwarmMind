@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -434,5 +435,216 @@ agents:
 	}
 	if string(after) != corrupted {
 		t.Errorf("拒写后原文件应原样不动:\n got %q\nwant %q", after, corrupted)
+	}
+}
+
+// ---------- reload 端点（第五轮收敛 1：读表纳入事务锁；此前无端点级覆盖） ----------
+
+// TestAgentsReloadEndpoint reload HTTP 全链：手编 node.yaml 后重载走「读-校验-
+// 分类-热应用」，ReloadExecutors 收到盘上新表；解析失败/校验失败 → 400 且原文件
+// 字节不动；node.yaml 缺失 → 404。
+func TestAgentsReloadEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "node.yaml")
+	workdir := filepath.Join(dir, "work")
+	initial := `# 顶部注释
+node_id: nodeA
+agents:
+  # alpha 条目注释
+  - name: alpha
+    command: /bin/echo
+    workdir: ` + workdir + `
+    timeout_sec: 600
+`
+	if err := writeConfigFile(cfgPath, initial); err != nil {
+		t.Fatal(err)
+	}
+	st := newState(t, t.TempDir(), []protocol.ExecProfile{{
+		Name: "alpha", Kind: protocol.AgentKindCLI, Command: "/bin/echo", Workdir: workdir, Exposed: true,
+	}})
+	var mu sync.Mutex
+	var applied []protocol.ExecProfile
+	ops := &ConfigOps{
+		ConfigPath: cfgPath, Supervised: true,
+		ReloadExecutors: func(p []protocol.ExecProfile) error {
+			mu.Lock()
+			applied = p
+			mu.Unlock()
+			return nil
+		},
+	}
+	srv := httptest.NewServer(New(Config{
+		NodeID: "nodeA", Mode: ModeStandalone, Agents: st, LocalToken: "tok-local", ConfigOps: ops,
+	}).Handler())
+	t.Cleanup(srv.Close)
+	reload := func() (int, map[string]any) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/local/agents/reload", nil)
+		req.Header.Set("Authorization", "Bearer tok-local")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(res.Body).Decode(&out)
+		return res.StatusCode, out
+	}
+	readFile := func() string {
+		t.Helper()
+		b, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	// ① 手编改 description 后重载：200 applied=true，热应用收到盘上新表
+	edited := strings.Replace(initial, "timeout_sec: 600",
+		"timeout_sec: 600\n    description: 手编新描述", 1)
+	if err := writeConfigFile(cfgPath, edited); err != nil {
+		t.Fatal(err)
+	}
+	code, out := reload()
+	if code != http.StatusOK || out["applied"] != true {
+		t.Fatalf("reload 应 200 applied=true, got %d %v", code, out)
+	}
+	mu.Lock()
+	got := applied
+	mu.Unlock()
+	if len(got) != 1 || got[0].Name != "alpha" || got[0].Description != "手编新描述" || got[0].TimeoutSec != 600 {
+		t.Fatalf("热应用应收到盘上手编表: %+v", got)
+	}
+
+	// ② 解析失败 → 400 invalid_config，原文件字节不动
+	corrupted := "agents: [oops\n"
+	if err := writeConfigFile(cfgPath, corrupted); err != nil {
+		t.Fatal(err)
+	}
+	code, out = reload()
+	if code != http.StatusBadRequest || out["error"] != "invalid_config" {
+		t.Fatalf("解析失败应 400 invalid_config, got %d %v", code, out)
+	}
+	if readFile() != corrupted {
+		t.Errorf("拒重载后原文件应原样不动:\n%q", readFile())
+	}
+
+	// ③ 校验失败 → 400「文件重载被拒绝」（timeout_sec 非正数），原文件不动
+	bad := strings.Replace(initial, "timeout_sec: 600", "timeout_sec: 0", 1)
+	if err := writeConfigFile(cfgPath, bad); err != nil {
+		t.Fatal(err)
+	}
+	code, out = reload()
+	if code != http.StatusBadRequest || out["error"] != "invalid_request" ||
+		!strings.Contains(fmt.Sprint(out["message"]), "文件重载被拒绝") {
+		t.Fatalf("校验失败应 400 文件重载被拒绝, got %d %v", code, out)
+	}
+	if readFile() != bad {
+		t.Errorf("校验拒载后原文件应原样不动:\n%q", readFile())
+	}
+
+	// ④ node.yaml 缺失 → 404 config_missing
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if code, out = reload(); code != http.StatusNotFound || out["error"] != "config_missing" {
+		t.Fatalf("文件缺失应 404 config_missing, got %d %v", code, out)
+	}
+}
+
+// TestReloadAndPutConfigConcurrentNoClobber 第五轮收敛 1 行为级验证：reload 的
+// 读文件+解析纳入 writeConfigMu 临界区后，与 PUT config 并发不得再现「reload
+// 锁外读旧表 → PUT 写新表 → reload 以旧表覆盖回盘」。PUT 链式发车锁定最后一轮
+//（应答在临界区内写回，同 TestDeclareAndPutConfigConcurrentNoClobber 口径），
+// reload 群全并发——reload 读到哪一版就写回哪一版，终态 agents 表必须与最后
+// 一次成功 PUT 的提交表完全一致（逐字段全表比对，echo 必然存在）。
+func TestReloadAndPutConfigConcurrentNoClobber(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "node.yaml")
+	wd := t.TempDir()
+	exposed := true
+	table := func(desc string) []AgentProfile {
+		return []AgentProfile{
+			{Name: "echo", Kind: "cli", Command: "/bin/echo", Workdir: wd, TimeoutSec: 10,
+				Description: desc, PermissionMode: "no-shell", Exposed: &exposed},
+			{Name: "sleeper", Kind: "cli", Command: "/bin/sleep", Workdir: wd, TimeoutSec: 1, Exposed: &exposed},
+		}
+	}
+	// 初始盘上表与运行时基线同构（同名同 command → 全程非结构性变更，全部热应用）
+	initial, err := updateAgentsYAML([]byte("node_id: nodeA\n"), table("desc-init"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfigFile(cfgPath, string(initial)); err != nil {
+		t.Fatal(err)
+	}
+	st := newState(t, t.TempDir(), []protocol.ExecProfile{
+		{Name: "echo", Kind: protocol.AgentKindCLI, Command: "/bin/echo", Workdir: wd, TimeoutSec: 10, Exposed: true},
+		{Name: "sleeper", Kind: protocol.AgentKindCLI, Command: "/bin/sleep", Workdir: wd, TimeoutSec: 1, Exposed: true},
+	})
+	srv := httptest.NewServer(New(Config{
+		NodeID: "nodeA", Mode: ModeStandalone, Agents: st, LocalToken: "tok-local",
+		ConfigOps: &ConfigOps{ConfigPath: cfgPath, Supervised: true,
+			ReloadExecutors: func([]protocol.ExecProfile) error { return nil }},
+	}).Handler())
+	t.Cleanup(srv.Close)
+
+	const rounds = 8
+	putDone := make([]chan struct{}, rounds)
+	for i := range putDone {
+		putDone[i] = make(chan struct{})
+	}
+	var lastPut []AgentProfile // 第 rounds-1 轮提交表（仅该 goroutine 写，wg.Wait 后主 goroutine 读）
+	var wg sync.WaitGroup
+	// reload 群：与 PUT 全并发（竞态检测主体）
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/agents/reload", ""); code != http.StatusOK {
+				t.Errorf("reload 应 200, got %d: %s", code, out)
+			}
+		}()
+	}
+	// PUT 链：第 i 轮等第 i-1 轮应答后发车（收到应答 = 第 i-1 轮写盘已完成）
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer close(putDone[i])
+			if i > 0 {
+				<-putDone[i-1]
+			}
+			tbl := table(fmt.Sprintf("desc-%d", i))
+			if i == rounds-1 {
+				lastPut = tbl
+			}
+			body, _ := json.Marshal(configPutRequest{Agents: tbl})
+			if code, out := doJSON(t, srv, "tok-local", http.MethodPut, "/api/v1/local/config", string(body)); code != http.StatusOK {
+				t.Errorf("PUT config 应 200, got %d: %s", code, out)
+			}
+		}(i)
+	}
+	wg.Wait()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := parseAgents(t, b)
+	hasEcho := false
+	for _, a := range doc {
+		if a.Name == "echo" {
+			hasEcho = true
+		}
+	}
+	if !hasEcho {
+		t.Fatalf("终态表缺 echo（PUT 写盘丢失或被截断）\n%s", b)
+	}
+	wantRaw, err := updateAgentsYAML([]byte("agents: []\n"), lastPut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := parseAgents(t, wantRaw)
+	if !reflect.DeepEqual(doc, want) {
+		t.Fatalf("终态表应与最后一次成功 PUT 的提交表完全一致（reload 以旧表覆盖回盘）:\n got %+v\nwant %+v\n%s", doc, want, b)
 	}
 }

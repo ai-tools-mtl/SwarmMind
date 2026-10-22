@@ -15,8 +15,10 @@
 //	SWARM_TARGET=node——连本机 node（standalone 单机编排入口，端点契约
 //	  对照 internal/node/localapi；stdio 传输天然仅本机可达）：
 //	  SWARM_NODE_URL         本机 node 地址（默认 http://127.0.0.1:8445）
-//	  SWARM_NODE_TOKEN       local_token（只读工具：nodes/agents/status/wait/artifact）
-//	  SWARM_NODE_PRIME_TOKEN prime_token（编排工具：submit；接入即总理）
+//	  SWARM_NODE_PRIME_TOKEN prime_token（唯一凭证：编排 submit + 只读六工具
+//	    全走它——安全审查修复 1：不再读取 SWARM_NODE_TOKEN，local_token 是本机
+//	    主人管理凭证（declare/rotate/restart/PUT config），不随总理连接下发；
+//	    prime 认证级 ⊇ 只读，单凭证覆盖全部工具）
 //
 // 通用（两模式）：
 //
@@ -165,11 +167,11 @@ func (hubBackend) initResult() map[string]any {
 
 // nodeBackend node 模式（standalone 单机编排入口，方案 3.4）：全部工具直连本机
 // 回环 localapi（端点契约见 internal/node/localapi），不经 hub。接入即总理——
-// 本机编排（submit）持 SWARM_NODE_PRIME_TOKEN，只读工具持 SWARM_NODE_TOKEN。
+// 六工具全走 SWARM_NODE_PRIME_TOKEN 单凭证（安全审查修复 1：编排 submit 与只读
+// 查询共用；local_token 是本机主人管理凭证，不随总理连接下发）。
 type nodeBackend struct {
 	baseURL    string // 本机 node 地址（SWARM_NODE_URL，默认 http://127.0.0.1:8445）
-	token      string // local_token（只读工具；localapi authRead 同收 prime_token）
-	primeToken string // prime_token（编排工具 submit 专属；403 prime_required 原话透传）
+	primeToken string // prime_token（唯一凭证：submit 编排 + 只读工具；localapi authRead 同收）
 	client     *http.Client
 }
 
@@ -177,7 +179,6 @@ type nodeBackend struct {
 func newNodeBackend(getenv func(string) string) nodeBackend {
 	return nodeBackend{
 		baseURL:    strings.TrimRight(envGet(getenv, "SWARM_NODE_URL", "http://127.0.0.1:8445"), "/"),
-		token:      strings.TrimSpace(getenv("SWARM_NODE_TOKEN")),
 		primeToken: strings.TrimSpace(getenv("SWARM_NODE_PRIME_TOKEN")),
 		client:     &http.Client{Timeout: client.Timeout},
 	}
@@ -189,8 +190,7 @@ func (nodeBackend) initResult() map[string]any {
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": "0.1.1"},
 		"instructions": "SwarmMind 本机编排入口（接入即总理：本机编排）。工具只作用于本机节点：" +
-			"swarmmind_submit 需总理凭证 SWARM_NODE_PRIME_TOKEN（node.yaml 声明 prime_agent 后编排接口才激活）；" +
-			"只读工具（nodes/agents/status/wait/artifact）用 SWARM_NODE_TOKEN。" +
+			"全部工具共用总理凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。",
 	}
 }
@@ -586,18 +586,10 @@ func isText(b []byte) bool {
 
 /* ---------- node 模式工具实现（本机回环 localapi 直连，方案 3.4） ---------- */
 
-// nodeAPI 本机 node API 调用：tok 由工具定级（只读=local_token 缺省回退
-// prime_token——localapi authRead 两者皆收；编排=prime_token）。
+// nodeAPI 本机 node API 调用：tok 由调用方传入（唯一凭证 prime_token——修复 1
+// 后只读与编排不再分票）。
 func (b nodeBackend) nodeAPI(method, path string, body any, tok string) (int, []byte, error) {
 	return httpCall(b.baseURL, tok, b.client, method, path, body)
-}
-
-// readToken 只读工具凭证：local_token 优先，未配置回退 prime_token（authRead 同收）。
-func (b nodeBackend) readToken() string {
-	if b.token != "" {
-		return b.token
-	}
-	return b.primeToken
 }
 
 // nodeAPIErr node 端非 2xx → error：服务端 JSON 错误体 {error,message} 的原话
@@ -623,7 +615,7 @@ func nodeAPIErr(code int, data []byte) error {
 
 // toolNodeNodes 本机节点信息（GET /api/v1/local/status，单条）。
 func (b nodeBackend) toolNodes() (string, error) {
-	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.readToken())
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.primeToken)
 	if err != nil {
 		return "", err
 	}
@@ -664,7 +656,7 @@ func (b nodeBackend) toolNodes() (string, error) {
 // toolNodeAgents 本机能力目录（GET /api/v1/local/agents：完整 ExecProfile 视图 +
 // 今日执行数；node 无全网视图）。
 func (b nodeBackend) toolAgents() (string, error) {
-	code, data, err := b.nodeAPI("GET", "/api/v1/local/agents", nil, b.readToken())
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/agents", nil, b.primeToken)
 	if err != nil {
 		return "", err
 	}
@@ -763,7 +755,7 @@ func (b nodeBackend) toolSubmit(args map[string]any) (string, error) {
 
 // localNodeID 本机身份（GET /api/v1/local/status 的 node_id；submit 边界锁补齐用）。
 func (b nodeBackend) localNodeID() (string, error) {
-	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.readToken())
+	code, data, err := b.nodeAPI("GET", "/api/v1/local/status", nil, b.primeToken)
 	if err != nil {
 		return "", fmt.Errorf("本机 node 不可达（%v）", err)
 	}
@@ -783,7 +775,7 @@ func (b nodeBackend) localNodeID() (string, error) {
 // 协议层 Task 形态，渲染共用 renderTaskStatus）。
 func (b nodeBackend) taskStatus(taskID string) (string, bool) {
 	return renderTaskStatus(taskID, "本机 node", func(id string) (int, []byte, error) {
-		return b.nodeAPI("GET", "/api/v1/tasks/"+id, nil, b.readToken())
+		return b.nodeAPI("GET", "/api/v1/tasks/"+id, nil, b.primeToken)
 	})
 }
 
@@ -798,7 +790,7 @@ func (b nodeBackend) toolArtifact(args map[string]any) (string, error) {
 	if v, ok := args["index"].(float64); ok {
 		idx = int(v)
 	}
-	code, data, err := b.nodeAPI("GET", fmt.Sprintf("/api/v1/tasks/%s/artifacts/%d", taskID, idx), nil, b.readToken())
+	code, data, err := b.nodeAPI("GET", fmt.Sprintf("/api/v1/tasks/%s/artifacts/%d", taskID, idx), nil, b.primeToken)
 	if err != nil {
 		return "", err
 	}

@@ -5,8 +5,11 @@
 //   - PUT  /api/v1/local/config          整表提交：服务端强校验 → yaml.Node
 //     round-trip 写盘（保留注释与未知字段）→ 普通字段变更热重载即时生效，
 //     结构性变更（增删 agent、command/agent_args/kind 变更）标「待应用」；
+//     读-改-写全程持 writeConfigMu 事务锁（安全审查修复 3，与 declare/reload/
+//     disconnect 互斥），能力表上报在锁外；
 //   - POST /api/v1/local/agents/reload   手编 node.yaml 后的网页一键重载（重读
-//     文件，同一校验/分类/热应用链）；
+//     文件，同一校验/分类/热应用链；读-校验-改写-热应用全程持 writeConfigMu
+//     事务锁，第五轮收敛 1）；
 //   - POST /api/v1/local/restart         「应用并重启」：HTTP 应答先返回，装配方
 //     延时优雅退出靠保活拉起；裸前台在应答注明手动重启命令。
 //
@@ -234,23 +237,22 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 // handleAgentsReload POST /api/v1/local/agents/reload：手编 node.yaml 后的网页
 // 一键重载——重读盘上配置走同一校验/分类/热应用链（普通字段即时生效不重启，
 // 结构性变更标待应用）。
+//
+// 第五轮收敛 1：读文件+解析纳入 writeConfigMu 临界区（与 PUT/disconnect 同锁，
+// 锁内完成读-校验-分类-写盘-热应用全链）——原实现在锁外读盘解析出旧表再进
+// 加锁写流程，存在「reload 读旧表 → PUT 写新表 → reload 以旧表覆盖回盘」竞态
+// 窗口。锁内无阻塞网络操作：能力表上报（CardsReporter）留在锁外尽力执行。
 func (s *Server) handleAgentsReload(w http.ResponseWriter, r *http.Request) {
 	ops := s.configPreflight(w)
 	if ops == nil {
 		return
 	}
-	raw, ok := s.readConfigRaw(w, ops)
-	if !ok {
+	if !s.applyReloadLocked(w, ops) {
 		return
 	}
-	var parsed struct {
-		Agents []AgentProfile `yaml:"agents"`
+	if s.cfg.CardsReporter != nil && s.cfg.Agents != nil {
+		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards()) // 锁外尽力上报；离线待重连收敛
 	}
-	if err := yaml.Unmarshal(raw, &parsed); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_config", "node.yaml 解析失败（先修正文件再重载）: "+err.Error())
-		return
-	}
-	s.applyConfigTable(w, ops, parsed.Agents, "文件重载")
 }
 
 // configPreflight 配置写端点公共前置：装配存在性（nil → 503）。
@@ -276,25 +278,74 @@ func (s *Server) readConfigRaw(w http.ResponseWriter, ops *ConfigOps) ([]byte, b
 	return raw, true
 }
 
-// applyConfigTable PUT 与 reload 共用主体：校验 → round-trip 写盘 → 分类 →
-// 热应用或标待应用。source 仅用于错误文案定位。
+// applyConfigTable PUT 提交主体：校验 → 事务锁内「读文件→改写→写盘→热应用」→
+// 分类结果应答。source 仅用于错误文案定位。
+//
+// 安全审查修复 3：共享配置的完整读-改-写纳入同一 writeConfigMu 临界区（读文件
+// 前持锁，写盘与内存生效完成后释放）——否则 declare 与 PUT config 并发时各自
+// 读旧文件互相覆盖（实测刚保存的 description 被 declare 覆盖）。锁内不做网络
+// 操作：能力表上报（CardsReporter）移到锁外尽力执行。reload 同纪律走
+// applyReloadLocked（第五轮收敛 1：其读文件+解析亦在同一临界区内）。
 func (s *Server) applyConfigTable(w http.ResponseWriter, ops *ConfigOps, agents []AgentProfile, source string) {
 	if err := ValidateAgentProfiles(agents); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", source+"被拒绝: "+err.Error())
 		return
 	}
+	if s.applyConfigTableLocked(w, ops, agents) && s.cfg.CardsReporter != nil && s.cfg.Agents != nil {
+		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards()) // 锁外尽力上报；离线待重连收敛
+	}
+}
+
+// applyConfigTableLocked PUT 事务段（调用方随后按返回值上报能力表）：持
+// writeConfigMu 完成「读文件→改写→写盘→分类→热应用」与应答；返回 true = 已写入
+// 且热应用成功。
+func (s *Server) applyConfigTableLocked(w http.ResponseWriter, ops *ConfigOps, agents []AgentProfile) bool {
+	writeConfigMu.Lock()
+	defer writeConfigMu.Unlock()
 	raw, ok := s.readConfigRaw(w, ops)
 	if !ok {
-		return
+		return false
 	}
+	return s.applyParsedLocked(w, ops, raw, agents)
+}
+
+// applyReloadLocked reload 事务段（第五轮收敛 1）：读文件+解析+校验与后续
+// 改写-写盘-分类-热应用在同一 writeConfigMu 临界区内完成——解析出的 agents 表
+// 不再有锁外陈旧窗口（旧实现锁外读盘解析，PUT 插写新表后 reload 以旧表覆盖回
+// 盘）。返回 true = 已写入且热应用成功。
+func (s *Server) applyReloadLocked(w http.ResponseWriter, ops *ConfigOps) bool {
+	writeConfigMu.Lock()
+	defer writeConfigMu.Unlock()
+	raw, ok := s.readConfigRaw(w, ops)
+	if !ok {
+		return false
+	}
+	var parsed struct {
+		Agents []AgentProfile `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_config", "node.yaml 解析失败（先修正文件再重载）: "+err.Error())
+		return false
+	}
+	if err := ValidateAgentProfiles(parsed.Agents); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "文件重载被拒绝: "+err.Error())
+		return false
+	}
+	return s.applyParsedLocked(w, ops, raw, parsed.Agents)
+}
+
+// applyParsedLocked 事务后半段（调用方已持 writeConfigMu）：以 raw 为底稿改写
+// agents 表并写盘，分类后热应用或标「待应用」，应答就地写出。返回 true = 已写入
+// 且热应用成功。
+func (s *Server) applyParsedLocked(w http.ResponseWriter, ops *ConfigOps, raw []byte, agents []AgentProfile) bool {
 	content, err := updateAgentsYAML(raw, agents)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_config", err.Error()+"（未改动原文件）")
-		return
+		return false
 	}
-	if err := writeConfigFile(ops.ConfigPath, string(content)); err != nil {
+	if err := writeConfigFileLocked(ops.ConfigPath, string(content)); err != nil {
 		writeErr(w, http.StatusInternalServerError, "write_failed", "node.yaml 写盘失败（未改动原文件可重试）: "+err.Error())
-		return
+		return false
 	}
 	next := make([]protocol.ExecProfile, 0, len(agents))
 	for _, p := range agents {
@@ -308,7 +359,7 @@ func (s *Server) applyConfigTable(w http.ResponseWriter, ops *ConfigOps, agents 
 			"structural": structural,
 			"note":       "已写入 node.yaml（未生效）：含结构性变更（增删 agent / command / agent_args / kind），重启后生效；可在本页点「应用并重启」",
 		})
-		return
+		return false
 	}
 	if err := s.applyHotConfig(ops, next); err != nil {
 		s.setPendingRestart(true)
@@ -317,19 +368,21 @@ func (s *Server) applyConfigTable(w http.ResponseWriter, ops *ConfigOps, agents 
 			"error": err.Error(),
 			"note":  "已写入 node.yaml，但热应用未完成（原因见 error）：重启后按盘上新配置收敛生效，可在本页点「应用并重启」",
 		})
-		return
+		return false
 	}
 	s.setPendingRestart(false)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"written": ops.ConfigPath, "applied": true, "pending_restart": false,
 		"note": "已写入 node.yaml 并热重载生效（未重启进程，在途任务不受影响）",
 	})
+	return true
 }
 
 // applyHotConfig 普通字段热应用（顺序即失败语义）：先重建执行器换表——失败时
 // 基线与运行时一致为旧值（磁盘已是新表，重启收敛）；成功后才整表替换基线提交
-//（覆盖集一并清空——提交表即权威，否则盘上 yaml 与生效值分叉、重启回跳）→
-// 能力表尽力上报 hub（组网态；离线失败静默，重连注册携全量能力表收敛）。
+//（覆盖集一并清空——提交表即权威，否则盘上 yaml 与生效值分叉、重启回跳）。
+// 能力表上报（CardsReporter）不在本函数——修复 3：它在 writeConfigMu 事务锁外
+// 由 applyConfigTable 尽力执行，锁内不得阻塞于网络。须持 writeConfigMu 调用。
 func (s *Server) applyHotConfig(ops *ConfigOps, next []protocol.ExecProfile) error {
 	if s.cfg.Agents == nil {
 		return errors.New("未装配 agent 状态（装配方须传入 Agents）")
@@ -339,9 +392,6 @@ func (s *Server) applyHotConfig(ops *ConfigOps, next []protocol.ExecProfile) err
 	}
 	if err := s.cfg.Agents.ReplaceBaseline(next); err != nil {
 		return fmt.Errorf("基线落盘失败（执行器已按提交表运行，基线保持旧值，重启后收敛）: %w", err)
-	}
-	if s.cfg.CardsReporter != nil {
-		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards()) // 尽力上报；离线待重连收敛
 	}
 	return nil
 }

@@ -50,15 +50,27 @@ const S = {
   primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp} 钦定完成一次性展示
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
          restart_cmd: '', config_path: '', structural: [], msg: '', editing: false },  // 能力配置编辑（方案 3.5）；editing=编辑 details 展开中（轮询挂起重绘）
+  sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
+                           // 在途请求发起时捕获，应答返回时代次不一致 = 迟到应答，丢弃不写状态
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
+}
+/* 一次性总理凭证内存清理（安全审查修复 5）：登出/401/换令牌时清空——退出登录后
+   prime_token 不得残留在 JS 内存（下个会话重新进页可见）。同时递增会话代次
+  （第五轮收敛 3）：清理前已发出的在途请求，其迟到应答凭代次不一致被丢弃，
+   不得把已清理的一次性凭证写回 S.primeNew / S.primeDecl.done。 */
+function resetPrimeState() {
+  S.sessionEpoch++;
+  S.primeDecl = { picking: false, busy: false, done: null };
+  S.primeNew = '';
 }
 
 /* ---------- API 访问（Bearer 本机管理令牌） ---------- */
 /* 返回 {code, data}；网络层失败抛 {network:true}（结果未知），401 抛前先回令牌页。 */
 async function api(method, path, body, opt = {}) {
   let resp;
+  const tokenAtReq = S.token, epochAtReq = S.sessionEpoch; // 会话边界竞态防护：捕获发起时令牌与代次
   try {
     resp = await fetch(path, {
       method,
@@ -73,9 +85,14 @@ async function api(method, path, body, opt = {}) {
   }
   const data = await resp.json().catch(() => null);
   if (resp.status === 401 && !opt.noGate) {
-    S.authed = false;
-    render();
-    throw { unauthorized: true, data };
+    // 迟到 401 防护（codex 终验两轮收敛）：请求发起后发生过会话边界
+    //（登出/换令牌/前次 401 清理，epoch 已递增）——不得清空当前（可能是新）会话。
+    if (S.sessionEpoch === epochAtReq) {
+      S.authed = false;
+      resetPrimeState(); // 同代次内真实失效：清凭证回门（reset 再递增 epoch 表示新边界）
+      render();
+    }
+    throw { unauthorized: true, stale: S.sessionEpoch !== epochAtReq, data };
   }
   return { code: resp.status, data };
 }
@@ -130,9 +147,13 @@ document.addEventListener('toggle', e => {
 
 /* ---------- 令牌门（本机管理令牌 = 本机控制台的登录） ---------- */
 async function tryToken(token) {
+  const epochAtReq = S.sessionEpoch; // 捕获登录发起时代次
   S.token = token;
+  resetPrimeState(); // 新会话边界：清上个会话凭证，epoch +1
+  const myEpoch = S.sessionEpoch; // 本登录会话的代次基准（自身 reset 之后取，免自误判）
   try {
     const r = await api('GET', '/api/v1/local/status', undefined, { noGate: true });
+    if (S.sessionEpoch !== myEpoch) return; // 登录期间发生别的会话边界（logout/再登录/401），本次应答丢弃
     if (r.code === 200) {
       localStorage.setItem(TOKEN_KEY, token);
       S.authed = true;
@@ -143,9 +164,12 @@ async function tryToken(token) {
     }
     toast('令牌未被接受 · ' + errLine(r.data));
   } catch (e) {
+    if (S.sessionEpoch !== myEpoch) return; // 迟到失败同理不碰新会话
     toast('本机 API 不可达，确认 node 已启动');
   }
-  S.token = localStorage.getItem(TOKEN_KEY) || '';
+  if (S.sessionEpoch === myEpoch) {
+    S.token = localStorage.getItem(TOKEN_KEY) || '';
+  }
 }
 
 /* ---------- 路由（hash SPA） ---------- */
@@ -679,8 +703,10 @@ async function wizApply() {
 async function primeRotate(btn) {
   if (!confirm('轮换总理凭证？旧凭证将立即失效，总理的 MCP 连接需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
   if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
+  const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
     const r = await api('POST', '/api/v1/local/prime/rotate');
+    if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回内存
     if (r.code === 200) {
       S.primeNew = r.data?.prime_token || '';
       toast('已轮换 · 新凭证仅此一次展示，请立即复制');
@@ -704,8 +730,10 @@ async function primeDeclare(btn) {
   if (!confirm(`钦定「${name}」为本机总理？旧总理凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
   S.primeDecl.busy = true;
   if (btn) { btn.disabled = true; btn.textContent = '钦定中…'; }
+  const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
     const r = await api('POST', '/api/v1/local/prime/declare', { prime_agent: name });
+    if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回状态（busy 已随 resetPrimeState 复位）
     if (r.code === 200) {
       S.primeDecl.done = { agent: name, token: r.data?.prime_token || '', mcp: r.data?.mcp_config || null };
       S.primeDecl.picking = false;
@@ -892,7 +920,9 @@ document.addEventListener('click', e => {
         cfgRestart(btn); return;
       }
       case 'logout':
-        localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = ''; render(); return;
+        localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = '';
+        resetPrimeState(); // 修复 5：登出清一次性凭证
+        render(); return;
       case 'expose-on': case 'expose-off': setExposed(arg, act === 'expose-on', btn); return;
       case 'form-submit': submitForm(); return;
       case 'form-retry': // 新幂等键开新单
@@ -935,7 +965,9 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());
 });
 $('#logout').addEventListener('click', () => {
-  localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = ''; render();
+  localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = '';
+  resetPrimeState(); // 修复 5：登出清一次性凭证
+  render();
 });
 function focusForm() {
   requestAnimationFrame(() => $('#f-stdin')?.focus());
@@ -944,11 +976,13 @@ function focusForm() {
 /* ---------- 启动 ---------- */
 async function boot() {
   if (!S.token) { render(); return; }
+  const epochAtReq = S.sessionEpoch; // 启动验证同样遵守会话边界（迟到 200 不得恢复 authed）
   try {
     await api('GET', '/api/v1/local/status', undefined, { noGate: true });
+    if (S.sessionEpoch !== epochAtReq) return;
     S.authed = true;
     await loadAll();
-  } catch (e) { /* 401 → 门；网络异常 → 空数据页，轮询会补 */ 
+  } catch (e) { /* 401 → 门；网络异常 → 空数据页，轮询会补 */
     if (!e.unauthorized) S.authed = true;
   }
   route();

@@ -196,8 +196,11 @@ const agentsHintComment = `
 #     description: 示例条目（照此格式增删；暂不配置也能上线，只是先不开放能力）
 `
 
-// writeConfigMu 配置写盘串行锁（返工 #5）：apply（向导落盘）与 disconnect（清
-// hub_url）的「读取-改写-提交」并发时串行化，杜绝两个提交交错。
+// writeConfigMu 配置读改写事务锁（返工 #5 立锁，安全审查修复 3 扩围）：凡共享
+// node.yaml 的「读文件→改写→写盘→内存生效」全程在同一临界区内完成（setup apply
+// 落盘、disconnect 清 hub_url、declare 写 prime_agent、PUT config/reload 整表
+// 提交），杜绝并发事务各自读旧文件互相覆盖。锁内禁网络操作（CardsReporter 上报
+// 在锁外）；锁序 muPrime→writeConfigMu→muCfg（包内无反向路径）。
 var writeConfigMu sync.Mutex
 
 // writeConfigFile 原子写配置文件（串行提交包装，见 writeConfigFileLocked）。

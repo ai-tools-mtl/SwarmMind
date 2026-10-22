@@ -9,9 +9,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	svcpkg "github.com/mtl802/swarmmind/internal/node/service"
@@ -239,6 +242,11 @@ func newDeclareServer(t *testing.T) (*httptest.Server, string) {
 		PrimeToken:        "tok-old", // 未钦定态预生成凭证（矩阵 #15：生成不分发）
 		LocalListen:       "127.0.0.1:8445",
 		DeclareConfigPath: cfgPath,
+		ConfigOps: &ConfigOps{ // 修复 3 并发测试用：与 declare 同一 node.yaml 读改写
+			ConfigPath:      cfgPath,
+			ReloadExecutors: func([]protocol.ExecProfile) error { return nil },
+			Supervised:      true,
+		},
 		RotatePrime: func() (string, error) {
 			n++
 			return fmt.Sprintf("tok-declare-%d", n), nil
@@ -250,7 +258,8 @@ func newDeclareServer(t *testing.T) (*httptest.Server, string) {
 
 // TestPrimeDeclareValidation 校验与应答结构：不存在 400（人话 + 可选名单）、
 // 空 400、prime_token 调用 401（本机主人门）、合法 200 三字段带全且
-// mcp_config 四 env 键值正确。
+// mcp_config 三 env 键值正确（安全审查修复 1：不含 SWARM_NODE_TOKEN——
+// local_token 是本机主人管理凭证，不随总理 MCP 片段下发）。
 func TestPrimeDeclareValidation(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	declare := func(token, body string) (int, string) {
@@ -300,16 +309,18 @@ func TestPrimeDeclareValidation(t *testing.T) {
 	wantEnv := map[string]string{
 		"SWARM_TARGET":           "node",
 		"SWARM_NODE_URL":         "http://127.0.0.1:8445",
-		"SWARM_NODE_TOKEN":       "tok-local",
 		"SWARM_NODE_PRIME_TOKEN": "tok-declare-1",
 	}
 	if len(body.MCPConfig.Env) != len(wantEnv) {
-		t.Fatalf("mcp_config.env 应恰四键, got %v", body.MCPConfig.Env)
+		t.Fatalf("mcp_config.env 应恰三键（修复 1：不再下发 SWARM_NODE_TOKEN）, got %v", body.MCPConfig.Env)
 	}
 	for k, want := range wantEnv {
 		if body.MCPConfig.Env[k] != want {
 			t.Fatalf("env[%s]=%q, want %q", k, body.MCPConfig.Env[k], want)
 		}
+	}
+	if leaked, ok := body.MCPConfig.Env["SWARM_NODE_TOKEN"]; ok {
+		t.Fatalf("mcp_config 不得含 SWARM_NODE_TOKEN（泄漏 local_token=%q）", leaked)
 	}
 }
 
@@ -384,6 +395,80 @@ func TestPrimeDeclareImmediateEffect(t *testing.T) {
 	}
 }
 
+// aliasYAML 修复 4 测试底稿：prime_agent 既有值为别名节点（*who 指向锚点标量）。
+const aliasYAML = `node_id: nodeA
+who: &who sleeper          # 锚点定义（别名目标）
+prime_agent: *who          # 别名值——原实现原位改 Value 写出悬空别名，重启报 unknown anchor
+custom_field: keep-me      # 未知字段锚点
+`
+
+// TestSetPrimeAgentYAMLReplacesAliasNode 修复 4：既有值为 AliasNode 时构造独立
+// 纯量整体替换（不原位改 Alias），重编码结果可正常解析（= 重启不炸）、prime_agent
+// 值正确、锚点定义与未知字段保留。
+func TestSetPrimeAgentYAMLReplacesAliasNode(t *testing.T) {
+	out, err := setPrimeAgentYAML([]byte(aliasYAML), "echo")
+	if err != nil {
+		t.Fatalf("别名值写总理应成功: %v", err)
+	}
+	s := string(out)
+	if strings.Contains(s, "prime_agent: *") {
+		t.Fatalf("prime_agent 不得残留别名引用:\n%s", s)
+	}
+	var doc struct {
+		PrimeAgent  string `yaml:"prime_agent"`
+		Who         string `yaml:"who"`
+		CustomField string `yaml:"custom_field"`
+	}
+	if err := yaml.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("重编码结果必须可解析（重启语义）: %v\n%s", err, s)
+	}
+	if doc.PrimeAgent != "echo" {
+		t.Fatalf("prime_agent=%q, want echo\n%s", doc.PrimeAgent, s)
+	}
+	if doc.Who != "sleeper" || doc.CustomField != "keep-me" {
+		t.Fatalf("锚点与未知字段应保留: %+v\n%s", doc, s)
+	}
+	// 幂等：写过一次后再写（此时值已是普通标量）仍正确
+	out2, err := setPrimeAgentYAML(out, "sleeper")
+	if err != nil {
+		t.Fatalf("二次写入应成功: %v", err)
+	}
+	var doc2 struct {
+		PrimeAgent string `yaml:"prime_agent"`
+		Who        string `yaml:"who"`
+	}
+	if err := yaml.Unmarshal(out2, &doc2); err != nil || doc2.PrimeAgent != "sleeper" || doc2.Who != "sleeper" {
+		t.Fatalf("二次写入应原位更新: %+v err=%v\n%s", doc2, err, string(out2))
+	}
+}
+
+// TestPrimeDeclareAliasValueEndToEnd 端到端（修复 4）：盘上 node.yaml 的
+// prime_agent 为别名值时 declare 200，落盘文件可解析且值正确（重启可加载）。
+func TestPrimeDeclareAliasValueEndToEnd(t *testing.T) {
+	srv, cfgPath := newDeclareServer(t)
+	if err := os.WriteFile(cfgPath, []byte(aliasYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
+	if code != http.StatusOK {
+		t.Fatalf("别名值 declare 应 200, got %d: %s", code, out)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		PrimeAgent string `yaml:"prime_agent"`
+		Who        string `yaml:"who"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("declare 落盘后文件必须可解析: %v\n%s", err, b)
+	}
+	if doc.PrimeAgent != "echo" || doc.Who != "sleeper" {
+		t.Fatalf("落盘值不符: %+v\n%s", doc, b)
+	}
+}
+
 // TestPrimeDeclareRotatesToken 钦定即换凭证：首次钦定前的旧凭证失效；换总理
 // 再钦定后上一任凭证同步失效——任一时刻恰一张有效编排凭证。
 func TestPrimeDeclareRotatesToken(t *testing.T) {
@@ -426,6 +511,8 @@ func TestPrimeDeclareRotatesToken(t *testing.T) {
 // TestPrimeDeclareRotateConcurrent 交错并发（返工收口：declare 与 rotate 共享
 // muPrime 互斥段，混合调用不得出现盘上/内存凭证分叉——每次应答凭证唯一且
 // 全部 200；任一时刻恰一张有效编排凭证由 declare 即换凭证语义保证）。
+// 修复 6 加强断言：收尾后 status 查询 prime_agent 正确；用最终凭证调 submit
+// 断言 202（「任一时刻恰一张有效凭证」的行为级验证——n 张应答凭证中恰一张可编排）。
 func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	const n = 6
@@ -461,5 +548,154 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 			t.Fatalf("并发 declare×rotate 应各得唯一凭证（互斥段无分叉）, got %q", tokens)
 		}
 		seen[tok] = true
+	}
+	// 加强①：收尾后 status 查询 prime_agent 正确（全部 declare 均钦定 echo）
+	if code, out := doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK || !strings.Contains(out, `"prime_agent":"echo"`) {
+		t.Fatalf("收尾后 status 应反映 prime_agent=echo, got %d: %s", code, out)
+	}
+	// 加强②：n 张应答凭证中恰一张可编排（202）——其余被后续轮换作废（401）。
+	submit := func(token string) int {
+		code, _ := doJSON(t, srv, token, http.MethodPost, "/api/v1/tasks",
+			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
+		return code
+	}
+	live := 0
+	for _, tok := range tokens {
+		if code := submit(tok); code == http.StatusAccepted {
+			live++
+		} else if code != http.StatusUnauthorized {
+			t.Fatalf("非最终凭证应 401, got %d（%s）", code, tok)
+		}
+	}
+	if live != 1 {
+		t.Fatalf("任一时刻应恰一张有效编排凭证, got %d 张可 202: %q", live, tokens)
+	}
+}
+
+// TestPrimeTokenCannotCallOwnerEndpoints 修复 1 行为级验证：仅持 prime_token 的
+// 调用方（总理）不可触达本机主人管理面——declare/rotate/restart/PUT config 全部
+// 401（authLocal 只认 local_token）；prime_token 仍可只读（authRead 双收，
+// prime ⊇ read）——MCP 连接单凭证够用，无需下发 local_token。
+func TestPrimeTokenCannotCallOwnerEndpoints(t *testing.T) {
+	srv, _ := newDeclareServer(t)
+	for _, tc := range []struct {
+		name, method, path, body string
+	}{
+		{"declare", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`},
+		{"rotate", http.MethodPost, "/api/v1/local/prime/rotate", ""},
+		{"restart", http.MethodPost, "/api/v1/local/restart", ""},
+		{"put config", http.MethodPut, "/api/v1/local/config", `{"agents":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := doJSON(t, srv, "tok-old", tc.method, tc.path, tc.body)
+			if code != http.StatusUnauthorized {
+				t.Fatalf("prime_token 调 %s 应 401, got %d: %s", tc.path, code, out)
+			}
+		})
+	}
+	// 只读仍放行：prime_token 查 status → 200
+	if code, out := doJSON(t, srv, "tok-old", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK {
+		t.Fatalf("prime_token 只读应 200, got %d: %s", code, out)
+	}
+}
+
+// TestDeclareAndPutConfigConcurrentNoClobber 修复 3 行为级验证：declare 与
+// PUT config 并发时完整读改写互斥——审查实测的「刚保存的 description 被
+// declare 覆盖」不得再现。
+//
+// 终态断言（第五轮收敛 4 加强）：PUT 按链式发车——第 i 轮等第 i-1 轮应答后才
+// 发（PUT 应答在 writeConfigMu 临界区内写回，收到应答即该轮写盘已完成），故第
+// rounds-1 轮确定性为「最后一次成功 PUT」；declare 只写顶层 prime_agent 不改
+// agents 表，因此终态 agents 表必须与最后一次成功 PUT 的提交表完全一致——
+// echo 必然存在，且经同一序列化器渲染后逐字段全表比对（不只查 description
+// 前缀——原断言在表被截断、echo 缺失时静默通过）。declare 群保持全并发不串行，
+// 竞态检测能力不变。
+func TestDeclareAndPutConfigConcurrentNoClobber(t *testing.T) {
+	srv, cfgPath := newDeclareServer(t)
+	wd := t.TempDir()
+	exposed := true
+	agents := []AgentProfile{
+		{Name: "echo", Kind: "cli", Command: "/bin/echo", Workdir: wd, TimeoutSec: 10,
+			Description: "回声测试", PermissionMode: "no-shell", Exposed: &exposed},
+		{Name: "sleeper", Kind: "cli", Command: "/bin/sleep", Workdir: wd, TimeoutSec: 1, Exposed: &exposed},
+	}
+	const rounds = 8
+	putDone := make([]chan struct{}, rounds)
+	for i := range putDone {
+		putDone[i] = make(chan struct{})
+	}
+	var lastPut []AgentProfile // 第 rounds-1 轮提交表（仅该 goroutine 写，wg.Wait 后主 goroutine 读）
+	var wg sync.WaitGroup
+	// declare 群：与 PUT 全并发（不串行——竞态检测主体）
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`); code != http.StatusOK {
+				t.Errorf("declare 应 200, got %d: %s", code, out)
+			}
+		}()
+	}
+	// PUT 链：第 i 轮等第 i-1 轮应答后发车（收到应答 = 第 i-1 轮写盘已完成）
+	for i := 0; i < rounds; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer close(putDone[i]) // 失败也放行下一轮（测试已经 Errorf 失败，不阻塞链）
+			if i > 0 {
+				<-putDone[i-1]
+			}
+			table := make([]AgentProfile, len(agents)) // 本轮私有副本：不与他 goroutine 共享可写状态
+			copy(table, agents)
+			table[0].Description = fmt.Sprintf("desc-%d", i)
+			if i == rounds-1 {
+				lastPut = table
+			}
+			body, _ := json.Marshal(configPutRequest{Agents: table})
+			if code, out := doJSON(t, srv, "tok-local", http.MethodPut, "/api/v1/local/config", string(body)); code != http.StatusOK {
+				t.Errorf("PUT config 应 200, got %d: %s", code, out)
+			}
+		}(i)
+	}
+	wg.Wait()
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		PrimeAgent string         `yaml:"prime_agent"`
+		Agents     []AgentProfile `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("终态 node.yaml 必须可解析: %v\n%s", err, b)
+	}
+	if doc.PrimeAgent != "echo" {
+		t.Fatalf("prime_agent 应为 declare 写入的 echo, got %q\n%s", doc.PrimeAgent, b)
+	}
+	// 加强①：echo 必然存在（原断言循环跳过缺失条目——表被截断时静默通过）
+	hasEcho := false
+	for _, a := range doc.Agents {
+		if a.Name == "echo" {
+			hasEcho = true
+		}
+	}
+	if !hasEcho {
+		t.Fatalf("终态表缺 echo（PUT 写盘丢失或被截断）\n%s", b)
+	}
+	// 加强②：终态 agents 表与最后一次成功 PUT 的提交表完全一致——期望表经同一
+	// updateAgentsYAML 序列化器渲染再解出（消除手写期望与最小形态规则的漂移），
+	// 与终态逐字段 DeepEqual。
+	wantRaw, err := updateAgentsYAML([]byte("agents: []\n"), lastPut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want struct {
+		Agents []AgentProfile `yaml:"agents"`
+	}
+	if err := yaml.Unmarshal(wantRaw, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc.Agents, want.Agents) {
+		t.Fatalf("终态表应与最后一次成功 PUT 的提交表完全一致（读改写未互斥或被覆盖）:\n got %+v\nwant %+v\n%s", doc.Agents, want.Agents, b)
 	}
 }
