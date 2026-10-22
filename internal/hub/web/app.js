@@ -477,27 +477,189 @@ function nodesPage() {
     : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
     <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否对外开放由各机器 exposed 开关决定。每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
 }
+/* ---------- 节点接入向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
+ * Step1 节点身份（实时校验）→ Step2 hub 侧登记（本地生成 64 位随机令牌 + 可复制
+ * hub.yaml 片段）→ Step3 目标机器安装配置（node.yaml 全真实值 + 分系统启动命令）
+ * → Step4 等待上线（3s 轮询节点列表，60s 未上线给排查提示）。
+ * 状态存模块级 ENROLL，弹层内重开重渲染、不动页面路由；5s 全局轮询只重绘 #app
+ * 不碰 #layer，向导 DOM 不会被轮询打断。令牌只存内存、关闭弹层即失——重开重新
+ * 生成（openSSL 等价：32 字节 crypto.getRandomValues → 64 位 hex）。 */
+let ENROLL = null;   // { step, id, token, tokenFor, os, t0, timer }
 function enrollModal() {
-  openLayerPlain(`${modalHead('生成接入配置 · V0 手工登记')}
-  <div class="notice warn">V0 无动态签发：token 不经 Web 展示或下发。请在 hub 侧生成随机令牌（如 <code>openssl rand -hex 32</code>）；下方 token 以掩码占位，实际值从 hub 配置查看。</div>
-  <div class="form-grid">
-  <label>新节点 ID（node_id，管理员填写）<input id="enroll-id" placeholder="例如 build-linux（小写字母 / 数字 / 连字符）" autocomplete="off"></label>
-  <label>接入令牌（hub 配置只读 · 掩码展示）<input readonly value="****************************************（存于 hub.yaml，不通过 Web 展示）"></label>
-  </div>
-  <div class="form-grid spaced">
-  <div><h3>① hub 配置片段 —— 将此片段加入 hub.yaml 的 nodes: 段并重启 hub</h3><pre id="enroll-snippet"></pre></div>
-  <div><h3>② 目标机器 node.yaml —— 同步登记同一身份与令牌</h3><pre id="enroll-node-snippet"></pre></div>
-  </div>
-  <div class="actions">${button('复制配置片段', 'copy-config')}${button('完成，等待节点上线', 'enroll-done', 'primary')}</div>
-  <p class="footer-note">node 连接成功后出现在节点列表；接入成功以列表在线状态为准。控制类身份须经管理员批准，禁止节点自报提权。</p>`);
-  updateEnrollSnippet();
+  ENROLL = { step: 1, id: '', token: '', tokenFor: '', os: 'linux', t0: 0, timer: null };
+  openLayerPlain(enrollHtml());
+  $('#enroll-id')?.focus();
 }
-function updateEnrollSnippet() {
-  const id = $('#enroll-id')?.value.trim();
-  const shown = id || '<node_id>';
-  const sn = $('#enroll-snippet'), ns = $('#enroll-node-snippet');
-  if (sn) sn.textContent = `# hub.yaml → nodes: 段新增一行，然后重启 hub\nnodes:\n  ${shown}: <hub 侧生成的随机令牌，如 openssl rand -hex 32>`;
-  if (ns) ns.textContent = `node_id: ${shown}\nhub_url: ws://<hub 地址>/ws/node   # 部署模式为 wss:// + 证书指纹\nregister_token: <同上令牌>          # 与 hub.yaml 中该 node_id 的值一致\nhub_pubkey_fp: ""                   # 空则 TOFU 记录首连\napi_listen: 127.0.0.1:8445\ndata_dir: data\nconcurrency: 2`;
+function enrollGo(step) {
+  if (!ENROLL) return;
+  if (ENROLL.timer && step !== 4) enrollStopWait();
+  ENROLL.step = step;
+  openLayerPlain(enrollHtml());
+  if (step === 1) enrollValidateId();
+}
+function enrollStopWait() {
+  if (ENROLL?.timer) { clearInterval(ENROLL.timer); ENROLL.timer = null; }
+}
+const ENROLL_STEPS = ['节点身份', 'hub 侧登记', '安装配置', '等待上线'];
+function enrollHtml() {
+  const bar = ENROLL_STEPS.map((name, i) => {
+    const n = i + 1, cls = n === ENROLL.step ? 'on' : n < ENROLL.step ? 'done' : 'todo';
+    const inner = `<span class="n">${cls === 'done' ? '✓' : n}</span><span>${name}</span>`;
+    return cls === 'done'
+      ? `<button class="wiz-step done" data-act="enroll-step" data-step="${n}" title="返回这一步">${inner}</button>`
+      : `<div class="wiz-step ${cls}">${inner}</div>`;
+  }).join('');
+  const body = [enrollStep1, enrollStep2, enrollStep3, enrollStep4][ENROLL.step - 1]();
+  return `${modalHead('生成接入配置 · 分步向导')}
+  <div class="wiz-steps">${bar}</div>
+  ${body}
+  <p class="footer-note">node 连接成功后出现在节点列表；接入成功以列表在线状态为准。控制类身份须经管理员批准，禁止节点自报提权。</p>`;
+}
+/* ---- Step 1 节点身份：输入 + 实时校验（小写字母/数字/连字符），通过才可下一步 ---- */
+function enrollStep1() {
+  return `<div class="notice">先给这台机器定个身份：后面三步的配置都会自动带上这个名字。</div>
+  <label class="spaced">节点 ID（node_id）<input id="enroll-id" value="${esc(ENROLL.id)}" placeholder="例如 build-linux、mac-mini" autocomplete="off" spellcheck="false">
+  <small id="enroll-id-hint" class="muted">给这台机器起个名字，会显示在节点列表，如 build-linux、mac-mini</small></label>
+  <div class="actions spaced">${button('下一步', 'enroll-next1', 'primary', 'disabled')}</div>`;
+}
+function enrollValidId(id) {
+  return id.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(id);
+}
+/* enrollValidateId 实时校验（input 委托）：更新旁注与「下一步」可点态；已存在的
+ * ID 允许继续（覆盖登记是合法操作）但黄字提醒会替换 hub.yaml 旧令牌行。 */
+function enrollValidateId() {
+  const input = $('#enroll-id'), hint = $('#enroll-id-hint');
+  const btn = document.querySelector('[data-act="enroll-next1"]');
+  if (!input || !hint || !ENROLL) return;
+  const id = input.value.trim();
+  ENROLL.id = id;
+  if (!btn) return;
+  hint.classList.remove('warn-text');
+  if (!id) { hint.textContent = '给这台机器起个名字，会显示在节点列表，如 build-linux、mac-mini'; btn.disabled = true; return; }
+  if (!enrollValidId(id)) {
+    hint.textContent = '只能用小写字母、数字和连字符（-），且不能以连字符开头或结尾';
+    hint.classList.add('warn-text'); btn.disabled = true; return;
+  }
+  if (S.nodes.some(n => n.node_id === id)) {
+    hint.textContent = '该 ID 已在节点列表：继续登记会替换 hub.yaml 里的旧令牌行';
+    hint.classList.add('warn-text');
+  } else hint.textContent = '可用 ✓ 下一步将生成这台机器的接入令牌';
+  btn.disabled = false;
+}
+/* ---- Step 2 hub 侧登记：本地生成令牌（只显示一次）+ 真实值 hub.yaml 片段 ---- */
+function newNodeToken() {
+  const b = new Uint8Array(32);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(b);
+  else for (let i = 0; i < 32; i++) b[i] = Math.floor(Math.random() * 256);   // 无 crypto 环境兜底
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+function enrollStep2() {
+  if (!ENROLL.token) ENROLL.token = newNodeToken();
+  return `<div class="notice warn">这台机器的接入令牌已在本页<b>本地生成</b>（不经过网络，安全性等同手动 <code>openssl rand -hex 32</code>）——<b>只显示这一次</b>，请立即复制保存。</div>
+  <div class="enroll-token-row spaced"><code>${esc(ENROLL.token)}</code>${button('复制令牌', 'enroll-copy-token')}</div>
+  <small class="muted">64 位随机令牌 · 关闭弹层后无法再查看，只能重新生成重贴。</small>
+  <h3 class="spaced">把这两行加进服务器上的 hub.yaml（一分钟）</h3>
+  <div class="enroll-rows">
+  <div class="enroll-row"><code>nodes:</code><small>hub.yaml 已有 nodes: 段时跳过本行，只粘贴下一行到段内</small></div>
+  <div class="enroll-row"><code>  ${esc(ENROLL.id)}: ${esc(ENROLL.token)}</code><small>新节点一行登记，令牌是这台机器的接入凭证</small></div>
+  </div>
+  <div class="row"><small class="muted">编辑服务器上的 hub.yaml → 粘贴上面两行 → 重启：<code>sudo systemctl restart swarmmind-hub</code></small>${button('复制 hub.yaml 片段', 'enroll-copy-hub')}</div>
+  <div class="actions spaced">${button('已粘贴并重启 hub，下一步', 'enroll-pasted', 'primary')}</div>`;
+}
+/* ---- Step 3 目标机器安装配置：真实值 node.yaml（分系统 tab）+ 启动命令 ---- */
+const ENROLL_OS = { linux: 'Linux', macos: 'macOS', windows: 'Windows' };
+/* hub_url 从会话上下文自动推导：控制台与节点接入同端口，http(s) 页面 → ws(s)。
+ * 注：node.yaml 实际字段为 local_listen（cmd/node/main.go）——旧弹层写的
+ * api_listen 是 yaml 解码会静默忽略的错名，本向导一并纠正。 */
+function enrollHubUrl() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${location.host || '127.0.0.1:8443'}/ws/node`;
+}
+function enrollNodeYaml() {
+  return `node_id: ${ENROLL.id}
+hub_url: ${enrollHubUrl()}
+register_token: ${ENROLL.token}
+hub_pubkey_fp: ""            # 留空 = 首次连接自动记录 hub 证书指纹（防中间人）
+local_listen: 127.0.0.1:8445
+data_dir: data
+concurrency: 2
+
+# 能力（agents）段参考 configs/node.example.yaml：这台机器有什么智能体就配什么，
+# 保存重启后自动注册到 hub；暂不配置也能上线（只是先不开放能力）。`;
+}
+const ENROLL_START = {
+  linux: `# 二进制放 /opt/swarmmind-node，配置放 /opt/swarmmind/node.yaml（单元文件默认读这里）
+sudo cp swarmmind-node /opt/swarmmind-node
+sudo mkdir -p /opt/swarmmind && sudo cp node.yaml /opt/swarmmind/node.yaml
+# 安装仓库自带 systemd 单元 deploy/swarmmind-node.service 并启动
+sudo cp deploy/swarmmind-node.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now swarmmind-node`,
+  macos: `# 先前台验证（看到连接日志即可回到向导继续）
+./swarmmind-node --config node.yaml
+# 验证通过后用 launchd 常驻（仓库暂无现成单元，需手写 plist）：
+#   /Library/LaunchDaemons/com.swarmmind.node.plist：ProgramArguments 指向二进制
+#   与 --config node.yaml，KeepAlive=true，RunAtLoad=true，然后
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.swarmmind.node.plist`,
+  windows: `# 先在命令行验证
+swarmmind-node.exe --config node.yaml
+# 验证通过后常驻二选一：
+#   计划任务（开机启动）：schtasks /create /tn SwarmMindNode /rl highest /sc onstart /tr "swarmmind-node.exe --config node.yaml"
+#   或用服务包装器（如 NSSM）注册为 Windows 服务`,
+};
+function enrollStep3() {
+  const os = ENROLL.os in ENROLL_OS ? ENROLL.os : 'linux';
+  const rows = [
+    [`node_id: ${ENROLL.id}`, '第一步起的节点身份，会显示在节点列表'],
+    [`hub_url: ${enrollHubUrl()}`, 'hub 的连接地址（内网用 ws://，公网建议配证书后用 wss://）· 已按当前控制台地址自动填好'],
+    [`register_token: ${ENROLL.token}`, '第二步生成的令牌，证明这台机器被允许接入'],
+    ['hub_pubkey_fp: ""', 'hub 证书指纹，留空则首次连接自动记录（防中间人劫持）'],
+    ['local_listen: 127.0.0.1:8445', '本机管理端口，只给本机工具用，默认即可'],
+    ['data_dir: data', '任务文件与执行记录的存放位置'],
+    ['concurrency: 2', '最多同时执行几个任务，2 适合个人机'],
+  ];
+  return `<div class="notice">把 node.yaml 放到目标机器上（内容已按这台机器填好，无需改动即可用），再按系统选启动方式。</div>
+  <div class="os-tabs spaced">${Object.entries(ENROLL_OS).map(([k, v]) =>
+    `<button data-act="enroll-os" data-os="${k}" class="${os === k ? 'on' : ''}">${v}</button>`).join('')}</div>
+  <div class="row"><h3>node.yaml（已填好真实值）</h3>${button('复制 node.yaml', 'enroll-copy-node')}</div>
+  <div class="enroll-rows">${rows.map(([code, note]) =>
+    `<div class="enroll-row"><code>${esc(code)}</code><small>${esc(note)}</small></div>`).join('')}</div>
+  <small class="muted">「复制 node.yaml」得到的是可运行全文（含注释，不含右侧说明列）。</small>
+  <h3 class="spaced">启动命令（${ENROLL_OS[os]}）</h3>
+  <pre>${esc(ENROLL_START[os])}</pre>
+  <div class="actions spaced">${button('下一步', 'enroll-next3', 'primary')}</div>`;
+}
+/* ---- Step 4 等待上线：3s 轮询节点列表，60s 未上线给排查提示 ---- */
+function enrollStep4() {
+  return `<div class="notice">hub 侧与机器侧都已配置。节点进程一连上 hub 就会出现在节点列表——下面自动等待，不用盯着刷新。</div>
+  <div id="enroll-wait" class="spaced">${enrollWaitHtml('wait', 0)}</div>
+  <div class="actions spaced">${button('先关闭，稍后在节点列表查看', 'enroll-later', 'link')}</div>`;
+}
+function enrollWaitHtml(state, secs) {
+  if (state === 'ok') return `<div class="enroll-ok"><b>✓ 已上线</b><p>节点 <b>${esc(ENROLL.id)}</b> 已连上 hub，出现在节点列表里。</p><div class="actions">${button('查看节点', 'go', 'primary', 'data-page="nodes"')}</div></div>`;
+  if (state === 'timeout') return `<div class="notice warn"><b>已等待 60 秒仍未上线</b><br>按顺序排查：<br>1. 两边令牌是否完全一致（hub.yaml 与 node.yaml 的 register_token）<br>2. 目标机器能否访问 hub（hub_url 的地址与端口、防火墙）<br>3. 节点服务是否真的启动了（<code>systemctl status swarmmind-node</code> 或前台命令的报错输出）</div>`;
+  return `<div class="row"><span class="badge running">等待上线…</span><small class="muted">正在等 ${esc(ENROLL.id)} 连接 · 已等待 ${secs} 秒 · 每 3 秒查询一次节点列表（上限 60 秒）</small></div>`;
+}
+function enrollStartWait() {
+  ENROLL.t0 = Date.now();
+  enrollStopWait();
+  ENROLL.timer = setInterval(enrollWaitTick, 3000);
+}
+async function enrollWaitTick() {
+  if (!ENROLL?.timer || !modalOpen || ENROLL.step !== 4) { enrollStopWait(); return; }
+  const box = $('#enroll-wait');
+  if (!box) { enrollStopWait(); return; }
+  const secs = Math.round((Date.now() - ENROLL.t0) / 1000);
+  const r = await api('GET', '/api/v1/nodes').catch(() => null);
+  if (!ENROLL.timer) return;   // 等待期间弹层被关闭
+  const n = (r?.data?.nodes || []).find(x => x.node_id === ENROLL.id);
+  if (n?.online) {
+    enrollStopWait();
+    box.innerHTML = enrollWaitHtml('ok', secs);
+    toast(`节点 ${ENROLL.id} 已上线 —— 下一步：查看节点与它开放的能力`);
+  } else if (secs >= 60) {
+    enrollStopWait();
+    box.innerHTML = enrollWaitHtml('timeout', secs);
+  } else box.innerHTML = enrollWaitHtml('wait', secs);
 }
 
 /* ---------- 任务监管 ---------- */
@@ -580,7 +742,7 @@ function syncDrawer(force = false) {
     layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-label="任务详情" tabindex="-1">${drawerHtml(S.drawer.task)}</section></div>`;
   }
 }
-function closeLayer() { S.drawer = null; modalOpen = false; $('#layer').innerHTML = ''; }
+function closeLayer() { S.drawer = null; modalOpen = false; enrollStopWait(); $('#layer').innerHTML = ''; }
 function modalHead(title) {
   return `<div class="row"><h2>${title}</h2>${button('×', 'close', 'close', 'aria-label="关闭弹层"')}</div>`;
 }
@@ -1194,8 +1356,21 @@ const ACT = {
   'go-tasks': () => go('tasks'),
   'go-review-queue': () => go('tasks', 'needs_review'),
   enroll: () => enrollModal(),
-  'enroll-done': () => { closeLayer(); render(); toast('配置已交接 · 节点上线后将出现在列表'); },
-  'copy-config': () => copyText([$('#enroll-snippet')?.textContent, $('#enroll-node-snippet')?.textContent].filter(Boolean).join('\n\n'), '接入配置片段'),
+  /* ---------- 接入向导（四步）动作 ---------- */
+  'enroll-step': b => enrollGo(Number(b.dataset.step)),
+  'enroll-next1': () => {
+    const id = $('#enroll-id')?.value.trim() || '';
+    if (!enrollValidId(id)) { toast('请先填写合法的节点 ID（小写字母/数字/连字符）'); $('#enroll-id')?.focus(); return; }
+    if (ENROLL.tokenFor !== id) { ENROLL.token = ''; ENROLL.tokenFor = id; }   // 身份变了令牌重生成；回看不改名则保留已生成令牌
+    enrollGo(2);
+  },
+  'enroll-pasted': () => enrollGo(3),
+  'enroll-os': b => { ENROLL.os = b.dataset.os || 'linux'; openLayerPlain(enrollHtml()); },
+  'enroll-next3': () => { enrollGo(4); enrollStartWait(); },
+  'enroll-copy-token': () => copyText(ENROLL?.token || '', '接入令牌'),
+  'enroll-copy-hub': () => copyText(ENROLL ? `nodes:\n  ${ENROLL.id}: ${ENROLL.token}\n` : '', 'hub.yaml 片段'),
+  'enroll-copy-node': () => copyText(ENROLL ? enrollNodeYaml() : '', 'node.yaml'),
+  'enroll-later': () => { closeLayer(); toast('已关闭 · 节点上线后可在节点列表查看'); },
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
   'switch-login': () => { loginMode = loginMode === 'password' ? 'token' : 'password'; loginPageRendered = null; route(); },
@@ -1448,7 +1623,7 @@ function bindEvents() {
   document.addEventListener('input', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; preserveFocus(() => render()); return; }
-    if (e.target.id === 'enroll-id') updateEnrollSnippet();
+    if (e.target.id === 'enroll-id') enrollValidateId();
     if (e.target.id === 'ctrl-stdin') S.C.stdin = e.target.value;
   });
   document.addEventListener('change', e => {
