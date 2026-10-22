@@ -138,6 +138,21 @@ func (s *AgentState) SetExposed(name string, exposed bool) (protocol.ExecProfile
 	return p, nil
 }
 
+// ReplaceBaseline 整表替换 YAML 基线（方案 3.5 网页编辑，PUT /api/v1/local/config
+// 热应用链）：提交表落盘后即权威配置，既有 exposed 覆盖一并清除——覆盖残留会让
+// 盘上 yaml 与生效值分叉（PATCH 开关写覆盖、PUT 写基线，基线刷新后覆盖语义失效），
+// 下次重启会回跳旧开关值。先写后见：落盘成功才发布内存。
+func (s *AgentState) ReplaceBaseline(profiles []protocol.ExecProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.persist(map[string]agentExposedRecord{}); err != nil {
+		return err // 落盘失败：不发布，基线与覆盖集均不变
+	}
+	s.baseline = append([]protocol.ExecProfile(nil), profiles...)
+	s.override = map[string]agentExposedRecord{}
+	return nil
+}
+
 // persist 覆盖集落盘（临时文件+rename，SPEC 4.7）；调用方持 mu。
 func (s *AgentState) persist(override map[string]agentExposedRecord) error {
 	b, err := json.MarshalIndent(agentsStateDisk{Version: 1, Exposed: override}, "", "  ")

@@ -70,6 +70,12 @@ type Service struct {
 	// execute 登记goroutine 注销；handleTaskCancel 依此触发执行中断。
 	muCancels sync.Mutex
 	cancels   map[string]*cancelEntry
+
+	// runners/roots 执行器与产物根表（初值 = cfg.Runners/ArtifactRoots；热重载
+	// SwapExecutors 整表替换，muExec 与执行期读取互斥——方案 3.5 网页编辑）。
+	muExec  sync.RWMutex
+	runners map[string]Runner
+	roots   map[string]string
 }
 
 // New 构造服务并订阅入站帧；启动补传 worker 与周期兜底循环；从账本重建 workdir
@@ -90,6 +96,8 @@ func New(cfg Config, tr transport.Transport) *Service {
 		cancels:    make(map[string]*cancelEntry),
 		wsByAgent:  make(map[string]string, len(cfg.ArtifactRoots)),
 		wsLocks:    newWsMutex(),
+		runners:    cfg.Runners,
+		roots:      cfg.ArtifactRoots,
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -348,7 +356,7 @@ func isExpired(t protocol.Task, now time.Time) bool {
 // runTask 选择执行器并执行；未知 agent 即配置漂移（SPEC 4.3）：failed/
 // agent_not_found，不进重推循环（结果已入账本，重复 offer 走重发分支）。
 func (s *Service) runTask(ctx context.Context, task protocol.Task) protocol.TaskResult {
-	r, ok := s.cfg.Runners[task.TargetAgent]
+	r, ok := s.runnerFor(task.TargetAgent)
 	if !ok {
 		return protocol.TaskResult{
 			Status:     protocol.ResultFailed,
@@ -358,6 +366,34 @@ func (s *Service) runTask(ctx context.Context, task protocol.Task) protocol.Task
 		}
 	}
 	return r.Run(ctx, task)
+}
+
+// runnerFor 取 agent 执行器（热重载换表的读侧；不在表内 ok=false）。
+func (s *Service) runnerFor(agent string) (Runner, bool) {
+	s.muExec.RLock()
+	defer s.muExec.RUnlock()
+	r, ok := s.runners[agent]
+	return r, ok
+}
+
+// artifactRootFor 取 agent 产物根（同 runnerFor）。
+func (s *Service) artifactRootFor(agent string) (string, bool) {
+	s.muExec.RLock()
+	defer s.muExec.RUnlock()
+	root, ok := s.roots[agent]
+	return root, ok
+}
+
+// SwapExecutors 热重载执行器表（方案 3.5 网页编辑）：整体替换 Runners 与
+// ArtifactRoots，与执行期读取（runnerFor/artifactRootFor）互斥。在途任务已持有
+// 旧 runner 引用，跑完不受影响；新任务取新表。wsByAgent（workspace 互斥键）保持
+// 启动值不重建——重建需迁移在途持锁，收益不抵复杂度；workdir 热变更后互斥仍按
+// 旧键保守串行（同 agent 任务依旧串行），重启后收敛新键。
+func (s *Service) SwapExecutors(runners map[string]Runner, roots map[string]string) {
+	s.muExec.Lock()
+	defer s.muExec.Unlock()
+	s.runners = runners
+	s.roots = roots
 }
 
 // handleResultAck 终态已持久化（SPEC 4.5）：账本置 result_acked，重发停止。

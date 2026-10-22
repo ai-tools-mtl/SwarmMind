@@ -47,6 +47,8 @@ const S = {
   focusForm: false,
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 总理凭证轮换后的新凭证（仅此一次展示），
+  cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
+         restart_cmd: '', config_path: '', structural: [], msg: '' },           // 能力配置编辑（方案 3.5）
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -140,6 +142,10 @@ function route() {
   const h = (location.hash || '#/overview').replace(/^#\//, '');
   const allowed = S.authed && S.status?.mode === 'setup' ? SETUP_PAGES : PAGES;
   S.page = allowed.some(p => p[0] === h) ? h : allowed[0][0];
+  if (S.page === 'services' && S.authed && S.status?.mode !== 'setup' && !S.cfg.loaded && !S.cfg._loading) {
+    S.cfg._loading = true;
+    loadCfg().finally(() => { S.cfg._loading = false; });
+  }
   render();
 }
 window.addEventListener('hashchange', route);
@@ -277,6 +283,87 @@ function recentTasksCard() {
     : `<div class="empty"><h2>还没有派过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
+/* ---------- 能力配置加载（方案 3.5；不进轮询——编辑中状态不被覆盖） ---------- */
+async function loadCfg() {
+  try {
+    const r = await api('GET', '/api/v1/local/config');
+    if (r.code === 503) { S.cfg.unavailable = true; S.cfg.loaded = true; render(); return; }
+    if (r.code !== 200) { S.cfg.unavailable = true; S.cfg.loaded = true; render(); return; }
+    const d = r.data || {};
+    S.cfg = {
+      loaded: true, unavailable: false,
+      agents: (d.agents || []).map(normalizeProfile),
+      pending: !!d.pending_restart, supervised: d.supervised !== false,
+      restart_cmd: d.restart_cmd || '', config_path: d.config_path || '', structural: [], msg: '',
+    };
+    render();
+  } catch (e) { if (!e?.unauthorized) { S.cfg.unavailable = true; S.cfg.loaded = true; render(); } }
+}
+
+// cfgSave 保存全部：PUT 整表（服务端校验+round-trip 写盘+热重载/待应用分类）。
+async function cfgSave(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  try {
+    const r = await api('PUT', '/api/v1/local/config', { agents: S.cfg.agents });
+    if (r.code === 200) {
+      const d = r.data || {};
+      S.cfg.pending = !!d.pending_restart;
+      S.cfg.msg = d.note || (d.applied ? '已保存并热重载生效' : '已写入 node.yaml（待应用）');
+      await loadCfg();
+      await loadAll().catch(() => {}); render();
+    } else {
+      S.cfg.msg = ''; render();
+      alert('保存被拒：' + errLine(r.data));
+      await loadCfg(); render();
+    }
+  } catch (e) {
+    if (!e?.unauthorized) alert('网络层失败：结果未知，请刷新后从文件重载核对');
+  } finally { if (btn) { btn.disabled = false; btn.textContent = '保存全部（校验+写盘）'; } }
+}
+
+// cfgReload 从文件重载（丢弃未保存编辑，服务端重读走同一校验/分类链）。
+async function cfgReload(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/v1/local/agents/reload');
+    if (r.code === 200) {
+      const d = r.data || {};
+      S.cfg.pending = !!d.pending_restart;
+      S.cfg.msg = d.note || '已从文件重载';
+      await loadCfg(); await loadAll().catch(() => {}); render();
+    } else { alert('重载失败：' + errLine(r.data)); }
+  } catch (e) { if (!e?.unauthorized) alert('网络层失败：结果未知'); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+// cfgRestart 应用并重启（结构性变更收口）：应答先回，进程延时退出靠保活拉起。
+async function cfgRestart(btn) {
+  if (btn) { btn.disabled = true; btn.textContent = '重启中…'; }
+  try {
+    const r = await api('POST', '/api/v1/local/restart');
+    if (r.code === 200) {
+      const d = r.data || {};
+      S.cfg.msg = d.note || 'node 重启中，稍后自动恢复';
+      render();
+      // 保活拉起后自动恢复：6s/12s 两次补拉 + 5s 轮询兑底
+      setTimeout(() => { S.cfg.loaded = false; loadCfg(); }, 6000);
+      setTimeout(() => { S.cfg.loaded = false; loadCfg(); }, 12000);
+    } else { alert('重启失败：' + errLine(r.data)); if (btn) { btn.disabled = false; btn.textContent = '应用并重启'; } }
+  } catch (e) {
+    if (!e?.unauthorized) alert('网络层失败：进程可能已退出，请稍后刷新');
+  }
+}
+
+// normalizeProfile 编辑副本归一（服务端字段全集；exposed 三态归一布尔）。
+function normalizeProfile(p) {
+  return {
+    name: p.name || '', kind: p.kind || 'cli', command: p.command || '', workdir: p.workdir || '',
+    agent_args: p.agent_args || [], timeout_sec: p.timeout_sec || 600,
+    allow_args: !!p.allow_args, allow_env: p.allow_env || [], config_home: p.config_home || '',
+    description: p.description || '', permission_mode: p.permission_mode || '', exposed: p.exposed !== false,
+  };
+}
+
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
   const head = `<div class="page-head"><div><h1>我的服务</h1>
@@ -286,7 +373,68 @@ function servicesPage() {
       <p class="muted">在 node.yaml 的 <code>agents:</code> 段登记后重启 node，这里就会出现开关。</p>${button('查看总览引导', 'go-overview', 'primary')}</div></section>`;
   }
   return head + S.agents.map(a => svcCard(a)).join('') +
-    `<p class="footer-note">完整配置（command / workdir / 白名单 / agent_args 等）请编辑 node YAML 并重启 node 生效；本页只读展示，不做表单编辑（V0 明确不做动态能力下发）。开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。</p>`;
+    `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` + cfgSection();
+}
+
+/* ---------- 能力配置编辑区（方案 3.5：yaml.Node round-trip + 热重载分类） ---------- */
+function cfgSection() {
+  const c = S.cfg;
+  if (!c.loaded) {
+    return `<section class="card"><div class="row"><div><h2>能力配置</h2></div>
+      ${button('加载配置', 'cfg-load', '')}</div><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。</p></section>`;
+  }
+  if (c.unavailable) {
+    return `<section class="card"><h2>能力配置</h2><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
+  }
+  const pending = c.pending ? `<div class="notice warn spaced"><b>有结构性变更待应用</b>：${esc((c.structural || []).join('；') || '详见保存应答')}。
+    ${button('应用并重启', 'cfg-restart', 'primary', c.supervised ? '' : '')}
+    ${c.supervised ? '' : `<small class="muted">裸前台运行：请手动重启——<code>${esc(c.restart_cmd)}</code></small>`}</div>` : '';
+  const msg = c.msg ? `<div class="notice ok spaced">${esc(c.msg)}</div>` : '';
+  const rows = c.agents.map((a, i) => cfgRow(a, i)).join('') ||
+    '<p class="muted">（空表：新增至少一个 agent 才能对外提供服务）</p>';
+  return `<section class="card"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>
+    <small class="muted">配置文件：<code>${esc(c.config_path)}</code> · 保存时服务端强校验；yaml 注释与未知字段保留（round-trip）。普通字段保存即热重载；增删 agent / 改 command 需重启。</small></div></div>
+    ${pending}${msg}
+    <div class="table-wrap"><table><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>暴露</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <div class="row spaced">
+      ${button('＋ 新增 agent', 'cfg-add', '')}
+      ${button('保存全部（校验+写盘）', 'cfg-save', 'primary')}
+      ${button('从文件重载', 'cfg-reload', '')}
+    </div>
+    <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
+    command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
+    exposed=false 仅关闭网内准入，本机总理派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
+}
+
+function cfgRow(a, i) {
+  return `<tr data-cfg-idx="${i}">
+    <td><code>${esc(a.name)}</code>${a.description ? `<br><small class="muted">${esc(a.description)}</small>` : ''}</td>
+    <td><code>${esc(a.command)}</code></td>
+    <td>${a.timeout_sec}s</td>
+    <td>${a.exposed ? '网内' : '仅本机'}</td>
+    <td class="table-action">
+      <details class="cfg-edit"><summary class="link">编辑</summary>
+        <div class="cfg-form">
+          ${cfgField(i, 'name', '名称', a.name)}
+          ${cfgField(i, 'command', 'command（绝对路径）', a.command)}
+          ${cfgField(i, 'workdir', 'workdir（绝对路径）', a.workdir)}
+          ${cfgField(i, 'timeout_sec', 'timeout_sec（秒）', String(a.timeout_sec), 'number')}
+          ${cfgField(i, 'description', '描述', a.description)}
+          ${cfgField(i, 'config_home', 'config_home（可空）', a.config_home)}
+          ${cfgField(i, 'agent_args', 'agent_args（逗号分隔）', (a.agent_args || []).join(','))}
+          ${cfgField(i, 'allow_env', 'allow_env（逗号分隔或 *）', (a.allow_env || []).join(','))}
+          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.allow_args" ${a.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
+          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> exposed（对网内暴露；本机派单不受限）</label>
+          ${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}
+        </div>
+      </details>
+    </td>
+  </tr>`;
+}
+
+function cfgField(idx, field, label, value, type = 'text') {
+  return `<label class="cfg-field">${esc(label)}<input type="${type}" data-cfg="${idx}.${field}" value="${esc(value)}"></label>`;
 }
 function svcCard(a) {
   const on = !!a.exposed;
@@ -619,6 +767,31 @@ document.addEventListener('click', e => {
       case 'prime-rotate': primeRotate(btn); return;
       case 'net-disconnect': netDisconnect(btn); return;
       case 'copy-prime-token': copyPrimeToken(); return;
+      case 'cfg-load': loadCfg(); return;
+      case 'cfg-add': {
+        S.cfg.agents.push({ name: '', kind: 'cli', command: '', workdir: '', agent_args: [],
+          timeout_sec: 600, allow_args: false, allow_env: [], config_home: '',
+          description: '', permission_mode: '', exposed: true });
+        render(); return;
+      }
+      case 'cfg-del': {
+        const di = parseInt(arg, 10);
+        if (!Number.isNaN(di) && S.cfg.agents[di]) {
+          if (confirm(`确定删除 agent「${S.cfg.agents[di].name}」？保存后写入 node.yaml（结构性变更需重启生效）。`)) {
+            S.cfg.agents.splice(di, 1); render();
+          }
+        }
+        return;
+      }
+      case 'cfg-save': cfgSave(btn); return;
+      case 'cfg-reload': {
+        if (!confirm('放弃当前编辑，从 node.yaml 文件重新读取？（未保存的修改将丢失）')) return;
+        cfgReload(btn); return;
+      }
+      case 'cfg-restart': {
+        if (!confirm('应用并重启 node？在途任务将被中断并进入「待人工核对」，确认继续？')) return;
+        cfgRestart(btn); return;
+      }
       case 'logout':
         localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = ''; render(); return;
       case 'expose-on': case 'expose-off': setExposed(arg, act === 'expose-on', btn); return;
@@ -644,6 +817,20 @@ document.addEventListener('input', e => {
   if (e.target.id === 'f-target') { S.f.target = e.target.value; render(); }
   if (e.target.id === 'f-stdin') S.f.stdin = e.target.value;
   if (e.target.id === 'wiz-join') S.wiz.join = e.target.value;
+  // 能力配置编辑（data-cfg="<idx>.<field>"）：直写副本不重绘（保输入焦点），保存时统一提交
+  const cfgT = e.target.dataset?.cfg;
+  if (cfgT) {
+    const [si, field] = cfgT.split('.');
+    const a = S.cfg.agents[parseInt(si, 10)];
+    if (!a) return;
+    if (e.target.type === 'checkbox') { a[field] = e.target.checked; return; }
+    if (field === 'timeout_sec') { a.timeout_sec = parseInt(e.target.value, 10) || 0; return; }
+    if (field === 'agent_args' || field === 'allow_env') {
+      a[field] = e.target.value.split(',').map(x => x.trim()).filter(Boolean);
+      return;
+    }
+    a[field] = e.target.value;
+  }
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());

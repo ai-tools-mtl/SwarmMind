@@ -35,53 +35,21 @@ import (
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
-// agentProfile yaml 侧 ExecProfile 镜像（protocol 包保持纯协议层，不引入 yaml
-// tag）。exposed 为指针：yaml 未写时默认 true（SPEC 4.9：接入开关默认开）。
-type agentProfile struct {
-	Name           string   `yaml:"name"`
-	Kind           string   `yaml:"kind"`
-	Command        string   `yaml:"command"`
-	Workdir        string   `yaml:"workdir"`
-	AgentArgs      []string `yaml:"agent_args"`
-	TimeoutSec     int      `yaml:"timeout_sec"`
-	AllowArgs      bool     `yaml:"allow_args"`
-	AllowEnv       []string `yaml:"allow_env"`
-	ConfigHome     string   `yaml:"config_home"`
-	Description    string   `yaml:"description"`
-	PermissionMode string   `yaml:"permission_mode"`
-	Exposed        *bool    `yaml:"exposed"`
-}
-
-func (p agentProfile) toExecProfile() protocol.ExecProfile {
-	exposed := true
-	if p.Exposed != nil {
-		exposed = *p.Exposed
-	}
-	kind := protocol.AgentKind(p.Kind)
-	if kind == "" {
-		kind = protocol.AgentKindCLI
-	}
-	return protocol.ExecProfile{
-		Name: p.Name, Kind: kind, Command: p.Command, Workdir: p.Workdir,
-		AgentArgs: p.AgentArgs, TimeoutSec: p.TimeoutSec, AllowArgs: p.AllowArgs,
-		AllowEnv: p.AllowEnv, ConfigHome: p.ConfigHome, Description: p.Description,
-		PermissionMode: p.PermissionMode, Exposed: exposed,
-	}
-}
-
 // nodeConfig configs/node.yaml 结构（SPEC 五/六 + 方案 3.2.1 prime_agent）。
+// agents 条目用 localapi.AgentProfile（yaml 镜像自 cmd/node 迁入共享——方案 3.5
+// 配置编辑端点与装配方同源解析，protocol 包保持纯协议层）。
 type nodeConfig struct {
-	NodeID        string            `yaml:"node_id"`
-	HubURL        string            `yaml:"hub_url"` // 形态开关：空 = standalone（方案 3.1）
-	RegisterToken string            `yaml:"register_token"`
-	HubPubkeyFP   string            `yaml:"hub_pubkey_fp"` // SPKI SHA-256；空则 TOFU 记录首连（Loop 4 已实现）
-	LocalListen   string            `yaml:"local_listen"`  // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
-	LocalToken    string            `yaml:"local_token"`   // 本地 API 管理令牌（空则生成存 data_dir/local_token）
-	PrimeAgent    string            `yaml:"prime_agent"`   // 本机唯一总理声明（仅展示；prime_token 存 data_dir/prime_token，方案 3.2.1）
-	Concurrency   int               `yaml:"concurrency"`
-	DataDir       string            `yaml:"data_dir"`
-	BaseEnv       map[string]string `yaml:"base_env"`
-	Agents        []agentProfile    `yaml:"agents"`
+	NodeID        string                   `yaml:"node_id"`
+	HubURL        string                   `yaml:"hub_url"` // 形态开关：空 = standalone（方案 3.1）
+	RegisterToken string                   `yaml:"register_token"`
+	HubPubkeyFP   string                   `yaml:"hub_pubkey_fp"` // SPKI SHA-256；空则 TOFU 记录首连（Loop 4 已实现）
+	LocalListen   string                   `yaml:"local_listen"`  // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
+	LocalToken    string                   `yaml:"local_token"`   // 本地 API 管理令牌（空则生成存 data_dir/local_token）
+	PrimeAgent    string                   `yaml:"prime_agent"`   // 本机唯一总理声明（仅展示；prime_token 存 data_dir/prime_token，方案 3.2.1）
+	Concurrency   int                      `yaml:"concurrency"`
+	DataDir       string                   `yaml:"data_dir"`
+	BaseEnv       map[string]string        `yaml:"base_env"`
+	Agents        []localapi.AgentProfile  `yaml:"agents"`
 }
 
 func main() {
@@ -157,7 +125,7 @@ func run(cfgPath, dataDirOverride string) error {
 	}
 	profiles := make([]protocol.ExecProfile, 0, len(cfg.Agents))
 	for _, ap := range cfg.Agents {
-		p := ap.toExecProfile()
+		p := ap.ToExecProfile()
 		if p.Name == "" || p.Command == "" || p.Workdir == "" {
 			return fmt.Errorf("agent %q: name/command/workdir 均为必填", p.Name)
 		}
@@ -205,14 +173,10 @@ func run(cfgPath, dataDirOverride string) error {
 	}
 
 	// 执行器装配（base_env 干净基线，HOME=ConfigHome，默认 data_dir/home）；
-	// ArtifactRoots 同源装配（产物取回路径解析基准，Loop 4）。
-	runners := make(map[string]service.Runner, len(profiles))
-	artifactRoots := make(map[string]string, len(profiles))
+	// ArtifactRoots 同源装配（产物取回路径解析基准，Loop 4）。装配逻辑抽
+	// buildExecutors（方案 3.5 可复用）：启动与热重载回调同源，杜绝两处漂移。
 	defaultHome := filepath.Join(cfg.DataDir, "home")
-	for _, p := range profiles {
-		runners[p.Name] = runner.New(p, cfg.BaseEnv, defaultHome)
-		artifactRoots[p.Name] = p.Workdir
-	}
+	runners, artifactRoots := buildExecutors(profiles, cfg.BaseEnv, defaultHome)
 
 	// 外连客户端仅组网态装配（方案 3.1：setup/standalone 不连 hub）。service
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧
@@ -286,9 +250,20 @@ func run(cfgPath, dataDirOverride string) error {
 		return tok, writeTokenFile(primeTokenPath, tok)
 	}
 
-	// 本地回环 API（SPEC 六，Loop 4 + 方案 3.2/3.3）：本地直执行提交/账本视图
-	// 直出 + 管理面 + 总理凭证 + setup 向导（三态均装配 SetupOps——setup 首启
-	// 接入、standalone/组网经向导切换形态、组网「断开组网」同一写盘路径）。
+	// 延时优雅退出（方案 3.3/3.5「应答先返回 → 延时退出」共用时序）：留出 HTTP
+	// 应答送达用户浏览器的时间（setupRestartDelay），保活拉起进入新形态/新配置；
+	// 裸前台跑在日志里给出重启命令。
+	gracefulExit := func(msg string) {
+		go func() {
+			time.Sleep(setupRestartDelay)
+			log.Printf("[node] %s（保活拉起后生效）；裸前台请手动重启: %s -config %s", msg, os.Args[0], cfgPath)
+			stop()
+		}()
+	}
+
+	// 本地回环 API（SPEC 六，Loop 4 + 方案 3.2/3.3/3.4/3.5）：本地直执行提交/
+	// 账本视图直出 + 管理面 + 总理凭证 + setup 向导（三态均装配 SetupOps）+
+	// 产物本机直取（ArtifactFetch）+ 能力配置编辑与热重载（ConfigOps）。
 	localCfg := localapi.Config{
 		NodeID:     cfg.NodeID,
 		Mode:       mode,
@@ -301,19 +276,29 @@ func run(cfgPath, dataDirOverride string) error {
 		PrimeToken: primeTok,
 		PrimeAgent: cfg.PrimeAgent,
 		RotatePrime: rotatePrime,
+		ArtifactFetch: svc.FetchArtifactLocal,
+		ConfigOps: &localapi.ConfigOps{
+			ConfigPath: cfgPath, // 读改写启动时 --config 原路径（绝不写示例文件）
+			ReloadExecutors: func(profiles []protocol.ExecProfile) error {
+				// 热重载（方案 3.5）：与启动装配同源 buildExecutors + 换表
+				//（在途任务持旧 runner 跑完不受影响）。必须异步安全——localapi
+				// 在请求 goroutine 内调用，这里只做同步换表，不碰执行调度。
+				runners, roots := buildExecutors(profiles, cfg.BaseEnv, defaultHome)
+				svc.SwapExecutors(runners, roots)
+				return nil
+			},
+			Restart:    func() { gracefulExit("已请求应用并重启，进程退出以加载新配置") },
+			Supervised: detectSupervisor(),
+			RestartCmd: fmt.Sprintf("%s -config %s", os.Args[0], cfgPath),
+		},
 		SetupOps: &localapi.SetupOps{
 			ConfigPath:  cfgPath, // 写回启动时 --config 原路径（绝不写示例文件）
 			DataDir:     cfg.DataDir,
 			LocalListen: cfg.LocalListen,
 			Concurrency: cfg.Concurrency,
 			OnApplied: func() {
-				// 落盘成功 → 延时优雅退出（HTTP 应答先返回），保活拉起进入新形态；
-				// 裸前台跑在日志里给出重启命令（方案 3.3）。
-				go func() {
-					time.Sleep(setupRestartDelay)
-					log.Printf("[node] 配置已写入，进程退出以切换形态（保活拉起后生效）；裸前台请手动重启: %s -config %s", os.Args[0], cfgPath)
-					stop()
-				}()
+				// 落盘成功 → 延时优雅退出（HTTP 应答先返回），保活拉起进入新形态。
+				gracefulExit("配置已写入，进程退出以切换形态")
 			},
 		},
 	}
@@ -375,6 +360,33 @@ func run(cfgPath, dataDirOverride string) error {
 
 // closeBudget 本地 API 优雅关闭预算（调度节拍，非协议常量）。
 const closeBudget = 5 * time.Second
+
+// buildExecutors 由 profiles 装配执行器与产物根表（方案 3.5 可复用函数）：
+// 启动装配与热重载回调（ConfigOps.ReloadExecutors）同源，杜绝两处漂移。
+// base_env 干净基线，HOME=ConfigHome（空则 defaultHome = data_dir/home）。
+func buildExecutors(profiles []protocol.ExecProfile, baseEnv map[string]string, defaultHome string) (map[string]service.Runner, map[string]string) {
+	runners := make(map[string]service.Runner, len(profiles))
+	artifactRoots := make(map[string]string, len(profiles))
+	for _, p := range profiles {
+		runners[p.Name] = runner.New(p, baseEnv, defaultHome)
+		artifactRoots[p.Name] = p.Workdir
+	}
+	return runners, artifactRoots
+}
+
+// detectSupervisor 保活检测（方案 3.5「应用并重启」应答注明的依据）：
+//   - SWARM_SUPERVISED=1：部署包 launchd plist / systemd unit 显式声明（首选，
+//     部署模板统一注入）；
+//   - systemd 手写 unit：INVOCATION_ID 环境变量由 systemd 恒注入；
+//   - 父进程为 PID 1：macOS launchd 服务的经典特征。
+//
+// 三者均未命中 = 裸前台，控制台「应用并重启」应答注明手动重启命令。
+func detectSupervisor() bool {
+	if os.Getenv("SWARM_SUPERVISED") == "1" || os.Getenv("INVOCATION_ID") != "" {
+		return true
+	}
+	return os.Getppid() == 1
+}
 
 // newToken 生成 256bit 随机令牌的 hex 编码。
 func newToken() (string, error) {

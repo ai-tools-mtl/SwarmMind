@@ -3,9 +3,12 @@
 //   - POST /api/v1/tasks 本地直执行——本地构造任务、账本入账（origin=local）、
 //     runner 执行、结果回写本地账本，不经 hub 帧往返（组不组网行为一致）；
 //   - GET /api/v1/tasks/{id} 从本地账本出视图（ledger.TaskView）——离线可查；
+//   - GET /api/v1/tasks/{id}/artifacts/{index} 本机直取产物内容（方案 3.4，
+//     node MCP swarmmind_artifact 的后端；不经 hub 中继帧）；
 //   - GET /api/v1/agents 只返回本机能力目录（node 无全网视图）；
 //   - /api/v1/local/* 为本地控制台管理面（Loop 7，见 local.go）+ 总理凭证
-//     （prime.go）+ setup 向导（setup.go，仅 setup 模式装配）；
+//     （prime.go）+ setup 向导（setup.go，仅 setup 模式装配）+ 能力配置编辑
+//     与热重载（config.go，方案 3.5）；
 //   - GET / 挂本地控制台前端（internal/node/web，embed）。
 //
 // 鉴权分级（方案 3.2.1 唯一总理）：local_token 只读（agents/status/tasks 类）；
@@ -73,6 +76,13 @@ type Config struct {
 	RotatePrime func() (string, error)
 	// SetupOps setup 向导装配方（写盘路径与落盘回调；nil = setup 端点 503）。
 	SetupOps *SetupOps
+	// ArtifactFetch 本机产物取回回调（GET /api/v1/tasks/{id}/artifacts/{index}
+	// 数据面，方案 3.4 node MCP swarmmind_artifact 的后端；装配方接
+	// service.FetchArtifactLocal）。nil = 端点 503。
+	ArtifactFetch func(taskID string, index int) (protocol.Artifact, []byte, error)
+	// ConfigOps 配置编辑装配方（方案 3.5 网页编辑 + 热重载 + 应用并重启；nil =
+	// 配置端点 503）。
+	ConfigOps *ConfigOps
 	// CardsReporter 能力表上报钩子（Loop 7：开关变更即 card_update 上报 hub；
 	// 装配方接 service.SendCardUpdate）。nil = 开关仅本机生效。
 	CardsReporter func(cards []protocol.AgentCard) error
@@ -91,6 +101,11 @@ type Server struct {
 	// primeTok 当前总理凭证（轮换即时生效；muPrime 串行读写）。
 	muPrime  sync.Mutex
 	primeTok string
+
+	// pendingRestartFlag 配置「待应用」状态（方案 3.5：结构性变更写盘未生效；
+	// muCfg 串行读写——重启即进程退出，内存态自然清零）。
+	muCfg              sync.Mutex
+	pendingRestartFlag bool
 }
 
 // New 构造本地 API 服务。
@@ -171,11 +186,16 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/tasks", s.authPrime(s.handleSubmit))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.authRead(s.handleQuery))
+	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.authRead(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.authRead(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/local/agents", s.authRead(s.handleLocalAgents))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/exposed", s.authRead(s.handleSetExposed))
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
+	mux.HandleFunc("GET /api/v1/local/config", s.authRead(s.handleGetConfig))
+	mux.HandleFunc("PUT /api/v1/local/config", s.authLocal(s.handlePutConfig))
+	mux.HandleFunc("POST /api/v1/local/agents/reload", s.authLocal(s.handleAgentsReload))
+	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
 	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handlePrimeRotate))
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
