@@ -480,12 +480,14 @@ function nodesPage() {
 function enrollModal() {
   openLayerPlain(`${modalHead('生成接入配置 · V0 手工登记')}
   <div class="notice warn">V0 无动态签发：token 不经 Web 展示或下发。请在 hub 侧生成随机令牌（如 <code>openssl rand -hex 32</code>）；下方 token 以掩码占位，实际值从 hub 配置查看。</div>
+  <div class="form-grid">
   <label>新节点 ID（node_id，管理员填写）<input id="enroll-id" placeholder="例如 build-linux（小写字母 / 数字 / 连字符）" autocomplete="off"></label>
   <label>接入令牌（hub 配置只读 · 掩码展示）<input readonly value="****************************************（存于 hub.yaml，不通过 Web 展示）"></label>
-  <h3>① hub 配置片段 —— 将此片段加入 hub.yaml 的 nodes: 段并重启 hub</h3>
-  <pre id="enroll-snippet"></pre>
-  <h3>② 目标机器 node.yaml —— 同步登记同一身份与令牌</h3>
-  <pre id="enroll-node-snippet"></pre>
+  </div>
+  <div class="form-grid spaced">
+  <div><h3>① hub 配置片段 —— 将此片段加入 hub.yaml 的 nodes: 段并重启 hub</h3><pre id="enroll-snippet"></pre></div>
+  <div><h3>② 目标机器 node.yaml —— 同步登记同一身份与令牌</h3><pre id="enroll-node-snippet"></pre></div>
+  </div>
   <div class="actions">${button('复制配置片段', 'copy-config')}${button('完成，等待节点上线', 'enroll-done', 'primary')}</div>
   <p class="footer-note">node 连接成功后出现在节点列表；接入成功以列表在线状态为准。控制类身份须经管理员批准，禁止节点自报提权。</p>`);
   updateEnrollSnippet();
@@ -687,7 +689,9 @@ function controlPage() {
  * agentPickerHtml 渲染；bindAgentPicker 统一 change 联动（委托，全局绑一次覆盖三
  * 处实例）；机器切换用 DOM 级更新不整页重绘（避免重置已填内容——与总理模式同款
  * 手法）。可选机器 = 在线且已开放能力；离线（提交端点直接 skip、不排队）与在线但
- * 无开放能力（not_exposed）的机器禁选并在选项上注明原因。 */
+ * 无开放能力（not_exposed）的机器禁选并在选项上注明原因。
+ * 宽屏化（2026-10-22 伦哥定）：两级下拉包 .form-grid 成对并排、成员树两列流式
+ * （<720px 均回纵向单列）——只动布局，选择联动行为不变。 */
 /* dispatchNodes 机器数据源：在线优先置顶，同组内按 node_id 稳定排序。 */
 function dispatchNodes() {
   return S.nodes.slice().sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || (a.node_id < b.node_id ? -1 : 1));
@@ -747,9 +751,13 @@ function agentPickerHtml(opts = {}) {
     </div>`;
   }
   const node = opts.node || '', agent = opts.agent || '';
-  return `<label class="spaced">第一步 · 执行机器<select id="${ids}-node" data-picker="node" data-picker-prefix="${ids}">${pickerNodeOptions(node)}</select></label>
+  /* 宽屏化：两级下拉包 form-grid 成对并排（<720px 回单列）；nodeHelp 是机器选择
+   * 的补充说明，置于整组下方通栏。 */
+  return `<div class="form-grid spaced picker-pair">
+  <label>第一步 · 执行机器<select id="${ids}-node" data-picker="node" data-picker-prefix="${ids}">${pickerNodeOptions(node)}</select></label>
+  <label>第二步 · 执行智能体<select id="${ids}-agent" data-picker="agent" data-picker-prefix="${ids}" ${node ? '' : 'disabled'}>${pickerAgentOptions(node, agent)}</select></label>
+  </div>
   ${opts.nodeHelp ? `<small class="muted">${esc(opts.nodeHelp)}</small>` : ''}
-  <label class="spaced">第二步 · 执行智能体<select id="${ids}-agent" data-picker="agent" data-picker-prefix="${ids}" ${node ? '' : 'disabled'}>${pickerAgentOptions(node, agent)}</select></label>
   <div class="row spaced" id="${ids}-summary-line">${pickerSummaryHtml(node, agent)}</div>`;
 }
 /* syncAgentPicker 机器切换联动（DOM 级更新）：按当前机器重建智能体选项，恢复此前
@@ -1148,10 +1156,12 @@ async function sendGroupMsg() {
 function groupCreateModal() {
   openLayerPlain(`${modalHead('新建协作群')}
   <div class="notice">创建即进入「进行中」：你与成员智能体可在群内讨论，代理发言总轮数默认 20，用尽后等待人工决策。</div>
-  <label class="spaced">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
-  <h3>选择成员智能体（可多选）</h3>
+  <div class="form-grid spaced">
+  <label class="full">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
+  <label>代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
+  </div>
+  <h3 class="spaced">选择成员智能体（可多选）</h3>
   ${S.directory.length ? agentPickerHtml({ ids: 'gnew', multi: true }) : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
-  <label class="spaced">代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
   <div class="actions spaced">${button('创建群聊', 'group-create', 'primary')}${button('取消', 'close', 'link')}</div>
   <p class="footer-note">建群后自动打开群详情；成员智能体经节点侧接入批次后才会自动发言。</p>`);
 }
@@ -1199,7 +1209,7 @@ const ACT = {
       render(); toast('账户信息已更新');
     } else toast('更新失败：' + (r ? errLine(r.data) : '网络异常'));
   },
-  'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`),
+  'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`, true),
   'token-revoke-confirm': async b => {
     const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
     if (r && r.code === 200) {
@@ -1260,7 +1270,7 @@ const ACT = {
     openLayerPlain(`${modalHead('关闭群聊')}
     <div class="notice warn">关闭后本群进入终态：所有成员（含你）都不能再发言，且不可恢复；时间线与历史仍可查看。</div>
     <p class="muted spaced">协作目标：${esc(g.goal)}</p>
-    <div class="actions spaced">${button('确认关闭', 'group-close-confirm', 'danger', `data-id="${esc(g.group_id)}"`)}${button('取消', 'close', 'link')}</div>`);
+    <div class="actions spaced">${button('确认关闭', 'group-close-confirm', 'danger', `data-id="${esc(g.group_id)}"`)}${button('取消', 'close', 'link')}</div>`, true);
   },
   'group-close-confirm': async b => {
     b.disabled = true; b.textContent = '关闭中…';
@@ -1276,11 +1286,11 @@ const ACT = {
       toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
     }
   },
-  revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`),
+  revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
     <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
-    <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`),
+    <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),
   'task-cancel-confirm': async b => {
     b.disabled = true; b.textContent = '取消中…';
     const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
@@ -1366,7 +1376,7 @@ const ACT = {
     }
   },
   'ctrl-retry': () => { S.C.stage = 'idle'; submitControl(); },
-  'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与幂等键将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">V0 不支持取消。请勿换用新幂等键重复提交同一巡检。</div><div class="actions">${button('保留幂等键，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`),
+  'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与幂等键将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">V0 不支持取消。请勿换用新幂等键重复提交同一巡检。</div><div class="actions">${button('保留幂等键，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),
   'ctrl-abandon-confirm': () => {
     S.C.stage = 'idle'; closeLayer(); render();
     toast('已保留幂等键与表单 · 可稍后同键重试');
@@ -1380,11 +1390,12 @@ const ACT = {
     else toast('批次查询失败：' + (r ? errLine(r.data) : '网络异常'));
   },
 };
-/* openLayerPlain：普通弹层（吊销/放弃等，非任务抽屉，不参与轮询同步） */
+/* openLayerPlain：普通弹层（吊销/放弃等，非任务抽屉，不参与轮询同步）。
+ * slim=true 为确认类小弹层（取消任务/关群/撤销 token 等）：窄版居中、按钮右对齐。 */
 let modalOpen = false;
-function openLayerPlain(content) {
+function openLayerPlain(content, slim) {
   modalOpen = true;
-  $('#layer').innerHTML = `<div class="overlay" data-backdrop="true"><section class="modal" role="dialog" aria-modal="true" tabindex="-1">${content}</section></div>`;
+  $('#layer').innerHTML = `<div class="overlay" data-backdrop="true"><section class="modal${slim ? ' slim' : ''}" role="dialog" aria-modal="true" tabindex="-1">${content}</section></div>`;
   $('#layer [role=dialog]').focus();
 }
 

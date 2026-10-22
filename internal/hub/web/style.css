@@ -56,7 +56,17 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .empty{text-align:center;padding:40px;color:var(--muted)}
 .login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--blue);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
 .overlay{position:fixed;inset:0;background:#202b454d;z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(3px)}
-.modal{max-width:680px;width:100%;max-height:88vh;overflow:auto;background:white;padding:28px;border-radius:16px;box-shadow:0 25px 100px #18284930}
+/* 弹层宽屏化（2026-10-22 伦哥定）：横向利用桌面宽度，不要窄高竖条——常规弹层
+ * min(920px,94vw)，内容少的确认弹层 .slim 收窄到 min(560px,90vw)（下限 480px）；
+ * 标题栏/操作栏不进表单网格，天然通栏；<720px 全部回纵向单列。 */
+.modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:white;padding:28px;border-radius:16px;box-shadow:0 25px 100px #18284930}
+.modal.slim{width:min(560px,90vw);min-width:min(480px,calc(100vw - 48px))}
+.modal.slim .actions{justify-content:flex-end;flex-wrap:nowrap}
+/* 弹层内表单两列网格：成对字段（机器+智能体、目标+轮数）并排，.full 跨两列（goal 描述框） */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+.form-grid label{margin:0}
+.form-grid .full{grid-column:1/-1}
+@media(max-width:719px){.modal{width:94vw}.modal.slim{width:94vw}.modal.slim .actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
 .drawer{width:min(700px,96vw);background:white;overflow:auto;padding:28px 32px;box-shadow:-15px 0 80px #23365320}
 .close{font-size:20px;padding:2px 10px}
@@ -69,12 +79,14 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .chip{font-size:11px;color:#8390a8;letter-spacing:1px}
 .checkline{display:flex;align-items:center;gap:8px}.checkline input{width:auto;margin:0}
 .checkline-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-/* 智能体选择公共组件 · 多选形态（建群成员）：按机器分组的 checkbox 树 */
-.picker-grid{display:grid;gap:10px}
-.picker-group{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fbfcfe}
-.picker-group-head{display:flex;align-items:center;gap:8px}
-.picker-group .checkline{margin:0;font-weight:500}
+/* 智能体选择公共组件 · 多选形态（建群成员）：按机器分组的 checkbox 树——宽屏下
+ * 机器分组卡片两列（<720px 一列），组内 checkbox 项流式换行成小卡 */
+.picker-grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.picker-group{display:flex;flex-flow:row wrap;align-content:start;gap:6px;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fbfcfe}
+.picker-group-head{display:flex;align-items:center;gap:8px;width:100%}
+.picker-group .checkline{margin:0;font-weight:500;max-width:100%;border:1px solid var(--line);border-radius:8px;padding:5px 10px;background:white}
 .picker-group .checkline small{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:719px){.picker-grid{grid-template-columns:1fr}}
 @media(max-width:680px){.picker-group{padding:9px 11px}}
 .readonly{font-size:11px;background:#f0f1f4;padding:4px 9px;border-radius:5px;color:#7c8492}
 .help{cursor:help;text-decoration:underline dotted}
