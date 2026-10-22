@@ -255,6 +255,16 @@ func (b *enrollBuilder) compile(goos, goarch, dst string) error {
 	if goBin == "" {
 		p, err := exec.LookPath("go")
 		if err != nil {
+			// systemd 服务默认 PATH 不含 /usr/local/go/bin——常见安装位逐个探测
+			for _, cand := range []string{"/usr/local/go/bin/go", "/usr/lib/go/bin/go", "/opt/go/bin/go", "/usr/local/bin/go", "/snap/bin/go"} {
+				if st, statErr := os.Stat(cand); statErr == nil && !st.IsDir() {
+					p = cand
+					err = nil
+					break
+				}
+			}
+		}
+		if err != nil {
 			return &enrollError{http.StatusServiceUnavailable, "compile_unavailable",
 				"hub 服务器未安装 go 工具链，无法编译部署包（安装 go 或设置 SWARM_SOURCE_DIR 后重启）"}
 		}
