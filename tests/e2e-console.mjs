@@ -68,13 +68,21 @@ async function main() {
   const onlineCount = (bodyText.match(/在线/g) || []).length;
   record('E05', '节点接入：双节点在列且在线', hasMac && hasBaidu && onlineCount >= 2);
 
-  // TC-E06 生成接入配置弹层
+  // TC-E06 接入向导 4 步走通（2026-10-22 向导重构后适配）：
+  // Step1 命名 → Step2 token 生成与登记片段 → Step3 部署方式 → Step4 关闭
   await page.click('button:has-text("生成接入配置")');
-  await page.waitForSelector('#enroll-snippet');
-  const snippet = await page.textContent('#enroll-snippet');
-  record('E06', '节点接入：接入配置片段生成（含 node_id 与令牌占位）', snippet.includes('node_id') && snippet.includes('hub.yaml'));
-  await page.click('[data-act="close"]');
-  await page.waitForSelector('#enroll-snippet', { state: 'detached' });
+  await page.waitForSelector('#enroll-id');
+  await page.fill('#enroll-id', 'e2e-drill');
+  await page.click('[data-act="enroll-next1"]');
+  await page.waitForSelector('[data-act="enroll-pasted"]');
+  const hubSnap = await page.textContent('.modal');
+  record('E06', '接入向导：Step2 生成令牌+hub 登记片段（真实值非占位）', hubSnap.includes('e2e-drill') && hubSnap.includes('hub.yaml') && hubSnap.includes('复制令牌'));
+  await page.click('[data-act="enroll-pasted"]');
+  await page.waitForSelector('[data-act="enroll-next3"]');
+  await page.click('[data-act="enroll-next3"]');
+  await page.waitForSelector('[data-act="enroll-later"]');
+  await page.click('[data-act="enroll-later"]');
+  await page.waitForSelector('#enroll-id', { state: 'detached' });
 
   // ---------- 任务监管页 ----------
   await page.click('aside button:has-text("任务监管")');
@@ -92,54 +100,45 @@ async function main() {
     await page.keyboard.press('Escape');
   }
 
-  // ---------- 运维控制页：真实派单 ----------
+  // ---------- 运维控制页：真实派单（机器优先两级选择）----------
   await page.click('button:has-text("任务派发")');
-  await page.waitForSelector('#ctrl-agent');
-  const agentOptions = await page.locator('#ctrl-agent option').count();
-  record('E09', '运维控制：能力目录下拉非空', agentOptions >= 1, `选项 ${agentOptions}`);
+  await page.waitForSelector('#ctrl-node');
+  const nodeOptions = await page.locator('#ctrl-node option').count();
+  const agentDisabledBefore = await page.locator('#ctrl-agent').isDisabled();
+  record('E09', '派单：机器下拉可选，未选机器时智能体禁用', nodeOptions >= 1 && agentDisabledBefore, `机器选项 ${nodeOptions}`);
 
-  // 选能力（节点随之确定）
-  await page.selectOption('#ctrl-agent', { index: 0 });
-  const nodeHint = await page.textContent('#ctrl-node-hint');
-  record('E09b', '选择能力后显示执行节点提示（不再单独选节点）', !!nodeHint, `节点 ${nodeHint}`);
+  // 选机器 → 智能体列表联动非空 → 选智能体 → 摘要行出现
+  await page.selectOption('#ctrl-node', { index: 1 }); // index 0 为占位
+  await page.waitForTimeout(300);
+  const agentOptionsAfter = await page.locator('#ctrl-agent option').count();
+  await page.selectOption('#ctrl-agent', { index: 1 });
+  const summary = await page.textContent('#ctrl-summary-line, body');
+  record('E09b', '选机器后智能体联动非空，摘要行出现', agentOptionsAfter >= 1 && summary.includes('将在'), `智能体选项 ${agentOptionsAfter}`);
 
   // TC-E10 总理模式（PRIME-DESIGN 8.1）：勾选联动（agent→zcode-dev、广播隐藏、
   // placeholder 切换、节点提示同步）→ 取消全恢复 → 再勾选提交复合目标 → 批次报告
   const PRIME_GOAL = 'E2E 总理模式链路验证：查询网内能力目录并回报在线节点数量，无需派发子任务';
-  const primeOpt = page.locator('#ctrl-agent option[value*="zcode-dev"]');
   let e10ok = false, e10note = '';
-  if (await primeOpt.count()) {
-    const selBefore = await page.inputValue('#ctrl-agent');
-    await page.check('#ctrl-prime');
-    const selOn = await page.inputValue('#ctrl-agent');
-    const hintOn = await page.textContent('#ctrl-node-hint');
-    const bcHidden = await page.locator('#ctrl-broadcast-line').isHidden();
-    const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
-    await page.uncheck('#ctrl-prime');
-    const selOff = await page.inputValue('#ctrl-agent');
-    const bcShown = await page.locator('#ctrl-broadcast-line').isVisible();
-    const phOff = await page.getAttribute('#ctrl-stdin', 'placeholder');
-    const toggleOk = selOn.includes('zcode-dev') && bcHidden && phOn.startsWith('描述复合目标')
-      && hintOn === selOn.split('/')[0]
-      && selOff === selBefore && bcShown && phOff.startsWith('用自然语言描述');
-    if (!toggleOk) e10note = `联动异常: on=${selOn} hint=${hintOn} ph=${String(phOn).slice(0, 12)}… off=${selOff}`;
-    await page.check('#ctrl-prime');
-    await page.fill('#ctrl-stdin', PRIME_GOAL);
-    await page.click('button:has-text("运行巡检")');
-    await page.waitForSelector('text=批次报告', { timeout: 30000 });
-    await page.waitForSelector('[data-act="detail"]', { timeout: 20000 }); // 等待任务行出现（提交后自动刷新快照）
-    const reportOk = (await page.textContent('body')).includes('已提交');
-    e10ok = toggleOk && reportOk;
-    record('E10', '总理模式：勾选联动+取消恢复，提交复合目标进入批次报告', e10ok, e10note);
-  } else {
-    // 网内无 zcode-dev 能力：回退普通巡检提交保持链路覆盖；E10b 相应标 PENDING
-    await page.fill('#ctrl-stdin', 'E2E 自动化巡检验证：请回报节点名');
-    await page.click('button:has-text("运行巡检")');
-    await page.waitForSelector('text=批次报告', { timeout: 30000 });
-    await page.waitForSelector('[data-act="detail"]', { timeout: 20000 });
-    e10ok = (await page.textContent('body')).includes('已提交');
-    record('E10', '总理模式提交（回退普通巡检：网内无 zcode-dev 能力）', e10ok, 'PENDING');
-  }
+  // 机器优先交互：先选机器+智能体（已选），勾总理 → 自动定位在线载体（agent 含 zcode-dev）+placeholder 切换
+  const selBefore = await page.inputValue('#ctrl-agent');
+  await page.check('#ctrl-prime');
+  await page.waitForTimeout(300);
+  const selOn = await page.inputValue('#ctrl-agent');
+  const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
+  await page.uncheck('#ctrl-prime');
+  await page.waitForTimeout(300);
+  const selOff = await page.inputValue('#ctrl-agent');
+  const phOff = await page.getAttribute('#ctrl-stdin', 'placeholder');
+  const toggleOk = selOn.includes('zcode-dev') && phOn.startsWith('描述复合目标')
+    && selOff === selBefore && phOff.startsWith('用自然语言描述');
+  if (!toggleOk) e10note = `联动异常: on=${selOn} ph=${String(phOn).slice(0, 12)}… off=${selOff}`;
+  await page.check('#ctrl-prime');
+  await page.fill('#ctrl-stdin', PRIME_GOAL);
+  await page.click('button:has-text("提交任务")');
+  await page.waitForSelector('[data-act="detail"]', { timeout: 30000 }); // 提交后任务行出现
+  const reportOk = (await page.textContent('body')).includes('已提交');
+  e10ok = toggleOk && reportOk;
+  record('E10', '总理模式：勾选自动定位载体+placeholder 切换，提交复合目标', e10ok, e10note);
 
   // TC-E10b 总理模式任务入参：经任务详情 API 断言 args[0] 以 PRIME 提示词开头、
   // 含「# 本次目标」段与用户输入的目标文本
