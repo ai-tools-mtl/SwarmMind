@@ -666,7 +666,7 @@ function enrollNextHtml() {
   </div><small class="muted">包内 README.txt 有同样的三步与看状态命令。</small>`;
 }
 function enrollBundlePane() {
-  return `<div class="notice">按目标平台生成部署包并下载：hub 现场编译（结果缓存，同平台二次秒回），包内 node.yaml 已按这台机器填好真实值。</div>
+  return `<div class="notice">按目标平台生成部署包并下载：二进制已内置（五平台预编译，点下即回），包内 node.yaml 已按这台机器填好真实值。</div>
   ${enrollPlatTabs()}
   <div class="actions spaced"><button type="button" data-act="enroll-bundle-dl" class="primary">生成并下载</button></div>
   ${enrollNextHtml()}`;
@@ -708,6 +708,7 @@ function enrollStep3() {
 /* enrollBundleBusy 生成进行中（含 503 后 10s 自动重试的等待期）：锁住方式/平台
  * 切换与重复点击；弹层重开（enrollModal 换新 ENROLL 对象）即整体作废。 */
 let enrollBundleBusy = false;
+let enrollBundleSeq = 0;   // 请求序号：作废旧 slowTip 定时器
 function enrollSetDlBtn(label, busy) {
   const btn = document.querySelector('[data-act="enroll-bundle-dl"]');
   if (!btn) return;
@@ -720,8 +721,14 @@ async function enrollBundleDownload() {
   const [os, arch] = ENROLL.plat.split('-');
   const mode = ENROLL.mode === 'docker' ? 'docker' : 'native';
   enrollBundleBusy = true;
-  enrollSetDlBtn('正在生成 · 首次需现场编译，约半分钟…', true);
-  const reset = () => { enrollBundleBusy = false; enrollSetDlBtn('生成并下载', false); };
+  enrollSetDlBtn('正在生成…', true);
+  // 内置产物秒回；超过 8s 未回说明走了现场编译兑底，再提示耗时
+  const curReq = ++enrollBundleSeq;
+  const slowTip = setTimeout(() => {
+    if (enrollBundleBusy && ENROLL && curReq === enrollBundleSeq)
+      enrollSetDlBtn('正在生成 · 首次需现场编译兑底，约半分钟…', true);
+  }, 8000);
+  const reset = () => { clearTimeout(slowTip); enrollBundleBusy = false; enrollSetDlBtn('生成并下载', false); };
   try {
     const resp = await fetch('/api/v1/nodes/enroll-bundle', {
       method: 'POST',
@@ -729,12 +736,13 @@ async function enrollBundleDownload() {
       body: JSON.stringify({ node_id: ENROLL.id, register_token: ENROLL.token, hub_url: enrollHubUrl(), os, arch, mode }),
       credentials: 'same-origin',
     });
-    if (resp.status === 401) { sessionExpired(); enrollBundleBusy = false; return; }
+    if (resp.status === 401) { clearTimeout(slowTip); sessionExpired(); enrollBundleBusy = false; return; }
     if (resp.ok && (resp.headers.get('Content-Type') || '').includes('zip')) {
       const name = /filename="([^"]+)"/.exec(resp.headers.get('Content-Disposition') || '')?.[1]
         || `swarmmind-node-${mode === 'docker' ? 'docker-linux-' : ''}${os}-${arch}.zip`;
       downloadBlob(await resp.blob(), name);
       ENROLL.bundleDone = { mode, os, arch };
+      clearTimeout(slowTip);
       enrollBundleBusy = false;
       if (ENROLL.step === 3 && modalOpen) openLayerPlain(enrollHtml());   // 展示「接下来」三行
       toast('部署包已下载 —— 拷到目标机器解压，按「接下来」三步安装');
@@ -744,6 +752,7 @@ async function enrollBundleDownload() {
     const code = d?.error || '';
     if (resp.status === 503 && code === 'compile_timeout') {
       if (!ENROLL.bundleRetried) {   // 编译排队（首次约半分钟到一分钟）：10s 后自动重试一次
+        clearTimeout(slowTip);
         ENROLL.bundleRetried = true;
         toast('编译排队中，10 秒后自动重试');
         enrollSetDlBtn('编译排队中 · 10 秒后自动重试…', true);
