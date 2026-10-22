@@ -173,7 +173,7 @@ func tools() []toolDef {
 			"body":     s("消息正文（8KiB 上限）"),
 			"kind":     s("消息类别（可选：user|agent，默认 user；system 为 hub 回流保留字，传入将被 400 拒绝）"),
 		}, "group_id", "from", "body")},
-		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐", InputSchema: obj(map[string]any{
+		{Name: "swarmmind_group_messages", Description: "拉取协作群消息：给 since（已见到的最大 seq）只返回之后的新消息，适合轮询补齐。群消息滚动只保留最新 200 条（GROUP-RFC 独立信箱约定），更早消息不可再拉，响应会标注裁剪位置 pruned_before_seq", InputSchema: obj(map[string]any{
 			"group_id": s("群 ID"),
 			"since":    n("已见最大 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
 		}, "group_id")},
@@ -1032,15 +1032,26 @@ func toolGroupMessages(args map[string]any) (string, error) {
 			Kind string `json:"kind"`
 			Body string `json:"body"`
 		} `json:"messages"`
+		PrunedBeforeSeq int64 `json:"pruned_before_seq"`
 	}
 	_ = json.Unmarshal(data, &out)
 	if len(out.Messages) == 0 {
+		if out.PrunedBeforeSeq > 0 && since < out.PrunedBeforeSeq {
+			return fmt.Sprintf("群 %s 自 seq=%d 后没有新消息。注意：群消息滚动只保留最新 200 条，seq≤%d 的更早消息已被裁剪、不可再拉。", gid, since, out.PrunedBeforeSeq), nil
+		}
 		return fmt.Sprintf("群 %s 自 seq=%d 后没有新消息。", gid, since), nil
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "群 %s 新增 %d 条：\n", gid, len(out.Messages))
 	for _, m := range out.Messages {
 		fmt.Fprintf(&b, "[#%d] %s(%s)：%s\n", m.Seq, m.From, m.Kind, m.Body)
+	}
+	// since 落在被裁区间：调用方按 lastSeq 轮询会误以为无缺口，显式点破
+	// （GROUP-RFC 三 200 条滚动窗口语义）。
+	if out.PrunedBeforeSeq > 0 && since < out.PrunedBeforeSeq {
+		fmt.Fprintf(&b, "注意：群消息滚动只保留最新 200 条，seq≤%d 的更早消息已被裁剪（含你请求的 since=%d 区间），从现存最旧 [#%d] 起返回。", out.PrunedBeforeSeq, since, out.Messages[0].Seq)
+	} else if out.PrunedBeforeSeq > 0 {
+		fmt.Fprintf(&b, "注意：群消息滚动只保留最新 200 条，seq≤%d 的更早消息已被裁剪。", out.PrunedBeforeSeq)
 	}
 	b.WriteString("按 #序号 继续 swarmmind_group_messages(since=最大序号) 轮询。")
 	return b.String(), nil

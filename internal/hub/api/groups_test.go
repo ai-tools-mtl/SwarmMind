@@ -129,7 +129,7 @@ func TestGroupRESTFlow(t *testing.T) {
 		t.Fatalf("agent 发言应 201, got %d: %s", code, body)
 	}
 
-	// 增量拉取：since=1 只剩 seq=2
+	// 增量拉取：since=1 只剩 seq=2；未裁剪时 pruned_before_seq=0
 	code, body = f.do(hc, http.MethodGet, "/api/v1/groups/"+g.ID+"/messages?since=1", "")
 	if code != http.StatusOK {
 		t.Fatalf("拉消息应 200, got %d", code)
@@ -138,9 +138,13 @@ func TestGroupRESTFlow(t *testing.T) {
 		Messages []struct {
 			Seq int64 `json:"seq"`
 		} `json:"messages"`
+		PrunedBeforeSeq int64 `json:"pruned_before_seq"`
 	}
 	if err := json.Unmarshal(body, &lm); err != nil || len(lm.Messages) != 1 || lm.Messages[0].Seq != 2 {
 		t.Fatalf("since=1 应只返回 seq=2, got %s err=%v", body, err)
+	}
+	if lm.PrunedBeforeSeq != 0 {
+		t.Fatalf("未裁剪群 pruned_before_seq 应为 0, got %d", lm.PrunedBeforeSeq)
 	}
 	// 非法 since 400
 	if code, _ = f.do(hc, http.MethodGet, "/api/v1/groups/"+g.ID+"/messages?since=abc", ""); code != http.StatusBadRequest {

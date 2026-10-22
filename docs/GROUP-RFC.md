@@ -85,4 +85,4 @@ Session      {(group_id, member) → session_id/resume能力映射}   // 协议�
 4. **协议 6 帧中 group_sync / group_msg_event 未实现**：历史补齐与事件推送由 REST since 增量拉取替代（语义等价：seq 单调 + 只补增量）；group_create / group_msg / group_close / group_task_created 以 REST 端点语义落地（POST groups、POST messages、POST close、转任务注记）。
 5. **发言许可制简化为 @提及触发**：四.1 的许可仲裁未做——成员智能体不因群消息自动启动计算，仅在人点名提及（或其操作者主动经 MCP `swarmmind_group_say`）时参与发言；补历史/重放不触发回复的原则不变。
 
-**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，MVP 仅落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）与 agent 发言预算护栏；群消息当前为**全量持久化**（`groups.json` append-only + seq 账本，无 200 条滚动窗口、无 24h 过期）。200 条滚动窗口与过期清理列入 **P4 关门前清单**（关门 DoD 核实项）：落地前防刷屏挤兑任务信箱的初衷由 max_rounds 预算暂代（仅约束 agent 发言；人/system 发言暂无条数上限，靠 8KiB 单体上限与群终态兜底）。
+**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，已落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）、**200 条滚动窗口**（`group.MaxGroupMessages`，2026-10-22 双审批 C 落地：超窗口从最小 seq 起丢最旧，seq 账本与 agent 预算计数独立累计不回退；`ListMessages` 响应以 `pruned_before_seq` 标注已裁区间上界供调用方对齐游标；裁剪随先写后见事务落盘，`groups.json` 不无限膨胀）与 agent 发言预算护栏。**24h 过期仍未做**，与 node 推送扇出同列 **P4 关门前清单**（关门 DoD 核实项）；过期落地前，防刷屏挤兑任务信箱靠 200 条滚动 + max_rounds 预算（仅约束 agent 发言；人/system 发言无条数上限，靠 8KiB 单体上限、200 条滚动与群终态兜底）。
