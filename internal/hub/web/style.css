@@ -1,65 +1,174 @@
-/* SwarmMind Hub 中心端控制台 · 继承 dashboard-journey.html 原型视觉（亮色 #f7f6f3 / #4a6cf7） */
-:root{--bg:#f7f6f3;--ink:#242b39;--muted:#737b89;--line:#e5e6e9;--blue:#4a6cf7;--orange:#b75d12;--white:#fff;--shadow:0 12px 45px #26375a0b}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.6 system-ui,-apple-system,sans-serif}
+/* SwarmMind Hub 中心端控制台 · Apple 灰阶工具视觉（FE-PLAN v3 / zcode 草案 P1）。
+ * 三个决定性判断：灰阶工具，颜色是报警器不是装修（语义色全站预算 4 个：
+ * accent=主操作/链接/焦点，heat=需要注意，live=连通性，danger=失败/不可逆）；
+ * 统一面板消灭碎片卡；动效只给召唤层（弹层/抽屉/toast，P2 已落地）。
+ * 紫色系与暖米底已全部灭失（草案 A.3）；表格字号下限 12.5px 为 v3 定案。 */
+:root{
+  /* 表面 */ --bg:#f5f5f7; --surface:#ffffff; --hover:#fbfbfd; --track:#e8e8ed;
+  /* 文字灰阶 */ --ink:#1d1d1f; --ink-2:#424245; --ink-3:#6e6e73; --ink-4:#86868b; --ink-5:#aeaeb2; --faint:#d2d2d7;
+  /* 线 */ --hairline:rgba(0,0,0,.07);
+  /* 语义色（全站预算只有这 4 个） */
+  --accent:#0071e3; --accent-press:#0066cc; --accent-bg:rgba(0,113,227,.08); --accent-ring:rgba(0,113,227,.20);
+  --heat:#ff6b00; --heat-bg:rgba(255,107,0,.10); --heat-ring:rgba(255,107,0,.35);
+  --live:#30d158; --live-ink:#248a3d; --live-bg:rgba(48,209,88,.14);
+  --danger:#d70015; --danger-bg:rgba(215,0,21,.06); --danger-line:rgba(215,0,21,.30);
+  /* 圆角（不许发明中间值） */ --r-pill:999px; --r-chip:6px; --r-thumb:12px; --r-sheet:16px; --r-card:18px; --r-panel:22px;
+  /* 阴影（全部两层，禁止单层硬阴影） */
+  --sh-card:0 1px 2px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.05);
+  --sh-panel:0 1px 3px rgba(0,0,0,.05),0 14px 40px rgba(0,0,0,.05);
+  --sh-lift:0 12px 32px rgba(0,0,0,.10);
+  --sh-overlay:0 2px 8px rgba(0,0,0,.10),0 30px 80px rgba(0,0,0,.24);
+  /* 玻璃（仅 topbar 与 toast 两个真重叠位置） */ --glass-bg:rgba(245,245,247,.72);
+  /* 遮罩 */ --scrim:rgba(0,0,0,.32);
+  /* 字体 */ --font:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  /* 字号（运维密度场景整体下移一档：长列表扫读优先，有意偏离营销页阶梯） */
+  --fs-h1:24px; --fs-h2:17px; --fs-h3:15px; --fs-body:14px; --fs-small:12px; --fs-micro:11.5px; --fs-metric:28px;
+  --fs-table:12.5px;   /* v3 定案：表格字号下限 12.5px（覆盖草案 11.5px） */
+  /* 动效 */ --ease-spring:cubic-bezier(0.32,0.72,0,1); --ease-out-quart:cubic-bezier(0.25,1,0.5,1);
+  --dur-enter:400ms; --dur-exit:260ms; --dur-scrim:250ms; --dur-micro:100ms; --dur-hover:180ms;
+  /* 过渡别名：旧变量名重指向新 token（P1 过渡期保留，引用迁移后删除） */
+  --muted:var(--ink-3); --line:var(--hairline); --blue:var(--accent); --orange:var(--heat); --white:var(--surface); --shadow:var(--sh-card);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:var(--fs-body);line-height:1.6;-webkit-font-smoothing:antialiased;font-optical-sizing:auto}
 button,input,select,textarea{font:inherit}button,a,input,select,textarea,summary{outline-offset:4px}
-button{cursor:pointer;border:1px solid var(--line);background:white;color:var(--ink);border-radius:9px;padding:9px 15px;transition:background .15s,transform .1s}
-button:hover{background:#f0f3ff;border-color:#c5cffd}button:active{transform:translateY(1px)}button:disabled{cursor:not-allowed;opacity:.48}
-.primary{background:var(--blue);border-color:var(--blue);color:white;font-weight:650}.primary:hover{background:#3e5ee0;color:white}
-.warning{background:#fff0df;border-color:#f5c99a;color:#a4510b}.warning:hover{background:#ffe6c7}
-.danger{color:#b83b42}a,.link{color:var(--blue);text-decoration:none;cursor:pointer}.link{background:transparent;border:0;padding:3px 0}.link:hover{text-decoration:underline;background:transparent}
-h1,h2,h3,p{margin-top:0}h1{font-size:29px;line-height:1.3;letter-spacing:-1px;margin-bottom:9px}h2{font-size:17px;margin-bottom:17px}h3{font-size:15px;margin-bottom:8px}p{margin-bottom:12px}
-.muted,small{color:var(--muted)}small{font-size:12px}.small{font-size:12px}
-.eyebrow{font-size:11px;letter-spacing:2px;color:var(--muted);font-weight:700;margin-bottom:9px}
-.topbar{position:sticky;top:0;z-index:20;background:#ffffffef;backdrop-filter:blur(12px);border-bottom:1px solid var(--line);padding:14px 28px;display:flex;align-items:center;gap:26px}
-.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--blue);margin-right:8px}
-.switcher{display:flex;background:#f1f2f5;padding:4px;border-radius:10px;gap:3px}.switcher button{border:0;background:transparent;padding:7px 16px;color:var(--muted)}.switcher .selected{background:white;color:var(--blue);box-shadow:0 2px 6px #00000009}
-.deploy{font-size:11px;max-width:355px;color:var(--muted)}
+/* ---- 按钮（草案 B.8）：全站灰 pill，:active 按压反馈；主操作 accent、危险描边 ---- */
+button{cursor:pointer;border:0;background:rgba(0,0,0,.05);color:var(--ink);border-radius:var(--r-pill);height:34px;padding:0 16px;font-weight:500;transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
+button:hover{background:rgba(0,0,0,.08)}
+button:active{transform:scale(.97)}
+button:disabled{cursor:not-allowed;opacity:.48}
+button:disabled:active{transform:none}
+.primary{background:var(--accent);color:var(--white);font-weight:600}.primary:hover{background:var(--accent-press)}
+/* danger/warning 同一套描边红：红色全站只表达「失败/不可逆」（草案 A.3 拆色依据） */
+.danger,.warning{background:var(--surface);border:1px solid var(--danger-line);color:var(--danger)}
+.danger:hover,.warning:hover{background:var(--danger-bg)}
+a,.link{color:var(--accent);text-decoration:none;cursor:pointer}
+.link{background:transparent;border:0;padding:3px 0;height:auto;border-radius:0;font-weight:inherit}
+.link:hover{text-decoration:underline;background:transparent}
+h1,h2,h3,p{margin-top:0}
+h1{font-size:var(--fs-h1);line-height:1.3;letter-spacing:-.02em;margin-bottom:9px}
+h2{font-size:var(--fs-h2);margin-bottom:17px}
+h3{font-size:var(--fs-h3);margin-bottom:8px}
+p{margin-bottom:12px}
+.muted,small{color:var(--ink-3)}small{font-size:var(--fs-small)}.small{font-size:var(--fs-small)}
+.eyebrow{font-size:11px;letter-spacing:2px;color:var(--ink-4);font-weight:700;margin-bottom:9px}
+/* ---- 顶栏：全站玻璃位置之一（design-system 四：glass 只给真重叠层）。
+ * 条件发丝线（P2 E）：scrollY>8 时 JS 挂 .scrolled，border 颜色 300ms 过渡浮现，
+ * 替代永久 hairline——页顶时顶栏与首屏内容浑然一体。 ---- */
+.topbar{position:sticky;top:0;z-index:20;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid transparent;transition:border-color 300ms ease,box-shadow 300ms ease;padding:14px 28px;display:flex;align-items:center;gap:26px}
+.topbar.scrolled{border-bottom-color:var(--hairline)}
+.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--accent);margin-right:8px}
+.switcher{display:flex;background:var(--track);padding:4px;border-radius:10px;gap:3px}.switcher button{border:0;background:transparent;height:auto;padding:7px 16px;color:var(--ink-3)}.switcher .selected{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.deploy{font-size:11px;max-width:355px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
+#session-left{font-variant-numeric:tabular-nums}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
-aside{border-right:1px solid var(--line);padding:30px 17px;display:flex;flex-direction:column;background:#faf9f6}
+/* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
+aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
-nav{display:grid;gap:7px}nav button{text-align:left;border:0;background:transparent;padding:12px 16px;color:#697181}
-nav button.active{background:#e9edff;color:var(--blue);font-weight:650}.navnum{display:inline-block;width:30px;font-size:12px;opacity:.6}
-.aside-bottom{margin-top:auto;padding:45px 13px 0;font-size:12px;color:var(--muted)}
+nav{display:grid;gap:7px}
+nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
+nav button:hover{background:rgba(0,0,0,.045)}
+nav button.active{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.08),0 0 0 1px rgba(0,0,0,.04)}
+.navnum{display:inline-block;width:30px;font-size:11px;font-variant-numeric:tabular-nums;color:var(--ink-4)}
+.aside-bottom{margin-top:auto;padding:45px 13px 0;font-size:var(--fs-small);color:var(--ink-3)}
 main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .page-head{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:28px}
 .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .grid{display:grid;gap:20px}.cols2{grid-template-columns:repeat(2,minmax(0,1fr))}.cols3{grid-template-columns:repeat(3,minmax(0,1fr))}.cols4{grid-template-columns:repeat(4,minmax(0,1fr))}
-.card{background:white;border:1px solid var(--line);border-radius:14px;padding:23px;box-shadow:var(--shadow)}.card+.card{margin-top:20px}.grid>.card+.card{margin-top:0}
-.metric{font-size:32px;line-height:1.3;font-weight:700;letter-spacing:-1px;margin:9px 0}.metric small{font-size:14px;font-weight:400;letter-spacing:0}
-.review-card{border-left:3px solid var(--orange)}.review-card .metric{color:var(--orange)}
+/* ---- 统一面板（草案 B.1）：总览四统计卡合并为一块面板 + 发丝线，消灭碎片卡 ----
+ * .stat 格子 hover 用底色不用 lift（格子抬升会撕裂面板整体）；.metric 类保留在
+ * 数字上（E2E E03 锚点）；「等待核对」橙左竖条废除，数字在 nr>0 时着 heat。 */
+.panel{background:var(--surface);border-radius:var(--r-panel);box-shadow:var(--sh-panel)}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr)}
+.stat-grid>.stat{display:block;height:auto;padding:20px 22px;border:0;border-radius:0;background:transparent;color:inherit;font-weight:400;text-align:left;cursor:pointer}
+.stat-grid>.stat:hover{background:var(--hover)}
+.stat+.stat{border-left:1px solid var(--hairline)}
+.metric{font-size:var(--fs-metric);line-height:1.3;font-weight:700;letter-spacing:-.02em;margin:9px 0;font-variant-numeric:tabular-nums}
+.metric small{font-size:var(--fs-body);font-weight:400;letter-spacing:0}
+.metric.heat{color:var(--heat)}
+/* .card 供「中心端状态/需要你关注」等非兄弟区块继续使用；登录页 .login 复用。
+ * 相邻卡片间距改显式 .spaced（原 .card+.card 相邻选择器废除）。 */
+.card{background:var(--surface);border:0;border-radius:var(--r-card);padding:23px;box-shadow:var(--sh-card)}
 .row{display:flex;align-items:center;justify-content:space-between;gap:14px}.stack{display:grid;gap:13px}.spaced{margin-top:22px}
-.notice{padding:13px 16px;background:#edf1ff;border:1px solid #dce3ff;border-radius:9px;color:#4b5d98}
-.notice.warn{background:#fff5e9;border-color:#f2ddc2;color:#9b5b21}
-.notice.purple{background:#f5efff;color:#7653a3;border-color:#e6d9fa}
-.badge{display:inline-flex;align-items:center;gap:5px;padding:4px 9px;border-radius:6px;font-size:11px;font-weight:550;white-space:nowrap;background:#eff0f2;color:#687080}
-.badge:before{content:'';width:5px;height:5px;background:currentColor;border-radius:50%}
-.submitted{background:#eff0f2;color:#687080}.offered{background:#edf0ff;color:#4d6ad1}.acknowledged{background:#e7f5f8;color:#198293}
-.running{background:#fff1df;color:#ad6714}.completed,.online{background:#e9f5ed;color:#35805a}.failed{background:#fcebec;color:#b64e56}
-.cancelled{background:#f0f0f3;color:#5c6270}
-/* needs_review 橙色高亮（本 Loop 要求：独立终态，一眼可辨） */
-.needs_review{background:#ffe8d1;color:#a4510b;box-shadow:0 0 0 1px #f5c99a}
-.offline{background:#f0f0f2;color:#7e8490}
-.filters{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:19px}.filters button{padding:6px 10px;font-size:12px}.filters .on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue)}
-.fields{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}.fields label{flex:1;min-width:150px;margin:0}
-label{display:block;font-size:12px;font-weight:600;margin-bottom:15px}
-input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid #dfe2e8;border-radius:8px;padding:10px 12px;color:var(--ink);background:white}textarea{resize:vertical;min-height:110px}
-input:focus,textarea:focus,select:focus{border-color:var(--blue)}input:disabled,textarea:disabled,select:disabled{background:#f1f2f4;color:#7b8190}
+/* ---- notice（草案 B.8）：默认灰底；warn=heat 频道（标题着 heat）；紫 notice 已删 ---- */
+.notice{padding:13px 16px;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);color:var(--ink-2)}
+.notice.warn{background:var(--heat-bg)}
+.notice.warn b{color:var(--heat)}
+.enroll-ok{padding:13px 16px;background:var(--live-bg);border:0;border-radius:var(--r-thumb);color:var(--live-ink)}
+.enroll-ok p{margin:6px 0 10px;color:var(--live-ink)}
+/* ---- 状态 badge（草案 B.2/A.2）：灰阶化。视觉档位数 < 状态数是故意的——
+ * 点=该状态还会动态变化：仅 running（蓝脉冲）/online（绿常亮）/needs_review
+ * （heat 常亮）开点；submitted/offered/acknowledged 瞬时握手挂点是噪音。 ---- */
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--r-pill);font-size:var(--fs-micro);font-weight:550;white-space:nowrap;background:rgba(0,0,0,.05);color:var(--ink-3)}
+.badge:before{content:'';width:5px;height:5px;border-radius:50%;background:currentColor;display:none}
+.badge.running:before{display:inline-block;background:var(--accent);animation:pulse-dot 2.2s infinite}
+.badge.online:before{display:inline-block;background:var(--live)}
+.badge.needs_review{background:var(--heat-bg);color:var(--heat);font-weight:650;box-shadow:inset 0 0 0 1px var(--heat-ring)}
+.badge.needs_review:before{display:inline-block}
+.badge.failed{color:var(--danger)}
+.badge.cancelled,.badge.offline{color:var(--ink-4)}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
+/* ---- 筛选 chips（草案 B.7）：任务页强筛选=黑 pill；总览下钻 chips 复用同容器。
+ * .chip-link 数量恒 8（E2E E04），类名仅作跳转语义标记。 ---- */
+.filters{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:19px}
+.filters button{display:inline-flex;align-items:center;gap:6px;height:auto;border:0;background:rgba(0,0,0,.05);border-radius:var(--r-pill);padding:6px 14px;font-size:12.5px;font-weight:500;color:var(--ink-2)}
+.filters button:hover{background:rgba(0,0,0,.08)}
+.filters button.on{background:var(--ink);color:var(--white);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.16)}
+.filters .badge{background:none;padding:0;color:inherit;font-weight:650}
+.chip-link{cursor:pointer}
+/* ---- 表单（草案 B.8）：focus 焦点环；label 与字段间距均匀化（修 audit 呼吸感） ---- */
+.fields{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px}.fields label{flex:1;min-width:150px;margin:0}
+label{display:block;font-size:var(--fs-small);font-weight:600;margin-bottom:6px;color:var(--ink-2)}
+input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid var(--faint);border-radius:var(--r-thumb);padding:10px 12px;color:var(--ink);background:var(--surface)}
+textarea{resize:vertical;min-height:110px}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring);outline:0}
+input:disabled,textarea:disabled,select:disabled{background:var(--track);color:var(--ink-4)}
 fieldset{border:0;padding:0;margin:0;min-width:0}
-details{border-top:1px solid var(--line);padding-top:15px;margin:20px 0}summary{cursor:pointer;font-weight:600}details[open] summary{margin-bottom:18px}
-.table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:12px}
-th{color:var(--muted);font-weight:500;background:#fafbfc;white-space:nowrap}th,td{padding:14px 12px;border-bottom:1px solid #eff0f3}
-tbody tr[data-task]{cursor:pointer}tbody tr:hover{background:#fafbff}td strong{font-weight:600}td small{display:block}
-.task-title{min-width:155px}.table-action{white-space:nowrap}.table-action button{font-size:12px;padding:4px 8px}
-code,pre{font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f6f9;border:1px solid #e9ebf0;border-radius:8px;padding:15px}code{color:#606b84}
-hr{border:0;border-top:1px solid var(--line);margin:20px 0}
-.empty{text-align:center;padding:40px;color:var(--muted)}
-.login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--blue);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
-.overlay{position:fixed;inset:0;background:#202b454d;z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;backdrop-filter:blur(3px)}
-/* 弹层宽屏化（2026-10-22 伦哥定）：横向利用桌面宽度，不要窄高竖条——常规弹层
- * min(920px,94vw)，内容少的确认弹层 .slim 收窄到 min(560px,90vw)（下限 480px）；
- * 标题栏/操作栏不进表单网格，天然通栏；<720px 全部回纵向单列。 */
-.modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:white;padding:28px;border-radius:16px;box-shadow:0 25px 100px #18284930}
+details{border-top:1px solid var(--hairline);padding-top:15px;margin:20px 0}summary{cursor:pointer;font-weight:600;color:var(--ink-2)}details[open] summary{margin-bottom:18px}
+/* 任务页高级筛选容器：默认折叠收进 details，任意高级条件生效期间保持展开 */
+details.adv-filter{margin:0 0 18px}
+/* ---- 表格（草案 B.4 + v3 定案）：表头靠 12.5px + ink-4 与数据分层（灰底表头废除）；
+ * 数字 tabular-nums；行 hover 限定可点任务行；D6 定案：滚动归属页面主滚动，
+ * .table-wrap 不限高（容器内 sticky 需求出现时再二选一）。 ---- */
+.table-wrap{overflow:auto}
+table{width:100%;border-collapse:collapse;text-align:left;font-size:var(--fs-table)}
+th{background:none;color:var(--ink-4);font-size:var(--fs-table);font-weight:550;white-space:nowrap}
+th,td{padding:12px 14px;border-bottom:1px solid var(--hairline)}
+td{font-variant-numeric:tabular-nums}
+tbody tr[data-task]{cursor:pointer}
+tbody tr[data-task]:hover{background:var(--hover)}
+td strong{font-weight:600}
+td small{display:block;color:var(--ink-4);font-family:var(--mono);font-size:var(--fs-table)}
+.task-title{min-width:155px}.table-action{white-space:nowrap}.table-action button{font-size:12.5px;height:auto;padding:4px 10px}
+code,pre{font-family:var(--mono);font-size:var(--fs-table);line-height:1.7}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);padding:15px}
+code{color:var(--ink-2)}
+hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
+/* ---- 空状态（草案 B.7） ---- */
+.empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
+.empty h2{font-size:var(--fs-h2);font-weight:600;letter-spacing:-.01em;color:var(--ink)}
+.empty p{max-width:440px;margin:8px auto 16px;font-size:13.5px;line-height:1.7;color:var(--ink-3)}
+.login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--accent);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
+/* ---- 弹层（草案 B.5 + C 动效预算表）：实白表面 + 遮罩，宽度体系（920/560 slim）
+ * 不动；backdrop blur 已撤，「materialize 感」由 scrim+位移+缩放共同表达。
+ * P2 动效（A）：modal 进 400ms spring / 出 260ms 同路径；scrim 250ms（比面板快）；
+ * 抽屉右缘 translateX(48px) 升入、出 280ms。只动 opacity/transform，纯 CSS
+ * transition（非 keyframes）——中途再触发可反转，Esc 连按不乱。关闭期 .closing
+ * 指针隔离（FE-14：关闭动画期背景可点），DOM 清理由 closeLayer 延迟 280ms。
+ * JS 侧配对：openLayerPlain/syncDrawer 先渲染→强制样式计算→下一帧加 .open。 ---- */
+.overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;opacity:0;transition:opacity var(--dur-scrim) ease}
+.overlay.open{opacity:1}
+.overlay.closing{opacity:0;pointer-events:none}
+.modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:var(--surface);padding:28px;border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);opacity:0;transform:translateY(12px) scale(.98);transition:opacity var(--dur-enter) var(--ease-spring),transform var(--dur-enter) var(--ease-spring)}
+.overlay.open .modal{opacity:1;transform:none}
+.overlay.closing .modal{opacity:0;transform:translateY(8px) scale(.985);transition-duration:var(--dur-exit)}
+/* 向导步进轻动效（草案 C 唯一轻动效预算）：同一 .modal 节点换内容（openLayerPlain
+ * replace 路径），新 pane 以 200ms translateY(4px)+opacity 进场——不整层重开、
+ * 不重播 400ms 弹层入场（FE-15：.modal 节点引用恒定）。 */
+.modal .pane{opacity:0;transform:translateY(4px);transition:opacity 200ms var(--ease-spring),transform 200ms var(--ease-spring)}
+.modal .pane.in{opacity:1;transform:none}
 .modal.slim{width:min(560px,90vw);min-width:min(480px,calc(100vw - 48px))}
 .modal.slim .actions{justify-content:flex-end;flex-wrap:nowrap}
 /* 弹层内表单两列网格：成对字段（机器+智能体、目标+轮数）并排，.full 跨两列（goal 描述框） */
@@ -67,94 +176,116 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .form-grid label{margin:0}
 .form-grid .full{grid-column:1/-1}
 @media(max-width:719px){.modal{width:94vw}.modal.slim{width:94vw}.modal.slim .actions{flex-wrap:wrap}.form-grid{grid-template-columns:1fr}}
-/* 节点接入向导（2026-10-22 伦哥定：四步向导）——顶部步骤条（done 可点回退），
- * 配置行「代码+右侧人话注释」两列网格，OS 三 tab，令牌展示行，绿色成功态 */
+/* ---- 节点接入向导（草案 B.8 向导步骤）：蓝单一色相表达进度 ---- */
 .wiz-steps{display:flex;align-items:center;gap:6px;margin:6px 0 20px}
-.wiz-step{flex:1;display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--muted);border:0;background:transparent;padding:8px 0;text-align:left;white-space:nowrap}
-.wiz-step .n{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:#f1f2f5;color:var(--muted);flex-shrink:0}
-.wiz-step:not(:last-child)::after{content:'';flex:1;height:2px;background:var(--line);margin:0 8px 0 4px;min-width:10px}
+.wiz-step{flex:1;display:flex;align-items:center;gap:8px;font-size:var(--fs-small);font-weight:600;color:var(--ink-3);border:0;background:transparent;height:auto;padding:8px 0;text-align:left;white-space:nowrap}
+.wiz-step .n{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--track);color:var(--ink-3);flex-shrink:0}
+.wiz-step:not(:last-child)::after{content:'';flex:1;height:2px;background:var(--hairline);margin:0 8px 0 4px;min-width:10px}
 .wiz-step.done{cursor:pointer}
-.wiz-step.done:hover{color:var(--blue)}
-.wiz-step.done .n{background:#e9f5ed;color:#35805a}
-.wiz-step.done:not(:last-child)::after{background:#bcd9c6}
-.wiz-step.on{color:var(--blue)}
-.wiz-step.on .n{background:var(--blue);color:white}
-.wiz-step.on:not(:last-child)::after{background:#c5cffd}
+.wiz-step.done:hover{color:var(--accent)}
+.wiz-step.done .n{background:var(--accent-bg);color:var(--accent)}
+.wiz-step.done:not(:last-child)::after{background:rgba(0,113,227,.35)}
+.wiz-step.on{color:var(--accent)}
+.wiz-step.on .n{background:var(--accent);color:var(--white)}
 .enroll-token-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.enroll-token-row code{font-size:13px;user-select:all;word-break:break-all;background:#f5f6f9;border:1px solid #e9ebf0;border-radius:8px;padding:10px 14px;flex:1;min-width:200px}
-.enroll-rows{border:1px solid var(--line);border-radius:10px;overflow:hidden;margin:12px 0}
+.enroll-token-row code{user-select:all;word-break:break-all;background:var(--hover);border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:10px 14px;flex:1;min-width:200px}
+.enroll-rows{border:1px solid var(--hairline);border-radius:var(--r-thumb);overflow:hidden;margin:12px 0}
 .enroll-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,320px)}
-.enroll-row+.enroll-row{border-top:1px solid var(--line)}
-.enroll-row code{padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere;color:#606b84;background:#fbfcfe}
-.enroll-row small{padding:10px 14px;color:var(--muted);border-left:1px dashed var(--line);display:flex;align-items:center;background:#fbfcfe}
+.enroll-row+.enroll-row{border-top:1px solid var(--hairline)}
+.enroll-row code{padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-2);background:var(--hover)}
+.enroll-row small{padding:10px 14px;color:var(--ink-3);border-left:1px dashed var(--hairline);display:flex;align-items:center;background:var(--hover)}
+/* 平台 tab：灰 pill 常态、选中黑 pill（与筛选 chips 同一强选择语言） */
 .os-tabs{display:flex;gap:6px}
-.os-tabs button{padding:6px 16px;font-size:12px}
-.os-tabs .on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue);color:var(--blue);font-weight:650}
-.enroll-ok{padding:13px 16px;background:#e9f5ed;border:1px solid #c4e5d0;border-radius:9px;color:#35805a}
-.enroll-ok p{margin:6px 0 10px;color:#2f6b4b}
-/* Step3 部署方式三卡（radio 视觉：点状圆 + 描述行）；生成中转圈见 .spin */
+.os-tabs button{height:auto;padding:6px 16px;font-size:12.5px}
+.os-tabs .on{background:var(--ink);color:var(--white);font-weight:600}
+/* Step3 部署方式三卡（radio 视觉：点状圆 + 描述行）；选中 accent 描边；生成中转圈见 .spin */
 .enroll-modes{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-.enroll-mode{border-radius:10px;padding:12px 14px;text-align:left;display:flex;flex-direction:column;gap:5px;align-items:stretch}
+.enroll-mode{height:auto;border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:12px 14px;text-align:left;display:flex;flex-direction:column;gap:5px;align-items:stretch;background:var(--surface)}
+.enroll-mode:hover{background:var(--hover)}
 .enroll-mode .t{font-weight:650;display:flex;align-items:center;gap:8px;font-size:13px}
-.enroll-mode .dot{width:14px;height:14px;border-radius:50%;border:2px solid #c8cede;flex-shrink:0}
-.enroll-mode small{color:var(--muted);line-height:1.5}
-.enroll-mode.on{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue)}
-.enroll-mode.on .dot{border-color:var(--blue);background:var(--blue);box-shadow:inset 0 0 0 2.5px white}
-.enroll-manual>summary{cursor:pointer;font-weight:650;color:var(--blue);padding:11px 14px;border:1px dashed var(--line);border-radius:10px;user-select:none}
+.enroll-mode .dot{width:14px;height:14px;border-radius:50%;border:2px solid var(--faint);flex-shrink:0}
+.enroll-mode small{color:var(--ink-3);line-height:1.5}
+.enroll-mode.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.enroll-mode.on .dot{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 2.5px var(--white)}
+.enroll-manual>summary{cursor:pointer;font-weight:650;color:var(--accent);padding:11px 14px;border:1px dashed var(--hairline);border-radius:var(--r-thumb);user-select:none}
 .enroll-manual[open]>summary{margin-bottom:6px}
 .spin{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px;margin-right:7px}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media(max-width:719px){.enroll-modes{grid-template-columns:1fr}}
-@media(max-width:719px){.wiz-steps{gap:2px}.wiz-step{flex:none}.wiz-step:not(:last-child)::after{display:none}.wiz-step+.wiz-step{margin-left:12px}.enroll-row{grid-template-columns:1fr}.enroll-row small{border-left:0;border-top:1px dashed var(--line)}}
+@media(max-width:719px){.wiz-steps{gap:2px}.wiz-step{flex:none}.wiz-step:not(:last-child)::after{display:none}.wiz-step+.wiz-step{margin-left:12px}.enroll-row{grid-template-columns:1fr}.enroll-row small{border-left:0;border-top:1px dashed var(--hairline)}}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
-.drawer{width:min(700px,96vw);background:white;overflow:auto;padding:28px 32px;box-shadow:-15px 0 80px #23365320}
-.close{font-size:20px;padding:2px 10px}
-.timeline{list-style:none;padding:0;margin:14px 0}.timeline li{padding:0 0 18px 22px;border-left:2px solid #e4e9fb;position:relative}
-.timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--blue)}
-.artifact{padding:12px 0;border-bottom:1px solid var(--line)}
+.drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay);opacity:0;transform:translateX(48px);transition:transform var(--dur-enter) var(--ease-spring),opacity var(--dur-enter) var(--ease-spring)}
+.overlay.open .drawer{transform:none;opacity:1}
+.overlay.closing .drawer{transform:translateX(40px);opacity:0;transition-duration:280ms}
+.close{font-size:20px;height:auto;padding:2px 10px;background:transparent;color:var(--ink-3)}
+.close:hover{background:rgba(0,0,0,.05);color:var(--ink)}
+/* ---- 时间线（草案 B.8）：历史记录是灰的，只有 needs_review 事件点用 heat ---- */
+.timeline{list-style:none;padding:0;margin:14px 0}
+.timeline li{padding:0 0 18px 22px;border-left:1px solid var(--hairline);position:relative}
+.timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.timeline li.hl:before{background:var(--heat)}
+.artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
 .cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}
-.toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:#27334a;color:white;padding:12px 22px;border-radius:10px;z-index:100;box-shadow:0 5px 30px #0002;max-width:90vw}
-.footer-note{font-size:11px;color:var(--muted);margin-top:25px}
-.chip{font-size:11px;color:#8390a8;letter-spacing:1px}
+/* ---- toast（草案 B.6 + C 预算表）：顶部玻璃胶囊；.show 类切换（hidden 属性会
+ * 杀死过渡），3400ms 自动消失逻辑与 #toast id 保留（JS 已在 P1 改造）。
+ * 进 320ms spring / 出 220ms ease-out-quart：过渡取目的地状态的 transition 值——
+ * .show 上声明出场方向、基态声明返程方向。 ---- */
+.toast{position:fixed;top:74px;left:50%;translate:-50% -10px;opacity:0;z-index:100;pointer-events:none;max-width:min(520px,90vw);padding:10px 18px;border-radius:var(--r-pill);background:rgba(250,250,252,.86);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid rgba(0,0,0,.08);box-shadow:0 2px 8px rgba(0,0,0,.08),0 12px 32px rgba(0,0,0,.12);color:var(--ink);font-size:13px;font-weight:550;transition:translate 220ms var(--ease-out-quart),opacity 220ms var(--ease-out-quart)}
+.toast.show{translate:-50% 0;opacity:1;transition:translate 320ms var(--ease-spring),opacity 320ms var(--ease-spring)}
+.footer-note{font-size:11px;color:var(--ink-3);margin-top:25px}
+.chip{font-size:11px;color:var(--ink-4);letter-spacing:1px}
 .checkline{display:flex;align-items:center;gap:8px}.checkline input{width:auto;margin:0}
 .checkline-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 /* 智能体选择公共组件 · 多选形态（建群成员）：按机器分组的 checkbox 树——宽屏下
  * 机器分组卡片两列（<720px 一列），组内 checkbox 项流式换行成小卡 */
 .picker-grid{display:grid;gap:10px;grid-template-columns:repeat(2,minmax(0,1fr))}
-.picker-group{display:flex;flex-flow:row wrap;align-content:start;gap:6px;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fbfcfe}
+.picker-group{display:flex;flex-flow:row wrap;align-content:start;gap:6px;border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:11px 14px;background:var(--hover)}
 .picker-group-head{display:flex;align-items:center;gap:8px;width:100%}
-.picker-group .checkline{margin:0;font-weight:500;max-width:100%;border:1px solid var(--line);border-radius:8px;padding:5px 10px;background:white}
+.picker-group .checkline{margin:0;font-weight:500;max-width:100%;border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:5px 10px;background:var(--surface)}
 .picker-group .checkline small{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:719px){.picker-grid{grid-template-columns:1fr}}
 @media(max-width:680px){.picker-group{padding:9px 11px}}
-.readonly{font-size:11px;background:#f0f1f4;padding:4px 9px;border-radius:5px;color:#7c8492}
+.readonly{font-size:11px;background:rgba(0,0,0,.05);padding:4px 9px;border-radius:var(--r-chip);color:var(--ink-4)}
 .help{cursor:help;text-decoration:underline dotted}
 .statusline{min-height:28px;margin:14px 0}
-.mini-stat{display:flex;gap:18px}.mini-stat b{display:block;font-size:22px}.mini-stat small{color:var(--muted)}
-.step{display:flex;gap:13px;align-items:flex-start}.step>span{border-radius:50%;background:#edf0ff;color:var(--blue);width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
-.warn-text{color:#a4510b}
+.mini-stat{display:flex;gap:18px}.mini-stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}.mini-stat small{color:var(--ink-3)}
+.step{display:flex;gap:13px;align-items:flex-start}.step>span{border-radius:50%;background:var(--accent-bg);color:var(--accent);width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
+.warn-text{color:var(--heat)}
 [hidden]{display:none!important}
-@media(max-width:1050px){.deploy{display:none}main{padding:30px 24px}.shell{grid-template-columns:185px minmax(0,1fr)}.cols4,.cols3{grid-template-columns:repeat(2,minmax(0,1fr))}.cols2{grid-template-columns:1fr}.topbar{gap:15px;padding:12px 18px}.switcher button{padding:7px 10px}.checkline-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:680px){.shell{display:block}aside{border-right:0;padding:12px}.workspace,.aside-bottom{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:8px}.navnum{display:none}.topbar{flex-wrap:wrap;gap:10px}.brand{font-size:17px}.top-right{font-size:11px}.switcher{order:3;width:100%}.switcher button{flex:1}main{padding:24px 16px}.page-head{align-items:flex-start;flex-direction:column}h1{font-size:25px}.cols3,.cols4{grid-template-columns:1fr 1fr}.card{padding:18px}.drawer{padding:22px}.checkline-grid{grid-template-columns:1fr}}
-/* 群聊页（GROUP-RFC 六 MVP）：群卡片列表 + 气泡时间线（user 蓝 / agent 白 / system 灰） */
-.discussing{background:#edf0ff;color:#4d6ad1}.concluded{background:#f0f0f2;color:#7e8490}
+@media(max-width:1050px){.deploy{display:none}main{padding:30px 24px}.shell{grid-template-columns:185px minmax(0,1fr)}.cols4,.cols3{grid-template-columns:repeat(2,minmax(0,1fr))}.cols2{grid-template-columns:1fr}.topbar{gap:15px;padding:12px 18px}.switcher button{padding:7px 10px}.checkline-grid{grid-template-columns:repeat(2,1fr)}
+.stat-grid{grid-template-columns:1fr 1fr}.stat-grid>.stat{border-left:0!important}.stat-grid>.stat:nth-child(even){border-left:1px solid var(--hairline)!important}.stat-grid>.stat:nth-child(n+3){border-top:1px solid var(--hairline)}}
+@media(max-width:680px){.shell{display:block}aside{border-right:0;padding:12px}.workspace,.aside-bottom{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:8px}.navnum{display:none}.topbar{flex-wrap:wrap;gap:10px}.brand{font-size:17px}.top-right{font-size:11px}.switcher{order:3;width:100%}.switcher button{flex:1}main{padding:24px 16px}.page-head{align-items:flex-start;flex-direction:column}h1{font-size:25px}.cols3,.cols4{grid-template-columns:1fr 1fr}.card{padding:18px}.stat-grid>.stat{padding:14px 16px}.drawer{padding:22px}.checkline-grid{grid-template-columns:1fr}}
+/* ---- 群聊页（GROUP-RFC 六 MVP）：群卡片列表 + 气泡时间线 ----
+ * 气泡（草案 B.8）：user=accent-bg / agent=白+发丝线 / system=灰；群卡片是真独立
+ * 对象，配 hover lift（C 动效预算：全站唯一允许 lift 处，200ms --ease-out-quart）。 */
 .group-list{display:grid;gap:12px}
-.group-card{text-align:left;display:grid;gap:8px;align-content:start;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:white}
-.group-card:hover{border-color:#c5cffd;background:#fafbff}
+.group-card{text-align:left;display:grid;gap:8px;align-content:start;height:auto;padding:14px 16px;border:1px solid var(--hairline);border-radius:var(--r-thumb);background:var(--surface);transition:transform 200ms var(--ease-out-quart),box-shadow 200ms var(--ease-out-quart)}
+.group-card:hover{transform:translateY(-2px);box-shadow:var(--sh-lift)}
 .group-members{display:flex;gap:5px;flex-wrap:wrap}
-.msgwrap{max-height:52vh;overflow:auto;border:1px solid var(--line);border-radius:10px;background:#fbfcfe;padding:14px;margin:12px 0 0}
+/* 消息区滚动跟随（P1）：.msgbox 相对定位承载「有新消息」浮标，.msgwrap 内部滚动 */
+.msgbox{position:relative}
+.msgwrap{max-height:52vh;overflow:auto;border:1px solid var(--hairline);border-radius:var(--r-thumb);background:var(--hover);padding:14px;margin:12px 0 0}
 .msgline{list-style:none;padding:0;margin:0;display:grid;gap:10px}
-.msg{max-width:82%;padding:9px 13px;border-radius:12px;background:white;border:1px solid #e9ebf0;font-size:13px;line-height:1.6}
-.msg-meta{font-size:11px;color:var(--muted);margin-bottom:2px}
+.msg{max-width:82%;padding:9px 13px;border-radius:var(--r-sheet);background:var(--surface);border:1px solid var(--hairline);font-size:13px;line-height:1.6}
+.msg-meta{font-size:11px;color:var(--ink-3);margin-bottom:2px}
 .msg-meta .link{font-size:11px;padding:0;margin-left:2px}
 .msg-body{white-space:pre-wrap;overflow-wrap:anywhere}
-.msg-user{margin-left:auto;background:#edf1ff;border-color:#dce3ff}
-.msg-system{background:#f1f2f4;color:#687080}
+.msg-user{margin-left:auto;background:var(--accent-bg);border-color:rgba(0,113,227,.15)}
+.msg-system{background:rgba(0,0,0,.04);border-color:transparent;color:var(--ink-3)}
 .sayline{display:flex;gap:10px;align-items:flex-end}
 .sayline textarea{margin-top:0;flex:1;min-height:52px}
 .sayline button{flex-shrink:0}
+.newmsg-pill{position:absolute;left:50%;bottom:14px;translate:-50% 0;height:auto;padding:6px 14px;border-radius:var(--r-pill);background:var(--ink);color:var(--white);font-size:12.5px;font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.16);z-index:2}
 @media(max-width:680px){.msg{max-width:94%}}
-
-/* 总览下钻 chips：与任务页筛选 chips 同观感，但语义是跳转 */
-.chip-link { cursor: pointer; }
-.chip-link:hover { border-color: var(--accent, #5b7fd4); color: var(--accent, #5b7fd4); }
+/* ---- P2 F：三条媒体查询（草案 C 交付物，缺一不验收） ----
+ * reduced-motion：层类只留 200ms 纯 opacity 淡入淡出，位移一律移除（!important 压过
+ * .closing 的高特异性时长覆盖）；toast 的 translate 同时承担居中定位，归位到静止值
+ * -50% 0 而非 none；群卡 lift 同属位移动画一并撤除。向导 pane 随 .modal 覆盖。
+ * reduced-transparency：topbar/toast 玻璃转实白（blur 是全站仅有的两处 backdrop）。
+ * contrast:more：边框增强；toast 是胶囊，给整圈描边而非 border-bottom。 ---- */
+@media (prefers-reduced-motion:reduce){
+  .overlay,.modal,.drawer,.modal .pane,.group-card{transform:none!important;transition:opacity 200ms ease!important}
+  .toast{translate:-50% 0!important;transition:opacity 200ms ease!important}
+}
+@media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
+@media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}
