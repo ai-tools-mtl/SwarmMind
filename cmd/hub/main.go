@@ -173,9 +173,15 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 
 	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4；Groups 群聊 MVP 端点；
 	// Enroll 部署包编译：源码根 SWARM_SOURCE_DIR（默认 /opt/swarmmind-src），
-	// 编译缓存挂 data_dir/enroll-cache）
+	// 编译缓存挂 data_dir/enroll-cache；NodeEntry 节点接入入口——接入向导 hub_url
+	// 预填真相源，第六轮修复 2：管理台端口与节点入口端口不同时前端推导必错）
+	nodeScheme := "wss"
+	if cfg.TLS.InsecureLoopback {
+		nodeScheme = "ws"
+	}
 	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{
 		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
+		NodeEntry: &api.NodeEntryConfig{Scheme: nodeScheme, Listen: cfg.NodeListen},
 		Enroll: &api.EnrollConfig{
 			SourceDir: envDefault("SWARM_SOURCE_DIR", "/opt/swarmmind-src"),
 			CacheDir:  filepath.Join(cfg.DataDir, "enroll-cache"),
