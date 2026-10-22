@@ -151,6 +151,25 @@ wait_status() {
   done
 }
 
+# wait_status_local <task_id> <正则> <timeout_s>：查 nodeA 本地账本（方案 3.2
+# 双路径：本机自派任务 origin=local 只入本机账本，hub 不可见——真相源在 node）。
+wait_status_local() {
+  local id=$1 want=$2 limit=$3 t0=$SECONDS
+  while :; do
+    local code
+    code=$(curl -sS -o "$TMP/resp.json" -w '%{http_code}' \
+      -H 'Authorization: Bearer '"$LOCAL_A_TOKEN" \
+      "http://127.0.0.1:${LOCAL_A_PORT}/api/v1/tasks/$id")
+    if [ "$code" != "200" ]; then fail "查询本地任务 $id 得 HTTP $code"; fi
+    STATUS=$(jget "$TMP/resp.json" status)
+    if [[ "$STATUS" =~ $want ]]; then return 0; fi
+    if (( SECONDS - t0 > limit )); then
+      fail "本地任务 $id 在 ${limit}s 内未到达 /$want/（当前 $STATUS）"
+    fi
+    sleep 0.1
+  done
+}
+
 echo "== SwarmMind V0 回环演示（DoD 3-10）=="
 echo "工作目录: $TMP"
 
@@ -183,6 +202,7 @@ register_token: ${NODEA_TOKEN}
 hub_pubkey_fp: ""
 local_listen: 127.0.0.1:${LOCAL_A_PORT}
 local_token: ${LOCAL_A_TOKEN}
+prime_agent: echo-demo
 concurrency: 2
 data_dir: ${TMP}/data-a
 base_env:
@@ -340,14 +360,39 @@ if ! python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) <= 5.0 else 1)" "$
 fi
 pass "全链 completed（${ELAPSED}s ≤ 5s），FinalAnswer=hello swarmmind"
 
-# node 本地 API 提交（SPEC 六：本机进程 → 本机 node → hub）
-LOCAL_OUT=$(curl -sS -X POST -H 'Authorization: Bearer '"$LOCAL_A_TOKEN" \
+# node 本地 API 提交（方案 3.2 双路径：本机进程 → 本机 node 本地直执行，不入
+# hub 账本）。修复 7（prime 分级适配）：编排类调用（POST /api/v1/tasks）必须
+# prime_token——node 起动时恒生成 data_dir/prime_token（夹具已声明
+# prime_agent: echo-demo，编排接口激活）；local_token 只读，调编排 → 403
+#（矩阵 #14，下方有反向断言）。任务结果查 node 本地账本（hub 不可见）。
+for i in $(seq 1 50); do
+  [ -s "$TMP/data-a/prime_token" ] && break
+  if [ "$i" = 50 ]; then fail "nodeA prime_token 未生成"; fi
+  sleep 0.2
+done
+PRIME_A_TOKEN=$(cat "$TMP/data-a/prime_token")
+if [ -z "$PRIME_A_TOKEN" ]; then fail "nodeA prime_token 为空"; fi
+LOCAL_OUT=$(curl -sS -X POST -H 'Authorization: Bearer '"$PRIME_A_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"target_node":"nodeA","target_agent":"echo-demo","input":{"args":["via-local-api"]},"submitted_by":"local-proc"}' \
   "http://127.0.0.1:${LOCAL_A_PORT}/api/v1/tasks")
 LOCAL_TASK=$(printf '%s' "$LOCAL_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
-wait_status "$LOCAL_TASK" 'completed' 10
-pass "node 本地 API 提交 → completed（ ${LOCAL_TASK} ）"
+wait_status_local "$LOCAL_TASK" 'completed' 10
+LOCAL_FINAL=$(jget "$TMP/resp.json" result.final_answer)
+if [ "${LOCAL_FINAL%$'\n'}" != "via-local-api" ]; then fail "本地直执行 FinalAnswer 不符: $LOCAL_FINAL"; fi
+pass "node 本地 API 提交（prime_token 编排）→ 本地直执行 completed（ ${LOCAL_TASK} ）"
+# 双路径语义断言：本机自派任务 hub 不可见（origin=local 只入本机账本）
+api GET "/api/v1/tasks/$LOCAL_TASK"
+if [ "$CODE" != "404" ]; then fail "本机自派任务不应出现在 hub 账本, got HTTP $CODE"; fi
+pass "本机自派任务 hub 不可见（本地账本为真相源，双路径隔离）"
+# 反向断言（矩阵 #14 环防护可测化）：local_token 调编排 → 403 prime_required
+LC_CODE=$(curl -sS -o "$TMP/resp-local.json" -w '%{http_code}' -X POST \
+  -H 'Authorization: Bearer '"$LOCAL_A_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"target_node":"nodeA","target_agent":"echo-demo","input":{"args":["denied"]},"submitted_by":"local-proc"}' \
+  "http://127.0.0.1:${LOCAL_A_PORT}/api/v1/tasks")
+if [ "$LC_CODE" != "403" ]; then fail "local_token 调编排应 403, got $LC_CODE: $(cat "$TMP/resp-local.json")"; fi
+grep -q 'prime_required' "$TMP/resp-local.json" || fail "403 应答应含 prime_required: $(cat "$TMP/resp-local.json")"
+pass "local_token 调编排被拒（403 prime_required，凭证分级生效）"
 # 本地能力目录（边界方案 v2：node 无全网视图——只有本机目录，无 network 键）
 curl -sS -H 'Authorization: Bearer '"$LOCAL_B_TOKEN" \
   "http://127.0.0.1:${LOCAL_B_PORT}/api/v1/agents" > "$TMP/resp.json"

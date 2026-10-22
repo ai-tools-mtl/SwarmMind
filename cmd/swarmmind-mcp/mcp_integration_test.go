@@ -96,14 +96,13 @@ func newLocalNode(t *testing.T, primeAgent string) (*httptest.Server, *ledger.Le
 	return srv, led, workdir
 }
 
-// newNodeBackendFor 对准给定 localapi 地址的 node 后端（凭证与 newLocalNode 对齐）。
+// newNodeBackendFor 对准给定 localapi 地址的 node 后端（安全审查修复 1 口径：
+// 假件只配 prime 凭证——六工具单凭证，不再下发 SWARM_NODE_TOKEN）。
 func newNodeBackendFor(url string) nodeBackend {
 	return newNodeBackend(func(key string) string {
 		switch key {
 		case "SWARM_NODE_URL":
 			return url
-		case "SWARM_NODE_TOKEN":
-			return "tok-local"
 		case "SWARM_NODE_PRIME_TOKEN":
 			return "tok-prime"
 		}
@@ -276,12 +275,10 @@ func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
 	}
 
 	// 客户端侧：未配置 SWARM_NODE_PRIME_TOKEN → 明确指出缺哪个环境变量
+	//（修复 1 口径：node 后端单凭证，prime 缺失即一切工具不可用）
 	noPrime := newNodeBackend(func(key string) string {
 		if key == "SWARM_NODE_URL" {
 			return srv.URL
-		}
-		if key == "SWARM_NODE_TOKEN" {
-			return "tok-local"
 		}
 		return ""
 	})
@@ -291,9 +288,10 @@ func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
 	}
 }
 
-// TestNodeBackendReadFallbackToPrime local_token 未配置时只读工具回退 prime_token
-//（localapi authRead 双凭证同收）。
-func TestNodeBackendReadFallbackToPrime(t *testing.T) {
+// TestNodeBackendReadOnlyPrimeToken 只读工具单凭证（安全审查修复 1 口径）：
+// 仅配 SWARM_NODE_PRIME_TOKEN 时只读工具（nodes/agents/status/wait/artifact）
+// 照常可用——localapi authRead 双收 prime_token，prime 认证级 ⊇ 只读。
+func TestNodeBackendReadOnlyPrimeToken(t *testing.T) {
 	srv, _, _ := newLocalNode(t, "echo")
 	bd := newNodeBackend(func(key string) string {
 		switch key {
@@ -306,7 +304,7 @@ func TestNodeBackendReadFallbackToPrime(t *testing.T) {
 	})
 	text, isErr := callText(t, bd, "swarmmind_nodes", nil)
 	if isErr || !strings.Contains(text, "nodeA") {
-		t.Fatalf("prime_token 只读回退失败（isErr=%v）: %s", isErr, text)
+		t.Fatalf("prime_token 单凭证只读失败（isErr=%v）: %s", isErr, text)
 	}
 }
 
@@ -389,8 +387,7 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"SWARM_TARGET=node",
 		"SWARM_NODE_URL="+srv.URL,
-		"SWARM_NODE_TOKEN=tok-local",
-		"SWARM_NODE_PRIME_TOKEN=tok-prime",
+		"SWARM_NODE_PRIME_TOKEN=tok-prime", // 修复 1 口径：单凭证，不配 SWARM_NODE_TOKEN
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
