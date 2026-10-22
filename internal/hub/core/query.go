@@ -7,9 +7,11 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// handleTaskQuery 提交方补查路径（SPEC 4.2：task_query → task_status，result_event
-// 离线错过的补查）。V0 查询不设提交方归属校验（管理面 GET /tasks/{id} 同口径全量
-// 可见）；查无此任务回 err(task_not_found)。ReplyTo=请求 mid 供提交方关联。
+// handleTaskQuery node 补查路径（SPEC 4.2：task_query → task_status，result_event
+// 离线错过的补查）。边界锁（方案 v2 D10）：node 会话只能查询本机任务——
+// Task.TargetNode == env.From，他节点任务拒绝（forbidden）；任务真相源仍是 hub
+// 存储，管理面 GET /tasks/{id}（管理员全量可见）不经此路径。查无此任务回
+// err(task_not_found)。ReplyTo=请求 mid 供提交方关联。
 func (c *Core) handleTaskQuery(env *protocol.Envelope) {
 	var ref protocol.TaskRef
 	if err := json.Unmarshal(env.Payload, &ref); err != nil || ref.TaskID == "" {
@@ -22,6 +24,11 @@ func (c *Core) handleTaskQuery(env *protocol.Envelope) {
 	if !ok {
 		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID, nil,
 			&protocol.ErrInfo{Code: protocol.CodeTaskNotFound, Msg: "任务不存在或已过保留期"})
+		return
+	}
+	if t.TargetNode != env.From {
+		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID, nil,
+			&protocol.ErrInfo{Code: "forbidden", Msg: "仅可查询本机任务（跨机任务状态经 hub 发起查询）"})
 		return
 	}
 	_ = c.sendFrame(env.From, protocol.MsgTaskStatus, env.MessageID, t, nil)

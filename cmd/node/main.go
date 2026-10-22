@@ -69,10 +69,8 @@ type nodeConfig struct {
 	HubURL        string            `yaml:"hub_url"`
 	RegisterToken string            `yaml:"register_token"`
 	HubPubkeyFP   string            `yaml:"hub_pubkey_fp"` // SPKI SHA-256；空则 TOFU 记录首连（Loop 4 已实现）
-	LocalListen   string            `yaml:"local_listen"`  // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
-	LocalToken    string            `yaml:"local_token"`   // 本地 API 管理令牌（空则生成存 data_dir/local_token）
-	HubAPIURL     string            `yaml:"hub_api_url"`   // hub 管理面（GET /agents 全网目录代理，可选）
-	HubAPIToken   string            `yaml:"hub_api_token"` // hub 管理令牌（随 hub_api_url）
+	LocalListen   string            `yaml:"local_listen"` // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
+	LocalToken    string            `yaml:"local_token"`  // 本地 API 管理令牌（空则生成存 data_dir/local_token）
 	Concurrency   int               `yaml:"concurrency"`
 	DataDir       string            `yaml:"data_dir"`
 	BaseEnv       map[string]string `yaml:"base_env"`
@@ -226,8 +224,6 @@ func run(cfgPath, dataDirOverride string) error {
 		Online:           client.Online,
 		Epoch:            client.Epoch,
 		LastRegisteredAt: client.LastRegisteredAt,
-		HubAPIURL:        cfg.HubAPIURL,
-		HubAPIToken:      cfg.HubAPIToken,
 		LocalToken:       localToken,
 	})
 	localLn, err := net.Listen("tcp", cfg.LocalListen)

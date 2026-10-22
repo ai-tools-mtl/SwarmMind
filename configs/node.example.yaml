@@ -4,8 +4,6 @@ register_token: token-for-mac-mini      # 每 node 独立，与 node_id 绑定
 hub_pubkey_fp: ""                       # SPKI SHA-256（base64）；空则 TOFU 首连记录 trusted_hubs.json
 local_listen: 127.0.0.1:8445            # 本地回环 API（仅本机进程可用，强制回环）；浏览器开 http://127.0.0.1:8445/ 即本地控制台（Loop 7）
 local_token: ""                         # 本地 API 管理令牌（Bearer）；空则启动时生成存 data_dir/local_token（控制台登录用同一令牌）
-hub_api_url: ""                         # hub 管理面（GET /agents 全网目录代理 + 本地控制台信箱余量代理，可选）
-hub_api_token: ""                       # hub 管理令牌（随 hub_api_url）
 concurrency: 2
 data_dir: data
 # 注意：data_dir/agents-state.json 由本地控制台的 exposed 开关自动维护（覆盖下方

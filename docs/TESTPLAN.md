@@ -61,7 +61,7 @@ PY
 )"
 
 "$PYTHON" - "$HUB_CONFIG" "$T" <<'PY'
-import json, os, pathlib, sys, yaml
+import json, pathlib, sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
 pairs = list(cfg["nodes"].items())
 assert len(pairs) >= 2, "hub.yaml 至少需要两个专用测试节点"
@@ -87,8 +87,6 @@ for tag, (nid, token), port in zip(("a", "b"), pairs[:2], (8445, 8446)):
         "hub_pubkey_fp": "",
         "local_listen": f"127.0.0.1:{port}",
         "local_token": "",
-        "hub_api_url": os.environ["HUB"],
-        "hub_api_token": cfg["admin_token"],
         "concurrency": 2, "data_dir": str(d / "data"),
         "base_env": {"PATH": "/usr/bin:/bin", "TMPDIR": "/tmp", "LANG": "C"},
         "agents": [
@@ -681,9 +679,13 @@ test "$(wc -l < "$T/a/w/outputs/$REVIEW/executions" | tr -d ' ')" = 1
 
 | 编号 | 模块 | 前置条件 | 步骤 | 期望结果 | 优先级 |
 |---|---|---|---|---|---|
-| TC-34 | 本地鉴权、状态与配置视图 | node A 在线 | `code="$(curl -sS -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/status")"`；`test "$code" = 401`；`code="$(curl -sS -H 'Authorization: Bearer wrong' -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/agents")"`；`test "$code" = 401`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true and .epoch>=1 and .last_sync_at!=null and (.ledger\|has("accepted") and has("started") and has("finished")) and .mailbox.quota==100 and .mailbox.remaining>=0'`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-sh" and .command=="/bin/sh" and .today_tasks>=0)'`；`api 200 GET /api/v1/agents '' local-a`；`check '(.local\|length)>0 and (.network.agents\|length)>0'` | 本地 API 强制 local_token；状态真实；本机主人可看 ExecProfile；全网代理只返回卡片 | P0 冒烟 |
+| TC-34 | 本地鉴权、状态与配置视图 | node A 在线 | `code="$(curl -sS -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/status")"`；`test "$code" = 401`；`code="$(curl -sS -H 'Authorization: Bearer wrong' -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/agents")"`；`test "$code" = 401`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true and .epoch>=1 and .last_sync_at!=null and (.ledger\|has("accepted") and has("started") and has("finished"))'`；`check 'has("mailbox")==false and has("inflight")==false'`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-sh" and .command=="/bin/sh" and .today_tasks>=0)'`；`api 200 GET /api/v1/agents '' local-a`；`check '(.local\|length)>0 and has("network")==false and ([.local[].node_id]|unique|length)==1 and .local[0].node_id=="'$N1'"'` | 本地 API 强制 local_token；状态只含本机事实（无 mailbox/inflight 键）；本机主人可看 ExecProfile；目录仅本机 agent、无 network 键（node 无全网视图） | P0 冒烟 |
 | TC-35 | exposed 准入、发现与持久化 | node A 在线 | `api 200 PATCH /api/v1/local/agents/qa-echo/exposed '{"exposed":false}' local-a`；`check '.exposed==false and .hub_synced==true'`；`wait_directory "$N1" qa-echo false`；`api 404 POST /api/v1/tasks "$(request "$N1" qa-echo)"`；`check '.error=="agent_not_exposed"'`；`stop_a`；`start_a`；`wait_node "$N1" true`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-echo" and .exposed==false)'`；`api 200 PATCH /api/v1/local/agents/qa-echo/exposed '{"exposed":true}' local-a`；`wait_directory "$N1" qa-echo true`；`api 404 PATCH /api/v1/local/agents/no-such-agent/exposed '{"exposed":true}' local-a`；`check '.error=="agent_not_found"'` | 停止暴露后新任务拒绝、目录移除、重启保持；重新暴露恢复；未知服务拒绝 | P1 核心 |
-| TC-36 | 本地互派、查询、幂等与留痕 | 两节点在线 | `L_BODY="$(request "$N2" qa-echo '' '["LOCAL_ROUTE_OK"]' '{}' local-main)"`；`api 202 POST /api/v1/tasks "$L_BODY" local-a`；`export LOCAL_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$LOCAL_TASK" completed`；`jq -e --arg n "$N1" '.submitted_by==$n and .result.final_answer=="LOCAL_ROUTE_OK\n"' "$T/$ID.body"`；`api 200 GET "/api/v1/tasks/$LOCAL_TASK" '' local-a`；`check '.status=="completed"'`；`api 200 POST /api/v1/tasks "$L_BODY" local-a`；`check '.dup==true'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg id "$LOCAL_TASK" '[.tasks[]\|select(.task_id==$id)]\|length==1' "$T/$ID.body"`；`api 409 POST /api/v1/tasks "$(jq '.input.args=["CHANGED"]' <<<"$L_BODY")" local-a`；`api 404 GET /api/v1/tasks/t-not-exist '' local-a`；`check '.error=="task_not_found"'` | 本地进程→node→hub→远端 node 完整闭环；hub 按连接身份覆盖 submitted_by；幂等仅留一条日志 | P0 冒烟 |
+| TC-36 | 本机派发、查询、幂等与留痕 | 两节点在线 | `L_BODY="$(request "$N1" qa-echo '' '["LOCAL_ROUTE_OK"]' '{}' local-main)"`；`api 202 POST /api/v1/tasks "$L_BODY" local-a`；`export LOCAL_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$LOCAL_TASK" completed`；`jq -e --arg n "$N1" '.submitted_by==$n and .result.final_answer=="LOCAL_ROUTE_OK\n"' "$T/$ID.body"`；`api 200 GET "/api/v1/tasks/$LOCAL_TASK" '' local-a`；`check '.status=="completed"'`；`api 200 POST /api/v1/tasks "$L_BODY" local-a`；`check '.dup==true'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg id "$LOCAL_TASK" '[.tasks[]\|select(.task_id==$id)]\|length==1' "$T/$ID.body"`；`api 409 POST /api/v1/tasks "$(jq '.input.args=["CHANGED"]' <<<"$L_BODY")" local-a`；`api 404 GET /api/v1/tasks/t-not-exist '' local-a`；`check '.error=="task_not_found"'` | 本地进程→本机 node→hub→本机执行完整闭环（v2 边界：本地 API 派单目标只能是本机 node，跨机派单经 hub 发起）；hub 按连接身份覆盖 submitted_by；幂等仅留一条日志 | P0 冒烟 |
+| TC-56 | 边界锁：本地 API 跨机派单 400（D8） | 两节点在线 | `api 400 POST /api/v1/tasks "$(request "$N2" qa-echo 'SHOULD_NOT_RUN')" local-a`；`check '.error=="invalid_request" and (.message\|contains("跨机派单经 hub 发起"))'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg n "$N2" '[.tasks[]\|select(.target_node==$n)]\|length==0' "$T/$ID.body"` | target_node 非本机 node_id 直接 400，不发帧、不留提交日志、不静默改写目标；跨机派单只能经 hub 发起（语义单测：TestSubmitCrossNodeRejected） | P1 核心 |
+| TC-57 | 边界锁：node 会话 WSS 直发外机被 hub 拒（D9） | 仓库依赖缓存可用 | `go test -mod=readonly -count=1 ./internal/hub/core -run '^TestSubmitFrameCrossNodeRejected$' >"$T/d9.log" 2>&1`；`grep -Eq '^ok[[:space:]]' "$T/d9.log"`；`! grep -Eq '^FAIL' "$T/d9.log"` | node task_submit 帧 target≠提交方会话身份时 hub 回 err、不发 offer；HTTP 管理面不受此限；实时链路需 node 协议 WSS 客户端，机械执行以覆盖该语义的单测为载体（HTTP 入口的同语义锁见 TC-56） | P1 核心 |
+| TC-58 | 边界锁：task_query 他节点任务 forbidden | 两节点在线 | `OTHER="$(submit "$N2" qa-echo 'printf QUERY_FORBIDDEN_MARK')"`；`wait_task "$OTHER" completed`；`api 502 GET "/api/v1/tasks/$OTHER" '' local-a`；`check '.error=="forbidden" and (.message\|contains("仅可查询本机任务"))'`；`api 200 GET "/api/v1/tasks/$OTHER"`；`check '.status=="completed"'` | node A 经本地 API 查 N2 任务：hub 回 err(forbidden)，本地 API 未映射该码按默认映射为 502 + error=forbidden；hub 管理面查同一任务不受限（语义单测：TestTaskQueryCrossNodeRejected） | P1 核心 |
+| TC-59 | 旧配置兼容：废除字段忽略 | node A 在线 | `"$PYTHON" -c 'import pathlib,sys,yaml; p=pathlib.Path(sys.argv[1]); c=yaml.safe_load(open(p)); c["hub_api_url"]="http://127.0.0.1:9"; c["hub_api_token"]="deprecated-should-be-ignored"; p.write_text(yaml.safe_dump(c))' "$T/a/node.yaml"`；`stop_a`；`start_a`；`wait_node "$N1" true`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true'`；`api 202 POST /api/v1/tasks "$(request "$N1" qa-echo 'DEPRECATED_FIELDS_OK')" local-a`；`export DEP_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$DEP_TASK" completed` | node.yaml 显式含已废除的 hub_api_url/hub_api_token 时仍正常启动、注册与派单（字段忽略，SPEC 第六节边界 v2） | P1 核心 |
 
 ## 五、Web 控制台九页交互
 
@@ -697,7 +699,7 @@ test "$(wc -l < "$T/a/w/outputs/$REVIEW/executions" | tr -d ' ')" = 1
 | TC-40 | hub 运维控制 | 两节点在线 | 执行下方 TC-40 浏览器命令 | 请求确已落库但响应丢失后，表单冻结；同键重试命中原批次，进入报告与下一步 | P1 核心 |
 | TC-41 | hub 策略容量 | 已登录 | 执行下方 TC-41 浏览器命令 | 明确只读，显示容量/保留规则，无保存入口，不发送变更请求 | P1 核心 |
 | TC-42 | hub 设置 | 账户已初始化 | 执行下方 TC-42 浏览器命令 | 账户设置存在；创建 PAT 明文一次展示；关闭后不再展示；UI 撤销后 Bearer 立即失效 | P1 核心 |
-| TC-43 | node 总览与诊断 | node A 在线 | 执行下方 TC-43 浏览器命令 | 连接、epoch、账本、信箱、同步信息可见；剪贴板诊断为真实 JSON；派单导航有效 | P1 核心 |
+| TC-43 | node 总览与诊断 | node A 在线 | 执行下方 TC-43 浏览器命令 | 三卡（连接状态/执行账本/最近同步）可见且页面无「信箱余量」；剪贴板诊断为真实 JSON；派单导航有效 | P1 核心 |
 | TC-44 | node 我的服务 | node A 在线 | 执行下方 TC-44 浏览器命令，并验证恢复暴露 | 配置只读；开关显示同步反馈，网络准入随之变化；操作不取消已有任务 | P1 核心 |
 | TC-45 | node 派任务·我的任务 | 两节点在线 | 执行下方 TC-45 浏览器命令 | 目录选择、未知态冻结、同键重试、任务留痕、结果抽屉及下一步完整闭合 | P0 冒烟 |
 
@@ -859,8 +861,9 @@ TC-43：
 ```bash
 ui node overview '
 await expect(page.locator("h1")).toHaveText("总览");
-for(const text of ["连接状态","执行账本","信箱余量","最近同步"])
+for(const text of ["连接状态","执行账本","最近同步"])
   await expect(page.locator("body")).toContainText(text);
+assert(!(await page.locator("body").innerText()).includes("信箱余量"));
 await page.locator("[data-act=copy-diag]").click();
 const diag=JSON.parse(await page.evaluate(()=>navigator.clipboard.readText()));
 assert.equal(diag.node_id,E.N1);
@@ -1153,7 +1156,7 @@ wait_node "$CLOUD_NODE_A" true
 wait_node "$CLOUD_NODE_B" true
 ```
 
-定义真实节点 API 与双向派单函数：
+定义真实节点本地目录读取与经 hub 管理面的双向派单函数（node 本地 API 只读本机目录；跨机派单与 MCP/A2A 同语义，一律经 hub 发起）：
 
 ```bash
 cloud_api() {
@@ -1167,17 +1170,16 @@ cloud_api() {
     "http://127.0.0.1:$port$path"
 }
 cloud_roundtrip() {
-  local port="$1" token="$2" target="$3" agent="$4" marker="$5"
-  local prompt body tid idx
+  local target="$1" agent="$2" marker="$3"
+  local prompt tid idx
 
   prompt="这是 SwarmMind 真实跨云验收。请执行：
 1. 在环境变量 SWARM_OUTPUTS_DIR 指向的目录创建 proof.txt，内容严格为 $marker 后接换行。
 2. 最终 stdout 答复包含 $marker。
 不得只描述计划；必须实际创建文件。"
-  body="$(request "$target" "$agent" "$prompt" '[]' '{}' "$marker")"
 
-  cloud_api "$port" "$token" POST /api/v1/tasks "$body" > "$T/$marker.submit.json"
-  tid="$(jq -er .task_id "$T/$marker.submit.json")"
+  tid="$(submit "$target" "$agent" "$prompt" '[]' '{}' "$marker")"
+  cp "$T/$ID.body" "$T/$marker.submit.json"
   wait_task "$tid" completed 600
   jq -e --arg m "$marker" '.result.final_answer|contains($m)' "$T/$ID.body"
 
@@ -1193,17 +1195,17 @@ cloud_roundtrip() {
 
 ```bash
 cloud_api 18445 "$CLOUD_LOCAL_A" GET /api/v1/agents > "$T/cloud-a.directory.json"
-jq -e --arg n "$CLOUD_NODE_B" --arg a "$CLOUD_AGENT_B" \
-  'any(.network.agents[];.node_id==$n and .card.name==$a and .card.exposed)' \
+jq -e --arg n "$CLOUD_NODE_A" --arg a "$CLOUD_AGENT_A" \
+  'has("network")==false and ([.local[].node_id]|unique)==[$n] and any(.local[];.card.name==$a and .card.exposed)' \
   "$T/cloud-a.directory.json"
 
 cloud_api 18446 "$CLOUD_LOCAL_B" GET /api/v1/agents > "$T/cloud-b.directory.json"
-jq -e --arg n "$CLOUD_NODE_A" --arg a "$CLOUD_AGENT_A" \
-  'any(.network.agents[];.node_id==$n and .card.name==$a and .card.exposed)' \
+jq -e --arg n "$CLOUD_NODE_B" --arg a "$CLOUD_AGENT_B" \
+  'has("network")==false and ([.local[].node_id]|unique)==[$n] and any(.local[];.card.name==$a and .card.exposed)' \
   "$T/cloud-b.directory.json"
 
-cloud_roundtrip 18445 "$CLOUD_LOCAL_A" "$CLOUD_NODE_B" "$CLOUD_AGENT_B" SWARM_CLOUD_A_TO_B
-cloud_roundtrip 18446 "$CLOUD_LOCAL_B" "$CLOUD_NODE_A" "$CLOUD_AGENT_A" SWARM_CLOUD_B_TO_A
+cloud_roundtrip "$CLOUD_NODE_B" "$CLOUD_AGENT_B" SWARM_CLOUD_A_TO_B
+cloud_roundtrip "$CLOUD_NODE_A" "$CLOUD_AGENT_A" SWARM_CLOUD_B_TO_A
 
 # 权限拒绝必须发生在真实远端执行入口。
 DENIED="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" \
@@ -1211,15 +1213,13 @@ DENIED="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" \
 wait_task "$DENIED" failed 60
 check '.result.error=="policy_denied"'
 
-# 停止 B 的 node 后，由 A 本地 API 派单；恢复 B 后完成并取回产物。
+# 停止 B 的 node 后，经 hub 管理面派单（离线信箱受理）；恢复 B 后完成并取回产物。
 ssh "$CLOUD_SSH_B" 'systemctl --user stop swarmmind-node'
 wait_node "$CLOUD_NODE_B" false
 
 PROMPT='实际创建 $SWARM_OUTPUTS_DIR/proof.txt，内容为 SWARM_CLOUD_OFFLINE_RECOVER 后接换行；最终 stdout 包含 SWARM_CLOUD_OFFLINE_RECOVER。'
-cloud_api 18445 "$CLOUD_LOCAL_A" POST /api/v1/tasks \
-  "$(request "$CLOUD_NODE_B" "$CLOUD_AGENT_B" "$PROMPT" '[]' '{}' cloud-offline-main)" \
-  > "$T/cloud-offline.submit.json"
-CLOUD_OFFLINE="$(jq -er .task_id "$T/cloud-offline.submit.json")"
+CLOUD_OFFLINE="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" "$PROMPT" '[]' '{}' cloud-offline-main)"
+cp "$T/$ID.body" "$T/cloud-offline.submit.json"
 api 200 GET "/api/v1/tasks/$CLOUD_OFFLINE"
 check '.status=="submitted"'
 
@@ -1251,7 +1251,7 @@ SPEC 当前 DoD 位于第七节；第六节及六.五、六.六为接口与交�
 | 8 | 同键去重、409、重复 offer 不重复执行 | TC-11、TC-24、TC-33、TC-53 |
 | 9 | 白名单及 PATH 拒绝 | TC-14、TC-15、TC-54 |
 | 10 | started 崩溃恢复为 needs_review，禁止自动重跑 | TC-29～TC-31、TC-50 |
-| 11 | 真实双机、异构 agent、互派、产物、断线与权限拒绝 | TC-54 |
+| 11 | 经 hub（MCP/A2A）发起的双机闭环：真实双机异构 agent、发现并派单、产物经 hub 取回、断线与权限拒绝 | TC-54 |
 
 ## 九、清理与证据保留
 
@@ -1342,7 +1342,7 @@ PY
 )"
 
 "$PYTHON" - "$HUB_CONFIG" "$T" <<'PY'
-import json, os, pathlib, sys, yaml
+import json, pathlib, sys, yaml
 cfg = yaml.safe_load(open(sys.argv[1]))
 pairs = list(cfg["nodes"].items())
 assert len(pairs) >= 2, "hub.yaml 至少需要两个专用测试节点"
@@ -1368,8 +1368,6 @@ for tag, (nid, token), port in zip(("a", "b"), pairs[:2], (8445, 8446)):
         "hub_pubkey_fp": "",
         "local_listen": f"127.0.0.1:{port}",
         "local_token": "",
-        "hub_api_url": os.environ["HUB"],
-        "hub_api_token": cfg["admin_token"],
         "concurrency": 2, "data_dir": str(d / "data"),
         "base_env": {"PATH": "/usr/bin:/bin", "TMPDIR": "/tmp", "LANG": "C"},
         "agents": [
@@ -1962,9 +1960,13 @@ test "$(wc -l < "$T/a/w/outputs/$REVIEW/executions" | tr -d ' ')" = 1
 
 | 编号 | 模块 | 前置条件 | 步骤 | 期望结果 | 优先级 |
 |---|---|---|---|---|---|
-| TC-34 | 本地鉴权、状态与配置视图 | node A 在线 | `code="$(curl -sS -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/status")"`；`test "$code" = 401`；`code="$(curl -sS -H 'Authorization: Bearer wrong' -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/agents")"`；`test "$code" = 401`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true and .epoch>=1 and .last_sync_at!=null and (.ledger\|has("accepted") and has("started") and has("finished")) and .mailbox.quota==100 and .mailbox.remaining>=0'`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-sh" and .command=="/bin/sh" and .today_tasks>=0)'`；`api 200 GET /api/v1/agents '' local-a`；`check '(.local\|length)>0 and (.network.agents\|length)>0'` | 本地 API 强制 local_token；状态真实；本机主人可看 ExecProfile；全网代理只返回卡片 | P0 冒烟 |
+| TC-34 | 本地鉴权、状态与配置视图 | node A 在线 | `code="$(curl -sS -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/status")"`；`test "$code" = 401`；`code="$(curl -sS -H 'Authorization: Bearer wrong' -o "$T/local-denied.json" -w '%{http_code}' "$NODE_A/api/v1/local/agents")"`；`test "$code" = 401`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true and .epoch>=1 and .last_sync_at!=null and (.ledger\|has("accepted") and has("started") and has("finished"))'`；`check 'has("mailbox")==false and has("inflight")==false'`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-sh" and .command=="/bin/sh" and .today_tasks>=0)'`；`api 200 GET /api/v1/agents '' local-a`；`check '(.local\|length)>0 and has("network")==false and ([.local[].node_id]|unique|length)==1 and .local[0].node_id=="'$N1'"'` | 本地 API 强制 local_token；状态只含本机事实（无 mailbox/inflight 键）；本机主人可看 ExecProfile；目录仅本机 agent、无 network 键（node 无全网视图） | P0 冒烟 |
 | TC-35 | exposed 准入、发现与持久化 | node A 在线 | `api 200 PATCH /api/v1/local/agents/qa-echo/exposed '{"exposed":false}' local-a`；`check '.exposed==false and .hub_synced==true'`；`wait_directory "$N1" qa-echo false`；`api 404 POST /api/v1/tasks "$(request "$N1" qa-echo)"`；`check '.error=="agent_not_exposed"'`；`stop_a`；`start_a`；`wait_node "$N1" true`；`api 200 GET /api/v1/local/agents '' local-a`；`check 'any(.agents[];.name=="qa-echo" and .exposed==false)'`；`api 200 PATCH /api/v1/local/agents/qa-echo/exposed '{"exposed":true}' local-a`；`wait_directory "$N1" qa-echo true`；`api 404 PATCH /api/v1/local/agents/no-such-agent/exposed '{"exposed":true}' local-a`；`check '.error=="agent_not_found"'` | 停止暴露后新任务拒绝、目录移除、重启保持；重新暴露恢复；未知服务拒绝 | P1 核心 |
-| TC-36 | 本地互派、查询、幂等与留痕 | 两节点在线 | `L_BODY="$(request "$N2" qa-echo '' '["LOCAL_ROUTE_OK"]' '{}' local-main)"`；`api 202 POST /api/v1/tasks "$L_BODY" local-a`；`export LOCAL_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$LOCAL_TASK" completed`；`jq -e --arg n "$N1" '.submitted_by==$n and .result.final_answer=="LOCAL_ROUTE_OK\n"' "$T/$ID.body"`；`api 200 GET "/api/v1/tasks/$LOCAL_TASK" '' local-a`；`check '.status=="completed"'`；`api 200 POST /api/v1/tasks "$L_BODY" local-a`；`check '.dup==true'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg id "$LOCAL_TASK" '[.tasks[]\|select(.task_id==$id)]\|length==1' "$T/$ID.body"`；`api 409 POST /api/v1/tasks "$(jq '.input.args=["CHANGED"]' <<<"$L_BODY")" local-a`；`api 404 GET /api/v1/tasks/t-not-exist '' local-a`；`check '.error=="task_not_found"'` | 本地进程→node→hub→远端 node 完整闭环；hub 按连接身份覆盖 submitted_by；幂等仅留一条日志 | P0 冒烟 |
+| TC-36 | 本机派发、查询、幂等与留痕 | 两节点在线 | `L_BODY="$(request "$N1" qa-echo '' '["LOCAL_ROUTE_OK"]' '{}' local-main)"`；`api 202 POST /api/v1/tasks "$L_BODY" local-a`；`export LOCAL_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$LOCAL_TASK" completed`；`jq -e --arg n "$N1" '.submitted_by==$n and .result.final_answer=="LOCAL_ROUTE_OK\n"' "$T/$ID.body"`；`api 200 GET "/api/v1/tasks/$LOCAL_TASK" '' local-a`；`check '.status=="completed"'`；`api 200 POST /api/v1/tasks "$L_BODY" local-a`；`check '.dup==true'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg id "$LOCAL_TASK" '[.tasks[]\|select(.task_id==$id)]\|length==1' "$T/$ID.body"`；`api 409 POST /api/v1/tasks "$(jq '.input.args=["CHANGED"]' <<<"$L_BODY")" local-a`；`api 404 GET /api/v1/tasks/t-not-exist '' local-a`；`check '.error=="task_not_found"'` | 本地进程→本机 node→hub→本机执行完整闭环（v2 边界：本地 API 派单目标只能是本机 node，跨机派单经 hub 发起）；hub 按连接身份覆盖 submitted_by；幂等仅留一条日志 | P0 冒烟 |
+| TC-56 | 边界锁：本地 API 跨机派单 400（D8） | 两节点在线 | `api 400 POST /api/v1/tasks "$(request "$N2" qa-echo 'SHOULD_NOT_RUN')" local-a`；`check '.error=="invalid_request" and (.message\|contains("跨机派单经 hub 发起"))'`；`api 200 GET /api/v1/local/tasks '' local-a`；`jq -e --arg n "$N2" '[.tasks[]\|select(.target_node==$n)]\|length==0' "$T/$ID.body"` | target_node 非本机 node_id 直接 400，不发帧、不留提交日志、不静默改写目标；跨机派单只能经 hub 发起（语义单测：TestSubmitCrossNodeRejected） | P1 核心 |
+| TC-57 | 边界锁：node 会话 WSS 直发外机被 hub 拒（D9） | 仓库依赖缓存可用 | `go test -mod=readonly -count=1 ./internal/hub/core -run '^TestSubmitFrameCrossNodeRejected$' >"$T/d9.log" 2>&1`；`grep -Eq '^ok[[:space:]]' "$T/d9.log"`；`! grep -Eq '^FAIL' "$T/d9.log"` | node task_submit 帧 target≠提交方会话身份时 hub 回 err、不发 offer；HTTP 管理面不受此限；实时链路需 node 协议 WSS 客户端，机械执行以覆盖该语义的单测为载体（HTTP 入口的同语义锁见 TC-56） | P1 核心 |
+| TC-58 | 边界锁：task_query 他节点任务 forbidden | 两节点在线 | `OTHER="$(submit "$N2" qa-echo 'printf QUERY_FORBIDDEN_MARK')"`；`wait_task "$OTHER" completed`；`api 502 GET "/api/v1/tasks/$OTHER" '' local-a`；`check '.error=="forbidden" and (.message\|contains("仅可查询本机任务"))'`；`api 200 GET "/api/v1/tasks/$OTHER"`；`check '.status=="completed"'` | node A 经本地 API 查 N2 任务：hub 回 err(forbidden)，本地 API 未映射该码按默认映射为 502 + error=forbidden；hub 管理面查同一任务不受限（语义单测：TestTaskQueryCrossNodeRejected） | P1 核心 |
+| TC-59 | 旧配置兼容：废除字段忽略 | node A 在线 | `"$PYTHON" -c 'import pathlib,sys,yaml; p=pathlib.Path(sys.argv[1]); c=yaml.safe_load(open(p)); c["hub_api_url"]="http://127.0.0.1:9"; c["hub_api_token"]="deprecated-should-be-ignored"; p.write_text(yaml.safe_dump(c))' "$T/a/node.yaml"`；`stop_a`；`start_a`；`wait_node "$N1" true`；`api 200 GET /api/v1/local/status '' local-a`；`check '.online==true'`；`api 202 POST /api/v1/tasks "$(request "$N1" qa-echo 'DEPRECATED_FIELDS_OK')" local-a`；`export DEP_TASK="$(jq -er .task_id "$T/$ID.body")"`；`wait_task "$DEP_TASK" completed` | node.yaml 显式含已废除的 hub_api_url/hub_api_token 时仍正常启动、注册与派单（字段忽略，SPEC 第六节边界 v2） | P1 核心 |
 
 ## 五、Web 控制台九页交互
 
@@ -1978,7 +1980,7 @@ test "$(wc -l < "$T/a/w/outputs/$REVIEW/executions" | tr -d ' ')" = 1
 | TC-40 | hub 运维控制 | 两节点在线 | 执行下方 TC-40 浏览器命令 | 请求确已落库但响应丢失后，表单冻结；同键重试命中原批次，进入报告与下一步 | P1 核心 |
 | TC-41 | hub 策略容量 | 已登录 | 执行下方 TC-41 浏览器命令 | 明确只读，显示容量/保留规则，无保存入口，不发送变更请求 | P1 核心 |
 | TC-42 | hub 设置 | 账户已初始化 | 执行下方 TC-42 浏览器命令 | 账户设置存在；创建 PAT 明文一次展示；关闭后不再展示；UI 撤销后 Bearer 立即失效 | P1 核心 |
-| TC-43 | node 总览与诊断 | node A 在线 | 执行下方 TC-43 浏览器命令 | 连接、epoch、账本、信箱、同步信息可见；剪贴板诊断为真实 JSON；派单导航有效 | P1 核心 |
+| TC-43 | node 总览与诊断 | node A 在线 | 执行下方 TC-43 浏览器命令 | 三卡（连接状态/执行账本/最近同步）可见且页面无「信箱余量」；剪贴板诊断为真实 JSON；派单导航有效 | P1 核心 |
 | TC-44 | node 我的服务 | node A 在线 | 执行下方 TC-44 浏览器命令，并验证恢复暴露 | 配置只读；开关显示同步反馈，网络准入随之变化；操作不取消已有任务 | P1 核心 |
 | TC-45 | node 派任务·我的任务 | 两节点在线 | 执行下方 TC-45 浏览器命令 | 目录选择、未知态冻结、同键重试、任务留痕、结果抽屉及下一步完整闭合 | P0 冒烟 |
 
@@ -2140,8 +2142,9 @@ TC-43：
 ```bash
 ui node overview '
 await expect(page.locator("h1")).toHaveText("总览");
-for(const text of ["连接状态","执行账本","信箱余量","最近同步"])
+for(const text of ["连接状态","执行账本","最近同步"])
   await expect(page.locator("body")).toContainText(text);
+assert(!(await page.locator("body").innerText()).includes("信箱余量"));
 await page.locator("[data-act=copy-diag]").click();
 const diag=JSON.parse(await page.evaluate(()=>navigator.clipboard.readText()));
 assert.equal(diag.node_id,E.N1);
@@ -2434,7 +2437,7 @@ wait_node "$CLOUD_NODE_A" true
 wait_node "$CLOUD_NODE_B" true
 ```
 
-定义真实节点 API 与双向派单函数：
+定义真实节点本地目录读取与经 hub 管理面的双向派单函数（node 本地 API 只读本机目录；跨机派单与 MCP/A2A 同语义，一律经 hub 发起）：
 
 ```bash
 cloud_api() {
@@ -2448,17 +2451,16 @@ cloud_api() {
     "http://127.0.0.1:$port$path"
 }
 cloud_roundtrip() {
-  local port="$1" token="$2" target="$3" agent="$4" marker="$5"
-  local prompt body tid idx
+  local target="$1" agent="$2" marker="$3"
+  local prompt tid idx
 
   prompt="这是 SwarmMind 真实跨云验收。请执行：
 1. 在环境变量 SWARM_OUTPUTS_DIR 指向的目录创建 proof.txt，内容严格为 $marker 后接换行。
 2. 最终 stdout 答复包含 $marker。
 不得只描述计划；必须实际创建文件。"
-  body="$(request "$target" "$agent" "$prompt" '[]' '{}' "$marker")"
 
-  cloud_api "$port" "$token" POST /api/v1/tasks "$body" > "$T/$marker.submit.json"
-  tid="$(jq -er .task_id "$T/$marker.submit.json")"
+  tid="$(submit "$target" "$agent" "$prompt" '[]' '{}' "$marker")"
+  cp "$T/$ID.body" "$T/$marker.submit.json"
   wait_task "$tid" completed 600
   jq -e --arg m "$marker" '.result.final_answer|contains($m)' "$T/$ID.body"
 
@@ -2474,17 +2476,17 @@ cloud_roundtrip() {
 
 ```bash
 cloud_api 18445 "$CLOUD_LOCAL_A" GET /api/v1/agents > "$T/cloud-a.directory.json"
-jq -e --arg n "$CLOUD_NODE_B" --arg a "$CLOUD_AGENT_B" \
-  'any(.network.agents[];.node_id==$n and .card.name==$a and .card.exposed)' \
+jq -e --arg n "$CLOUD_NODE_A" --arg a "$CLOUD_AGENT_A" \
+  'has("network")==false and ([.local[].node_id]|unique)==[$n] and any(.local[];.card.name==$a and .card.exposed)' \
   "$T/cloud-a.directory.json"
 
 cloud_api 18446 "$CLOUD_LOCAL_B" GET /api/v1/agents > "$T/cloud-b.directory.json"
-jq -e --arg n "$CLOUD_NODE_A" --arg a "$CLOUD_AGENT_A" \
-  'any(.network.agents[];.node_id==$n and .card.name==$a and .card.exposed)' \
+jq -e --arg n "$CLOUD_NODE_B" --arg a "$CLOUD_AGENT_B" \
+  'has("network")==false and ([.local[].node_id]|unique)==[$n] and any(.local[];.card.name==$a and .card.exposed)' \
   "$T/cloud-b.directory.json"
 
-cloud_roundtrip 18445 "$CLOUD_LOCAL_A" "$CLOUD_NODE_B" "$CLOUD_AGENT_B" SWARM_CLOUD_A_TO_B
-cloud_roundtrip 18446 "$CLOUD_LOCAL_B" "$CLOUD_NODE_A" "$CLOUD_AGENT_A" SWARM_CLOUD_B_TO_A
+cloud_roundtrip "$CLOUD_NODE_B" "$CLOUD_AGENT_B" SWARM_CLOUD_A_TO_B
+cloud_roundtrip "$CLOUD_NODE_A" "$CLOUD_AGENT_A" SWARM_CLOUD_B_TO_A
 
 # 权限拒绝必须发生在真实远端执行入口。
 DENIED="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" \
@@ -2492,15 +2494,13 @@ DENIED="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" \
 wait_task "$DENIED" failed 60
 check '.result.error=="policy_denied"'
 
-# 停止 B 的 node 后，由 A 本地 API 派单；恢复 B 后完成并取回产物。
+# 停止 B 的 node 后，经 hub 管理面派单（离线信箱受理）；恢复 B 后完成并取回产物。
 ssh "$CLOUD_SSH_B" 'systemctl --user stop swarmmind-node'
 wait_node "$CLOUD_NODE_B" false
 
 PROMPT='实际创建 $SWARM_OUTPUTS_DIR/proof.txt，内容为 SWARM_CLOUD_OFFLINE_RECOVER 后接换行；最终 stdout 包含 SWARM_CLOUD_OFFLINE_RECOVER。'
-cloud_api 18445 "$CLOUD_LOCAL_A" POST /api/v1/tasks \
-  "$(request "$CLOUD_NODE_B" "$CLOUD_AGENT_B" "$PROMPT" '[]' '{}' cloud-offline-main)" \
-  > "$T/cloud-offline.submit.json"
-CLOUD_OFFLINE="$(jq -er .task_id "$T/cloud-offline.submit.json")"
+CLOUD_OFFLINE="$(submit "$CLOUD_NODE_B" "$CLOUD_AGENT_B" "$PROMPT" '[]' '{}' cloud-offline-main)"
+cp "$T/$ID.body" "$T/cloud-offline.submit.json"
 api 200 GET "/api/v1/tasks/$CLOUD_OFFLINE"
 check '.status=="submitted"'
 
@@ -2532,7 +2532,7 @@ SPEC 当前 DoD 位于第七节；第六节及六.五、六.六为接口与交�
 | 8 | 同键去重、409、重复 offer 不重复执行 | TC-11、TC-24、TC-33、TC-53 |
 | 9 | 白名单及 PATH 拒绝 | TC-14、TC-15、TC-54 |
 | 10 | started 崩溃恢复为 needs_review，禁止自动重跑 | TC-29～TC-31、TC-50 |
-| 11 | 真实双机、异构 agent、互派、产物、断线与权限拒绝 | TC-54 |
+| 11 | 经 hub（MCP/A2A）发起的双机闭环：真实双机异构 agent、发现并派单、产物经 hub 取回、断线与权限拒绝 | TC-54 |
 
 ## 九、清理与证据保留
 

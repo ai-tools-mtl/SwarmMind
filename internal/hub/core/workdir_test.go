@@ -119,7 +119,6 @@ func TestFullChainWorkdirSerialTimestamps(t *testing.T) {
 	newExecNode(f, "nodeB", map[string]*runner.Runner{
 		"sleeper": runner.New(echo, baseTestEnv2(), f.t.TempDir()),
 	}, []protocol.AgentCard{card})
-	newExecNode(f, "nodeA", map[string]*runner.Runner{}, agentsOf("misc"))
 
 	type submitOutcome struct {
 		ack *SubmitAck
@@ -132,7 +131,7 @@ func TestFullChainWorkdirSerialTimestamps(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		a, e := f.core.Submit(submitReq("nodeB", "sleeper", "0.3"), "nodeA")
+		a, e := f.core.Submit(submitReq("nodeB", "sleeper", "0.3"), "nodeB") // 本机派单（边界方案 v2）
 		res1 = submitOutcome{ack: a, err: e}
 	}()
 	time.Sleep(50 * time.Millisecond) // 确保第二任务在第一任务执行中到达

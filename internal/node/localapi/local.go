@@ -1,11 +1,11 @@
 // node 本地 API 的管理面端点（Loop 7，INTERACTION 客户端三旅程）：
 //   - GET   /api/v1/local/agents                   旅程①服务提供者：本机 ExecProfile
 //     视图 + 今日任务数（本机主人视角，执行配置可见——ExecProfile 永不出本机，
-//     出本机的 register/card_update/目录代理仍只携 AgentCard）；
+//     出本机的 register/card_update 仍只携 AgentCard）；
 //   - PATCH /api/v1/local/agents/{name}/exposed    接入开关：立即生效（运行时 +
 //     持久化 + card_update 上报），已排队任务继续执行至终态；
 //   - GET   /api/v1/local/status                   旅程③运维：连接/epoch/账本三态/
-//     信箱余量/最近同步；
+//     最近同步（信箱余量是 hub 侧事实，node 不代理展示）；
 //   - GET   /api/v1/local/tasks                    旅程②消费者：本机提交任务留痕。
 package localapi
 
@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -95,7 +94,8 @@ func (s *Server) handleSetExposed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// localStatus 本机状态总览（旅程③）。
+// localStatus 本机状态总览（旅程③）。node 只呈现本机事实：连接/epoch/账本/
+// 最近同步；信箱余量与投递窗口是 hub 侧事实，不在此代理展示（方案 v2 D6）。
 type localStatus struct {
 	NodeID string `json:"node_id"`
 	Online bool   `json:"online"`
@@ -104,15 +104,9 @@ type localStatus struct {
 	LastSyncAt *time.Time `json:"last_sync_at"`
 	// Ledger 账本三态计数（accepted/started/finished，SPEC 4.8）。
 	Ledger map[string]int `json:"ledger"`
-	// Mailbox 信箱余量（hub 视角：quota-used；经管理面代理取得，未配置/不可达
-	// 时为 {"error":...}——如实呈现，不编造）。
-	Mailbox any `json:"mailbox"`
-	// Inflight 投递窗口占用（hub 视角；代理不可得时缺省）。
-	Inflight *int `json:"inflight,omitempty"`
 }
 
-// handleLocalStatus GET /api/v1/local/status：本机运维视图。信箱余量与投递窗口
-// 是 hub 侧事实，经管理面 /api/v1/nodes 代理读取（best effort，失败如实报错）。
+// handleLocalStatus GET /api/v1/local/status：本机运维视图。
 func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	st := localStatus{
 		NodeID: s.cfg.NodeID,
@@ -124,11 +118,6 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 		if at, ok := s.cfg.LastRegisteredAt(); ok {
 			st.LastSyncAt = &at
 		}
-	}
-	if s.cfg.HubAPIURL != "" {
-		st.Mailbox, st.Inflight = s.hubMailbox()
-	} else {
-		st.Mailbox = map[string]any{"error": "未配置 hub_api_url，信箱余量不可见（hub 侧事实）"}
 	}
 	writeJSON(w, http.StatusOK, st)
 }
@@ -161,48 +150,6 @@ func (s *Server) ledgerCounts() map[string]int {
 		}
 	}
 	return counts
-}
-
-// hubMailbox 经 hub 管理面 /api/v1/nodes 代理读本节点信箱占用与投递窗口。
-func (s *Server) hubMailbox() (any, *int) {
-	client, err := s.hubSession()
-	if err != nil {
-		return map[string]any{"error": err.Error()}, nil
-	}
-	body, status, err := s.hubGetPath(client, "/api/v1/nodes")
-	if err == nil && status == http.StatusUnauthorized { // 会话过期：重登一次
-		if client, err = s.hubLogin(true); err == nil {
-			body, status, err = s.hubGetPath(client, "/api/v1/nodes")
-		}
-	}
-	if err != nil {
-		return map[string]any{"error": err.Error()}, nil
-	}
-	if status != http.StatusOK {
-		return map[string]any{"error": "hub 节点总览查询失败（HTTP " + strconv.Itoa(status) + "）"}, nil
-	}
-	var nodes struct {
-		Nodes []struct {
-			NodeID      string `json:"node_id"`
-			Inflight    int    `json:"inflight"`
-			MailboxUsed int    `json:"mailbox_used"`
-		} `json:"nodes"`
-	}
-	if err := json.Unmarshal(body, &nodes); err != nil {
-		return map[string]any{"error": "hub 节点总览解析失败: " + err.Error()}, nil
-	}
-	for _, n := range nodes.Nodes {
-		if n.NodeID != s.cfg.NodeID {
-			continue
-		}
-		inflight := n.Inflight
-		return map[string]any{
-			"used":      n.MailboxUsed,
-			"quota":     protocol.MailboxQuota,
-			"remaining": protocol.MailboxQuota - n.MailboxUsed,
-		}, &inflight
-	}
-	return map[string]any{"error": "hub 侧尚无本节点登记（未注册成功）"}, nil
 }
 
 // handleLocalTasks GET /api/v1/local/tasks：本机提交任务留痕（新→旧）。任务

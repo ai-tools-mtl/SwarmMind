@@ -147,9 +147,10 @@ func echoProfile(t *testing.T) protocol.ExecProfile {
 	}
 }
 
-// TestFullChain 内存 transport 全链（SPEC 八.3）：node 提交 → submit_ack → 投递 →
-// ack → started → 执行 → result → result_ack → result_event，全程真实
-// ledger/runner，membus 同步链一次 Submit 调用内完成。
+// TestFullChain 内存 transport 全链（SPEC 八.3）：node 本机派单（边界方案 v2：
+// node 会话只能派给本机，K2 回环链路）→ submit_ack → 投递回本机 → ack →
+// started → 执行 → result → result_ack → result_event，全程真实 ledger/runner，
+// membus 同步链一次 Submit 调用内完成。
 func TestFullChain(t *testing.T) {
 	f := newHub(t)
 	echo := echoProfile(t)
@@ -161,24 +162,20 @@ func TestFullChain(t *testing.T) {
 	nodeB := newExecNode(f, "nodeB", map[string]*runner.Runner{
 		"echo-demo": runner.New(echo, baseTestEnv2(), filepath.Join(t.TempDir(), "home")),
 	}, []protocol.AgentCard{card})
-	nodeA := newExecNode(f, "nodeA", map[string]*runner.Runner{}, agentsOf("misc")) // 提交方 node（无 runner）
 
 	req := submitReq("nodeB", "echo-demo", "hello", "swarmmind")
 	req.IdemKey = "fullchain-001"
-	ack, err := f.core.Submit(req, "nodeA")
+	ack, err := f.core.Submit(req, "nodeB")
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
 
 	// membus 同步链：Submit 返回即全链完成
-	if nodeA.offers != 0 {
-		t.Errorf("提交方不应收到 offer")
-	}
-	if len(nodeA.submitAcks) != 1 || nodeA.submitAcks[0].TaskID != ack.TaskID || nodeA.submitAcks[0].Dup {
-		t.Errorf("submit_ack 不符: %+v", nodeA.submitAcks)
-	}
 	if nodeB.offers != 1 {
-		t.Fatalf("nodeB 应收到 1 次 offer, got %d", nodeB.offers)
+		t.Fatalf("nodeB 应收到 1 次 offer（本机派单经 hub 回投本机）, got %d", nodeB.offers)
+	}
+	if len(nodeB.submitAcks) != 1 || nodeB.submitAcks[0].TaskID != ack.TaskID || nodeB.submitAcks[0].Dup {
+		t.Errorf("submit_ack 不符: %+v", nodeB.submitAcks)
 	}
 	task := f.taskOf(ack.TaskID)
 	if task.Status != protocol.StatusCompleted || task.Result == nil {
@@ -187,14 +184,14 @@ func TestFullChain(t *testing.T) {
 	if task.Result.FinalAnswer != "hello swarmmind\n" || task.Result.ExitCode != 0 {
 		t.Errorf("结果不符: %+v", task.Result)
 	}
-	if task.SubmittedBy != "nodeA" {
+	if task.SubmittedBy != "nodeB" {
 		t.Errorf("node 提交应覆盖 SubmittedBy, got %q", task.SubmittedBy)
 	}
 	// result_event 闭合「调用方拿回结果」（SPEC 4.2）
-	if len(nodeA.resultEvent) != 1 {
-		t.Fatalf("提交方应收到 result_event, got %d", len(nodeA.resultEvent))
+	if len(nodeB.resultEvent) != 1 {
+		t.Fatalf("提交方应收到 result_event, got %d", len(nodeB.resultEvent))
 	}
-	ev := nodeA.resultEvent[0]
+	ev := nodeB.resultEvent[0]
 	if ev.TaskID != ack.TaskID || ev.Status != protocol.ResultCompleted ||
 		ev.Result == nil || ev.Result.FinalAnswer != "hello swarmmind\n" {
 		t.Errorf("result_event 不符: %+v", ev)
@@ -261,9 +258,8 @@ func TestFullChainNeedsReview(t *testing.T) {
 	nodeB := newExecNode(f, "nodeB", map[string]*runner.Runner{
 		"echo-demo": runner.New(echo, baseTestEnv2(), t.TempDir()),
 	}, []protocol.AgentCard{card})
-	newExecNode(f, "nodeA", map[string]*runner.Runner{}, agentsOf("misc"))
 
-	ack, err := f.core.Submit(submitReq("nodeB", "echo-demo"), "nodeA")
+	ack, err := f.core.Submit(submitReq("nodeB", "echo-demo"), "nodeB") // 本机派单（边界方案 v2）
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}

@@ -225,8 +225,6 @@ register_token: ${NODEB_TOKEN}
 hub_pubkey_fp: ""
 local_listen: 127.0.0.1:${LOCAL_B_PORT}
 local_token: ${LOCAL_B_TOKEN}
-hub_api_url: http://127.0.0.1:${API_PORT}
-hub_api_token: ${ADMIN_TOKEN}
 concurrency: 2
 data_dir: ${TMP}/data-b
 base_env:
@@ -350,18 +348,17 @@ LOCAL_OUT=$(curl -sS -X POST -H 'Authorization: Bearer '"$LOCAL_A_TOKEN" \
 LOCAL_TASK=$(printf '%s' "$LOCAL_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
 wait_status "$LOCAL_TASK" 'completed' 10
 pass "node 本地 API 提交 → completed（ ${LOCAL_TASK} ）"
-# 本地能力目录 + 全网目录代理（nodeB 配置了 hub_api_url）
+# 本地能力目录（边界方案 v2：node 无全网视图——只有本机目录，无 network 键）
 curl -sS -H 'Authorization: Bearer '"$LOCAL_B_TOKEN" \
   "http://127.0.0.1:${LOCAL_B_PORT}/api/v1/agents" > "$TMP/resp.json"
-N_LOCAL=$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["local"]))' "$TMP/resp.json")
-python3 - "$TMP/resp.json" <<'PY' || fail "全网目录代理缺 nodeA echo-demo"
+python3 - "$TMP/resp.json" <<'PY' || fail "本地目录应为纯本机视图（含本机 echo-demo、无 network 键）"
 import json, sys
 d = json.load(open(sys.argv[1]))
-net = d.get("network", {})
-assert "error" not in net, net
-assert any(a["node_id"] == "nodeA" and a["card"]["name"] == "echo-demo" for a in net.get("agents", [])), d
+assert "network" not in d, d
+assert all(a["node_id"] == "nodeB" for a in d.get("local", [])), d
+assert any(a["card"]["name"] == "echo-demo" for a in d.get("local", [])), d
 PY
-pass "node 本地目录 ${N_LOCAL} 条 + hub 全网目录代理可达"
+pass "node 本地目录仅本机 agent（无全网代理）"
 
 # ---------- DoD 4：超时 + 进程组整组终止 ----------
 echo

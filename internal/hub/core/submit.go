@@ -23,23 +23,32 @@ func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyT
 }
 
 // submit 校验链顺序固定（同键重试在信箱满时仍能取回原 task_id 的保证）：
-//  1. 鉴权存在：提交方身份与目标字段非空（会话层 token 鉴权先于本包；HTTP 面
+//  1. 边界锁（方案 v2 D9）：node 会话提交强制 target == 提交方 node_id
+//     （身份由会话层覆盖，可信），违规拒绝——防绕过 node localapi 直发帧
+//     跨节点派单；hub HTTP 管理面（submitterNode 为空）不受此限；
+//  2. 鉴权存在：提交方身份与目标字段非空（会话层 token 鉴权先于本包；HTTP 面
 //     V0 绑回环，身份仅为调用方标记）；
-//  2. 目标 exposed=true，否则 ErrAgentNotExposed；
-//  3. idem 查重——命中即返回，不做配额检查；
-//  4. 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
-//  5. 信箱配额/字节预算 + 存储全局预算预检；
-//  6. 单写事务持久化（事务内全部重检）→ SubmitAck。
+//  3. 目标 exposed=true，否则 ErrAgentNotExposed；
+//  4. idem 查重——命中即返回，不做配额检查；
+//  5. 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
+//  6. 信箱配额/字节预算 + 存储全局预算预检；
+//  7. 单写事务持久化（事务内全部重检）→ SubmitAck。
 //
 // submitterNode 非 "" 表示 node 会话提交：SubmittedBy 被覆盖为该 node_id
 // （SPEC 4.9），确认与失败经帧回给该 node（submit_ack/err 帧，ReplyTo=replyTo），
 // 终态经 result_event 推送。
 func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo string) (*SubmitAck, error) {
+	// 1. node 会话边界锁：目标收敛为本机（先于一切校验，违规不发 offer）
+	if submitterNode != "" && req.TargetNode != submitterNode {
+		err := ErrInvalid
+		c.ackSubmitter(submitterNode, replyTo, nil, err)
+		return nil, err
+	}
 	if submitterNode != "" {
 		req.SubmittedBy = submitterNode // hub 覆盖为该 node_id
 	}
 
-	// 1. 鉴权存在
+	// 2. 鉴权存在
 	if req.TargetNode == "" || req.TargetAgent == "" || req.SubmittedBy == "" {
 		err := ErrInvalid
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
@@ -48,14 +57,14 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 
 	view := c.st.View()
 
-	// 2. 目标存在且 exposed
+	// 3. 目标存在且 exposed
 	if _, ok := lookupAgent(view, req.TargetNode, req.TargetAgent); !ok {
 		err := ErrAgentNotExposed
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
 	}
 
-	// 3. idem 查重（命中即返回，不做配额检查）
+	// 4. idem 查重（命中即返回，不做配额检查）
 	if req.IdemKey != "" {
 		id, dup, err := mailbox.IdemCheck(view, req)
 		if err != nil {
@@ -70,7 +79,7 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 		}
 	}
 
-	// 4. 构造任务 + 序列化体积实测预检（完整 TaskOffer 信封编码计字节）
+	// 5. 构造任务 + 序列化体积实测预检（完整 TaskOffer 信封编码计字节）
 	task := c.newTask(req)
 	if err := checkOfferSize(&task); err != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
@@ -78,13 +87,13 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 	}
 	size := mailbox.TaskBytes(&task)
 
-	// 5. 信箱配额/字节预算 + 存储全局预算预检
+	// 6. 信箱配额/字节预算 + 存储全局预算预检
 	if err := c.checkCapacity(view, req.TargetNode, size); err != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
 	}
 
-	// 6. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）
+	// 7. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）
 	var (
 		txnDup *SubmitAck
 		txnErr error
@@ -136,7 +145,8 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 	return ack, nil
 }
 
-// handleTaskSubmit node 间派单帧入口（task_submit：hub 鉴权后走同 HTTP 等价流程）。
+// handleTaskSubmit node 本机派单帧入口（task_submit：hub 鉴权后走同 HTTP 等价
+// 流程；node 会话目标收敛为本机，边界锁见 submit 步骤 1）。
 func (c *Core) handleTaskSubmit(env *protocol.Envelope) {
 	var req protocol.TaskSubmitRequest
 	if err := json.Unmarshal(env.Payload, &req); err != nil {
@@ -163,7 +173,8 @@ func (c *Core) ackSubmitter(submitterNode, replyTo string, ack *SubmitAck, err e
 }
 
 // submitErrCode 提交失败错误 → 协议错误码（SPEC 4.6 CodeXxx；"conflict" 对应
-// SPEC 4.5 同键不同内容的 409 语义，"invalid" 对应请求字段缺失）。
+// SPEC 4.5 同键不同内容的 409 语义，"invalid" 对应请求字段缺失与 node 会话
+// 跨节点目标违规——边界锁，方案 v2 D9）。
 func submitErrCode(err error) string {
 	switch {
 	case errors.Is(err, ErrAgentNotExposed):
