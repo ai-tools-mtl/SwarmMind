@@ -4,24 +4,20 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	apipkg "github.com/mtl802/swarmmind/internal/hub/api"
-	"github.com/mtl802/swarmmind/internal/hub/core"
-	"github.com/mtl802/swarmmind/internal/hub/store"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	svcpkg "github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
-// 本地 API 单测：令牌鉴权、hub 不可达映射 503、能力目录（本机 + 代理失败如实呈现）
-// + 全网目录代理端到端。提交/查询的数据面（SubmitLocal/QueryLocal 关联链）在
-// service 包覆盖。
+// 本地 API 单测：令牌鉴权、hub 不可达映射 503、能力目录（仅本机，无 network 键）、
+// 派单边界锁（跨节点目标 400，不发帧不留痕）。提交/查询的数据面
+// （SubmitLocal/QueryLocal 关联链）在 service 包覆盖。
 
 // newService 开账本并构造 node service（挂在给定端点上）。
 func newService(t *testing.T, ep transport.Transport) *svcpkg.Service {
@@ -98,9 +94,9 @@ func TestLocalAuthGate(t *testing.T) {
 		t.Fatalf("无令牌 PATCH exposed 应 401, got %d: %s", code, out)
 	}
 
-	// hub 不可达 → 503 hub_unreachable
+	// hub 不可达 → 503 hub_unreachable（目标为本机，已过 D8 边界锁）
 	code, out := do("tok-local", http.MethodPost, "/api/v1/tasks",
-		`{"target_node":"nodeB","target_agent":"echo","submitted_by":"p"}`)
+		`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	if code != http.StatusServiceUnavailable || !strings.Contains(out, protocol.CodeHubUnreachable) {
 		t.Fatalf("hub 不可达应 503 hub_unreachable, got %d: %s", code, out)
 	}
@@ -110,7 +106,7 @@ func TestLocalAuthGate(t *testing.T) {
 		t.Fatalf("坏请求体应 400, got %d", code)
 	}
 
-	// 本机能力目录：card 不含 ExecProfile 字段；未配代理时 network 如实呈现 error
+	// 本机能力目录：card 不含 ExecProfile 字段；node 无全网视图——响应无 network 键
 	code, out = do("tok-local", http.MethodGet, "/api/v1/agents", "")
 	if code != http.StatusOK {
 		t.Fatalf("agents 应 200, got %d: %s", code, out)
@@ -126,9 +122,6 @@ func TestLocalAuthGate(t *testing.T) {
 			Card   protocol.AgentCard `json:"card"`
 			NodeID string             `json:"node_id"`
 		} `json:"local"`
-		Network struct {
-			Error string `json:"error"`
-		} `json:"network"`
 	}
 	if err := json.Unmarshal([]byte(out), &body); err != nil {
 		t.Fatal(err)
@@ -136,58 +129,76 @@ func TestLocalAuthGate(t *testing.T) {
 	if body.NodeID != "nodeA" || len(body.Local) != 1 || body.Local[0].Card.Name != "echo" {
 		t.Fatalf("本机目录不符: %s", out)
 	}
-	if body.Network.Error == "" {
-		t.Fatalf("未配置代理时 network 应如实呈现 error: %s", out)
+	if strings.Contains(out, `"network"`) {
+		t.Fatalf("本机目录不得含 network 键（node 无全网视图）: %s", out)
+	}
+
+	// 本机状态：node 只呈现本机事实——响应无 mailbox/inflight 键
+	code, out = do("tok-local", http.MethodGet, "/api/v1/local/status", "")
+	if code != http.StatusOK {
+		t.Fatalf("local/status 应 200, got %d: %s", code, out)
+	}
+	for _, gone := range []string{`"mailbox"`, `"inflight"`} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("local/status 不得含 %s 键（hub 侧事实不代理展示）: %s", gone, out)
+		}
 	}
 }
 
-// TestHubAgentsProxyE2E 全网目录代理（配 hub_api_url/token）：经真 hub 管理面
-// 登录 + 查询，代理结果含其他 node 的 agent。
-func TestHubAgentsProxyE2E(t *testing.T) {
-	st, err := store.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+// TestSubmitCrossNodeRejected 边界锁（方案 v2 D8）：本地 API 派单 target_node 为
+// 外机 → 400 拒绝，不发 task_submit 帧、不留提交日志、不静默改写目标。
+func TestSubmitCrossNodeRejected(t *testing.T) {
 	bus := transport.NewBus()
-	c, err := core.New(core.Config{Store: st, Transport: bus.Endpoint("hub"), SweepInterval: 0})
+	frames := 0 // hub 侧帧计数：D8 拒绝必须发生在发帧之前
+	bus.Endpoint("hub").Subscribe(func(env *protocol.Envelope) { frames++ })
+	svc := newService(t, bus.Endpoint("nodeA"))
+
+	tl, err := OpenTaskLog(filepath.Join(t.TempDir(), "tasklog"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
-	bus.Endpoint("hub").Subscribe(c.HandleFrame)
-	hubAPI := httptest.NewServer(apipkg.New(apipkg.Config{Core: c, AdminToken: "hub-admin"}).Handler())
-	t.Cleanup(hubAPI.Close)
-
-	nodeEP := bus.Endpoint("nodeA")
-	svc := newService(t, nodeEP)
-
-	if err := c.RegisterNode("nodeB", []protocol.AgentCard{{
-		Name: "remote", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
-		OutputMode: "answer+artifacts", PermissionMode: "no-shell", ProtocolVer: 1, Exposed: true,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-
-	local := httptest.NewServer(New(Config{
+	srv := httptest.NewServer(New(Config{
 		NodeID: "nodeA", Service: svc,
-		Agents:    newState(t, t.TempDir(), nil),
-		HubAPIURL: hubAPI.URL, HubAPIToken: "hub-admin",
+		Agents:     newState(t, t.TempDir(), []protocol.ExecProfile{echoProfileLocal(t)}),
+		TaskLog:    tl,
 		LocalToken: "tok-local",
 	}).Handler())
-	t.Cleanup(local.Close)
+	t.Cleanup(srv.Close)
 
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{Jar: jar}
-	req, _ := http.NewRequest(http.MethodGet, local.URL+"/api/v1/agents", nil)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
+		strings.NewReader(`{"target_node":"nodeB","target_agent":"echo","submitted_by":"p"}`))
 	req.Header.Set("Authorization", "Bearer tok-local")
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"remote"`) {
-		t.Fatalf("全网目录代理应含 nodeB remote: %d %s", resp.StatusCode, b)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("跨节点派单应 400, got %d: %s", resp.StatusCode, b)
+	}
+	if frames != 0 {
+		t.Fatalf("拒绝不得发任何帧, got %d", frames)
+	}
+	if l := tl.List(); len(l) != 0 {
+		t.Fatalf("拒绝不得留提交日志: %+v", l)
+	}
+	if !strings.Contains(string(b), "nodeB") {
+		t.Fatalf("错误信息应如实回显违规目标（不静默改写）: %s", b)
+	}
+
+	// 本机目标不被此锁误伤（链路本身另见 service 包全链测试）
+	req2, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/tasks",
+		strings.NewReader(`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`))
+	req2.Header.Set("Authorization", "Bearer tok-local")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	_ = resp2.Body.Close()
+	// bus 上无 "hub" 端点 → hub_unreachable（503），而非 400——边界锁只拦外机目标
+	if resp2.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("本机目标应放行进入转发链（此处 hub 不可达 503）, got %d", resp2.StatusCode)
 	}
 }

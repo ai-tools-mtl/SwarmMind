@@ -69,7 +69,7 @@ type ErrInfo struct { Code string `json:"code"`; Msg string `json:"msg"` }
 | register_ack | hub→node | `{ok, epoch, reason?}` | 成功携带分配的 epoch；拒绝则断开（错误码 auth_failed） |
 | ping / pong | 双向 | 空 | 应用层心跳 |
 | card_update | node→hub | `{agents[]}` | 能力表全量更新 |
-| task_submit | node→hub | TaskSubmitRequest | node 间派单（hub 鉴权后走同 HTTP 等价流程） |
+| task_submit | node→hub | TaskSubmitRequest | node 本机派单（node 会话强制 target == env.From，见 §六边界锁；hub 鉴权后走同 HTTP 等价流程） |
 | submit_ack | hub→提交方 | `{task_id, trace_id, dup}` | 提交已持久化（dup=true 表示幂等命中） |
 | task_offer | hub→node | 完整 Task | 推任务 |
 | task_ack | node→hub | `{task_id}` | 任务已入账本（accepted 持久化成功后发） |
@@ -77,7 +77,7 @@ type ErrInfo struct { Code string `json:"code"`; Msg string `json:"msg"` }
 | task_result | node→hub | `{task_id, status, result}` | 终态回传（status ∈ completed/failed/needs_review/cancelled；含 FinalAnswer 与产物引用） |
 | result_ack | hub→node | `{task_id}` | 终态已持久化 |
 | result_event | hub→提交方（node 会话时） | `{task_id, status, result}` | 终态推送给提交方，闭合「调用方拿回结果」；HTTP 提交方靠 GET /tasks/{id} 轮询。已知限制：提交方离线错过即弃，靠主动查询补 |
-| task_query | 提交方→hub | `{task_id}` | 查询任务状态（result_event 离线错过的补查路径） |
+| task_query | 提交方→hub | `{task_id}` | 查询任务状态（node 会话仅限本机任务：Task.TargetNode == env.From，他节点任务拒绝；result_event 离线错过的补查路径） |
 | task_status | hub→提交方 | Task | 查询响应（完整 Task 可能接近 1MiB 上限，超大任务以摘要+artifact 引用返回） |
 | artifact_fetch | 提交方→hub | `{task_id, index}` | 请求取回第 index 个产物（hub 中继到执行 node） |
 | artifact_data | 执行 node→请求方（经 hub 中继） | `{task_id, index, meta, data_base64}` | 产物内容（单文件原始 ≤640KiB，base64 后随帧 ≤1MiB；更大产物 V1 分块） |
@@ -349,9 +349,11 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 **无 HTTP 轮询回退**：离线路径=信箱+重连补推，别无分叉（避免绕过账本/Ack 的第二条路径）。旧 `/tasks/fetch` 概念废除。
 任务提交校验链（顺序与 §4.5 一致）：**鉴权/目标存在且 exposed=true（未接入 → 404 `agent_not_exposed`）→ idem 查重（命中即返回，不做配额检查）→ 序列化体积实测预检 → 信箱配额与字节预算 → 持久化（单写事务内全部重检）→ submit_ack**。全链失败则无 Ack。
 
-### node 本地 API（双机互派的提交/查询入口，V0）
+**node 会话边界锁（方案 v2 D9/D10，hub 兜底）**：node 会话的 task_submit 在一切校验前强制 `target == env.From`（身份由会话层覆盖，违规拒绝）；task_query 按 `Task.TargetNode == env.From` 收敛，他节点任务拒绝。hub 核心层双保险保证 node 无全网派发与全网视图。
 
-node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：`POST /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`，语义与 hub 管理面一致，内部经 WSS 会话转发为 task_submit/task_query 帧。这样任意本机进程（脚本/agent）都能派单与查询，跨机互派闭环：本机进程 → 本机 node → hub → 目标 node。**已知限制**：提交方若非 node 本机而是 hub 侧回环调用方，取结果靠 hub 管理面轮询；node 提交方的终态经 result_event 推送。
+### node 本地 API（本机派发/查询入口，V0）
+
+node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：`POST /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`，语义与 hub 管理面一致，内部经 WSS 会话转发为 task_submit/task_query 帧。任意本机进程（脚本/agent）都能对本机派单与查询，但**只限本机**：`target_node` 非本机 node_id 即 400 拒绝（不发帧、不留提交日志），hub 侧 D9/D10 双保险兜底——node 无全网派发与全网视图，跨机协作统一经 hub（MCP/A2A）发起。**已知限制**：提交方若非 node 本机而是 hub 侧回环调用方，取结果靠 hub 管理面轮询；node 提交方的终态经 result_event 推送。
 
 ## 六.五、P3 增补契约（Web 控制台，按 INTERACTION.md 分级清单落地）
 
@@ -374,8 +376,8 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 
 ### 发现与目录
 
-- `GET /api/v1/directory`：全网 exposed=true 的 AgentCard 列表（不含 ExecProfile）——中心端与 node 代理共用
-- node 本地 API 的目录代理已实现（hub_api_url/hub_api_token），双机可达方案：hub 管理面 P3 起绑定公网反代后（带鉴权），node 配置指向反代地址
+- `GET /api/v1/directory`：全网 exposed=true 的 AgentCard 列表（不含 ExecProfile）——中心端独有，node 不代理此接口（node 无全网视图）；跨机能力发现经 hub（MCP swarmmind_agents / A2A）发起
+- node 本地 API 无目录代理（hub_api_url/hub_api_token 已废除，旧配置字段忽略）；node `GET /api/v1/agents` 仅返回本机能力列表，全网目录唯 hub 可查
 
 ### 提交身份
 
@@ -452,7 +454,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 8. 幂等：同 idem_key 两次提交同 task_id；同键不同内容 409；重复 offer 只执行一次
 9. 白名单：allow_env 外覆盖 → failed + policy_denied；PATH 未列入时覆盖 PATH 同样拒绝
 10. needs_review：任务 started 后 kill node → 重启 → 该任务终态为 needs_review（非 failed、不自动重跑），结果回传 hub 可查
-11. **真实异构闭环（产品验收，双机）**：两台真实机器各跑 node，各接至少一种真实 agent（如 codex + claude code），完成发现 → 互派 → 执行 → FinalAnswer 与产物取回，覆盖断线恢复与权限拒绝各一次
+11. **真实异构闭环（产品验收，双机）**：两台真实机器各跑 node，各接至少一种真实 agent（如 codex + claude code），A 机经 hub（MCP/A2A）发现 B 机 exposed agent 并派单 → B 机执行 → FinalAnswer 与产物经 hub 取回，覆盖断线恢复与权限拒绝各一次
 
 demo 脚本：bash、`set -euo pipefail`、trap 清理、mktemp 隔离（hub/node 各自独立 data_dir）、每进程记录 PID、用有上限的状态轮询替代固定 sleep、JSON 解析用 python3；无法注入网络黑洞的项（如 6）用进程 kill 模拟并在脚本注释声明局限；超时验收检查直接子进程消失，不能只看错误字符串。
 

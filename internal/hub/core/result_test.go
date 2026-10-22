@@ -69,17 +69,17 @@ func TestResultArbitration(t *testing.T) {
 }
 
 // TestResultEventToNodeSubmitter 提交方为 node 会话时生成 result_event（SPEC 4.2）。
+// 边界方案 v2：node 只能本机派单，提交方与执行方同为 nodeA。
 func TestResultEventToNodeSubmitter(t *testing.T) {
 	f := newHub(t)
-	nodeB := f.newNode("nodeB", agentsOf("echo"), true)
-	nodeA := f.newNode("nodeA", agentsOf("misc"), false) // 提交方 node
+	nodeA := f.newNode("nodeA", agentsOf("echo"), false) // 提交方 = 执行方
 
-	ack, err := f.core.Submit(submitReq("nodeB", "echo"), "nodeA")
+	ack, err := f.core.Submit(submitReq("nodeA", "echo"), "nodeA")
 	if err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
-	// autoAck 后任务为 acknowledged，node 上报终态触发 result_event
-	nodeB.result(ack.TaskID, completeRes())
+	// 执行方（=本机）上报终态触发 result_event
+	nodeA.result(ack.TaskID, completeRes())
 	// membus 同步链：result 处理返回时 result_event 已推完
 	if len(nodeA.resultEvent) != 1 {
 		t.Fatalf("node 提交方应收到 1 条 result_event, got %d", len(nodeA.resultEvent))
@@ -88,53 +88,69 @@ func TestResultEventToNodeSubmitter(t *testing.T) {
 	if ev.TaskID != ack.TaskID || ev.Status != protocol.ResultCompleted || ev.Result == nil {
 		t.Errorf("result_event 内容不符: %+v", ev)
 	}
-	_ = nodeB
 	// HTTP 提交方（无 node 会话）不收 result_event：另提一条走 HTTP 语义
 	nodeA.resultEvent = nil
-	if _, err := f.core.Submit(submitReq("nodeB", "echo"), ""); err != nil {
+	ack2, err := f.core.Submit(submitReq("nodeA", "echo", "via-http"), "")
+	if err != nil {
 		t.Fatalf("HTTP 提交失败: %v", err)
 	}
+	nodeA.result(ack2.TaskID, completeRes())
 	if len(nodeA.resultEvent) != 0 {
 		t.Errorf("HTTP 提交方不应经 nodeA 收到 result_event")
 	}
 }
 
 // TestExpireSweep expire 清扫（SPEC 4.3：非终态任意状态到期 → failed/expired；
-// 提交方 node 会话收 result_event；此后迟到结果按冲突行处理）。
+// 提交方 node 会话在线收 result_event、离线即弃（SPEC 已声明限制，靠补查）；
+// 此后迟到结果按冲突行处理）。
 func TestExpireSweep(t *testing.T) {
 	f := newHub(t)
-	f.registerOffline("nodeB", agentsOf("echo")) // 目标离线：任务滞留 submitted
-	nodeA := f.newNode("nodeA", agentsOf("misc"), false)
 
-	ack, _ := f.core.Submit(submitReq("nodeB", "echo"), "nodeA")
+	// 场景 1：目标（=本机，node 只能本机派单）离线 → 任务滞留 submitted 入信箱；
+	// 到期清扫 failed/expired 并释放信箱。
+	f.registerOffline("nodeA", agentsOf("echo"))
+	ack, _ := f.core.Submit(submitReq("nodeA", "echo"), "nodeA")
 	// 未到期：不动
 	f.clock.Advance(protocol.TaskRetention - f.second())
 	f.core.Sweep()
 	if got := f.taskOf(ack.TaskID).Status; got != protocol.StatusSubmitted {
 		t.Fatalf("未到期不应清扫, got %s", got)
 	}
-	// 到期：failed/expired + 释放信箱 + result_event
+	// 到期：failed/expired + 释放信箱
 	f.clock.Advance(2 * f.second())
 	f.core.Sweep()
 	task := f.taskOf(ack.TaskID)
 	if task.Status != protocol.StatusFailed || task.Result == nil || task.Result.Error != protocol.CodeExpired {
 		t.Fatalf("到期应 failed/expired, got %s %+v", task.Status, task.Result)
 	}
-	if n := f.countMailbox("nodeB"); n != 0 {
+	if n := f.countMailbox("nodeA"); n != 0 {
 		t.Errorf("过期应释放信箱, got %d", n)
 	}
+
+	// 场景 2：提交方（=执行方）在线、不 ack（滞留 offered）；到期清扫并推
+	// result_event；过期后 node 结果到达按冲突行处理。
+	nodeA := f.newNode("nodeA", agentsOf("echo"), false)
+	ack2, _ := f.core.Submit(submitReq("nodeA", "echo", "sweep-offered"), "nodeA")
+	if got := f.taskOf(ack2.TaskID).Status; got != protocol.StatusOffered {
+		t.Fatalf("不 ack 应滞留 offered, got %s", got)
+	}
+	f.clock.Advance(protocol.TaskRetention + 2*f.second())
+	f.core.Sweep()
+	task2 := f.taskOf(ack2.TaskID)
+	if task2.Status != protocol.StatusFailed || task2.Result == nil || task2.Result.Error != protocol.CodeExpired {
+		t.Fatalf("到期应 failed/expired, got %s %+v", task2.Status, task2.Result)
+	}
 	if len(nodeA.resultEvent) != 1 || nodeA.resultEvent[0].Status != protocol.ResultFailed {
-		t.Fatalf("node 提交方应收到 failed result_event, got %+v", nodeA.resultEvent)
+		t.Fatalf("提交方应收到 failed result_event, got %+v", nodeA.resultEvent)
 	}
 
 	// 过期后 node 结果到达：按冲突行处理（终态 + 不同结果 → err(result_conflict)）
-	nodeB := f.newNode("nodeB", agentsOf("echo"), false)
-	nodeB.result(ack.TaskID, completeRes())
-	if got := f.taskOf(ack.TaskID).Status; got != protocol.StatusFailed {
+	nodeA.result(ack2.TaskID, completeRes())
+	if got := f.taskOf(ack2.TaskID).Status; got != protocol.StatusFailed {
 		t.Errorf("过期后迟到 result 不得改写终态, got %s", got)
 	}
-	if len(nodeB.errs) != 1 || nodeB.errs[0].Code != protocol.CodeResultConflict {
-		t.Errorf("迟到结果应回 err(result_conflict), got %+v", nodeB.errs)
+	if len(nodeA.errs) != 1 || nodeA.errs[0].Code != protocol.CodeResultConflict {
+		t.Errorf("迟到结果应回 err(result_conflict), got %+v", nodeA.errs)
 	}
 }
 
