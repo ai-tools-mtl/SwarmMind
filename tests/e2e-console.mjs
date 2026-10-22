@@ -57,7 +57,7 @@ async function main() {
   record('E03', '总览：统计卡与「需要你关注」卡渲染', metricsOk && focusOk);
 
   // TC-E04 状态分布下钻 chips（2026-10-22 总览下钻重构：七态 chip 直达任务页对应筛选，无「全部」chip）
-  const chips = await page.locator('[data-act="go"][data-page="tasks"][data-status]').count();
+  const chips = await page.locator('.chip-link').count();
   record('E04', '总览：状态分布下钻 chips（7 枚七态直达）', chips === 7, `实际 ${chips}`);
 
   // ---------- 节点接入页 ----------
