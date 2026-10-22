@@ -48,6 +48,9 @@ type Config struct {
 	// Groups 群聊存储（GROUP-RFC 六 MVP）；nil 时群端点统一 503 降级
 	// （旧构造方不感知该依赖）。
 	Groups *group.Store
+	// Enroll 节点部署包编译参数（POST /api/v1/nodes/enroll-bundle，enroll.go）；
+	// nil 时该端点统一 503 降级（旧构造方与既有测试不感知）。
+	Enroll *EnrollConfig
 }
 
 // Server 管理面 HTTP 服务。
@@ -58,6 +61,7 @@ type Server struct {
 	sessions map[string]time.Time // 会话 ID → 过期时刻（UTC）
 	tokens   *tokenStore          // 子令牌（PAT）存储；DataDir 为空时为 nil（禁用）
 	accounts *accountStore        // 管理员账户（密码登录）；DataDir 为空时为 nil
+	enroll   *enrollBuilder       // 部署包编译器；Enroll 配置为空时为 nil（端点 503）
 }
 
 // New 构造管理面服务。
@@ -66,6 +70,9 @@ func New(cfg Config) *Server {
 	if cfg.DataDir != "" {
 		s.tokens = newTokenStore(cfg.DataDir)
 		s.accounts = newAccountStore(cfg.DataDir)
+	}
+	if cfg.Enroll != nil {
+		s.enroll = newEnrollBuilder(cfg.Enroll)
 	}
 	return s
 }
@@ -91,6 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.auth(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.auth(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/nodes", s.auth(s.handleNodes))
+	mux.HandleFunc("POST /api/v1/nodes/enroll-bundle", s.auth(s.handleEnroll)) // 部署包生成（enroll.go）
 	mux.HandleFunc("POST /api/v1/tasks/{id}/review", s.auth(s.handleReview))
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))

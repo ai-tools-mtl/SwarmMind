@@ -164,8 +164,16 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 	}
 
-	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4；Groups 群聊 MVP 端点）
-	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups}).Handler()}
+	// HTTP 管理面（SPEC 六：五端点 + 登录鉴权，Loop 4；Groups 群聊 MVP 端点；
+	// Enroll 部署包编译：源码根 SWARM_SOURCE_DIR（默认 /opt/swarmmind-src），
+	// 编译缓存挂 data_dir/enroll-cache）
+	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{
+		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
+		Enroll: &api.EnrollConfig{
+			SourceDir: envDefault("SWARM_SOURCE_DIR", "/opt/swarmmind-src"),
+			CacheDir:  filepath.Join(cfg.DataDir, "enroll-cache"),
+		},
+	}).Handler()}
 	apiLn, err := net.Listen("tcp", cfg.APIListen)
 	if err != nil {
 		return fmt.Errorf("管理面监听 %s 失败: %w", cfg.APIListen, err)
@@ -222,6 +230,14 @@ func shutdownHub(apiSrv *http.Server, mgr *session.Manager, srv *http.Server, bu
 		log.Printf("[hub] 会话关闭异常: %v", err)
 	}
 	_ = srv.Shutdown(ctx)
+}
+
+// envDefault 环境变量读取（空值回落默认）。
+func envDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 // ensureGeneratedToken 生成 256bit 随机令牌；已有令牌文件则复用（重启不换令牌，
