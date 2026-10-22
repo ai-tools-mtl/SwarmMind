@@ -285,7 +285,7 @@ function updateFreshness() {
   const oks = names.filter(n => S.fresh[n] && S.fresh[n].ok && S.fresh[n].at);
   let txt;
   if (oks.length) {
-    const t = new Date(Math.min(...oks.map(f => f.at)));
+    const t = new Date(Math.min(...oks.map(n => S.fresh[n].at)));
     const hh = String(t.getHours()).padStart(2, '0'), mm = String(t.getMinutes()).padStart(2, '0');
     txt = `数据更新于 ${hh}:${mm}`;
   } else {
