@@ -154,3 +154,7 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .sayline textarea{margin-top:0;flex:1;min-height:52px}
 .sayline button{flex-shrink:0}
 @media(max-width:680px){.msg{max-width:94%}}
+
+/* 总览下钻 chips：与任务页筛选 chips 同观感，但语义是跳转 */
+.chip-link { cursor: pointer; }
+.chip-link:hover { border-color: var(--accent, #5b7fd4); color: var(--accent, #5b7fd4); }
