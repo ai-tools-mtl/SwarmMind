@@ -199,14 +199,11 @@ func newSessionID() (string, error) {
 
 // ---------- 五端点（SPEC 六表格） ----------
 
-// hubSubmitRequest POST /api/v1/tasks 请求体：TaskSubmitRequest 全字段 + 管理面
-// 扩展的 group_ref（GROUP-RFC 转任务闭环，协议帧 task_submit 不感知；嵌入展开
-// 后 target_node 等字段平铺解码，向后兼容）。
+// hubSubmitRequest POST /api/v1/tasks 请求体：TaskSubmitRequest 全字段平铺解码
+//（含 group_ref——管理面扩展，GROUP-RFC 转任务闭环；协议帧 task_submit 不携带，
+// node 间提交恒空。字段已在 protocol.TaskSubmitRequest 上，嵌入后直接平铺）。
 type hubSubmitRequest struct {
 	protocol.TaskSubmitRequest
-	// GroupRef 可选群引用：任务创建成功后登记进群并注入系统消息；终态结果
-	// 自动回流该群（回流由 core 终态钩子接线，见 cmd/hub）。
-	GroupRef string `json:"group_ref,omitempty"`
 }
 
 // handleSubmit POST /api/v1/tasks：校验链在 core.Submit（顺序 SPEC 4.5/六）；
@@ -215,8 +212,13 @@ type hubSubmitRequest struct {
 // 由会话决定，忽略请求体自报（防伪造审计标签）；node 帧提交在 core 按连接
 // 身份覆盖为 node_id。
 //
-// group_ref 非空时先校验群存在且进行中（fail-fast，不产生孤儿任务），任务创建
-// 成功（非幂等命中）后登记入群并注入创建注记消息。
+// group_ref 非空走「先登记后提交」（批 B 修复1）：groupRefCheck 通过后、Submit
+// 之前完成 AddTaskRef——快速任务（同步链下终态在 Submit 内即回落）的 fireTerminal
+// 回流时引用必已就位，不再有「登记先于终态失败 → 回流永久丢失」竞态。任务 ID
+// 预生成（登记需要 task_id 而 ID 由 Submit 生成），经 SubmitWithID 使登记与落库
+// 引用同一 ID；Submit 失败或 dup 命中即回滚刚加的引用。dup 时原任务按指纹规则
+// 必然同群（group_ref 已入指纹，SPEC 4.5），其引用首次提交时已登记；此处再幂等
+// 登记一次，自愈首次登记失败的历史缺口（GroupStore 追加去重，不重复登记）。
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	var req hubSubmitRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
@@ -227,13 +229,27 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	if !s.groupRefCheck(w, req.GroupRef) {
 		return
 	}
-	ack, err := s.cfg.Core.Submit(req.TaskSubmitRequest, "")
+	var preID string
+	if req.GroupRef != "" {
+		preID = protocol.NewTaskID()
+		if err := s.cfg.Groups.AddTaskRef(req.GroupRef, preID); err != nil {
+			writeGroupErr(w, err) // 校验与登记间的窄窗口：群被关/删（409/404）或落盘失败
+			return
+		}
+	}
+	ack, err := s.cfg.Core.SubmitWithID(req.TaskSubmitRequest, preID, "")
 	if err != nil {
+		s.unwireGroupTask(req.GroupRef, preID) // 提交失败：回滚刚加的引用
 		writeSubmitErr(w, err)
 		return
 	}
-	if !ack.Dup {
-		s.wireGroupTask(req.GroupRef, ack.TaskID, taskDesc(req.Input))
+	if ack.Dup {
+		s.unwireGroupTask(req.GroupRef, preID) // 命中原任务：预登记的 ID 未落库，回滚
+		if req.GroupRef != "" {
+			_ = s.cfg.Groups.AddTaskRef(req.GroupRef, ack.TaskID) // 幂等重登记（自愈缺口）
+		}
+	} else {
+		s.noteGroupTaskCreated(req.GroupRef, ack.TaskID, taskDesc(req.Input))
 	}
 	code := http.StatusAccepted
 	body := map[string]any{"task_id": ack.TaskID, "trace_id": ack.TraceID}

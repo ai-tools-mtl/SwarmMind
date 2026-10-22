@@ -163,12 +163,15 @@ func (c *Core) RegisterNode(nodeID string, agents []protocol.AgentCard) error {
 	})
 }
 
-// SetOnline 更新节点在线状态；上线即触发补推（离线期间入箱的任务，DoD 5）。
+// SetOnline 更新节点在线状态；上线即触发补推（离线期间入箱的任务，DoD 5）与
+// 取消补发（离线期间取消、task_cancel 未达的任务，批 B 修复3——注册成功处的
+// 至少一次取消语义）。
 func (c *Core) SetOnline(nodeID string, online bool) {
 	c.mu.Lock()
 	c.online[nodeID] = online
 	c.mu.Unlock()
 	if online {
+		c.resendPendingCancels(nodeID)
 		c.dispatch(nodeID)
 	}
 }

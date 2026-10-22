@@ -50,9 +50,16 @@ func (s *Server) groupRefCheck(w http.ResponseWriter, groupRef string) bool {
 	return true
 }
 
-// wireGroupTask 任务入群登记（GROUP-RFC group_task_created 语义）：任务已落库后
-// 调用——登记群内任务引用并注入 kind=system 创建消息。登记/注记失败只记日志：
-// 任务已提交生效，注记属 best-effort，不回滚提交。
+// wireGroupTask 任务入群登记（GROUP-RFC group_task_created 语义）：登记群内任务
+// 引用并注入 kind=system 创建消息。登记/注记失败只记日志：任务已提交生效，注记
+// 属 best-effort，不回滚提交。
+//
+// 本函数用于批次等「任务 ID 生成于 core 内部、登记只能后置」的路径。单任务提交
+// 走「先登记后提交」（见 handleSubmit：预生成 ID + AddTaskRef 先于 Submit），使
+// 快速任务（membus 同步链下终态在 Submit 内即回落）的 fireTerminal 回流时引用
+// 必已就位。此处登记后置存在同型竞态——任务可能在登记前已终态且回流扫描扑空——
+// 故登记后对已终态任务补偿触发一次回流：RefluxTaskResult 以已回流集合单事务
+// 保证恰好一次，与终态钩子并发安全。
 func (s *Server) wireGroupTask(groupRef, taskID, desc string) {
 	if s.cfg.Groups == nil || groupRef == "" || taskID == "" {
 		return
@@ -61,8 +68,43 @@ func (s *Server) wireGroupTask(groupRef, taskID, desc string) {
 		log.Printf("[hub] 任务入群登记失败 task=%s group=%s: %v", taskID, groupRef, err)
 		return
 	}
+	s.noteGroupTaskCreated(groupRef, taskID, desc)
+	s.refluxIfTerminal(groupRef, taskID)
+}
+
+// noteGroupTaskCreated 转任务创建注记：注入 kind=system 创建消息（group_task_
+// created）；失败只记日志（best-effort，不影响任务）。
+func (s *Server) noteGroupTaskCreated(groupRef, taskID, desc string) {
+	if s.cfg.Groups == nil || groupRef == "" || taskID == "" {
+		return
+	}
 	if _, err := s.cfg.Groups.PostMessage(groupRef, group.RefluxFrom, group.KindSystem, group.TaskCreatedBody(taskID, desc)); err != nil {
 		log.Printf("[hub] 转任务系统消息注入失败 task=%s group=%s: %v", taskID, groupRef, err)
+	}
+}
+
+// unwireGroupTask 回滚预登记（批 B 修复1）：提交失败/幂等命中时移除「先登记后
+// 提交」加上的引用。失败只记日志——孤儿引用（无对应任务）在回流扫描中不命中，
+// 无害；下轮同任务登记幂等覆盖。
+func (s *Server) unwireGroupTask(groupRef, taskID string) {
+	if s.cfg.Groups == nil || groupRef == "" || taskID == "" {
+		return
+	}
+	if err := s.cfg.Groups.RemoveTaskRef(groupRef, taskID); err != nil {
+		log.Printf("[hub] 任务入群登记回滚失败 task=%s group=%s: %v", taskID, groupRef, err)
+	}
+}
+
+// refluxIfTerminal 任务已终态则补偿回流（批 B 修复1：登记后置路径的漏回流兜底）。
+// 终态在登记前已落时 fireTerminal 的回流扫描扑空且不记已回流集合，此处补发；
+// 终态钩子已回流过则被幂等集合挡下，恰好一次。
+func (s *Server) refluxIfTerminal(groupRef, taskID string) {
+	t, ok := s.cfg.Core.GetTask(taskID)
+	if !ok || !t.Status.Terminal() {
+		return
+	}
+	if _, err := s.cfg.Groups.RefluxTaskResult(t.ID, group.TaskTerminalBody(t)); err != nil {
+		log.Printf("[hub] 任务终态补偿回流失败 task=%s group=%s: %v", taskID, groupRef, err)
 	}
 }
 
