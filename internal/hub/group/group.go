@@ -438,6 +438,31 @@ func (s *Store) AddTaskRef(groupID, taskID string) error {
 	})
 }
 
+// RemoveTaskRef 移除群内任务引用（批 B 修复1「先登记后提交」的失败回滚路径）：
+// 引用不存在时幂等无害（no-op）。不检查群终态——回滚登记是账本修正而非消息
+// 写入，群在「校验通过→提交失败」窗口内被关闭时回滚仍须生效。
+func (s *Store) RemoveTaskRef(groupID, taskID string) error {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return fmt.Errorf("%w: task_id 必填", ErrInvalid)
+	}
+	return s.mutate(func(next *state) error {
+		g, ok := next.Groups[groupID]
+		if !ok {
+			return ErrNotFound
+		}
+		for i, r := range g.TaskRefs {
+			if r != taskID {
+				continue
+			}
+			g.TaskRefs = append(g.TaskRefs[:i], g.TaskRefs[i+1:]...)
+			next.Groups[groupID] = g
+			return nil
+		}
+		return nil // 未登记：幂等命中
+	})
+}
+
 // RefluxTaskResult 任务终态回流群（GROUP-RFC 闭环「结果自动回流」）：查引用了
 // 该任务的群，注入一条 from=hub 的 kind=system 消息并记入已回流集合，单事务
 // 原子完成。幂等：同任务只回流一次（重复终态事件/重启重放返回 false）。

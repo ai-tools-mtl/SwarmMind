@@ -76,6 +76,8 @@ type testNode struct {
 	resultAcks  []string
 	resultEvent []protocol.TaskResultPayload
 	errs        []protocol.ErrInfo
+	cancels     []protocol.TaskCancelPayload // 收到的 task_cancel 帧（取消链路断言用）
+	errTaskRefs []string                     // err 帧载荷 TaskRef（冲突帧须携引用，回归 2578fd8）
 	autoAck     bool
 
 	// ReplyTo 关联记录（Loop 4：本地请求-应答匹配断言用）。
@@ -146,7 +148,17 @@ func (n *testNode) handle(env *protocol.Envelope) {
 		if env.Err != nil {
 			n.errs = append(n.errs, *env.Err)
 			n.errReplyTo = append(n.errReplyTo, env.ReplyTo)
+			var ref protocol.TaskRef
+			_ = json.Unmarshal(env.Payload, &ref)
+			n.errTaskRefs = append(n.errTaskRefs, ref.TaskID)
 		}
+	case protocol.MsgTaskCancel:
+		var p protocol.TaskCancelPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			n.t.Errorf("task_cancel 载荷解析失败: %v", err)
+			return
+		}
+		n.cancels = append(n.cancels, p)
 	}
 }
 

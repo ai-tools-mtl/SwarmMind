@@ -146,6 +146,11 @@ type Task struct {
 	SubmittedBy string `json:"submitted_by"`
 	// IdemKey 幂等键（hub 全局作用域，与任务同生命周期）。
 	IdemKey string `json:"idem,omitempty"`
+	// GroupRef 群引用（GROUP-RFC 转任务闭环，管理面扩展字段）：任务归属的协作
+	// 群 ID。协议帧 task_submit 不携带（node 间提交恒空）；参与提交幂等指纹——
+	// 同键同群重试=dup 命中原任务，同键换群=不同指纹=新任务（对齐批次内容指纹
+	// 口径，SPEC 4.5）。
+	GroupRef string `json:"group_ref,omitempty"`
 	// Status hub 视角任务状态（SPEC 4.3 状态机）。
 	Status TaskStatus `json:"status"`
 	// CreatedAt 创建时刻（UTC RFC3339）。
@@ -173,6 +178,9 @@ type TaskSubmitRequest struct {
 	SubmittedBy string `json:"submitted_by"`
 	// IdemKey 可选幂等键。
 	IdemKey string `json:"idem_key,omitempty"`
+	// GroupRef 可选群引用（管理面扩展）：随任务落库并参与幂等指纹（同键换群=
+	// 新任务，SPEC 4.5）；node 帧提交不携带，群登记由管理面在提交前完成。
+	GroupRef string `json:"group_ref,omitempty"`
 }
 
 // 结果终态取值（TaskResult.Status；与 TaskStatus 的四个终态同值，SPEC 4.3/4.9）。

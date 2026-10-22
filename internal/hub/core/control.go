@@ -286,6 +286,7 @@ func (c *Core) fillBatchItems(batchID string) error {
 			Input:       b.Input.Clone(),
 			SubmittedBy: b.SubmittedBy,
 			IdemKey:     batchChildIdem(batchID, i),
+			GroupRef:    b.GroupRef, // 子任务随批次携带群引用（查询自描述；批次子幂等键唯一，不影响指纹语义）
 		}, "")
 		switch {
 		case err == nil:

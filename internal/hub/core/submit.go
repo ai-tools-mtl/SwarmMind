@@ -13,13 +13,21 @@ import (
 // Submit 任务提交入口（HTTP 管理面与 node 间 task_submit 帧共用，SPEC 4.5/六）。
 // replyTo 为空；node 帧提交方走 SubmitFrame 携带请求 mid。
 func (c *Core) Submit(req protocol.TaskSubmitRequest, submitterNode string) (*SubmitAck, error) {
-	return c.submit(req, submitterNode, "")
+	return c.submit(req, submitterNode, "", "")
+}
+
+// SubmitWithID 携预生成任务 ID 的提交入口（管理面「先登记后提交」专用，批 B
+// 修复1）：群引用登记先于提交时任务 ID 必须已知，故调用方预生成 ID（两者引用
+// 同一 ID），其余校验链与 Submit 完全一致；ID 与既有任务冲突在事务内拒绝
+//（ErrInvalid，概率可忽略）。taskID 为空等价 Submit。node 帧路径不经此。
+func (c *Core) SubmitWithID(req protocol.TaskSubmitRequest, taskID, submitterNode string) (*SubmitAck, error) {
+	return c.submit(req, submitterNode, "", taskID)
 }
 
 // SubmitFrame node 会话提交入口（task_submit 帧）：replyTo 为请求帧 mid，
 // submit_ack/err 帧据此回关联（node 本地 API 的请求-响应关联，Loop 4）。
 func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyTo string) (*SubmitAck, error) {
-	return c.submit(req, submitterNode, replyTo)
+	return c.submit(req, submitterNode, replyTo, "")
 }
 
 // submit 校验链顺序固定（同键重试在信箱满时仍能取回原 task_id 的保证）：
@@ -34,7 +42,7 @@ func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyT
 // submitterNode 非 "" 表示 node 会话提交：SubmittedBy 被覆盖为该 node_id
 // （SPEC 4.9），确认与失败经帧回给该 node（submit_ack/err 帧，ReplyTo=replyTo），
 // 终态经 result_event 推送。
-func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo string) (*SubmitAck, error) {
+func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, taskIDHint string) (*SubmitAck, error) {
 	if submitterNode != "" {
 		req.SubmittedBy = submitterNode // hub 覆盖为该 node_id
 	}
@@ -71,7 +79,7 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 	}
 
 	// 4. 构造任务 + 序列化体积实测预检（完整 TaskOffer 信封编码计字节）
-	task := c.newTask(req)
+	task := c.newTask(req, taskIDHint)
 	if err := checkOfferSize(&task); err != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
@@ -112,6 +120,12 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo str
 		}
 		if err := c.checkCapacity(st, req.TargetNode, size); err != nil {
 			txnErr = err
+			return nil
+		}
+		if _, exists := st.Tasks[task.ID]; exists {
+			// 预生成 ID 撞上既有任务（SubmitWithID 路径，概率可忽略）：防御性拒绝，
+			// 绝不覆盖落库
+			txnErr = ErrInvalid
 			return nil
 		}
 		st.Tasks[task.ID] = task
@@ -182,17 +196,23 @@ func submitErrCode(err error) string {
 	return "internal"
 }
 
-// newTask 按提交请求构造任务（ID/时间/身份 hub 生成，SPEC 4.9）。
-func (c *Core) newTask(req protocol.TaskSubmitRequest) protocol.Task {
+// newTask 按提交请求构造任务（ID/时间/身份 hub 生成，SPEC 4.9）。idHint 非空
+// 时沿用调用方预生成的任务 ID（SubmitWithID「先登记后提交」路径）。
+func (c *Core) newTask(req protocol.TaskSubmitRequest, idHint string) protocol.Task {
 	now := c.now()
+	id := idHint
+	if id == "" {
+		id = protocol.NewTaskID()
+	}
 	return protocol.Task{
-		ID:          protocol.NewTaskID(),
+		ID:          id,
 		TraceID:     protocol.NewTraceID(),
 		TargetNode:  req.TargetNode,
 		TargetAgent: req.TargetAgent,
 		Input:       req.Input.Clone(),
 		SubmittedBy: req.SubmittedBy,
 		IdemKey:     req.IdemKey,
+		GroupRef:    req.GroupRef,
 		Status:      protocol.StatusSubmitted,
 		CreatedAt:   now,
 		UpdatedAt:   now,

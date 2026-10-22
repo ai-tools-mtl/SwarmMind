@@ -78,6 +78,34 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 	return out, false, nil
 }
 
+// resendPendingCancels 节点注册成功取消补发（批 B 修复3，task_cancel 至少一次
+// 语义）：node 离线期间管理面取消的任务，task_cancel 尽力送达可能失败（CancelTask
+// 只记日志，状态已终态不重试）——节点重新注册成功（会话层注册事务发布后回调
+// SetOnline 上线）时，对其名下 status=cancelled 且 Result==nil（真实执行数据尚待
+// node 回传合并）的任务逐个补发 task_cancel。node 侧幂等：在跑则终止执行，已终
+// 态/不在账本回 task_cancelled ack；已合并结果（Result 非 nil）的任务无需再补。
+// 触发时机对齐注册成功处（session.register → SetOnline(true)），membus 测试链路
+// 同口径。
+func (c *Core) resendPendingCancels(nodeID string) {
+	var ids []string
+	for id, t := range c.st.View().Tasks {
+		if t.TargetNode == nodeID && t.Status == protocol.StatusCancelled && t.Result == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	for _, id := range ids {
+		if err := c.sendFrame(nodeID, protocol.MsgTaskCancel, "",
+			protocol.TaskCancelPayload{TaskID: id, Reason: "hub 重连补发"}, nil); err != nil {
+			log.Printf("[hub] 补发 task_cancel 失败（node 已再离线，下轮注册再补） node=%s task=%s: %v",
+				nodeID, id, err)
+		}
+	}
+	log.Printf("[hub] 节点注册取消补发 node=%s 补发 task_cancel 数量=%d", nodeID, len(ids))
+}
+
 // handleTaskCancelledAck node→hub 的 task_cancelled ack：任务在 node 侧已终态或
 // 不存在（无可取消对象）。hub 状态在 CancelTask 事务内已收敛，本帧仅观测记录；
 // node 已执行完的迟到结果经重发链路到达后按冲突行保留 cancelled 先到。
