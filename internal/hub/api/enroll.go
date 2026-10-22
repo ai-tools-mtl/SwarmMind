@@ -87,8 +87,33 @@ func (b *enrollBuilder) prebuiltBinary(goos, goarch string) ([]byte, bool) {
 //go:embed all:embedded
 var embedFS embed.FS
 
+// prebuiltMagic 平台 → 可执行二进制 magic 头。内置 gzip 产物入库前未经执行
+// 验证，解压后须核对 magic：不符（文件损坏/被占位内容污染）一律视为未命中，
+// 走现场编译兜底，绝不把坏产物打进部署包。darwin 同时认 Mach-O 64 位
+// （\xcf\xfa\xfe\xed）与通用二进制（\xca\xfe\xba\xbe）两种形态。
+var prebuiltMagic = map[string][][]byte{
+	"linux":   {[]byte("\x7fELF")},
+	"darwin":  {[]byte("\xcf\xfa\xfe\xed"), []byte("\xca\xfe\xba\xbe")},
+	"windows": {[]byte("MZ")},
+}
+
+// prebuiltMagicOK 校验解压产物非空且 magic 头与平台匹配（未知平台恒 false——
+// 白名单外平台的内置产物不可信，宁可多编一次）。
+func prebuiltMagicOK(goos string, data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	for _, m := range prebuiltMagic[goos] {
+		if bytes.HasPrefix(data, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // prebuiltNode 取内置预编译 node 二进制（embedded/node-<goos>-<goarch>.gz 解压
-// 原文）。对应平台无内置产物时 ok=false，调用方走现场编译兜底。
+// 原文）。对应平台无内置产物、解压失败、产物为空或 magic 头不符时 ok=false，
+// 调用方走现场编译兜底。
 func prebuiltNode(goos, goarch string) ([]byte, bool) {
 	f, err := embedFS.Open(fmt.Sprintf("embedded/node-%s-%s.gz", goos, goarch))
 	if err != nil {
@@ -100,7 +125,10 @@ func prebuiltNode(goos, goarch string) ([]byte, bool) {
 		return nil, false
 	}
 	data, err := io.ReadAll(gz)
-	if err != nil {
+	if err != nil || !prebuiltMagicOK(goos, data) {
+		if err == nil {
+			log.Printf("[hub] 内置预编译产物 %s/%s magic 头不符（损坏或被污染），改走现场编译兜底", goos, goarch)
+		}
 		return nil, false
 	}
 	return data, true
@@ -177,12 +205,16 @@ func (r *enrollRequest) normalize() (osArg, archArg, mode string, err error) {
 	if !validHubURL(r.HubURL) {
 		return "", "", "", fmt.Errorf("hub_url 须为可解析的 ws:// 或 wss:// 地址")
 	}
+	// Windows 暂撤（2026-10-22 双审决断：安装链路未经真实机验证，撤下待开发
+	// 完整后再开放；内置 windows 产物与打包代码保留，未来开放即用）。
 	switch r.OS {
-	case "linux", "darwin", "windows":
+	case "linux", "darwin":
+	case "windows":
+		return "", "", "", fmt.Errorf("Windows 支持开发中，暂不开放")
 	case "":
-		return "", "", "", fmt.Errorf("os 必填（linux|darwin|windows）")
+		return "", "", "", fmt.Errorf("os 必填（linux|darwin）")
 	default:
-		return "", "", "", fmt.Errorf("os 仅支持 linux|darwin|windows")
+		return "", "", "", fmt.Errorf("os 仅支持 linux|darwin")
 	}
 	switch r.Arch {
 	case "amd64", "arm64":
@@ -467,7 +499,9 @@ func writeBundleZip(zw *zip.Writer, mode, goos, goarch, binPath string, binData 
 	if err != nil {
 		return err
 	}
-	if err := zipEntry(zw, "node.yaml", 0o644, renderNodeYaml(v)); err != nil {
+	// node.yaml 内嵌 register_token 凭据，zip 外部权限一并 0600（解压落地即
+	// 属主可读写；安装脚本内另有 chmod 兜底），README 提示勿转发明文。
+	if err := zipEntry(zw, "node.yaml", 0o600, renderNodeYaml(v)); err != nil {
 		return err
 	}
 	switch {
@@ -514,9 +548,11 @@ concurrency: 2
 `
 }
 
-// unixInstallSh linux/darwin 安装脚本：装二进制与配置 → 探测 systemd（linux）
-// 生成单元并 enable --now，darwin 写用户级 launchd plist 并 load；两者皆无时
-// 给前台运行提示（不静默失败）。
+// unixInstallSh linux/darwin 安装脚本：装二进制与配置（node.yaml 含令牌一律
+// chmod 0600）→ 探测 systemd（linux）生成单元并 enable --now，darwin 现场生成
+// 用户级 launchd plist（ProgramArguments=绝对路径二进制+--config+node.yaml、
+// WorkingDirectory=安装目录、KeepAlive、RunAtLoad）并 load；两者皆无时给前台
+// 运行提示（不静默失败）。
 func unixInstallSh(goos string) string {
 	if goos == "darwin" {
 		return `#!/bin/sh
@@ -524,19 +560,40 @@ func unixInstallSh(goos string) string {
 set -eu
 cd "$(dirname "$0")"
 
-DIR="$HOME/.swarmmind"
+	DIR="$HOME/.swarmmind"
 PLIST=~/Library/LaunchAgents/com.swarmmind.node.plist # 无引号赋值，shell 展开 ~
 
 chmod +x swarmmind-node
 mkdir -p "$DIR" "$HOME/Library/LaunchAgents"
 cp swarmmind-node "$DIR/swarmmind-node"
 cp node.yaml "$DIR/node.yaml"
+chmod 0600 "$DIR/node.yaml"
 
 if command -v launchctl >/dev/null 2>&1; then
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.swarmmind.node</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$DIR/swarmmind-node</string>
+    <string>--config</string>
+    <string>$DIR/node.yaml</string>
+  </array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>$DIR/node.log</string>
+  <key>StandardErrorPath</key><string>$DIR/node.log</string>
+</dict>
+</plist>
+EOF
   launchctl unload "$PLIST" >/dev/null 2>&1 || true
   launchctl load "$PLIST"
   echo "已安装并启动。看状态：launchctl list | grep swarmmind"
-  echo "日志：launchctl 查不到输出时先前台验证：$DIR/swarmmind-node --config $DIR/node.yaml"
+  echo "日志：$DIR/node.log（launchctl 查不到输出时先前台验证：$DIR/swarmmind-node --config $DIR/node.yaml）"
 else
   echo "未检测到 launchctl，请前台运行：" >&2
   echo "  $DIR/swarmmind-node --config $DIR/node.yaml" >&2
@@ -559,7 +616,7 @@ mkdir -p /opt/swarmmind
 cp swarmmind-node /opt/swarmmind/swarmmind-node
 cp node.yaml /opt/swarmmind/node.yaml
 chmod 0755 /opt/swarmmind/swarmmind-node
-chmod 0644 /opt/swarmmind/node.yaml
+chmod 0600 /opt/swarmmind/node.yaml
 
 if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
   cat > /etc/systemd/system/swarmmind-node.service <<'EOF'
@@ -640,6 +697,8 @@ func readmeTxt(mode, goos, goarch string) string {
 3. 看状态：docker compose ps && docker compose logs -f
 
 说明：node.yaml 已按这台节点填好真实值；改配置后 docker compose restart 即可。
+node.yaml 含接入令牌（register_token），属敏感凭据：文件权限已收紧为 0600
+（仅属主可读写），请勿转发明文、不要提交进代码仓库。
 `)
 		return b.String()
 	}
@@ -663,7 +722,9 @@ func readmeTxt(mode, goos, goarch string) string {
 	}
 	b.WriteString(`
 说明：node.yaml 已按这台节点填好真实值；智能体能力在 node.yaml 的 agents 段配置，
-保存重启节点后自动注册到 hub。节点连上 hub 后即在控制台节点列表显示在线。`)
+保存重启节点后自动注册到 hub。节点连上 hub 后即在控制台节点列表显示在线。
+node.yaml 含接入令牌（register_token），属敏感凭据：文件权限已收紧为 0600
+（仅属主可读写，安装脚本内另有 chmod 兜底），请勿转发明文、不要提交进代码仓库。`)
 	return b.String()
 }
 

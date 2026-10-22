@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,6 +188,7 @@ func TestEnrollValidationMatrix(t *testing.T) {
 		{"hub_url 含空格", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://hu b/ws","os":"linux","arch":"amd64"}`},
 		{"hub_url 含换行（yaml 注入）", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws\nregister_token: evil","os":"linux","arch":"amd64"}`},
 		{"os 非法", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws","os":"solaris","arch":"amd64"}`},
+		{"os=windows 已撤下", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws","os":"windows","arch":"amd64"}`},
 		{"os 缺失", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws","arch":"amd64"}`},
 		{"arch 非法", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws","os":"linux","arch":"x86"}`},
 		{"mode 非法", `{"node_id":"abc","register_token":"` + tok + `","hub_url":"ws://h/ws","os":"linux","arch":"amd64","mode":"kube"}`},
@@ -197,6 +199,11 @@ func TestEnrollValidationMatrix(t *testing.T) {
 		if code != http.StatusBadRequest {
 			t.Fatalf("%s 应 400, got %d: %s", tc.name, code, body)
 		}
+	}
+	// windows 撤下的人话提示（前端直接展示该 message）
+	if wcode, wbody := f.do(hc, http.MethodPost, "/api/v1/nodes/enroll-bundle",
+		`{"node_id":"abc","register_token":"`+tok+`","hub_url":"ws://h/ws","os":"windows","arch":"amd64"}`); wcode != http.StatusBadRequest || !strings.Contains(string(wbody), "Windows 支持开发中，暂不开放") {
+		t.Fatalf("os=windows 应 400 且提示开发中, got %d: %s", wcode, wbody)
 	}
 	// mode 空缺省 = native（合法），docker 非法 os 无效——docker 固定 linux，此处仅证缺省可过校验前门：
 	// 该请求 sourceDir 不存在，若走到编译会 500；用 mode 空省 + 假 sourceDir 会被 400 拦下与 500 区分不开，
@@ -258,8 +265,19 @@ func TestNativeZipStructure(t *testing.T) {
 		script    string
 		scriptHas []string
 	}{
-		{"linux", "swarmmind-node", "install.sh", []string{"systemctl enable --now swarmmind-node", "/etc/systemd/system/swarmmind-node.service", "chmod +x swarmmind-node"}},
-		{"darwin", "swarmmind-node", "install.sh", []string{"launchctl load", "com.swarmmind.node.plist", "~/Library/LaunchAgents", "chmod +x swarmmind-node"}},
+		{"linux", "swarmmind-node", "install.sh", []string{
+			"systemctl enable --now swarmmind-node", "/etc/systemd/system/swarmmind-node.service",
+			"chmod +x swarmmind-node", "chmod 0600 /opt/swarmmind/node.yaml"}},
+		{"darwin", "swarmmind-node", "install.sh", []string{
+			// plist 由脚本现场生成（此前只 load 不生成，安装链路断裂）：路径、
+			// 程序参数（绝对路径二进制 + --config + node.yaml）、工作目录、
+			// 常驻与开机自启、launchctl load 全链断言
+			`cat > "$PLIST"`, "com.swarmmind.node.plist", "~/Library/LaunchAgents",
+			"<key>ProgramArguments</key>", "<string>$DIR/swarmmind-node</string>",
+			"<string>--config</string>", "<string>$DIR/node.yaml</string>",
+			"<key>WorkingDirectory</key><string>$DIR</string>",
+			"<key>KeepAlive</key><true/>", "<key>RunAtLoad</key><true/>",
+			"launchctl load", "chmod +x swarmmind-node", `chmod 0600 "$DIR/node.yaml"`}},
 		{"windows", "swarmmind-node.exe", "install.bat", []string{"sc create swarmmind-node binPath=", "sc start swarmmind-node"}},
 	}
 	for _, tc := range cases {
@@ -293,10 +311,18 @@ func TestNativeZipStructure(t *testing.T) {
 				t.Fatalf("%s: %s 缺 %q\n%s", tc.goos, tc.script, marker, script)
 			}
 		}
-		// node.yaml 内嵌真实值；README 给出三步指引
+		// node.yaml 内嵌真实值、权限 0600（内含 register_token，落地即属主可读写）；
+		// README 给出三步指引
 		yamlTxt := zipEntryText(t, files["node.yaml"])
 		if !strings.Contains(yamlTxt, "node_id: build-linux") || !strings.Contains(yamlTxt, v.Token) {
 			t.Fatalf("%s: node.yaml 未内嵌真实值\n%s", tc.goos, yamlTxt)
+		}
+		if got := files["node.yaml"].Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s: node.yaml 权限应 0600, got %v", tc.goos, got)
+		}
+		// README 提示令牌敏感、勿转发（zip 外部提示，0600 纪律的一部分）
+		if readme := zipEntryText(t, files["README.txt"]); !strings.Contains(readme, "0600") {
+			t.Fatalf("%s: README 缺令牌权限提示", tc.goos)
 		}
 		if !strings.Contains(zipEntryText(t, files["README.txt"]), "3. 看状态") {
 			t.Fatalf("%s: README 缺三步指引", tc.goos)
@@ -363,6 +389,43 @@ func TestPrebuiltNodeHit(t *testing.T) {
 func TestPrebuiltNodeMiss(t *testing.T) {
 	if data, ok := prebuiltNode("plan9", "mips"); ok {
 		t.Fatalf("不存在的平台不应命中, len=%d", len(data))
+	}
+}
+
+// TestPrebuiltMagicCheck magic 头校验矩阵：各平台合法头放行（darwin 认 Mach-O
+// 64 与 fat 二进制两种）、空内容/垃圾内容/平台错配/未知平台一律拒绝——坏产物
+// 视为未命中，走现场编译兜底，绝不进部署包。
+func TestPrebuiltMagicCheck(t *testing.T) {
+	elf := append([]byte("\x7fELF"), make([]byte, 64)...)
+	macho := append([]byte("\xcf\xfa\xfe\xed"), make([]byte, 64)...)
+	fat := append([]byte("\xca\xfe\xba\xbe"), make([]byte, 64)...)
+	pe := append([]byte("MZ"), make([]byte, 64)...)
+	ok := []struct {
+		goos string
+		data []byte
+	}{
+		{"linux", elf}, {"darwin", macho}, {"darwin", fat}, {"windows", pe},
+	}
+	for _, tc := range ok {
+		if !prebuiltMagicOK(tc.goos, tc.data) {
+			t.Fatalf("%s 合法 magic 应放行: % x", tc.goos, tc.data[:4])
+		}
+	}
+	bad := []struct {
+		goos string
+		data []byte
+	}{
+		{"linux", nil},                         // 空产物
+		{"linux", []byte("garbage-not-a-bin")}, // 垃圾内容（占位污染）
+		{"darwin", elf},                        // 平台错配
+		{"windows", elf},                       // 平台错配
+		{"plan9", elf},                         // 白名单外平台恒拒
+		{"linux", []byte("\x7fEL")},            // magic 头不完整
+	}
+	for _, tc := range bad {
+		if prebuiltMagicOK(tc.goos, tc.data) {
+			t.Fatalf("%s 非法产物(%q)应拒绝", tc.goos, tc.data)
+		}
 	}
 }
 
@@ -510,6 +573,23 @@ func TestEnrollGoBinMissing(t *testing.T) {
 	var ee *enrollError
 	if !errors.As(err, &ee) || ee.status != http.StatusInternalServerError || ee.code != "compile_failed" {
 		t.Fatalf("假工具链应 500 compile_failed, got %v", err)
+	}
+}
+
+// ---------- 安装脚本语法（sh -n）：heredoc/plist 生成结构写错即装机失败 ----------
+
+func TestInstallShSyntax(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("环境无 sh，跳过安装脚本语法校验")
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		script := unixInstallSh(goos)
+		cmd := exec.Command(sh, "-n")
+		cmd.Stdin = strings.NewReader(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s install.sh 语法错误: %v\n%s", goos, err, out)
+		}
 	}
 }
 

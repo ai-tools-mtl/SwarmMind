@@ -543,7 +543,9 @@ function enrollStep1() {
   <div class="actions spaced">${button('下一步', 'enroll-next1', 'primary', 'disabled')}</div>`;
 }
 function enrollValidId(id) {
-  return id.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(id);
+  /* 与 enroll.go enrollNodeIDRe 同口径：2-32 位、首尾字母数字（禁连字符开头/结尾）。
+   * 此前端宽为 ≤63 位，Step1 放行后端 400 拒收的 ID——口径统一为 2-32，前端即拦。 */
+  return /^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(id);
 }
 /* enrollValidateId 实时校验（input 委托）：更新旁注与「下一步」可点态；已存在的
  * ID 允许继续（覆盖登记是合法操作）但黄字提醒会替换 hub.yaml 旧令牌行。 */
@@ -557,7 +559,7 @@ function enrollValidateId() {
   hint.classList.remove('warn-text');
   if (!id) { hint.textContent = '给这台机器起个名字，会显示在节点列表，如 build-linux、mac-mini'; btn.disabled = true; return; }
   if (!enrollValidId(id)) {
-    hint.textContent = '只能用小写字母、数字和连字符（-），且不能以连字符开头或结尾';
+    hint.textContent = '只能用 2-32 位小写字母、数字和连字符（-），且不能以连字符开头或结尾';
     hint.classList.add('warn-text'); btn.disabled = true; return;
   }
   if (S.nodes.some(n => n.node_id === id)) {
@@ -587,7 +589,9 @@ function enrollStep2() {
   <div class="actions spaced">${button('已粘贴并重启 hub，下一步', 'enroll-pasted', 'primary')}</div>`;
 }
 /* ---- Step 3 安装配置：三方式卡（一键部署包/Docker 构建包/手动复制） ---- */
-const ENROLL_OS = { linux: 'Linux', macos: 'macOS', windows: 'Windows' };
+/* Windows 暂撤（2026-10-22 双审决断：安装链路未经真实机验证，enroll 后端已拒
+ * os=windows）；ENROLL_OS/ENROLL_START 的 windows 项一并撤下，后端开放时同步恢复。 */
+const ENROLL_OS = { linux: 'Linux', macos: 'macOS' };
 /* hub_url 从会话上下文自动推导：控制台与节点接入同端口，http(s) 页面 → ws(s)。
  * 注：node.yaml 实际字段为 local_listen（cmd/node/main.go）——旧弹层写的
  * api_listen 是 yaml 解码会静默忽略的错名，本向导一并纠正。 */
@@ -620,11 +624,6 @@ sudo systemctl daemon-reload && sudo systemctl enable --now swarmmind-node`,
 #   /Library/LaunchDaemons/com.swarmmind.node.plist：ProgramArguments 指向二进制
 #   与 --config node.yaml，KeepAlive=true，RunAtLoad=true，然后
 sudo launchctl bootstrap system /Library/LaunchDaemons/com.swarmmind.node.plist`,
-  windows: `# 先在命令行验证
-swarmmind-node.exe --config node.yaml
-# 验证通过后常驻二选一：
-#   计划任务（开机启动）：schtasks /create /tn SwarmMindNode /rl highest /sc onstart /tr "swarmmind-node.exe --config node.yaml"
-#   或用服务包装器（如 NSSM）注册为 Windows 服务`,
 };
 /* 方式卡与平台清单（plat 键 = <os>-<arch>，直传 enroll-bundle 请求体；docker
  * 产物固定打包 linux 二进制——容器基座即 linux，见 enroll.go normalize）。 */
@@ -634,7 +633,7 @@ const ENROLL_MODES = [
   ['manual', '手动复制配置', '自己放置二进制：复制 node.yaml 全文与分系统启动命令'],
 ];
 const ENROLL_PLATS = {
-  bundle: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64'], ['darwin-arm64', 'macOS Apple Silicon'], ['darwin-amd64', 'macOS Intel'], ['windows-amd64', 'Windows amd64']],
+  bundle: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64'], ['darwin-arm64', 'macOS Apple Silicon'], ['darwin-amd64', 'macOS Intel']],
   docker: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64']],
 };
 function enrollModeCards() {
@@ -654,11 +653,9 @@ function enrollNextHtml() {
   const zipName = d.mode === 'docker' ? `swarmmind-node-docker-linux-${d.arch}.zip` : `swarmmind-node-${d.os}-${d.arch}.zip`;
   const second = d.mode === 'docker'
     ? { code: 'docker build -t swarmmind-node . && docker compose up -d', note: '构建镜像并启动；配置经 compose 挂载，改 node.yaml 后 docker compose restart 即可' }
-    : d.os === 'windows'
-      ? { code: '右键 install.bat →「以管理员身份运行」', note: '注册 Windows 服务并启动；脚本会自检管理员权限' }
-      : d.os === 'linux'
-        ? { code: 'sudo bash install.sh', note: '装到 /opt/swarmmind 并注册 systemd 服务' }
-        : { code: 'bash install.sh', note: '装到 ~/.swarmmind 并注册 launchd 用户服务（免 sudo）' };
+    : d.os === 'linux'
+      ? { code: 'sudo bash install.sh', note: '装到 /opt/swarmmind 并注册 systemd 服务' }
+      : { code: 'bash install.sh', note: '装到 ~/.swarmmind 并注册 launchd 用户服务（免 sudo）' };
   return `<h3 class="spaced">接下来（3 步）</h3><div class="enroll-rows">
   <div class="enroll-row"><code>解压 ${esc(zipName)}</code><small>得到 swarmmind-node 二进制、node.yaml（已填好真实值）与安装脚本</small></div>
   <div class="enroll-row"><code>${esc(second.code)}</code><small>${second.note}</small></div>
@@ -666,7 +663,7 @@ function enrollNextHtml() {
   </div><small class="muted">包内 README.txt 有同样的三步与看状态命令。</small>`;
 }
 function enrollBundlePane() {
-  return `<div class="notice">按目标平台生成部署包并下载：二进制已内置（五平台预编译，点下即回），包内 node.yaml 已按这台机器填好真实值。</div>
+  return `<div class="notice">按目标平台生成部署包并下载：二进制已内置（预编译，点下即回），包内 node.yaml 已按这台机器填好真实值。</div>
   ${enrollPlatTabs()}
   <div class="actions spaced"><button type="button" data-act="enroll-bundle-dl" class="primary">生成并下载</button></div>
   ${enrollNextHtml()}`;
@@ -717,16 +714,20 @@ function enrollSetDlBtn(label, busy) {
 }
 async function enrollBundleDownload() {
   if (!ENROLL || enrollBundleBusy) return;
-  if (!/^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$/.test(ENROLL.id)) { toast('节点 ID 需为 2-32 位小写字母/数字/连字符才能生成部署包'); return; }
+  if (!enrollValidId(ENROLL.id)) { toast('节点 ID 需为 2-32 位小写字母/数字/连字符才能生成部署包'); return; }
   const [os, arch] = ENROLL.plat.split('-');
   const mode = ENROLL.mode === 'docker' ? 'docker' : 'native';
   enrollBundleBusy = true;
   enrollSetDlBtn('正在生成…', true);
-  // 内置产物秒回；超过 8s 未回说明走了现场编译兑底，再提示耗时
+  // 会话引用捕获（双审 2026-10-22）：await 期间弹层可能被重开（enrollModal 换新
+  // ENROLL 对象），旧会话的响应回来后不得再动全局忙标志/按钮/提示——一律丢弃。
+  const sess = ENROLL;
+  const stale = () => ENROLL !== sess;
+  // 内置产物秒回；超过 8s 未回说明走了现场编译兜底，再提示耗时
   const curReq = ++enrollBundleSeq;
   const slowTip = setTimeout(() => {
-    if (enrollBundleBusy && ENROLL && curReq === enrollBundleSeq)
-      enrollSetDlBtn('正在生成 · 首次需现场编译兑底，约半分钟…', true);
+    if (enrollBundleBusy && !stale() && curReq === enrollBundleSeq)
+      enrollSetDlBtn('正在生成 · 首次需现场编译兜底，约半分钟…', true);
   }, 8000);
   const reset = () => { clearTimeout(slowTip); enrollBundleBusy = false; enrollSetDlBtn('生成并下载', false); };
   try {
@@ -736,11 +737,14 @@ async function enrollBundleDownload() {
       body: JSON.stringify({ node_id: ENROLL.id, register_token: ENROLL.token, hub_url: enrollHubUrl(), os, arch, mode }),
       credentials: 'same-origin',
     });
+    if (stale()) return;   // 旧会话响应：丢弃（新会话已重置忙标志与按钮）
     if (resp.status === 401) { clearTimeout(slowTip); sessionExpired(); enrollBundleBusy = false; return; }
     if (resp.ok && (resp.headers.get('Content-Type') || '').includes('zip')) {
       const name = /filename="([^"]+)"/.exec(resp.headers.get('Content-Disposition') || '')?.[1]
         || `swarmmind-node-${mode === 'docker' ? 'docker-linux-' : ''}${os}-${arch}.zip`;
-      downloadBlob(await resp.blob(), name);
+      const blob = await resp.blob();
+      if (stale()) return;   // blob 读取期间会话也可能更换
+      downloadBlob(blob, name);
       ENROLL.bundleDone = { mode, os, arch };
       clearTimeout(slowTip);
       enrollBundleBusy = false;
@@ -756,10 +760,14 @@ async function enrollBundleDownload() {
         ENROLL.bundleRetried = true;
         toast('编译排队中，10 秒后自动重试');
         enrollSetDlBtn('编译排队中 · 10 秒后自动重试…', true);
-        const cur = ENROLL;
         setTimeout(() => {
-          if (ENROLL === cur && ENROLL.step === 3 && modalOpen) enrollBundleDownload();
-          else enrollBundleBusy = false;
+          if (stale()) return;   // 会话已更换：忙标志已随新会话重置，不再动
+          if (ENROLL.step === 3 && modalOpen) {
+            // 忙标志必须先放行再重试：入口处 `enrollBundleBusy` 恒真会把第二次
+            // 请求整体拦掉，重试名存实亡（双审 2026-10-22）
+            enrollBundleBusy = false;
+            enrollBundleDownload();
+          } else enrollBundleBusy = false;   // 弹层已关或已换步：解除占用
         }, 10000);
         return;   // 忙标志保持到重试真正发出或作废
       }
@@ -771,6 +779,7 @@ async function enrollBundleDownload() {
     }
     reset();
   } catch {
+    if (stale()) return;   // 旧会话的网络异常不打扰新会话
     reset();
     toast('网络异常：连不上 hub，无法生成部署包');
   }
@@ -1164,9 +1173,11 @@ function applyPrimeMode(on) {
     if (on) {
       S.C.primePrevNode = nodeSel.value;
       S.C.primePrevAgent = $('#ctrl-agent')?.value || '';
-      const entry = S.directory.find(d => d.card.name.includes(PRIME_AGENT_KEY));
+      /* 只认在线载体（双审 2026-10-22）：离线机器提交端点直接 skip，选中即派发
+       * 失败——目录条目自带 online 字段（core.DirectoryEntry）。 */
+      const entry = S.directory.find(d => d.card.name.includes(PRIME_AGENT_KEY) && d.online);
       if (entry) setSel(entry.node_id, entry.card.name);
-      else toast('网内暂无 ' + PRIME_AGENT_KEY + '（总理）能力：请先在节点开放该能力再使用总理模式');
+      else toast('网内暂无在线的 ' + PRIME_AGENT_KEY + '（总理）能力：请先在在线节点开放该能力再使用总理模式');
     } else {
       if (S.C.primePrevNode && [...nodeSel.options].some(o => o.value === S.C.primePrevNode)) {
         setSel(S.C.primePrevNode, S.C.primePrevAgent);
@@ -1509,7 +1520,7 @@ const ACT = {
   'enroll-step': b => enrollGo(Number(b.dataset.step)),
   'enroll-next1': () => {
     const id = $('#enroll-id')?.value.trim() || '';
-    if (!enrollValidId(id)) { toast('请先填写合法的节点 ID（小写字母/数字/连字符）'); $('#enroll-id')?.focus(); return; }
+    if (!enrollValidId(id)) { toast('请先填写合法的节点 ID（2-32 位小写字母/数字/连字符）'); $('#enroll-id')?.focus(); return; }
     if (ENROLL.tokenFor !== id) { ENROLL.token = ''; ENROLL.tokenFor = id; }   // 身份变了令牌重生成；回看不改名则保留已生成令牌
     enrollGo(2);
   },

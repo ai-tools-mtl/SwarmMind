@@ -116,6 +116,7 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 //	running      working         执行中
 //	completed    completed       终态
 //	failed       failed          终态
+//	cancelled    canceled        终态（A2A 官方拼法单词 canceled，单 L）
 //	needs_review input-required  结果不确定待人工输入/核对，语义最接近；
 //	                             原始值保留在 metadata.swarmmind_status
 //	其他/未知    unknown
@@ -129,6 +130,8 @@ func a2aState(st protocol.TaskStatus) string {
 		return "completed"
 	case protocol.StatusFailed:
 		return "failed"
+	case protocol.StatusCancelled:
+		return "canceled"
 	case protocol.StatusNeedsReview:
 		return "input-required"
 	default:

@@ -386,7 +386,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 
 - `GET /.well-known/agent.json`（免鉴权，A2A 发现惯例）：AgentCard（对齐 A2A v0.2.x），skills 由全网 exposed 目录聚合（id=`node_id/agent`）；只含能力元数据，ExecProfile/令牌/工作区互斥键一概不出
 - `POST /a2a/rpc`（Bearer PAT `smsw_` 或会话 cookie，与现有同一鉴权）：JSON-RPC 2.0 手写分发（零新依赖）；`message/send` 等价 POST /api/v1/tasks（submitted_by=a2a，messageId 映射幂等键 `a2a:<id>`）、`tasks/get` 等价 GET /tasks/{id}；未知方法 -32601、任务不存在 -32001。外部协议兼容层本身即 agent 调用面（与 MCP 同位），故不另设六.六工具行
-- 状态映射（七态→A2A TaskState）：submitted/offered/acknowledged→submitted、running→working、completed→completed、failed→failed、needs_review→input-required（原始状态保留于 metadata.swarmmind_status）；已知偏差清单见 internal/hub/api/a2a.go 头注
+- 状态映射（七态→A2A TaskState）：submitted/offered/acknowledged→submitted、running→working、completed→completed、failed→failed、cancelled→canceled（A2A 官方单 L 拼法）、needs_review→input-required（原始状态保留于 metadata.swarmmind_status）；已知偏差清单见 internal/hub/api/a2a.go 头注
 
 ## 六.六、MCP 服务（agent 统一入口，2026-10-21 立）
 
@@ -433,9 +433,12 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    ① SPEC 本节表格补一行映射；② cmd/swarmmind-mcp 增补对应工具（含人话描述）；
    ③ MCP 层至少一条实测或单测。
 2. 纯内部实现（调度/存储/协议内部）不适用本规则。
-3. **人工管理专属豁免（2026-10-22）**：POST /api/v1/tasks/{id}/cancel（任务取消）不设 MCP 工具——取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）。除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
-3. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
-4. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
+3. **人工管理专属豁免（2026-10-22）**：以下管理面端点不设 MCP 工具——
+   ① `POST /api/v1/tasks/{id}/cancel`（任务取消）：取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）；
+   ② `POST /api/v1/nodes/enroll-bundle`（节点接入部署包生成）：端点为管理端人工装机操作专属——生成的部署包内嵌节点 register_token 凭据，agent 无权获取凭据，部署包亦不经 agent 面分发，只对管理端会话开放。
+   除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
+4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
+5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
 
 ## 七、验证标准（DoD 十一条）
 

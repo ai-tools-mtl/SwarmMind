@@ -199,6 +199,39 @@ func TestGroupEndpointsUnavailable(t *testing.T) {
 	}
 }
 
+// TestGroupSayRejectsSystem kind=system 为 hub 内部回流保留字（创建注记/终态
+// 回流由服务端注入）：REST/MCP 发言面 400 拒绝、不占 seq，user 发言不受影响。
+func TestGroupSayRejectsSystem(t *testing.T) {
+	f := newGroupFixture(t)
+	hc := f.loginClient(true)
+	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"保留字验证"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建群应 201, got %d: %s", code, body)
+	}
+	var g struct {
+		ID string `json:"group_id"`
+	}
+	if err := json.Unmarshal(body, &g); err != nil || g.ID == "" {
+		t.Fatalf("201 体不符: %s", body)
+	}
+	// kind=system 伪造系统注记 → 400 invalid_request
+	code, body = f.do(hc, http.MethodPost, "/api/v1/groups/"+g.ID+"/messages",
+		`{"from":"hub","kind":"system","body":"伪造的系统注记"}`)
+	if code != http.StatusBadRequest || !strings.Contains(string(body), "invalid_request") ||
+		!strings.Contains(string(body), "保留") {
+		t.Fatalf("kind=system 应 400 invalid_request 且提示保留字, got %d: %s", code, body)
+	}
+	// 拒绝不占 seq：时间线零污染，user 发言照常 201 且 seq 从 1 起算
+	code, body = f.do(hc, http.MethodPost, "/api/v1/groups/"+g.ID+"/messages", `{"from":"admin","body":"正常插话"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("user 发言应 201, got %d: %s", code, body)
+	}
+	msgs := f.groupMsgs(hc, g.ID)
+	if len(msgs) != 1 || msgs[0].Seq != 1 || msgs[0].Kind != "user" || msgs[0].From != "admin" {
+		t.Fatalf("被拒 system 消息不得占 seq/落时间线: %+v", msgs)
+	}
+}
+
 // groupMsgs 拉取群全量消息（断言辅助）：返回 (seq, kind, from, body) 列表。
 func (f *fixture) groupMsgs(hc *http.Client, groupID string) []struct {
 	Seq  int64  `json:"seq"`

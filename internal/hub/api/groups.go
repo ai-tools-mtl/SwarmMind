@@ -131,9 +131,10 @@ func (s *Server) handleGroupMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 }
 
-// groupSayRequest 群发言请求体。from 为发言者标识；kind 须 user|agent|system
-// （agent 计入发言预算）。MVP 阶段 from 由调用方声明，node 侧接入批次再按
-// 连接身份强制。
+// groupSayRequest 群发言请求体。from 为发言者标识；REST/MCP 发言只允许
+// kind=user|agent（agent 计入发言预算）——kind=system 为 hub 内部回流专用保留字
+// （创建注记/终态回流由服务端注入，见 wireGroupTask/RefluxTaskResult），外部
+// 传入一律 400 拒绝，防止伪造系统注记污染时间线。
 type groupSayRequest struct {
 	From string `json:"from"`
 	Kind string `json:"kind"`
@@ -141,7 +142,7 @@ type groupSayRequest struct {
 }
 
 // handleGroupSay POST /api/v1/groups/{id}/messages：→ 201 消息对象 /
-// 400 body_too_large / 409 budget_exhausted、group_concluded / 404。
+// 400 body_too_large、kind=system 保留字 / 409 budget_exhausted、group_concluded / 404。
 func (s *Server) handleGroupSay(w http.ResponseWriter, r *http.Request) {
 	if s.groupUnavailable(w) {
 		return
@@ -153,6 +154,11 @@ func (s *Server) handleGroupSay(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Kind == "" {
 		req.Kind = group.KindUser // 缺省按人插话（GROUP-RFC 六：人可随时插话）
+	}
+	if req.Kind == group.KindSystem {
+		writeErr(w, http.StatusBadRequest, "invalid_request",
+			"kind=system 为系统回流保留类别（仅 hub 内部注入），发言只允许 user|agent")
+		return
 	}
 	msg, err := s.cfg.Groups.PostMessage(r.PathValue("id"), req.From, req.Kind, req.Body)
 	if err != nil {
