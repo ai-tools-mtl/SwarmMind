@@ -1,8 +1,8 @@
 'use strict';
 /* SwarmMind Hub 中心端控制台（真实 API 版，Loop 6）。
  * 数据面：/api/v1/*（SPEC 六/六.五）；会话 cookie（swarmmind_session）鉴权，
- * 任何 401 自动回登录页。无框架原生 JS，hash 路由 SPA，与 dashboard-journey
- * 原型同视觉（亮色 #f7f6f3 / #4a6cf7）与同交互闭环（INTERACTION 四：300ms
+ * 任何 401 自动回登录页。无框架原生 JS，hash 路由 SPA，Apple 灰阶工具视觉
+ * （token 化见 style.css :root，FE-PLAN v3）与同交互闭环（INTERACTION 四：300ms
  * 反馈、终态带下一步、结果未知锁表单、技术态配人话双语）。 */
 
 const $ = s => document.querySelector(s);
@@ -121,11 +121,21 @@ const S = {
   expAt: 0,                    // 登录应答 expires_in 推算；服务端 401 为权威兜底
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
-  snap: '',                    // 轮询数据指纹：未变化不重绘
+  seq: { nodes: 0, tasks: 0, directory: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
+  resSnap: { nodes: '', tasks: '', directory: '' },   // 按资源指纹：任一资源有变才整页重绘
+  fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
+  pollBusy: false,             // 轮询 single-flight：上轮在途跳过本轮
   f: { status: '', trace: '', by: '', error: '', from: '', to: '' },   // 任务筛选
   drawer: null,                // 打开的任务详情 {id, task}
+  drafts: {},                  // taskId → {note, checked}：抽屉核对草稿（P0.3），重绘回填、登出清空
+  busy: new Set(),             // 进行中操作键（P0.5）：'cancel:<id>' 等，防重建窗口重复提交
+  layerGen: 0,                 // 层世代（D3）：开/关层递增，延迟回调执行前校验，不符即放弃
   C: freshControl(),           // 运维控制页状态
   tokens: [],                  // 访问令牌列表
+  tokensLoading: false,        // 设置页令牌列表加载态（D2：局部更新，不触表单）
+  tokensError: '',             // 令牌列表加载失败信息（空=正常）
+  acctLoading: false,          // 账户信息加载态
+  acctError: '',               // 账户信息加载失败信息
   newToken: null,              // 刚创建的令牌明文（仅展示一次）
   groups: [],                  // 群聊列表（GROUP-RFC 六）
   groupMsgCounts: {},          // group_id → 消息数（列表端点不返回，进群聊页时补拉计数）
@@ -143,18 +153,25 @@ function newIdem() {
 }
 
 /* ---------- API 访问 ---------- */
-/* 返回 {code, data}；网络层失败抛 {network:true}（结果未知），401 抛前先跳登录。 */
+/* 返回 {code, data}；网络层失败抛 {network:true}（结果未知），401 抛前先跳登录。
+ * opt.timeoutMs：AbortController 超时（D1 数据面 12s），到点中止在途请求——
+ * 挂起的接口不再无限占用，调用方据此把该资源标陈旧。 */
 async function api(method, path, body, opt = {}) {
   let resp;
+  const ctrl = opt.timeoutMs ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), opt.timeoutMs) : null;
   try {
     resp = await fetch(path, {
       method,
       headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
       body: body !== undefined ? JSON.stringify(body) : undefined,
       credentials: 'same-origin',
+      signal: ctrl ? ctrl.signal : undefined,
     });
   } catch (e) {
-    throw { network: true, cause: e };
+    throw { network: true, cause: e, aborted: !!(ctrl && ctrl.signal.aborted) };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
   const data = await resp.json().catch(() => null);
   if (resp.status === 401 && !opt.isLogin) {
@@ -170,28 +187,90 @@ function errLine(data) {
 function sessionExpired() {
   if (!S.authed) { S.authed = false; route(); return; }
   S.authed = false; S.loaded = false; S.drawer = null; S.C = freshControl(); S.groupView = null;
+  S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
   render();
   location.hash = '#/login';
   toast('登录会话已失效 · 请重新登录');
 }
 
-/* ---------- 数据加载与轮询（页面可见时 5s） ---------- */
+/* ---------- 数据加载与轮询（页面可见时 5s） ----------
+ * D1 并发纪律：三接口由 Promise.all 聚合发起，但提交路径按资源拆分——
+ * ① 每资源独立 seq，响应返回时仅当序号仍当前才提交（旧响应晚到不回滚新数据，
+ *    成功与失败路径同样校验，防旧失败把新成功标陈旧）；
+ * ② 结构校验：非 200 或关键字段（nodes/tasks/directory 数组）缺失不提交；
+ * ③ 部分成功：单资源失败保留旧快照并把该资源标「（陈旧）」，不 reject 其他资源；
+ * ④ 12s AbortController 超时（api 的 timeoutMs），挂起接口到点中止并标陈旧；
+ * ⑤ changed 按资源指纹计算，覆盖全部实际展示字段；任一资源有变才整页重绘，
+ *    无变只更新顶栏新鲜度小字（独立 DOM 更新，不经 render()）。
+ * 后端 ListNodes/ListDirectory 按 Go map 遍历序返回（每次调用都不同），先归一化
+ * 再存状态：渲染位置稳定（sortNodesStable 注释），指纹只反映真实数据变化。 */
+const DATA_TIMEOUT_MS = 12000;
+async function loadResource(name, path, validate) {
+  const seq = ++S.seq[name];
+  let r = null;
+  try {
+    r = await api('GET', path, undefined, { timeoutMs: DATA_TIMEOUT_MS });
+  } catch (e) {
+    if (seq !== S.seq[name]) return null;   // 旧请求的超时/失败：不得污染新请求的新鲜度
+    S.fresh[name] = { ok: false, at: S.fresh[name]?.at || 0 };
+    updateFreshness();
+    return null;
+  }
+  if (seq !== S.seq[name]) return null;     // 旧响应晚到：整体丢弃（不提交、不动新鲜度）
+  const value = r.code === 200 ? validate(r.data) : null;
+  if (value === null) {                     // 非 200 / 缺字段：不提交，保留旧快照并标陈旧
+    S.fresh[name] = { ok: false, at: S.fresh[name]?.at || 0 };
+    updateFreshness();
+    return null;
+  }
+  S.fresh[name] = { ok: true, at: Date.now() };
+  return value;
+}
 async function loadAll() {
-  const [n, t, d] = await Promise.all([
-    api('GET', '/api/v1/nodes'),
-    api('GET', '/api/v1/tasks'),
-    api('GET', '/api/v1/directory'),
+  const [nodes, tasks, directory] = await Promise.all([
+    loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
+    loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
+    loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
   ]);
-  /* 后端 ListNodes/ListDirectory 按 Go map 遍历序返回（每次调用都不同），先归一化
-   * 再存状态：① 渲染位置稳定（sortNodesStable 注释）；② snap 只反映真实数据变化，
-   * 否则顺序抖动会让 changed 永真、每 5s 无谓整页重绘（闪烁观感同源）。 */
-  const nodes = sortNodesStable(n.data?.nodes || []);
-  const tasks = (t.data?.tasks || []).slice().sort(byCreatedDesc);
-  const directory = sortDirectoryStable(d.data?.directory || []);
-  const snap = JSON.stringify([nodes, tasks, directory]);
-  const changed = snap !== S.snap;
-  S.nodes = nodes; S.tasks = tasks; S.directory = directory; S.snap = snap;
+  let changed = false;
+  const commit = (name, value) => {
+    if (value === null) return;
+    const fp = JSON.stringify(value);
+    if (fp === S.resSnap[name]) return;     // 该资源无变化：不触发重绘
+    S.resSnap[name] = fp;
+    if (name === 'nodes') S.nodes = value;
+    else if (name === 'tasks') S.tasks = value;
+    else S.directory = value;
+    changed = true;
+  };
+  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory);
+  updateFreshness();
   return changed;
+}
+/* ensureFreshnessEl 顶栏新鲜度小字（D1）：挂载在 index.html 顶栏 .top-right 内，
+ * 独立于 render() 的 DOM 更新通道——render 只重建 #app，顶栏元素常驻不重建。 */
+function ensureFreshnessEl() {
+  if (document.getElementById('freshness')) return;
+  const right = document.querySelector('.topbar .top-right');
+  if (!right) return;
+  const sp = document.createElement('span');
+  sp.id = 'freshness';
+  sp.className = 'muted small';
+  sp.hidden = true;
+  right.prepend(sp);
+}
+/* updateFreshness 顶栏小字唯一写入点：时间取最陈旧资源的最近成功时刻（D1：
+ * 顶栏显示最陈旧资源的状态），任一资源失败/超时追加「（陈旧）」；首屏尚无
+ * 完整成功数据时不显示。 */
+function updateFreshness() {
+  const el = document.getElementById('freshness');
+  if (!el) return;
+  const vals = Object.values(S.fresh);
+  if (!S.authed || vals.length < 3 || vals.some(f => !f || !f.at)) { el.hidden = true; return; }
+  const t = new Date(Math.min(...vals.map(f => f.at)));
+  const hh = String(t.getHours()).padStart(2, '0'), mm = String(t.getMinutes()).padStart(2, '0');
+  el.textContent = `数据更新于 ${hh}:${mm}` + (vals.some(f => !f.ok) ? '（陈旧）' : '');
+  el.hidden = false;
 }
 function byCreatedDesc(a, b) {
   const x = a.created_at || '', y = b.created_at || '';
@@ -237,6 +316,8 @@ async function loadGroups() {
 }
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
+  if (S.pollBusy) return;   // single-flight（D1）：上轮在途跳过本轮，避免请求堆积
+  S.pollBusy = true;
   try {
     let changed = await loadAll();
     if (S.C.view === 'result' && S.C.batch) {
@@ -248,9 +329,11 @@ async function pollTick() {
     if (changed) {
       if (S.page === 'control' && S.C.view === 'form') return;
       if (S.page === 'groups' && S.groupId) return;   // 群详情由 3s 增量追加维护，整页重绘会清空发言输入与滚动位置
+      if (S.page === 'tokens') return;   // 设置页豁免整页重绘（D2/FE-05）：数据已按资源静默提交，进任务页即见
       render();
     }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
+  finally { S.pollBusy = false; }
 }
 
 /* ---------- 路由（hash SPA） ---------- */
@@ -263,7 +346,7 @@ function route() {
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
   S.groupId = S.page === 'groups' && arg ? arg : '';
   render();
-  if (S.authed && S.page === 'tokens') loadTokens().then(() => { if (S.page === 'tokens') render(); });
+  if (S.authed && S.page === 'tokens') loadTokens();   // D2：完成后只局部更新两个子树，不整页重绘（表单保护）
   if (S.authed && S.page === 'groups') {
     loadGroups().then(() => { if (S.page === 'groups') { render(); if (S.groupId) scrollMsgToBottom(); } });
     if (S.groupId) enterGroupView();
@@ -286,8 +369,8 @@ function render() {
       loginPageRendered = 'loading';
       loadAccountStatus().then(init => { loginPageRendered = init; render(); });
     }
+    closeLayer();   // 登录/登出渲染统一走层生命周期（D3）：generation++ 废弃在途回调 + 释放 inert
     app.innerHTML = loginPage(loginPageRendered === true);
-    $('#layer').innerHTML = '';
     return;
   }
   app.innerHTML = shell(PAGES[S.page]());
@@ -296,6 +379,8 @@ function render() {
 function renderChrome() {
   $('#logout').hidden = !S.authed;
   $('#session-left').textContent = S.authed ? '会话剩余 ' + humanLeft() : '';
+  const fr = document.getElementById('freshness');
+  if (fr) fr.hidden = !S.authed;   // 新鲜度小字只在登录态显示；文本由 updateFreshness 独立维护
 }
 function humanLeft() {
   if (!S.expAt) return '有效（24h 内）';   // reload 后登录时刻未知；服务端 401 为权威兜底
@@ -320,15 +405,28 @@ function button(label, act, cls = '', extra = '') { return `<button data-act="${
 function head(title, desc, action = '') {
   return `<div class="page-head"><div><h1>${title}</h1><p class="muted">${desc}</p></div><div class="actions">${action}</div></div>`;
 }
-function metric(label, value, desc, cls = '', attrs = '') { return `<div class="card${cls ? ' ' + cls : ''}"${attrs ? ` ${attrs} style="cursor:pointer"` : ''}><small>${label}</small><div class="metric">${value}</div><small>${desc}</small></div>`; }
+/* metric 统计格（P1 B.1 统一面板）：渲染为 .panel>.stat-grid 内的 .stat 格子——
+ * 带 attrs（data-act 下钻）即为可点格（button，键盘可达），无 attrs 为纯展示格。
+ * .metric 类保留在数字元素上（E2E E03 断言 .metric ≥3）；cls 现作用于数字
+ * （heat=「等待核对」nr>0 时数字着 heat 色，替代旧 review-card 橙左竖条）。 */
+function metric(label, value, desc, cls = '', attrs = '') {
+  const inner = `<small>${label}</small><div class="metric${cls ? ' ' + cls : ''}">${value}</div><small>${desc}</small>`;
+  return attrs
+    ? `<button type="button" class="stat"${attrs}>${inner}</button>`
+    : `<div class="stat">${inner}</div>`;
+}
 function badge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(STATES[s] || GROUP_STATES[s] || s)}</span>`; }
 function onlineB(n) { return `<span class="badge ${n.online ? 'online' : 'offline'}">${n.online ? '在线' : '离线'}</span>`; }
 function warnNotice(title, body) { return `<div class="notice warn"><b>${title}</b><br>${body}</div>`; }
 const fmtTime = s => (s && !String(s).startsWith('0001-01-01')) ? String(s).replace('T', ' ').slice(0, 16) : '';
 const fmtFull = s => s ? String(s).replace('T', ' ').slice(0, 19) + ' UTC' : '';
+/* toast（P1 B.6）：顶部玻璃胶囊，.show 类切换进出（hidden 属性 + display:none
+ * 会杀死 CSS 过渡）；3400ms 自动消失，#toast id 与单实例复用（clearTimeout）保留。
+ * index.html 中 #toast 不再带 hidden——无 .show 时 opacity:0 + pointer-events:none。 */
 function toast(msg) {
-  const t = $('#toast'); t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.hidden = true; }, 3400);
+  const t = $('#toast'); t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.classList.remove('show'); }, 3400);
 }
 function terminal(st) { return ['completed', 'failed', 'needs_review', 'cancelled'].includes(st); }
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
@@ -452,12 +550,12 @@ function overviewPage() {
   const drillChips = Object.keys(STATES).map(s =>
     `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link">${badge(s)} ${c[s] || 0} →</button>`).join('');
   return head('总览', `${online} / ${S.nodes.length} 台节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
-    + `<div class="grid cols4">
+    + `<section class="panel"><div class="stat-grid">
     ${metric('全网任务', S.tasks.length, '查看全部 →', '', 'data-act="go" data-page="tasks"')}
     ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
     ${metric('已完成', c.completed || 0, c.completed ? '查看已完成 →' : '暂无完成任务', '', `data-act="go" data-page="tasks" data-status="completed"`)}
-    ${metric('等待核对', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'review-card' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
-    </div>`
+    ${metric('等待核对', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'heat' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
+    </div></section>`
     + `<div class="grid cols2 spaced">
     <section class="card"><div class="row"><h2>中心端状态</h2><span class="badge online">在线</span></div>
       <div class="stack">
@@ -468,7 +566,7 @@ function overviewPage() {
       <small class="muted">中心端负责登记与监管；所有任务都在各节点本机执行。</small>
     </section>
     <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
-      ${nr ? `<div class="notice purple"><b>${nr} 条执行结果不确定</b><p>执行中断等待人工核对，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
+      ${nr ? `<div class="notice warn"><b>${nr} 条执行结果不确定</b><p>执行中断等待人工核对，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
     : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务监管」页下钻原因。</div>`}
       ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务会暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看节点 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
@@ -489,7 +587,7 @@ function nodesPage() {
       return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(d => {
       const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
       return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
-    }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('吊销', 'revoke', 'danger', `data-node="${esc(n.node_id)}"`)}</td></tr>`;
+    }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台节点（只读说明）"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
     : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
@@ -540,7 +638,7 @@ function enrollGo(step) {
   if (!ENROLL) return;
   if (ENROLL.timer && step !== 4) enrollStopWait();
   ENROLL.step = step;
-  openLayerPlain(enrollHtml());
+  openLayerPlain(enrollHtml(), false, true);   // 层已开只换 .modal 内容（D3 replace 路径，FE-15 节点恒定），不整层重开；关闭仍走 closeLayer 完整生命周期
   if (step === 1) enrollValidateId();
 }
 function enrollStopWait() {
@@ -788,7 +886,7 @@ async function enrollBundleDownload() {
       ENROLL.bundleDone = { mode, os, arch };
       clearTimeout(slowTip);
       enrollBundleBusy = false;
-      if (ENROLL.step === 3 && modalOpen) openLayerPlain(enrollHtml());   // 展示「接下来」三行
+      if (ENROLL.step === 3 && modalOpen) openLayerPlain(enrollHtml(), false, true);   // 展示「接下来」三行
       toast('部署包已下载 —— 拷到目标机器解压，按「接下来」三步安装');
       return;
     }
@@ -877,6 +975,9 @@ function tasksPage() {
   const counts = stateCounts();
   const filtered = !!(S.f.status || S.f.trace || S.f.by || S.f.error || S.f.from || S.f.to);
   const submitters = [...new Set(S.tasks.map(t => t.submitted_by).filter(Boolean))].sort();
+  /* 高级筛选折叠态（P1 B.7）：默认收起；任一高级条件（提交方/失败原因/时间范围）
+   * 生效期间保持展开——重绘式筛选不会把生效中的条件藏起来。 */
+  const advOpen = !!(S.f.by || S.f.error || S.f.from || S.f.to);
   return head('任务监管', '全网任务只读监管；从异常下钻，以证据核对交付。', button('↓ 导出 JSON（当前筛选）', 'export'))
     + `<section class="card">
     <div class="filters">${[''].concat(Object.keys(STATES)).map(s => s
@@ -884,11 +985,15 @@ function tasksPage() {
     : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('')}</div>
     <div class="fields">
       <label>搜索任务 ID<input id="f-trace" data-f="trace" value="${esc(S.f.trace)}" placeholder="输入任务 ID 或追踪号"></label>
+    </div>
+    <details class="adv-filter" ${advOpen ? 'open' : ''}><summary>高级筛选</summary>
+    <div class="fields">
       <label>提交方<select data-f="by"><option value="">全部提交方</option>${submitters.map(u => `<option ${S.f.by === u ? 'selected' : ''}>${esc(u)}</option>`).join('')}</select></label>
       <label>失败原因<select data-f="error"><option value="">全部</option>${Object.entries(ERRORS).map(([k, v]) => `<option value="${k}" title="${esc(v)}" ${S.f.error === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
       <label>提交时间 · 从（UTC）<input type="datetime-local" data-f="from" value="${esc(S.f.from)}"></label>
       <label>提交时间 · 至（UTC）<input type="datetime-local" data-f="to" value="${esc(S.f.to)}"></label>
     </div>
+    </details>
     ${list.length ? taskTable(list) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}</div>`}
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 已完成的任务保留 24 小时，重要结果请及时导出。</p></section>`;
 }
@@ -926,21 +1031,146 @@ function openTask(id) {
   S.drawer = { id, task: t };
   syncDrawer(true);
 }
+/* ---------- 层生命周期状态机（D3 + P2 动效） ----------
+ * 状态：closed → open → closing → closed（P2 起关闭带 260/280ms 出场动画）。
+ * 规约：
+ * · 唯一世代号 S.layerGen：打开新层 / 关闭层都递增；任何延迟回调（.open 入场、
+ *   DOM 清理、焦点返回）执行前校验 gen，不符即放弃——旧关闭流程不得碰新层。
+ * · 向导步进等「同一逻辑层换内容」走 openLayerPlain(…, true)（replace）：只换
+ *   .modal 子内容（FE-15 节点恒定），不改 gen；pane 200ms 轻动效进场。
+ * · 入场动画（playLayerOpen）：先渲染并强制一次样式计算，下一帧 rAF 加 .open——
+ *   过渡由「已计算的初始态 → open 态」触发；gen 校验防迟到帧误开已关闭的层。
+ * · syncDrawer 无 drawer 时不碰层（清层只经 closeLayer）；抽屉已开时属受控子树
+ *   更新：只换 .drawer 子节点，overlay/.open 类不动——轮询重绘不重放入场动画。
+ * · 关闭（closeLayer）：进入 closing 即加 .closing 类（指针隔离 + 出场动画），
+ *   280ms 后 gen 校验通过才清 #layer（modal 出场 260ms / drawer 出场 280ms）。
+ * · 背景隔离（D4）：inert 作用于 #app + 顶栏（背景全部操作区），层自身不加；
+ *   释放时机=关闭开始，保证关闭动画期背景可点（FE-14）。
+ * · 层内标题统一 modalHead 输出 id="layer-title"，对话框 aria-labelledby 指向它。 */
+let modalOpen = false;
+let layerState = 'closed';   // 'closed' | 'open' | 'closing'
+let layerCtx = null;         // {gen, trigger}：当前层世代与打开时的触发元素（关闭焦点返回用）
+const LAYER_CLEAR_MS = 280;  // 关闭动画收尾时延：不早于 drawer 出场 280ms（modal 260ms）
+function applyInert(on) {
+  for (const el of [document.getElementById('app'), document.querySelector('.topbar')]) {
+    if (!el) continue;
+    if (on) el.setAttribute('inert', ''); else el.removeAttribute('inert');
+  }
+}
+function layerOpenBegin() {
+  S.layerGen++;
+  layerState = 'open';
+  const a = document.activeElement;
+  layerCtx = { gen: S.layerGen, trigger: a && a !== document.body ? a : null };
+}
+/* playLayerOpen 入场（P2 A）：层内容已渲染 → 强制一次布局（提交初始态样式）→
+ * 下一帧加 .open 触发过渡。gen/状态双校验：关闭或换层后迟到的帧不得点亮旧层。 */
+function playLayerOpen(layer) {
+  const gen = S.layerGen;
+  void layer.offsetWidth;
+  requestAnimationFrame(() => {
+    if (gen !== S.layerGen || layerState !== 'open') return;
+    layer.querySelector('.overlay')?.classList.add('open');
+  });
+}
+/* layerFocusables 层内可聚焦元素（Tab 陷阱用）：排除禁用/隐藏/折叠（details 未展开
+ * 内容 offsetParent 为 null）与 tabindex=-1 的层容器自身。 */
+function layerFocusables() {
+  const layer = $('#layer');
+  if (!layer) return [];
+  return [...layer.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+    .filter(el => el.offsetParent !== null);
+}
+/* restoreLayerFocus 关闭焦点返回（FE-10）：触发元素仍连在文档上则回它；
+ * 失存（轮询重建使行消失等）回落侧栏当前页签按钮。 */
+function restoreLayerFocus() {
+  const t = layerCtx?.trigger;
+  if (t && t.isConnected) { t.focus(); return; }
+  const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+  if (tab) tab.focus();
+}
+/* openLayerPlain：普通弹层（吊销说明/向导/确认等，非任务抽屉，不参与轮询同步）。
+ * slim=true 为确认类小弹层（取消任务/关群/撤销 token 等）：窄版居中、按钮右对齐。
+ * replace=true 且层已开：同一逻辑层换内容（向导步进/方式切卡）——只换 .modal 子
+ * 内容（同一 DOM 节点，FE-15），200ms 轻动效进场，世代不变（D3）；层未开或层内
+ * 无 .modal 时回落完整打开路径。 */
+function openLayerPlain(content, slim, replace = false) {
+  modalOpen = true;
+  if (replace && layerState === 'open') {
+    const modal = $('#layer .modal');
+    if (modal) { swapModalContent(modal, content); return; }
+  }
+  layerOpenBegin();
+  applyInert(true);
+  const layer = $('#layer');
+  layer.innerHTML = `<div class="overlay" data-backdrop="true"><section class="modal${slim ? ' slim' : ''}" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${content}</section></div>`;
+  $('#layer [role=dialog]')?.focus();
+  playLayerOpen(layer);
+}
+/* swapModalContent replace 路径（P2 B）：.modal 节点不动，内容包一层 .pane——
+ * 先渲染并强制布局提交初始态（opacity:0 / translateY(4px)），下一帧加 .in 走
+ * 200ms 轻动效进场。焦点语义与整层打开一致：移入层容器（tabindex=-1）。 */
+function swapModalContent(modal, content) {
+  modal.innerHTML = `<div class="pane">${content}</div>`;
+  const pane = modal.firstElementChild;
+  void modal.offsetWidth;
+  requestAnimationFrame(() => { if (pane?.isConnected) pane.classList.add('in'); });
+  modal.focus();
+}
+/* syncDrawer 任务抽屉同步：openTask / 轮询重绘共用。首次打开（层内无 drawer）
+ * 走 layerOpenBegin 新世代 + playLayerOpen 入场动画并入焦点；抽屉已开时属受控
+ * 子树更新：只换 .drawer 子节点，overlay/section/.open 类原样保留——5s 轮询
+ * 重绘不重放入场动画（P2 硬约束：重渲染卡 0 动画）。同世代重绘不抢焦点——
+ * 输入中（焦点在层内表单控件）整层不重建，核对表单区 DOM 恒定（P0.3）；非输入
+ * 态重建后由草稿回填保值（reviewSection 读 S.drafts）。 */
 function syncDrawer(force = false) {
   const layer = $('#layer');
+  if (!layer) return;
   if (modalOpen) return;               // 普通弹层优先：不被轮询/页面重绘冲掉
-  if (!S.drawer) { layer.innerHTML = ''; return; }
+  if (!S.drawer) return;               // 无 drawer 不碰层（D3）：清层只经 closeLayer 生命周期
   const t = S.tasks.find(x => x.id === S.drawer.id);
   if (t) S.drawer.task = t;
   const a = document.activeElement;
   const typing = !force && a && layer.contains(a) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName);
-  if (!layer.innerHTML || !typing) {
-    layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-label="任务详情" tabindex="-1">${drawerHtml(S.drawer.task)}</section></div>`;
+  const present = layerState === 'open' && !!layer.querySelector('.drawer');
+  if (present && typing) return;
+  applyInert(true);
+  if (present) {
+    const dr = layer.querySelector('.drawer');
+    if (dr) dr.innerHTML = drawerHtml(S.drawer.task);   // 新节点首个计算样式即 open 终态，无过渡可放
+    return;
   }
+  layerOpenBegin();
+  layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${drawerHtml(S.drawer.task)}</section></div>`;
+  playLayerOpen(layer);
+  layer.querySelector('.drawer')?.focus();   // 焦点入层仅首次打开（P0.6）
 }
-function closeLayer() { S.drawer = null; modalOpen = false; enrollStopWait(); $('#layer').innerHTML = ''; }
+/* closeLayer 关闭入口（全入口统一走这里：Esc/遮罩/关闭按钮/go 导航/登出/会话失效）。
+ * 世代先递增（在途层回调一律作废），随后进入 closing：加 .closing 类（出场动画 +
+ * pointer-events:none，FE-14 点击隔离）、释放 inert（关闭开始即释放）、可选焦点
+ * 返回（用户发起的关闭）；DOM 清理走 gen 校验保护的延迟回调（280ms，覆盖 drawer
+ * 出场 280ms / modal 出场 260ms）。期间重开新层则本回调 gen 不符自动放弃（FE-11）。 */
+function closeLayer(restoreFocus = false) {
+  enrollStopWait();
+  S.drawer = null;
+  modalOpen = false;
+  S.layerGen++;
+  if (layerState === 'closed') { layerCtx = null; return; }
+  layerState = 'closing';
+  applyInert(false);
+  $('#layer .overlay')?.classList.add('closing');
+  if (restoreFocus) restoreLayerFocus();
+  const gen = S.layerGen;
+  setTimeout(() => {
+    if (gen !== S.layerGen || layerState !== 'closing') return;   // 期间已开新层：不得清掉新层（FE-11）
+    const l = $('#layer');
+    if (l) l.innerHTML = '';
+    layerState = 'closed';
+    layerCtx = null;
+  }, LAYER_CLEAR_MS);
+}
 function modalHead(title) {
-  return `<div class="row"><h2>${title}</h2>${button('×', 'close', 'close', 'aria-label="关闭弹层"')}</div>`;
+  return `<div class="row"><h2 id="layer-title">${title}</h2>${button('×', 'close', 'close', 'aria-label="关闭弹层"')}</div>`;
 }
 function drawerHtml(t) {
   const needs = t.status === 'needs_review';
@@ -952,7 +1182,7 @@ function drawerHtml(t) {
     : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
     : '任务仍在进行，列表每 5 秒自动刷新。';
   return `${modalHead('任务详情 · ' + esc(t.id))}
-  <p class="${needs ? 'notice purple' : 'notice'}">${intro}</p>
+  <p class="${needs ? 'notice warn' : 'notice'}">${intro}</p>
   <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)}</h2></div>
   <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
   <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 幂等键 <code>' + esc(t.idem) + '</code>' : ''}</p>
@@ -967,7 +1197,7 @@ function drawerHtml(t) {
   ${artifactsHtml(t)}
   <p class="footer-note">产物经中心端中继从执行节点取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
   <h3 class="spaced">时间线</h3>
-  <ol class="timeline">${timeline(t).map(([e, time]) => `<li>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
+  <ol class="timeline">${timeline(t).map(([e, time, hl]) => `<li${hl ? ' class="hl"' : ''}>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
   ${reviewSection(t)}
   ${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
   <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`;
@@ -978,16 +1208,16 @@ function artifactsHtml(t) {
   return arts.map((a, i) => `<div class="artifact row"><div><b>${esc(a.path)}</b><br><small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…</small></div>${button('取回', 'artifact', '', `data-id="${esc(t.id)}" data-index="${i}"`)}</div>`).join('');
 }
 function timeline(t) {
-  const ev = [['任务已受理', fmtFull(t.created_at)]];
+  const ev = [['任务已受理', fmtFull(t.created_at), false]];
   // Go time.Time 零值序列化为 0001-01-01T00:00:00Z（omitempty 对结构体不生效）：
-  // 仅非零时刻才算有证据。
+  // 仅非零时刻才算有证据。第三位标记 needs_review 终态事件点（timeline 灰点中唯一 heat）。
   const real = s => s && !String(s).startsWith('0001-01-01');
-  if (real(t.result?.started_at)) ev.push(['开始执行', fmtFull(t.result.started_at)]);
+  if (real(t.result?.started_at)) ev.push(['开始执行', fmtFull(t.result.started_at), false]);
   if (terminal(t.status)) {
     const fin = [t.result?.finished_at, t.updated_at].find(real);
-    ev.push([`${STATES[t.status]}`, fmtFull(fin)]);
+    ev.push([`${STATES[t.status]}`, fmtFull(fin), t.status === 'needs_review']);
   }
-  if (t.review) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtFull(t.review.at)]);
+  if (t.review) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtFull(t.review.at), false]);
   return ev;
 }
 function reviewSection(t) {
@@ -997,10 +1227,13 @@ function reviewSection(t) {
     <div class="notice">已核对完成<br>结论：${esc(REVIEW_ACTIONS[t.review.action] || t.review.action)}<br>依据：${esc(t.review.note || '（未填写）')}<br><small>${esc(fmtFull(t.review.at))} · ${esc(t.review.by)}</small></div>
     <div class="actions spaced">${button('下一步：回到待办列表 →', 'go-review-queue', 'link')}</div></section>`;
   }
+  /* 草稿回填（P0.3/FE-07）：input 事件即写 S.drafts，抽屉重绘（轮询刷新、非输入态）
+   * 后 textarea 从草稿恢复，填写内容不因重绘丢失。 */
+  const draft = S.drafts[t.id]?.note || '';
   return `<section class="card spaced"><h3>人工核对</h3>
   <p class="muted">核对只是登记人工结论：任务保持「待人工核对」状态，不会自动重跑，也不会改写执行结果。</p>
   <div class="notice warn"><b>请勿重新提交同一任务：</b>重复提交会在节点上再次执行。</div>
-  <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。"></textarea></label>
+  <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。">${esc(draft)}</textarea></label>
   <div class="actions">
     <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}">确认结果有效</button>
     <button class="warning" data-act="review" data-review-action="mark_failed" data-id="${esc(t.id)}">标记为失败</button>
@@ -1310,19 +1543,60 @@ function policyPage() {
     <p class="footer-note">低负载部署目标 ≤ 5 node；此页数据取自协议常量（SPEC 4.6），非运行时快照。</p></section>`;
 }
 
-/* ---------- 访问令牌（GitHub 式 PAT） ---------- */
+/* ---------- 访问令牌（GitHub 式 PAT） ----------
+ * D2 设置页加载保护：进页即渲染完整表单（可用，不禁用），账户信息与令牌列表两
+ * 个子树先渲染「加载中」占位；loadTokens 完成/失败只 innerHTML 替换这两个容器
+ * （#account-info / #token-list），不触表单——延迟期填写不被清掉（FE-04），
+ * 轮询亦豁免本页整页重绘（pollTick）。失败不再吞：对应子树渲染错误+「重试」
+ * 按钮（data-act="tokens-retry"），重试成功后正常局部更新（FE-06）。 */
 async function loadTokens() {
-  const r = await api('GET', '/api/v1/auth/tokens').catch(() => null);
-  if (r && r.code === 200) S.tokens = r.data.tokens || [];
-  const a = await api('GET', '/api/v1/auth/account').catch(() => null);
-  if (a && a.code === 200) S.account = a.data;
+  S.tokensLoading = true; S.acctLoading = true;
+  paintTokensSubtrees();
+  const settled = await Promise.allSettled([
+    api('GET', '/api/v1/auth/tokens'),
+    api('GET', '/api/v1/auth/account'),
+  ]);
+  const [tr, ar] = settled.map(x => x.status === 'fulfilled' ? x.value : null);
+  if (tr && tr.code === 200) { S.tokens = tr.data.tokens || []; S.tokensError = ''; }
+  else S.tokensError = tr ? errLine(tr.data) : '网络异常 · 未收到服务器应答';
+  if (ar && ar.code === 200) { S.account = ar.data; S.acctError = ''; }
+  else S.acctError = ar ? errLine(ar.data) : '网络异常 · 未收到服务器应答';
+  S.tokensLoading = false; S.acctLoading = false;
+  paintTokensSubtrees();
+}
+/* paintTokensSubtrees 局部更新唯一入口：只碰两个容器，表单区永不重建。
+ * 已切离设置页（容器不存在）时静默丢弃，只留状态供下次进页渲染。 */
+function paintTokensSubtrees() {
+  if (S.page !== 'tokens') return;
+  const info = $('#account-info'), list = $('#token-list');
+  if (!info || !list) return;
+  info.innerHTML = accountInfoHtml();
+  list.innerHTML = tokenListHtml();
+}
+function accountInfoHtml() {
+  if (S.acctLoading) return '<p class="muted">账户信息加载中…</p>';
+  if (S.acctError) return `<div class="notice warn"><b>账户信息加载失败</b><br>${esc(S.acctError)}</div><div class="actions spaced">${button('重试', 'tokens-retry', '')}</div>`;
+  return S.account?.username ? `<p class="muted">当前用户名：<b>${esc(S.account.username)}</b></p>` : '';
+}
+function tokenListHtml() {
+  if (S.tokensLoading) return '<p class="muted">令牌列表加载中…</p>';
+  if (S.tokensError) return `<div class="notice warn"><b>令牌列表加载失败</b><br>${esc(S.tokensError)}</div><div class="actions spaced">${button('重试', 'tokens-retry', '')}</div>`;
+  return `<div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th></th></tr></thead><tbody>
+    ${S.tokens.length ? S.tokens.map(t => `<tr>
+      <td><b>${esc(t.name)}</b></td>
+      <td><code>${esc(t.prefix)}…</code></td>
+      <td><small>${esc(fmtTime(t.created_at))}</small></td>
+      <td><small>${t.last_used_at ? esc(fmtTime(t.last_used_at)) : '从未使用'}</small></td>
+      <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
+      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
+    </tbody></table></div>`;
 }
 function tokensPage() {
   const nt = S.newToken;
-  const acct = S.account || { initialized: S.tokens.length >= 0 };
   return head('设置', '账户信息与访问令牌：日常用密码登录，令牌只给脚本和其他设备用。')
   + `<section class="card"><h2>账户信息</h2>
-    ${S.account?.username ? `<p class="muted">当前用户名：<b>${esc(S.account.username)}</b></p>` : ''}
+    <div id="account-info">${accountInfoHtml()}</div>
     <form id="account-form" class="fields" onsubmit="return false">
       <label>当前密码（验证身份）<input id="acc-cur" type="password" autocomplete="current-password" required></label>
       <label>新用户名（不改则留空）<input id="acc-user" autocomplete="username" placeholder="留空表示不修改"></label>
@@ -1335,33 +1609,28 @@ function tokensPage() {
     <pre id="new-token-plain" style="user-select:all">${esc(nt.token)}</pre>
     <div class="actions">${button('复制令牌', 'copy-token', 'primary')}${button('我已保存，关闭', 'token-done', 'link')}</div>
     <p class="footer-note">名称：${esc(nt.name)} · 前缀：${esc(nt.prefix)}…</p></section>` : '')
-  + `<section class="card"><div class="row"><h2>已创建的令牌</h2></div>
+  + `<section class="card spaced"><div class="row"><h2>已创建的令牌</h2></div>
     <form id="token-form" class="fields">
       <label>用途名称（必填）<input id="token-name" placeholder="例如：运维台电脑 · 只读巡检" required maxlength="64"></label>
       <div class="actions" style="align-self:end"><button class="primary" type="submit">生成新令牌</button></div>
     </form>
-    <div class="table-wrap spaced"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th></th></tr></thead><tbody>
-    ${S.tokens.length ? S.tokens.map(t => `<tr>
-      <td><b>${esc(t.name)}</b></td>
-      <td><code>${esc(t.prefix)}…</code></td>
-      <td><small>${esc(fmtTime(t.created_at))}</small></td>
-      <td><small>${t.last_used_at ? esc(fmtTime(t.last_used_at)) : '从未使用'}</small></td>
-      <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
-      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
-    </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
-    </tbody></table></div>
+    <div id="token-list" class="spaced">${tokenListHtml()}</div>
     <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
 }
 async function submitToken(form) {
   const name = $('#token-name')?.value.trim();
   if (!name) { toast('请先填写令牌用途名称'); return; }
-  const r = await api('POST', '/api/v1/auth/tokens', { name }).catch(() => null);
-  if (r && r.code === 201) {
-    S.newToken = r.data;
-    await loadTokens();
-    render();
-    toast('令牌已生成 · 请立即保存明文');
-  } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
+  if (S.busy.has('token-create')) return;
+  S.busy.add('token-create');
+  try {
+    const r = await api('POST', '/api/v1/auth/tokens', { name }).catch(() => null);
+    if (r && r.code === 201) {
+      S.newToken = r.data;
+      await loadTokens();
+      render();
+      toast('令牌已生成 · 请立即保存明文');
+    } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
+  } finally { S.busy.delete('token-create'); }
 }
 
 /* ---------- 群聊（GROUP-RFC 六 MVP）：列表 + 详情时间线 ---------- */
@@ -1428,8 +1697,9 @@ function groupDetailPage() {
     <p class="muted">协作目标：${esc(g.goal)}</p>
     <div id="group-budget-slot"></div>
     ${isBudgetExhausted(g, msgs) ? budgetBanner : ''}
-    <div id="group-msgwrap" class="msgwrap"><ol id="group-msgline" class="msgline">${msgs.map(groupMsgHtml).join('')}</ol>
+    <div class="msgbox"><div id="group-msgwrap" class="msgwrap"><ol id="group-msgline" class="msgline">${msgs.map(groupMsgHtml).join('')}</ol>
     ${msgs.length ? '' : '<p id="group-msghint" class="muted">还没有发言：写下第一条消息，或等待成员智能体响应。</p>'}</div>
+    <button id="group-newmsg" class="newmsg-pill" data-act="group-jump-new" hidden></button></div>
     ${concluded
     ? `<div class="notice spaced">本群已结束（${esc(g.closed_by || 'admin')} 于 ${esc(fmtFull(g.closed_at || ''))} 关闭）：时间线只读，不能再发言。</div>
        <div class="sayline spaced"><textarea rows="2" disabled placeholder="群已结束，不能再发言"></textarea><button class="primary" disabled>发送</button></div>`
@@ -1442,12 +1712,13 @@ function groupDetailPage() {
 async function enterGroupView() {
   const id = S.groupId;
   if (!id) return;
-  if (!S.groupView || S.groupView.id !== id) S.groupView = { id, lastSeq: 0, msgs: [] };
+  if (!S.groupView || S.groupView.id !== id) S.groupView = { id, lastSeq: 0, msgs: [], unread: 0 };   // unread=回看期间未读新消息数（滚动跟随用）
   await pullGroupMessages();
 }
 /* pullGroupMessages 增量拉取：GET messages?since=lastSeq，只追加新消息到
  * 时间线尾部（不重绘整页，与任务页的重绘式刷新不同）；按 data-seq 去重，
- * 全量重绘与增量追加两条路径并发到达也不会画重。 */
+ * 全量重绘与增量追加两条路径并发到达也不会画重。追加前采样「是否接近底部」：
+ * 接近则跟随滚动并清零未读，否则不打断、累加未读并点亮浮标。 */
 async function pullGroupMessages() {
   const G = S.groupView;
   if (!G || G.id !== S.groupId) return;
@@ -1460,17 +1731,38 @@ async function pullGroupMessages() {
   if ((S.groupMsgCounts[G.id] || 0) < G.lastSeq) S.groupMsgCounts[G.id] = G.lastSeq;
   const line = $('#group-msgline');
   if (line && G.id === S.groupId) {   // 页面仍是本群才动 DOM；已切走只留缓存
+    const wrap = $('#group-msgwrap');
+    const near = wrap ? msgNearBottom(wrap) : true;
     $('#group-msghint')?.remove();
+    let added = 0;
     for (const m of fresh) {
-      if (!line.querySelector(`[data-seq="${m.seq}"]`)) line.insertAdjacentHTML('beforeend', groupMsgHtml(m));
+      if (!line.querySelector(`[data-seq="${m.seq}"]`)) { line.insertAdjacentHTML('beforeend', groupMsgHtml(m)); added++; }
     }
-    scrollMsgToBottom();
+    if (wrap) {
+      if (near) { wrap.scrollTop = wrap.scrollHeight; G.unread = 0; setNewMsgPill(0); }
+      else if (added) { G.unread = (G.unread || 0) + added; setNewMsgPill(G.unread); }
+    }
     syncBudgetBanner(false);
   }
 }
+/* 群消息滚动跟随（P1）：视口接近底部（<80px）才跟随新消息；用户上滑回看时不
+ * 打断阅读位置，改为浮出「有 N 条新消息」胶囊（#group-newmsg），点击回底部。
+ * 接近判定必须在追加前采样——追加后再判会被新内容撑离底部造成误判。 */
+const GROUP_FOLLOW_PX = 80;
+function msgNearBottom(w) { return w.scrollHeight - w.scrollTop - w.clientHeight < GROUP_FOLLOW_PX; }
+function setNewMsgPill(n) {
+  const pill = $('#group-newmsg');
+  if (!pill) return;
+  if (n > 0) { pill.textContent = `有 ${n} 条新消息 ↓`; pill.hidden = false; }
+  else pill.hidden = true;
+}
 function scrollMsgToBottom() {
   const w = $('#group-msgwrap');
-  if (w) w.scrollTop = w.scrollHeight;
+  if (!w) return;
+  w.scrollTop = w.scrollHeight;
+  const G = S.groupView;
+  if (G) G.unread = 0;   // 主动回底部即视为已读（进群/点浮标都走这里）
+  setNewMsgPill(0);
 }
 /* syncBudgetBanner 预算黄条：常规按本地消息计数判定；服务端 409 budget_exhausted
  * 时 force 直出（他端代理消息尚未增量到位也立即提示）。 */
@@ -1551,7 +1843,7 @@ const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
   fchip: b => { S.f.status = b.dataset.fchip || ''; render(); },
   'clear-filters': () => { S.f = { status: '', trace: '', by: '', error: '', from: '', to: '' }; render(); toast('已清除筛选'); },
-  close: () => closeLayer(),
+  close: () => closeLayer(true),   // 用户发起的关闭：焦点返回触发元素（FE-10）
   detail: b => { closeLayer(); openTask(b.dataset.id); },
   'go-tasks': () => go('tasks'),
   'go-review-queue': () => go('tasks', 'needs_review'),
@@ -1572,13 +1864,13 @@ const ACT = {
     const m = ENROLL_MODES.some(([k]) => k === b.dataset.mode) ? b.dataset.mode : 'bundle';
     if (ENROLL.mode === m) return;
     ENROLL.mode = m;
-    openLayerPlain(enrollHtml());
+    openLayerPlain(enrollHtml(), false, true);
   },
   'enroll-plat': b => {
     if (enrollBundleBusy) { toast('正在生成部署包，请稍候…'); return; }
     if (!ENROLL) return;
     ENROLL.plat = b.dataset.plat || 'linux-amd64';
-    openLayerPlain(enrollHtml());
+    openLayerPlain(enrollHtml(), false, true);
   },
   'enroll-bundle-dl': () => enrollBundleDownload(),
   /* 手动折叠区内的系统 tab：只局部更新启动命令，整层重绘会把 <details> 合上 */
@@ -1597,24 +1889,38 @@ const ACT = {
   'enroll-copy-node': () => copyText(ENROLL ? enrollNodeYaml() : '', 'node.yaml'),
   'enroll-later': () => { closeLayer(); toast('已关闭 · 节点上线后可在节点列表查看'); },
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
+  'tokens-retry': () => loadTokens(),   // 设置页加载失败重试（D2/FE-06）：只局部更新两个子树
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
   'switch-login': () => { loginMode = loginMode === 'password' ? 'token' : 'password'; loginPageRendered = null; route(); },
   'account-update': async () => {
     const cur = $('#acc-cur')?.value || '', nu = $('#acc-user')?.value.trim() || '', np = $('#acc-new')?.value || '';
     if (!cur) { toast('请先输入当前密码'); return; }
     if (!nu && !np) { toast('请填写新用户名或新密码'); return; }
-    const r = await api('POST', '/api/v1/auth/account/update', { current_password: cur, new_username: nu || undefined, new_password: np || undefined }).catch(() => null);
-    if (r && r.code === 200) {
-      S.account = r.data.account;
-      render(); toast('账户信息已更新');
-    } else toast('更新失败：' + (r ? errLine(r.data) : '网络异常'));
+    if (S.busy.has('account-update')) return;
+    S.busy.add('account-update');
+    try {
+      const r = await api('POST', '/api/v1/auth/account/update', { current_password: cur, new_username: nu || undefined, new_password: np || undefined }).catch(() => null);
+      if (r && r.code === 200) {
+        S.account = r.data.account;
+        render(); toast('账户信息已更新');
+      } else toast('更新失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally { S.busy.delete('account-update'); }
   },
   'token-revoke': b => openLayerPlain(`${modalHead('撤销令牌 · ' + esc(b.dataset.name))}<div class="notice warn">撤销后使用此令牌的脚本或设备将立即失去访问权限（不可恢复）。可随时创建新令牌替代。</div><div class="actions spaced">${button('确认撤销', 'token-revoke-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`, true),
   'token-revoke-confirm': async b => {
-    const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
-    if (r && r.code === 200) {
-      await loadTokens(); closeLayer(); render(); toast('令牌已撤销');
-    } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
+    const key = 'token-revoke:' + b.dataset.id;
+    if (S.busy.has(key)) return;   // 忙态键在状态层：重绘重建按钮也拦得住（P0.5）
+    S.busy.add(key);
+    b.disabled = true; b.textContent = '撤销中…';
+    try {
+      const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
+      if (r && r.code === 200) {
+        await loadTokens(); closeLayer(); render(); toast('令牌已撤销');
+      } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally {
+      S.busy.delete(key);
+      b.disabled = false; b.textContent = '确认撤销';
+    }
   },
   /* ---------- 群聊动作（GROUP-RFC 六） ---------- */
   'go-groups': () => go('groups'),
@@ -1623,22 +1929,27 @@ const ACT = {
   'group-create': async () => {
     const goal = $('#group-goal')?.value.trim() || '';
     if (!goal) { toast('请先填写协作目标'); $('#group-goal')?.focus(); return; }
+    if (S.busy.has('group-create')) return;
+    S.busy.add('group-create');
     const box = $('#gnew-picker');
     const members = box ? pickerChecked(box).agents : [];
     const btn = document.querySelector('[data-act="group-create"]');
     if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
-    const r = await api('POST', '/api/v1/groups', { goal, members }).catch(() => null);
-    if (r && r.code === 201) {
-      closeLayer();
-      await loadGroups();
-      render();
-      toast('群已创建 —— 下一步：点击群卡片进入讨论');
-    } else {
-      if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
-      toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
-    }
+    try {
+      const r = await api('POST', '/api/v1/groups', { goal, members }).catch(() => null);
+      if (r && r.code === 201) {
+        closeLayer();
+        await loadGroups();
+        render();
+        toast('群已创建 —— 下一步：点击群卡片进入讨论');
+      } else {
+        if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
+        toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
+      }
+    } finally { S.busy.delete('group-create'); }
   },
   'group-send': () => sendGroupMsg(),
+  'group-jump-new': () => scrollMsgToBottom(),   // 「有新消息」浮标：回底部并清零未读
   'task-from-msg': b => taskFromMsgModal(Number(b.dataset.seq)),
   'task-from-msg-submit': async b => {
     const desc = $('#task-desc')?.value.trim() || '';
@@ -1646,23 +1957,30 @@ const ACT = {
     const node = $('#task-node')?.value || '', agent = $('#task-agent')?.value || '';
     if (!node) { toast('请先选择执行机器'); return; }
     if (!agent) { toast('请先选择该机器上的执行智能体'); return; }
+    if (S.busy.has('task-from-msg')) return;
+    S.busy.add('task-from-msg');
     b.disabled = true; b.textContent = '派发中…';
-    const r = await api('POST', '/api/v1/control-operations', {
-      agent, targets: [node], input: { args: [], stdin: desc }, group_ref: S.groupId,
-    }).catch(() => null);
-    if (r && (r.code === 202 || r.code === 200)) {
-      closeLayer();
-      const it = (r.data?.items || [])[0] || {};
-      await pullGroupMessages();   // 创建注记立即上时间线，不等 3s 轮询
-      if (it.task_id) toast('任务已派发：' + it.task_id + ' · 结果完成后自动回流本群');
-      else if (it.skipped) toast('目标当前不可达（' + (it.skipped === 'offline' ? '节点离线' : '能力未开放') + '），未创建任务');
-      else toast('提交失败：' + esc(ERRORS[it.error] || it.error || '未知错误'));
-    } else if (r && r.data?.error === 'group_concluded') {
-      const g = S.groups.find(x => x.group_id === S.groupId);
-      if (g) g.status = 'concluded';
-      closeLayer(); render();
-      toast('群已结束，不能再转任务');
-    } else toast('派发失败：' + (r ? errLine(r.data) : '网络异常'));
+    try {
+      const r = await api('POST', '/api/v1/control-operations', {
+        agent, targets: [node], input: { args: [], stdin: desc }, group_ref: S.groupId,
+      }).catch(() => null);
+      if (r && (r.code === 202 || r.code === 200)) {
+        closeLayer();
+        const it = (r.data?.items || [])[0] || {};
+        await pullGroupMessages();   // 创建注记立即上时间线，不等 3s 轮询
+        if (it.task_id) toast('任务已派发：' + it.task_id + ' · 结果完成后自动回流本群');
+        else if (it.skipped) toast('目标当前不可达（' + (it.skipped === 'offline' ? '节点离线' : '能力未开放') + '），未创建任务');
+        else toast('提交失败：' + esc(ERRORS[it.error] || it.error || '未知错误'));
+      } else if (r && r.data?.error === 'group_concluded') {
+        const g = S.groups.find(x => x.group_id === S.groupId);
+        if (g) g.status = 'concluded';
+        closeLayer(); render();
+        toast('群已结束，不能再转任务');
+      } else {
+        toast('派发失败：' + (r ? errLine(r.data) : '网络异常'));
+        b.disabled = false; b.textContent = '派发任务';
+      }
+    } finally { S.busy.delete('task-from-msg'); }
   },
   'group-close': () => {
     const g = S.groups.find(x => x.group_id === S.groupId);
@@ -1673,36 +1991,53 @@ const ACT = {
     <div class="actions spaced">${button('确认关闭', 'group-close-confirm', 'danger', `data-id="${esc(g.group_id)}"`)}${button('取消', 'close', 'link')}</div>`, true);
   },
   'group-close-confirm': async b => {
+    const key = 'group-close:' + b.dataset.id;
+    if (S.busy.has(key)) return;
+    S.busy.add(key);
     b.disabled = true; b.textContent = '关闭中…';
-    const r = await api('POST', '/api/v1/groups/' + encodeURIComponent(b.dataset.id) + '/close', { by: 'admin' }).catch(() => null);
-    if (r && r.code === 200) {
-      const i = S.groups.findIndex(g => g.group_id === b.dataset.id);
-      if (i >= 0) S.groups[i] = r.data;
-      closeLayer();
-      render();
-      toast('群已结束 · 时间线保留，不能再发言');
-    } else {
-      b.disabled = false; b.textContent = '确认关闭';
-      toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
-    }
+    try {
+      const r = await api('POST', '/api/v1/groups/' + encodeURIComponent(b.dataset.id) + '/close', { by: 'admin' }).catch(() => null);
+      if (r && r.code === 200) {
+        const i = S.groups.findIndex(g => g.group_id === b.dataset.id);
+        if (i >= 0) S.groups[i] = r.data;
+        closeLayer();
+        render();
+        toast('群已结束 · 时间线保留，不能再发言');
+      } else {
+        b.disabled = false; b.textContent = '确认关闭';
+        toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
+      }
+    } finally { S.busy.delete(key); }
   },
-  revoke: b => openLayerPlain(`${modalHead('吊销 · ' + esc(b.dataset.node))}<div class="notice warn">演示：V0 无撤销机制</div><p class="spaced">此按钮不改变节点或会话状态。签发 / 撤销 / 轮换自动化属后续阶段；当前请由管理员直接修改 hub.yaml 的 nodes: 段并重启 hub。</p>${button('下一步：返回节点列表 →', 'close', 'link')}`, true),
+  /* 撤下说明（P0.4）：原「吊销」为假按钮，改为只读弹层讲清撤下路径，不再暗示有撤销能力 */
+  revoke: b => openLayerPlain(`${modalHead('如何撤下节点 · ' + esc(b.dataset.node))}<div class="notice">当前版本没有在线撤下节点的能力；要让 <b>${esc(b.dataset.node)}</b> 退出协作网，请由管理员直接修改 hub 配置文件后重启 hub。</div><div class="enroll-rows spaced">
+  <div class="enroll-row"><code>编辑 hub.yaml → 删除 nodes: 段中 ${esc(b.dataset.node)} 那一行</code><small>该节点的身份与接入令牌随之失效</small></div>
+  <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后节点列表不再出现该机器</small></div>
+  </div><div class="notice warn">撤下前该节点在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态 24 小时）继续可查。</div><div class="actions spaced">${button('我知道了，返回节点列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
     <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
     <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),
   'task-cancel-confirm': async b => {
+    const key = 'cancel:' + b.dataset.id;
+    if (S.busy.has(key)) return;   // 800ms 在途窗口内连点只发一次请求（FE-09）
+    S.busy.add(key);
     b.disabled = true; b.textContent = '取消中…';
-    const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
-    if (r && (r.code === 202 || r.code === 200)) {
-      const i = S.tasks.findIndex(t => t.id === r.data.id);
-      if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
-      closeLayer(); render();
-      toast('已发送取消指令 · 任务进入「已取消」，节点侧执行数据回传后自动补充');
-    } else if (r && r.code === 409) {
-      closeLayer(); render();
-      toast('任务已终态，无需取消');
-    } else toast('取消失败：' + (r ? errLine(r.data) : '网络异常'));
+    try {
+      const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
+      if (r && (r.code === 202 || r.code === 200)) {
+        const i = S.tasks.findIndex(t => t.id === r.data.id);
+        if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
+        closeLayer(); render();
+        toast('已发送取消指令 · 任务进入「已取消」，节点侧执行数据回传后自动补充');
+      } else if (r && r.code === 409) {
+        closeLayer(); render();
+        toast('任务已终态，无需取消');
+      } else toast('取消失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally {
+      S.busy.delete(key);
+      b.disabled = false; b.textContent = '确认取消任务';   // 失败路径按钮必须恢复（FE-09）
+    }
   },
   'drawer-refresh': async b => {
     const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id)).catch(() => null);
@@ -1724,6 +2059,9 @@ const ACT = {
   },
   artifact: async b => {
     const id = b.dataset.id, idx = Number(b.dataset.index);
+    const key = `artifact:${id}:${idx}`;
+    if (S.busy.has(key)) return;
+    S.busy.add(key);
     b.disabled = true; b.textContent = '取回中…';
     try {
       const resp = await fetch(`/api/v1/tasks/${encodeURIComponent(id)}/artifacts/${idx}`, { credentials: 'same-origin' });
@@ -1744,13 +2082,18 @@ const ACT = {
       }
     } catch (e) {
       toast('结果未知 · 网络中断：文件可能未下载完整，请重试');
+    } finally {
+      S.busy.delete(key);
+      b.disabled = false; b.textContent = '取回';
     }
-    b.disabled = false; b.textContent = '取回';
   },
   review: async b => {
     const id = b.dataset.id, action = b.dataset.reviewAction;
+    const key = 'review:' + id;
+    if (S.busy.has(key)) return;
     const note = $('#review-note')?.value.trim();
     if (!note) { toast('请先填写核对依据（记录检查过的证据）'); $('#review-note')?.focus(); return; }
+    S.busy.add(key);
     const orig = b.textContent;
     document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = true; });
     b.textContent = '登记中…';
@@ -1760,6 +2103,9 @@ const ACT = {
         const i = S.tasks.findIndex(t => t.id === id);
         if (i >= 0) S.tasks[i] = r.data;
         S.drawer = { id, task: r.data };
+        /* 草稿置已核对态（D6 草稿闭环）：登记完成后草稿被「已提交记录」取代 */
+        const d = S.drafts[id] || (S.drafts[id] = { note: '', checked: false });
+        d.checked = true; d.note = note;
         render(); syncDrawer(true);
         toast(`核对已登记（${REVIEW_ACTIONS[action]}）· 任务保持 needs_review —— 下一步：回到待办列表`);
       } else {
@@ -1773,7 +2119,7 @@ const ACT = {
         document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = false; });
         b.textContent = orig;
       }
-    }
+    } finally { S.busy.delete(key); }
   },
   'ctrl-retry': () => { S.C.stage = 'idle'; submitControl(); },
   'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与幂等键将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">V0 不支持取消。请勿换用新幂等键重复提交同一巡检。</div><div class="actions">${button('保留幂等键，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),
@@ -1790,14 +2136,7 @@ const ACT = {
     else toast('批次查询失败：' + (r ? errLine(r.data) : '网络异常'));
   },
 };
-/* openLayerPlain：普通弹层（吊销/放弃等，非任务抽屉，不参与轮询同步）。
- * slim=true 为确认类小弹层（取消任务/关群/撤销 token 等）：窄版居中、按钮右对齐。 */
-let modalOpen = false;
-function openLayerPlain(content, slim) {
-  modalOpen = true;
-  $('#layer').innerHTML = `<div class="overlay" data-backdrop="true"><section class="modal${slim ? ' slim' : ''}" role="dialog" aria-modal="true" tabindex="-1">${content}</section></div>`;
-  $('#layer [role=dialog]').focus();
-}
+/* openLayerPlain / 层生命周期状态机本体见「层生命周期状态机（D3）」节（任务抽屉节之后统一维护）。 */
 
 /* ---------- 文件导出 / 复制 ---------- */
 function downloadBlob(blob, name) {
@@ -1828,6 +2167,7 @@ function bindEvents() {
     if (b?.id === 'logout') {
       closeLayer();
       S.authed = false; S.loaded = false; S.C = freshControl(); S.groupView = null;
+      S.drafts = {}; S.busy.clear();   // 草稿不跨会话（FE-08）；在途操作随登出作废
       location.hash = '#/login';
       route();
       toast('已退出登录 · 服务端会话仍有效至过期（V0 无撤销端点）');
@@ -1835,7 +2175,7 @@ function bindEvents() {
     }
     const btn = e.target.closest('[data-act]');
     if (btn && !btn.disabled) { const fn = ACT[btn.dataset.act]; if (fn) { fn(btn); return; } }
-    if (e.target.dataset?.backdrop) { closeLayer(); return; }
+    if (e.target.dataset?.backdrop) { closeLayer(true); return; }   // 遮罩点击=用户关闭：焦点返回
     const tr = e.target.closest('tr[data-task]');
     if (tr) openTask(tr.dataset.task);
   });
@@ -1850,6 +2190,14 @@ function bindEvents() {
   document.addEventListener('input', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; preserveFocus(() => render()); return; }
+    if (e.target.id === 'review-note') {
+      /* 抽屉核对草稿（P0.3/FE-07/08）：input 即写，重绘回填，任务间隔离 */
+      if (S.drawer) {
+        const d = S.drafts[S.drawer.id] || (S.drafts[S.drawer.id] = { note: '', checked: false });
+        d.note = e.target.value;
+      }
+      return;
+    }
     if (e.target.id === 'enroll-id') enrollValidateId();
     if (e.target.id === 'enroll-hub-url') {
       if (ENROLL) {
@@ -1878,7 +2226,25 @@ function bindEvents() {
     if (info.prefix === 'ctrl' && info.node !== undefined) { S.C.node = info.node; S.C.agent = info.agent || ''; }
   });
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') { closeLayer(); return; }
+    if (e.key === 'Escape') {
+      /* Esc 仅 open 态响应（D3 状态机）：closing / closed 一律忽略，防残留误清 */
+      if (layerState === 'open') closeLayer(true);
+      return;
+    }
+    /* Tab 焦点循环（P0.6/FE-10）：仅 open 态拦截——焦点在层内则在首尾循环；
+     * 焦点意外落在层外（重绘丢焦点等）则拉回层内。背景 inert 已把 #app/顶栏
+     * 移出 Tab 序，本陷阱保证连按 Tab 焦点始终不出层。 */
+    if (e.key === 'Tab' && layerState === 'open') {
+      const items = layerFocusables();
+      if (items.length) {
+        const first = items[0], last = items[items.length - 1];
+        const active = document.activeElement;
+        if (!$('#layer').contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+        else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+        else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      }
+      return;
+    }
     /* 群发言框 Enter 直发；isComposing 挡住中文输入法选词回车。 */
     if (e.target?.id === 'group-say' && e.key === 'Enter' && !e.shiftKey) {
       if (e.isComposing) return;
@@ -1891,6 +2257,22 @@ function bindEvents() {
   });
   setInterval(pollTick, 5000);
   setInterval(groupTick, 3000);   // 群详情消息增量轮询；非群详情页在 groupTick 内跳过
+  /* 群消息区手动滚回底部：未读清零、浮标熄灭（scroll 事件不冒泡，用捕获监听） */
+  document.addEventListener('scroll', e => {
+    if (e.target && e.target.id === 'group-msgwrap') {
+      const G = S.groupView;
+      if (G && G.id === S.groupId && msgNearBottom(e.target)) { G.unread = 0; setNewMsgPill(0); }
+    }
+  }, { capture: true, passive: true });
+  /* topbar 条件发丝线（P2 E）：scrollY>8 才挂 .scrolled（CSS 300ms 过渡浮现），
+   * passive 只读监听不阻塞滚动线程；顶栏在 #app 外常驻，绑一次即可；初值立即
+   * 同步一次，覆盖中段刷新（reload 时已滚动）的场景。 */
+  const topbar = document.querySelector('.topbar');
+  if (topbar) {
+    const onWinScroll = () => topbar.classList.toggle('scrolled', window.scrollY > 8);
+    window.addEventListener('scroll', onWinScroll, { passive: true });
+    onWinScroll();
+  }
 }
 /* groupTick 群消息 3s 增量：只在已登录、正停留在某群详情时拉取，其余一律跳过。 */
 async function groupTick() {
@@ -1901,6 +2283,7 @@ async function groupTick() {
 /* ---------- 启动：会话探测 → 恢复控制台或落登录页 ---------- */
 async function init() {
   bindEvents();
+  ensureFreshnessEl();   // 顶栏新鲜度小字（独立于 render 的 DOM 更新通道）
   try {
     await api('GET', '/api/v1/nodes');
     S.authed = true;

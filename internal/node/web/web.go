@@ -1,7 +1,7 @@
 // Package web 承载 Node 本地控制台前端（Loop 7，INTERACTION 客户端三旅程）：
 // 无框架原生 JS 单页（index.html + app.js + style.css），go:embed 编译进 node
 // 二进制——node 启动即带控制台，无外部静态文件依赖。视觉与 hub 控制台同源
-// （亮色 #f7f6f3 / #4a6cf7）。
+// （Apple 灰阶工具 token，见 style.css :root，FE-PLAN v3）。
 //
 // 挂载约定（localapi Handler）：GET / 控制台入口 + /app.js /style.css 静态资源，
 // 免令牌（令牌输入页必须可达）；/api/v1/* 数据接口另行鉴权（Bearer local_token，
