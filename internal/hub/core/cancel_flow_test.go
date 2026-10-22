@@ -4,6 +4,7 @@
 package core
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -56,7 +57,7 @@ func TestCancelTaskStateMatrix(t *testing.T) {
 	if got := f.taskOf(ack2.TaskID).Status; got != protocol.StatusCompleted {
 		t.Fatalf("驱动后应 completed, got %s", got)
 	}
-	if _, _, err := f.core.CancelTask(ack2.TaskID, "对终态取消"); err != ErrNotCancellable {
+	if _, _, err := f.core.CancelTask(ack2.TaskID, "对终态取消"); !errors.Is(err, ErrNotCancellable) {
 		t.Fatalf("completed 取消应 ErrNotCancellable, got %v", err)
 	}
 }
