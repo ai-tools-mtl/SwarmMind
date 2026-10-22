@@ -69,6 +69,13 @@ hr{border:0;border-top:1px solid var(--line);margin:20px 0}
 .chip{font-size:11px;color:#8390a8;letter-spacing:1px}
 .checkline{display:flex;align-items:center;gap:8px}.checkline input{width:auto;margin:0}
 .checkline-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+/* 智能体选择公共组件 · 多选形态（建群成员）：按机器分组的 checkbox 树 */
+.picker-grid{display:grid;gap:10px}
+.picker-group{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:10px;padding:11px 14px;background:#fbfcfe}
+.picker-group-head{display:flex;align-items:center;gap:8px}
+.picker-group .checkline{margin:0;font-weight:500}
+.picker-group .checkline small{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(max-width:680px){.picker-group{padding:9px 11px}}
 .readonly{font-size:11px;background:#f0f1f4;padding:4px 9px;border-radius:5px;color:#7c8492}
 .help{cursor:help;text-decoration:underline dotted}
 .statusline{min-height:28px;margin:14px 0}
