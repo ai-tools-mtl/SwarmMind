@@ -104,6 +104,12 @@ func (s *Service) lookupCancel(taskID string) (*cancelEntry, bool) {
 }
 
 // handleTaskCancel task_cancel 入口：见包内「管理面任务取消」注释。
+// 任务租约（P4/SPEC 4.11）：取消帧携带的 fence_epoch 仅作取消时刻代次的口径
+// 记录，node 不据此改账本租约——取消回执（task_result(cancelled)）恒按派发
+// 时的租约回带，与 hub 任务落库租约等值（未重派则必然一致）。取消执行本身无
+// 需门禁：取消⇒任务 hub 侧终态⇒同 task_id 永不重派（旧取消不可能命中新派单
+// 执行），重复取消由墓碑/幂等 ack 收敛，无状态污染面；zombie 进程的取消回执
+// 由 hub 结果仲裁的租约门禁兜底。
 func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 	var p protocol.TaskCancelPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TaskID == "" {
@@ -127,8 +133,15 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 				log.Printf("[node] 取消墓碑落盘失败 task=%s: %v", p.TaskID, err)
 			}
 			log.Printf("[node] 取消命中未入账任务，落墓碑防后到 offer 执行 task=%s", p.TaskID)
-		} else {
+		} else if e.ResultAcked || e.Closed {
 			log.Printf("[node] 取消幂等命中（已终态）task=%s state=%s", p.TaskID, e.State)
+		} else {
+			// 已终态且结果未闭合：立即重发一次——原结果可能滞留重发队列（重连
+			// 换代后由周期补传送达），取消回执按派发租约回带，hub cancelled 分支
+			// 合并收敛；closed 条目不重发（冲突审计保留）
+			log.Printf("[node] 取消命中已终态未确认条目，重发回执 task=%s state=%s", p.TaskID, e.State)
+			s.sendResult(p.TaskID, *e.Result)
+			return
 		}
 		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
 		return
@@ -179,16 +192,17 @@ func (s *Service) finishCancelledBeforeRun(taskID string) bool {
 
 // finishCancelledOffer 取消先于投递（offer 命中取消墓碑）的收口：任务不再执行，
 // 以 cancelled/user_cancelled 落账本终态并回传 task_result——hub 侧该任务已
-// cancelled 且无结果，收敛表 cancelled 分支合并真实数据。落盘成功即消费墓碑
+// cancelled 且无结果，收敛表 cancelled 分支合并真实数据。入账携带本次 offer 的
+// 租约快照（P4：回执按派发代次回带，等值仲裁通过）。落盘成功即消费墓碑
 // （账本条目此后由 ErrDuplicate 挡重复执行）；落盘失败保留墓碑，重复 offer 再试。
-func (s *Service) finishCancelledOffer(task protocol.Task) {
+func (s *Service) finishCancelledOffer(task protocol.Task, fence int64) {
 	res := protocol.TaskResult{
 		Status:     protocol.ResultCancelled,
 		ExitCode:   protocol.ExitCodeNotRun,
 		Error:      protocol.CodeUserCancelled,
 		FinishedAt: protocol.NowUTC(),
 	}
-	if err := s.cfg.Ledger.Accept(task); err != nil && !errors.Is(err, ledger.ErrDuplicate) {
+	if err := s.cfg.Ledger.AcceptFenced(task, ledger.OriginHub, fence); err != nil && !errors.Is(err, ledger.ErrDuplicate) {
 		// 账本写入失败（磁盘等）：不 ack 不发结果，保留墓碑，hub 回退重推（SPEC 4.5）
 		log.Printf("[node] 墓碑收口入账失败 task=%s: %v", task.ID, err)
 		return

@@ -245,9 +245,10 @@ func (c *Core) checkCapacity(st *store.State, nodeID string, incoming int64) err
 }
 
 // checkOfferSize 序列化体积实测（SPEC 4.6：构建含 ID/时间/身份的完整信封后
-// marshal 计字节数，超 1MiB 拒收，不用余量估算）。
+// marshal 计字节数，超 1MiB 拒收，不用余量估算）。fence 按代次位数上限量级
+// 计入（P4/SPEC 4.11：派发帧携带租约快照，实测取保守上界）。
 func checkOfferSize(t *protocol.Task) error {
-	_, err := protocol.Encode(offerEnvelope(t))
+	_, err := protocol.Encode(offerEnvelope(t, 1<<40))
 	return err
 }
 

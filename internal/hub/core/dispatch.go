@@ -17,20 +17,24 @@ var (
 )
 
 // offerEnvelope 构造 task_offer 帧（完整 Task 载荷，SPEC 4.2/4.6 实测计量口径）。
-func offerEnvelope(t *protocol.Task) *protocol.Envelope {
+// fence 为派发事务内捕获的该 node 当前注册代次（任务租约快照，P4/SPEC 4.11），
+// node 回带结果时据此等值仲裁；0=未注册（membus 等价链路），omitempty 缺省，
+// hub 侧按「缺省=当前 epoch」宽容。
+func offerEnvelope(t *protocol.Task, fence int64) *protocol.Envelope {
 	payload, err := json.Marshal(t)
 	if err != nil {
 		// Task 全字段可序列化，不可达；空载荷让 Encode 侧给出确定性结果
 		payload = []byte("null")
 	}
 	return &protocol.Envelope{
-		Version:   protocol.ProtocolVersion,
-		Type:      protocol.MsgTaskOffer,
-		MessageID: protocol.NewMessageID(), // 每次推送新 mid；node 按任务 ID 幂等
-		To:        t.TargetNode,
-		TraceID:   t.TraceID,
-		Payload:   payload,
-		ExpireAt:  t.ExpireAt,
+		Version:    protocol.ProtocolVersion,
+		Type:       protocol.MsgTaskOffer,
+		MessageID:  protocol.NewMessageID(), // 每次推送新 mid；node 按任务 ID 幂等
+		To:         t.TargetNode,
+		FenceEpoch: fence,
+		TraceID:    t.TraceID,
+		Payload:    payload,
+		ExpireAt:   t.ExpireAt,
 	}
 }
 
@@ -44,7 +48,10 @@ func (c *Core) dispatch(nodeID string) {
 		return
 	}
 	for {
-		var offered *protocol.Task
+		var (
+			offered *protocol.Task
+			fence   int64 // 派发时刻该 node 的注册代次（租约快照，事务内捕获）
+		)
 		err := c.st.Update(func(st *store.State) error {
 			// 窗口在单写事务内重检（并发 dispatch 由单写串行化收敛）
 			if inflightCount(st, nodeID) >= protocol.DeliveryWindow {
@@ -59,6 +66,12 @@ func (c *Core) dispatch(nodeID string) {
 			nt := t.Clone()
 			nt.Status = protocol.StatusOffered
 			nt.UpdatedAt = c.now() // offer 超时计时段（Sweep 据此回退）
+			// 任务租约（P4/SPEC 4.11）：每次派发捕获该 node 当下注册代次并落库
+			//（重派即换新租约），作为结果仲裁的等值基准；0=未注册代次（membus
+			// 等价链路）不落库，回带缺失走缺省宽容。
+			if fence = st.Nodes[nodeID].Epoch; fence > 0 {
+				nt.Lease = &protocol.TaskLease{FenceEpoch: fence}
+			}
 			st.Tasks[nt.ID] = nt
 			acquireWorkdirLock(st, &nt) // 占用从 offered 起算（SPEC 4.10）
 			offered = &nt
@@ -68,7 +81,7 @@ func (c *Core) dispatch(nodeID string) {
 			return // 无任务/窗口满/事务失败
 		}
 		c.noteTask(offered)
-		if err := c.tr.Send(nodeID, offerEnvelope(offered)); err != nil {
+		if err := c.tr.Send(nodeID, offerEnvelope(offered, fence)); err != nil {
 			// 发送失败（对端竞态下线/关闭）：回退 submitted 并回队首，等下一次触发
 			log.Printf("[hub] offer 发送失败 node=%s task=%s: %v", nodeID, offered.ID, err)
 			c.revertOffer(offered)

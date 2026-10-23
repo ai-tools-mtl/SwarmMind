@@ -110,6 +110,13 @@ type Entry struct {
 	// Closed 重传终止标记（SPEC 4.5）：task_result 被 hub 拒收（result_conflict /
 	// expired 终态拒绝）后置位并持久化，停止重发；记录保留作冲突审计，不删除、不参与清理。
 	Closed bool `json:"closed"`
+	// FenceEpoch 任务租约代次快照（P4/SPEC 4.11）：task_offer 携带的派发时刻
+	// hub 代次，task_result 原样回带供 hub 等值仲裁。仅 hub 显式（重）授予时
+	// 变更：入账（AcceptFenced）或重臂（RearmFence——重复 offer/取消帧携新
+	// 代次，二者只能经当前会话送达，zombie 无法伪造）；重连重发等 node 自发
+	// 路径永不改写。旧账本条目无此字段=0，回带缺失由 hub 按「缺省=当前
+	// epoch」宽容处理，向后兼容。
+	FenceEpoch int64 `json:"fence_epoch,omitempty"`
 }
 
 // normalized 归一 origin：空（旧版条目）视为 hub。
@@ -266,11 +273,40 @@ func (l *Ledger) Accept(t protocol.Task) error {
 // AcceptOrigin 按来源入账（方案 3.2 双路径）：Accept 的带 origin 变体。
 // 本地直执行记 OriginLocal，hub 下发记 OriginHub；重复 task_id 返回 ErrDuplicate。
 func (l *Ledger) AcceptOrigin(t protocol.Task, origin Origin) error {
+	return l.AcceptFenced(t, origin, 0)
+}
+
+// AcceptFenced 带租约代次入账（P4/SPEC 4.11）：AcceptOrigin 的 fence 变体，
+// task_offer 链路专用——把派发帧携带的 fence_epoch 快照随条目持久化，
+// task_result 据此回带。fence=0 = 派发帧未携租约（旧版 hub），条目照常入账。
+func (l *Ledger) AcceptFenced(t protocol.Task, origin Origin, fence int64) error {
 	return l.Update(func(m map[string]Entry) error {
 		if _, ok := m[t.ID]; ok {
 			return ErrDuplicate
 		}
-		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted, Origin: origin}
+		m[t.ID] = Entry{Task: t.Clone(), State: StateAccepted, Origin: origin, FenceEpoch: fence}
+		return nil
+	})
+}
+
+// RearmFence 重臂任务租约（P4/SPEC 4.11）：把条目回带用的 fence_epoch 更新为
+// hub 帧携带的新代次。仅 hub 显式授予的帧（重复 task_offer=重派收口、
+// task_cancel=取消收口）触发——二者只能经当前会话送达，重臂即承认「本条目的
+// 收口回执对齐 hub 当前代次」；zombie 进程无当前会话，收不到帧即无法自臂。
+// node 自发路径（重连重发/恢复执行）永不调用本方法。幂等（同值 no-op）；
+// origin=local 条目拒臂（hub 租约只管 hub 链路）。
+func (l *Ledger) RearmFence(taskID string, fence int64) error {
+	return l.Update(func(m map[string]Entry) error {
+		e, ok := m[taskID]
+		if !ok {
+			return ErrNotFound
+		}
+		if e.normalized().Origin != OriginHub || e.FenceEpoch == fence {
+			return nil
+		}
+		ne := e.Clone()
+		ne.FenceEpoch = fence
+		m[taskID] = ne
 		return nil
 	})
 }

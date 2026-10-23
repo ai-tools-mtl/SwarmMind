@@ -52,6 +52,7 @@ type Envelope struct {
     ReplyTo      string          `json:"reply_to,omitempty"`
     IdemKey      string          `json:"idem,omitempty"`
     SessionEpoch int64           `json:"epoch,omitempty"`      // 规则见 4.4
+    FenceEpoch   int64           `json:"fence_epoch,omitempty"` // 任务租约代次（P4，规则见 4.11）：offer/cancel 由 hub 携带，task_result 由 node 回带
     TraceID      string          `json:"trace_id,omitempty"`
     Payload      json.RawMessage `json:"payload"`
     Err          *ErrInfo        `json:"err,omitempty"`
@@ -71,17 +72,17 @@ type ErrInfo struct { Code string `json:"code"`; Msg string `json:"msg"` }
 | card_update | node→hub | `{agents[]}` | 能力表全量更新 |
 | task_submit | node→hub | TaskSubmitRequest | node 本机派单（node 会话强制 target == env.From，见 §六边界锁；hub 鉴权后走同 HTTP 等价流程） |
 | submit_ack | hub→提交方 | `{task_id, trace_id, dup}` | 提交已持久化（dup=true 表示幂等命中） |
-| task_offer | hub→node | 完整 Task | 推任务 |
+| task_offer | hub→node | 完整 Task | 推任务；信封携派发租约 fence_epoch=该 node 当前注册代次（P4，见 4.11） |
 | task_ack | node→hub | `{task_id}` | 任务已入账本（accepted 持久化成功后发） |
 | task_started | node→hub | `{task_id}` | 执行已开始（started 持久化成功后、spawn 前发） |
-| task_result | node→hub | `{task_id, status, result}` | 终态回传（status ∈ completed/failed/needs_review/cancelled；含 FinalAnswer 与产物引用） |
+| task_result | node→hub | `{task_id, status, result}` | 终态回传（status ∈ completed/failed/needs_review/cancelled；含 FinalAnswer 与产物引用）；信封原样回带 offer 的 fence_epoch（P4 租约，见 4.11） |
 | result_ack | hub→node | `{task_id}` | 终态已持久化 |
 | result_event | hub→提交方（node 会话时） | `{task_id, status, result}` | 终态推送给提交方，闭合「调用方拿回结果」；HTTP 提交方靠 GET /tasks/{id} 轮询。已知限制：提交方离线错过即弃，靠主动查询补 |
 | task_query | 提交方→hub | `{task_id}` | 查询任务状态（node 会话仅限本机任务：Task.TargetNode == env.From，他节点任务拒绝；result_event 离线错过的补查路径） |
 | task_status | hub→提交方 | Task | 查询响应（完整 Task 可能接近 1MiB 上限，超大任务以摘要+artifact 引用返回） |
 | artifact_fetch | 提交方→hub | `{task_id, index}` | 请求取回第 index 个产物（hub 中继到执行 node） |
 | artifact_data | 执行 node→请求方（经 hub 中继） | `{task_id, index, meta, data_base64}` | 产物内容（单文件原始 ≤640KiB，base64 后随帧 ≤1MiB；更大产物 V1 分块） |
-| task_cancel | hub→node | `{task_id, reason?}` | 管理面取消（管理面 POST /tasks/{id}/cancel 触发）：node 整组终止在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；至少一次+幂等，重复 cancel 安全 |
+| task_cancel | hub→node | `{task_id, reason?}` | 管理面取消（管理面 POST /tasks/{id}/cancel 触发）：node 整组终止在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；至少一次+幂等，重复 cancel 安全；信封携取消时刻注册代次（P4，仅口径记录——node 不据其改账本租约，取消回执恒按派发租约回带，见 4.11） |
 | task_cancelled | node→hub | `{task_id}` | 取消确认 ack：任务已终态或不在账本（无可取消对象）；执行中断路径不走本帧（回 task_result 走三段确认） |
 | err | 双向 | ErrInfo | 错误帧；协议级错误（版本/epoch 残余/格式）另按规则断开 |
 
@@ -100,6 +101,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 
 | 事件 | 当前状态 | 处理 |
 |---|---|---|
+| task_result 回带租约过期 | 任意（门禁先于状态仲裁，P4） | 拒收 zombie 结果（zombie_result_rejected）：任务维持原状态（不改 Status/UpdatedAt/Result），Task.Lease 记审计（Rejects++），回 err(result_conflict)（msg 注明 fence_epoch/current_lease）促停 node 重发；见 4.11 |
 | task_ack 迟到 | submitted（曾回退） | 接受 → acknowledged；不覆盖任何终态 |
 | task_ack 迟到 | 终态 | 忽略 + 日志告警 |
 | task_started 迟到 | acknowledged | 置 running |
@@ -122,6 +124,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 - hub 对其余入站帧校验 epoch：不等于该 node 当前 epoch → 忽略该帧 + 日志（旧连接残余），连续 5 次则断开。
 - node 侧：register_ack 后记住 epoch；hub 入站帧（node 视角）epoch 不匹配 → 断开并按新连接重连。
 - 历史任务的结果补传使用当前会话 epoch，不因任务创建于旧代次被拒。epoch 只隔离会话，不追溯已发生执行（见账本 needs_review）。
+- **epoch 与任务租约（P4）的正交分工**：会话 epoch（本节）在传输层隔离「旧连接残余帧」——帧只能经该 node 当前会话进入仲裁；任务租约（4.11）在任务层隔离「旧派单的迟到回写」——回执必须对齐任务当前派发租约。两层校验独立生效，互不替代（重连后同一进程的结果补传过会话层、由租约层判定；未重派任务的跨代次恢复重发过租约层、按原租约等值接受）。
 
 ### 4.5 可靠性契约（三段持久化确认 + 幂等）
 
@@ -252,6 +255,14 @@ type Task struct {
     UpdatedAt   time.Time   `json:"updated_at"`
     ExpireAt    time.Time   `json:"expire_at"`      // CreatedAt+7d
     Result      *TaskResult `json:"result,omitempty"`
+    Lease       *TaskLease  `json:"lease,omitempty"` // 任务租约（P4，见 4.11）：nil=未派发/旧版记录
+}
+
+type TaskLease struct {
+    FenceEpoch        int64     `json:"fence_epoch"`                // 当前派发租约代次（每次派发/重派刷新；结果仲裁等值基准）
+    Rejects           int       `json:"rejects,omitempty"`          // 累计 zombie_result_rejected 次数
+    LastRejectedFence int64     `json:"last_rejected_fence,omitempty"` // 最近被拒结果携带的回带值
+    LastAt            time.Time `json:"last_at,omitempty"`          // 最近拒收时刻（UTC）
 }
 
 type TaskSubmitRequest struct {
@@ -271,6 +282,25 @@ type TaskSubmitRequest struct {
 // 终态 Task.Result
 {"status":"completed","exit_code":0,"final_answer":"hello swarmmind","stdout_tail":"hello swarmmind\n","stderr_tail":"","artifacts":[],"started_at":"2026-10-20T09:00:00Z","finished_at":"2026-10-20T09:00:00Z"}
 ```
+
+### 4.11 任务租约（P4，2026-10-23；fencing token 防 zombie 写）
+
+**问题**（PLAN.md 风险节 V1 项）：hub 判定 node 离线（重连 epoch+1）或任务重派后，旧 node 进程（zombie）完成任务并回写结果——过期结果被接受会污染状态机（重派场景下旧执行结果覆盖新派单的状态推进）。
+
+**挂点（侵入最小选型）**：`Envelope.FenceEpoch`（`json:"fence_epoch,omitempty"`，4.1）。不复用 `SessionEpoch`——node 传输层对每帧强制盖章 SessionEpoch=当前会话代次（hub 会话层亦按它校验，承载过期值会被整帧丢弃），语义冲突不可承载；不改 Task 载荷 Schema 主体。task_offer / task_cancel 由 hub 携带，task_result 由 node 从账本原样回带；传输层（node conn.Send / membus）对 unknown 字段透传。
+
+**契约**：
+1. **授予**：每次派发（dispatch 事务内）捕获该 node 当前注册代次（4.4）作为租约快照，随 offer 帧下发并落库 `Task.Lease.FenceEpoch`；重派（offer 超时回退后补推）即换新租约。代次为 0（membus 等价链路未注册）不落库。
+2. **回带**：node 入账时（`ledger Entry.FenceEpoch`）随条目持久化租约快照，task_result（含重连重发/重复 offer 重发等全部路径）原样回带；账本条目的租约只在 hub 显式（重）授予时变更——入账，或**重臂**（重复 task_offer=重派收口，携新代次，node `RearmFence` 对齐后重发）。重连重发等 node 自发路径永不改写；zombie 进程无当前会话，收不到授予帧即无法自臂。
+3. **仲裁**：hub 结果仲裁在状态收敛前校验——回带 `fence_epoch` 与任务落库租约**等值**才进入收敛表；**缺省宽容**：回带缺失（0，旧版 node/旧账本/未携租约派发）按「缺省=当前租约」放行，向后兼容。**等值基准是任务落库租约而非 node 当前代次**：进程重启恢复（SPEC 4.8 needs_review 回传）、结果重发（4.5）都是「新会话持有者报旧租约执行结果」的合法路径，等值基准取任务租约使这些路径自然通过，同时精确排除「重派后旧派单回写」（唯一被门禁拦下的正是租约不符的回写）。
+4. **拒收**：不符 → `zombie_result_rejected`：任务维持原状态（不改 Status/UpdatedAt/Result，不动七态状态机），`Task.Lease` 记审计（Rejects++/LastRejectedFence/LastAt，随快照持久化、查询面可见），hub stderr 记日志（含 fence_epoch 与 current_lease），并回 err(result_conflict)（msg 注明 zombie_result_rejected）——node 据既有规则置账本 closed 停止重发，zombie 结果不再周期性重入仲裁。
+5. **task_cancel 同口径结论**：取消帧自身**不需要门禁**——取消 ⇒ 任务 hub 侧终态 ⇒ 同 task_id 永不重派，故「旧取消命中新派单执行」在结构上不可能；重复取消由幂等 ack/取消墓碑收敛（node 侧既有语义）。帧仍携取消时刻代次（口径统一、审计可查），但 node **不据其改账本租约**，取消回执恒按派发租约回带（等值基准唯一）；zombie 的取消回执由第 3 条门禁兜底。ack/started 类过程帧同理不设门：无结果载荷，无状态污染面。
+
+**与 4.4 会话 epoch 的关系**：正交两层。会话 epoch 保证「帧只经当前会话进入」（传输层，送达方身份可信）；任务租约保证「回执对齐当前派发」（任务层，派发代次一致）。防御目标：同 node_id 被两个进程持有（部署事故/慢 zombie 抢回连接）时，旧进程在旧派单下产生的结果无法覆盖新派单状态。
+
+**已知代价（声明）**：跨代次的执行若任务未重派（如 node 执行中掉线重连、hub 侧任务仍 running），其合法结果与 zombie 结果对 hub 不可区分，按本契约回带原租约**接受**（等值）——状态机安全由会话层身份担保；真正的残留风险窗口仅「同 node_id 双进程且旧进程抢回会话且任务未重派」，此时回执来自当前会话持有者、且 node 单账本保证每任务至多一个执行，污染面为诊断数据而非状态机。租约拒收后的滞留任务（如重派竞态失败留 running）由 7d expire 兜底，V2 自动回收以此为输入。
+
+**MCP 同步检查**：本变更为协议内防写机制 + 审计字段，结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更（任务查询工具返回体透传 `lease` 展示字段，不构成工具面变更）。
 
 ## 五、node 配置（configs/node.example.yaml）
 
@@ -445,6 +475,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
+6. **P4 任务租约同步检查声明（2026-10-23）**：任务租约（4.11）为协议内防写机制（Envelope fence_epoch 门禁 + Task.Lease 审计），结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更——豁免映射表补行；任务查询工具返回体透传新增 `lease` 展示字段，不构成工具面变更。
 
 ## 七、验证标准（DoD 十一条）
 
