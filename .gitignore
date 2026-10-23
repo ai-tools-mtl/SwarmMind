@@ -19,3 +19,4 @@
 tmp-rest-probe.py
 p2-mac/zcode-home/
 internal/hub/api/embedded/*.gz
+bin/
