@@ -1,9 +1,9 @@
 package runner
 
 import (
-	"os"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -145,7 +145,7 @@ func TestRunArgsOrder(t *testing.T) {
 }
 
 // TestRunEnvBaseline env 基线：PATH/TMPDIR/LANG 来自 base_env，HOME=ConfigHome
-//（ConfigHome 空时 defaultHome），daemon 环境不泄漏。
+// （ConfigHome 空时 defaultHome），daemon 环境不泄漏。
 func TestRunEnvBaseline(t *testing.T) {
 	t.Setenv("SWARMMIND_DAEMON_SECRET", "leak-marker") // daemon 环境（不得进入子进程）
 

@@ -1,8 +1,8 @@
 package runner
 
 import (
-	"crypto/sha256"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"

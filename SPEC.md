@@ -52,6 +52,14 @@ repo/
 └── scripts/demo-loopback.sh
 ```
 
+**依赖白名单（V0 冻结）**：新增依赖必须在本清单与 go.mod 注释同步登记理由，禁止未登记引入。现有全部：
+
+| 依赖 | 用途 | 理由/边界 |
+|---|---|---|
+| github.com/coder/websocket | node→hub WSS 长会话 | 标准库无 WebSocket 实现 |
+| gopkg.in/yaml.v3 | hub/node 配置解析 | 标准库无 yaml |
+| golang.org/x/sys | Windows 服务化（svc/svc/mgr）+ Job Object 进程治理（P4②） | 半标准库（Go 官方扩展库）：Windows SCM 服务编程唯一正道，无更轻替代；仅 `//go:build windows` 路径引入，非 Windows 平台编译产物不含相关代码，行为零变化 |
+
 ## 四、协议（internal/protocol）
 
 ### 4.1 信封（WebSocket 文本帧，每帧一个 JSON；V1 评估二进制帧）
@@ -181,7 +189,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 
 **先写后见**：单写 goroutine 串行处理变更 → 构造新状态副本 → 落盘（临时文件+rename）→ 成功后才原子替换内存可见状态并发 Ack → 失败则丢弃副本、不发布、不 Ack。禁止先改内存再补盘。掉电耐久性不承诺（已声明）。
 node 侧关键顺序：accepted 落盘成功 → 发 task_ack；started 落盘成功 → 发 task_started → spawn；finished+result 落盘成功 → 发 task_result。
-`data_dir` 单实例锁：**OS 文件锁（Unix flock，进程退出自动释放）**，不用 O_EXCL 锁文件（SIGKILL 后残留会永久阻塞重启，DoD 6/10 无法执行）；锁冲突则退出报错。Windows 跨平台锁 V1 服务化时补。
+`data_dir` 单实例锁：**OS 文件锁（Unix flock，进程退出自动释放）**，不用 O_EXCL 锁文件（SIGKILL 后残留会永久阻塞重启，DoD 6/10 无法执行）；锁冲突则退出报错。Windows 侧随 P4② 服务化落地同语义实现（CreateFile 独占打开 + LockFileEx，句柄随进程退出由 OS 释放；lock_test.go 跨平台同一套契约断言）。
 
 ### 4.8 node 执行账本（internal/node/ledger）
 
@@ -424,7 +432,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 **执行环境规则**：runner 使用 base_env（+任务在 allow_env 白名单内的覆盖）构造进程环境，不继承 daemon 自身环境（防凭证泄漏进子进程）。**runner 额外注入三个系统变量（不受 base_env/allow_env 约束、任务 env 不可覆盖）：`SWARM_TASK_ID`、`SWARM_OUTPUTS_DIR`（=workdir/outputs/<task_id> 绝对路径，agent 产物约定输出位置）、`SWARM_TRACE_ID`**。**HOME 由 runner 固定设为 ExecProfile.ConfigHome**（agent 配置/凭证目录，默认 data_dir/home，与 workdir 分离——不破坏 agent 的配置查找），cwd=workdir。越界（env 键不在名单）任务直接 failed，error=`policy_denied`，不执行。
 **能力边界声明**（写入文档）：CLI agent 的行为边界由 command 本身性质与其自带权限机制决定；stdin/env 是输入面；allow_args 授权解释器类命令等同全权授权，选用即知情；PermissionMode 把 agent 自带权限映射告知调用方。
 
-任务执行 context 独立于会话：唯一超时源是 timeout_sec；会话断开不杀已 spawn 的任务（结果经账本在重连后补传）。**进程组治理（V0 必做，接真实 agent 的前提）**：Unix 下 spawn 前 setpgid 置独立进程组，超时/取消时 kill(-pgid) 整组终止，WaitDelay=5s 兑底；V0 只承诺 Unix 进程组，Windows Job Object V1。
+任务执行 context 独立于会话：唯一超时源是 timeout_sec；会话断开不杀已 spawn 的任务（结果经账本在重连后补传）。**进程组治理（V0 Unix / P4② Windows）**：Unix 下 spawn 前 setpgid 置独立进程组，超时/取消时 kill(-pgid) 整组终止，WaitDelay=5s 兑底；Windows 下子进程 CREATE_SUSPENDED 挂起启动→入 Job Object（KILL_ON_JOB_CLOSE）→ResumeThread（执行任何指令前必已受治理），超时/取消 TerminateJobObject 整组终止，Job 装配/入组失败拒绝执行（不静默降级），node 自身另入兜底 Job（进程异常终止时 OS 兜底清理遗留子进程）。
 
 ## 六、交互面与管理 API
 

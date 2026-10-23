@@ -41,8 +41,54 @@ agents:
 C:\swarmmind\node.exe --config C:\swarmmind\node.yaml
 ```
 
-5. 看到「注册成功 node=win-box epoch=1」即入网。
-6. 服务化（可选，V1 正式支持）：先用计划任务保活：
+5. 看到「注册成功 node=win-box epoch=1」即入网；Ctrl+C 退出，转服务化。
+
+## Windows 服务化（P4② 正式支持，替代 schtasks）
+
+swarmmind-node 自身即服务二进制：`service` 子命令把它注册进 Windows 服务管理器（服务名 `swarmmind-node`，启动类型「自动」，开机自启），SCM 拉起的进程内嵌服务主循环、复用前台运行的全部启动/优雅关闭逻辑。**以下命令均需管理员 PowerShell**（右键「以管理员身份运行」）。
+
+```powershell
+C:\swarmmind\node.exe service install --config C:\swarmmind\node.yaml   # 注册（拒绝示例配置；路径落死为绝对路径）
+C:\swarmmind\node.exe service start                                     # 启动并确认进入运行态
+C:\swarmmind\node.exe service status                                    # 状态/启动类型/PID/启动命令
+C:\swarmmind\node.exe service stop                                      # 优雅停止（在途任务整组终止收尾）
+C:\swarmmind\node.exe service remove                                    # 卸载（运行中会拒绝，须先 stop）
+```
+
+行为要点（人话）：
+
+- **无人值守自愈**：进程崩溃、自行退出（setup 向导落盘/「应用并重启」）与**非崩溃失败**（配置错误/运行错误以非零退出码收场）一律触发恢复动作，服务管理器按 5s/30s/60s 退避自动重启（24 小时无失败重置计数，超出动作表沿用末项即最坏 1 次/分钟）；非崩溃失败经 `SetRecoveryActionsOnNonCrashFailures` 显式启用（SCM 默认只认进程崩溃）。退出码统一经服务主循环终态上报：干净停止（`service stop`/系统关机）退出码 0 不重启，异常一律服务专属非零码。
+- **Running 即真就绪**：服务管理器等到账本打开、启动恢复与本地 API 监听全部完成后才报运行态，`service start` 返回时本地 API 已可用（无「假运行」窗口）。
+- **日志**：服务模式无控制台，标准日志落 `<data_dir>\logs\node.log`（追加写，打开与每次写入都检查大小，超 16MiB 轮转为 `node.log.old` 仅留一代——长期运行不无限增长）。前台运行仍输出 stderr，行为不变。选文件而非 Windows 事件日志：事件源需写注册表，文件与 data_dir 同生命周期、`type` 即看，简单可靠。
+- **进程治理（Job Object）**：每个任务子进程**先挂起启动、入 Job 后再恢复执行**（KILL_ON_JOB_CLOSE）——执行任何指令前必已受治理，无「先启动再入组」逃逸窗口；超时/取消整组终止（含 agent 派生的孙进程）；Job 装配/入组失败直接拒绝执行该任务（不静默降级）。node 进程自身也入一个兜底 Job：服务停止或 node 被强杀时操作系统兜底终止全部遗留子进程，绝不孤儿化。
+- **单实例锁**：同一 `data_dir` 第二个 node 实例（前台或服务）启动即报「已被其他实例锁定」退出（Windows 用 CreateFile 独占 + LockFileEx，与 Mac/Linux 的 flock 同语义，进程退出自动释放）。
+- **配置**：格式与前台完全相同（node.yaml 不变）；install 时 `--config`/`--data-dir` 一律绝对化落死，服务并以 exe 所在目录为工作目录；配置里仍建议写绝对路径。
+- **移动/更新 node.exe 后**需先 `service remove` 再重新 `service install`（注册的 BinaryPathName 落死旧路径，不会自动跟随）。
+
+### 真机验证清单（伦哥 5 分钟照做）
+
+管理员 PowerShell 逐条执行，12 条全部符合预期即验收通过：
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | `C:\swarmmind\node.exe service install --config C:\swarmmind\node.yaml` | 打印「服务已注册：swarmmind-node（开机自启…，非崩溃失败同样触发）」 |
+| 2 | `C:\swarmmind\node.exe service start` | 打印「已启动…（PID …）」；`sc query swarmmind-node` 回 `RUNNING`（Running 即账本/本地 API 已就绪） |
+| 3 | `C:\swarmmind\node.exe service status` | 状态=运行中；启动类型=自动（开机自启） |
+| 4 | hub 侧 `swarmmindctl nodes` | win-box 行 ONLINE=是 |
+| 5 | `type C:\swarmmind\data\logs\node.log` | 有「===== 服务进程启动」横幅与「注册成功」行 |
+| 6 | 重启 Windows，登录后 `service status` | 状态=运行中（开机自启成立），hub 侧 win-box 回线 |
+| 7 | hub 派一个长任务（约 60s），随后 `service stop` | 「已停止」；任务管理器确认无 node 派生的残留子进程；node 本机 `data\ledger.json` 里该任务以 cancelled/needs_review 收尾（非 running 悬挂） |
+| 8 | `service start`，再故意改坏 node.yaml（如改错 register_token）后 `service stop` + `start` | start 报「启动后立即停止」或状态非运行中；`node.log` 有可读错误；恢复 node.yaml 后 start 回正常 |
+| 9 | `service remove`（须先 stop） | 打印「服务已卸载」；`sc query swarmmind-node` 报服务不存在 |
+| 10 | 服务运行时，另开一个前台实例 `node.exe --config <同 data_dir 配置>` | 立即报「data_dir 已被其他实例锁定」退出；`service status` 不受影响仍运行中 |
+| 11 | hub 派长任务，任务运行中 `taskkill /f /pid <node 服务 PID>`（模拟崩溃） | 任务管理器确认 agent 及其子进程一并消失（兜底 Job 生效）；随后 `sc query` 观察到服务被自动拉回 RUNNING（恢复动作生效） |
+| 12 | `type C:\swarmmind\data\logs\node.log.old`（若存在）或持续运行观察 | 日志超 16MiB 后出现 `node.log.old` 且 `node.log` 重新变小（单代轮转不无限增长） |
+
+10-12 为本次返工新增检查点（单实例锁 / 兜底 Job+崩溃自愈 / 写入时轮转）。
+
+### 备选（不推荐）：schtasks 计划任务保活
+
+仅当服务化不可用（如权限受限无法注册服务）时的降级手段——无优雅停止、无崩溃退避、日志无人接管：
 
 ```powershell
 schtasks /create /tn SwarmMindNode /tr "C:\swarmmind\node.exe --config C:\swarmmind\node.yaml" /sc onstart /ru SYSTEM
@@ -68,5 +114,5 @@ mkdir -p ~/swarmmind/data && cp dist/swarmmind-node-macos-arm64 ~/swarmmind/node
 
 ## 已知限制（P2 阶段）
 
-- Windows 进程组治理为 Job Object 的完整实现属 V1（V0 用 WaitDelay 兜底，验证直接子进程终止）
+- Windows 进程治理与账本锁（返工必修 1-4：跨平台文件锁、挂起启动入 Job、Job 失败拒绝执行、兜底 Job、SCM 非崩溃恢复）已完成 darwin 侧单测与 Windows 交叉编译+静态审查，**真机行为以上方「真机验证清单」12 条实测为准**
 - hub 公网部署建议前置反代 + TLS（自签 + 指纹分发方案见 SPEC 二节）
