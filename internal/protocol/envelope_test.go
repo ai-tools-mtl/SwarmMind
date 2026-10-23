@@ -129,3 +129,40 @@ func TestFrameSizeLimit(t *testing.T) {
 		t.Fatalf("正常帧 Encode: %v", err)
 	}
 }
+
+// TestEnvelopeFenceEpoch 任务租约字段（P4/SPEC 4.11）：携带时往返保留；零值
+// omitempty 不出现在编码结果（旧版对端缺省语义的载体形态）。
+func TestEnvelopeFenceEpoch(t *testing.T) {
+	env := &Envelope{
+		Version:    ProtocolVersion,
+		Type:       MsgTaskResult,
+		MessageID:  "mid-fence",
+		From:       "node-a",
+		To:         "hub",
+		FenceEpoch: 42,
+		Payload:    json.RawMessage(`{}`),
+	}
+	b, err := Encode(env)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !strings.Contains(string(b), `"fence_epoch":42`) {
+		t.Fatalf("编码结果应含 fence_epoch=42: %s", b)
+	}
+	got, err := Decode(b)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got.FenceEpoch != 42 {
+		t.Fatalf("FenceEpoch=%d, 期望 42", got.FenceEpoch)
+	}
+
+	zero := &Envelope{Version: ProtocolVersion, Type: MsgPing, MessageID: "m1", Payload: json.RawMessage("null")}
+	bz, err := Encode(zero)
+	if err != nil {
+		t.Fatalf("Encode 零值: %v", err)
+	}
+	if strings.Contains(string(bz), "fence_epoch") {
+		t.Fatalf("零值 FenceEpoch 不应出现（omitempty）: %s", bz)
+	}
+}

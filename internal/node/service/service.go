@@ -175,6 +175,9 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 // failed 终态（不进重推循环）；正常路径 accepted 落盘 → ack → 异步执行。
 // 取消墓碑命中（task_cancel 先于本 offer 到达，cancel.go）→ 拒绝执行，直接以
 // cancelled/user_cancelled 落终态回传（2026-10-22 修复轮2）。
+// 任务租约（P4/SPEC 4.11）：offer 携带的 fence_epoch 快照随入账持久化供结果
+// 回带；重复 offer（重派收口）按重臂处理——hub 重派即以新代次重新授予本条目
+// 的收口回执（重臂只能经当前会话送达，zombie 无法借道）。
 func (s *Service) handleOffer(env *protocol.Envelope) {
 	var task protocol.Task
 	if err := json.Unmarshal(env.Payload, &task); err != nil || task.ID == "" {
@@ -182,12 +185,16 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 		return
 	}
 	if s.cfg.Ledger.HasCancelTombstone(task.ID) {
-		s.finishCancelledOffer(task)
+		s.finishCancelledOffer(task, env.FenceEpoch)
 		return
 	}
-	err := s.cfg.Ledger.Accept(task)
+	err := s.cfg.Ledger.AcceptFenced(task, ledger.OriginHub, env.FenceEpoch)
 	if errors.Is(err, ledger.ErrDuplicate) {
-		// 重复 offer：不再执行，直接重发 task_ack；已 finished 附带重发 result（SPEC 4.3）
+		// 重复 offer：不再执行，直接重发 task_ack；已 finished 附带重发 result（SPEC 4.3）。
+		// 重臂后重发：回执携带 hub 本次重派的新租约（等值仲裁通过，收口闭合）
+		if err := s.cfg.Ledger.RearmFence(task.ID, env.FenceEpoch); err != nil {
+			log.Printf("[node] 重复 offer 重臂失败 task=%s: %v", task.ID, err)
+		}
 		log.Printf("[node] 重复 offer，重发确认 task=%s", task.ID)
 		s.sendRef(protocol.MsgTaskAck, task.ID)
 		if e, ok := s.cfg.Ledger.Get(task.ID); ok && e.State == ledger.StateFinished && e.Result != nil {
@@ -508,29 +515,43 @@ func (s *Service) sendRef(typ, taskID string) {
 
 // sendResult 发送 task_result 帧（SPEC 4.2 载荷）。origin 堵点同 sendRef：
 // local 任务的结果只回写本地账本，绝不推 hub（含取消/中断收尾等所有路径）。
+// 任务租约（P4/SPEC 4.11）：从账本条目取 fence_epoch 原样回带（入账/重臂时
+// 写入；重连重发与重复 offer 重发同源同值，内容稳定）。
 func (s *Service) sendResult(taskID string, res protocol.TaskResult) {
 	if s.originOf(taskID) == ledger.OriginLocal {
 		return
 	}
-	s.send(protocol.MsgTaskResult, protocol.TaskResultPayload{
+	s.sendFenced(protocol.MsgTaskResult, s.fenceOf(taskID), protocol.TaskResultPayload{
 		TaskID: taskID, Status: res.Status, Result: &res,
 	})
+}
+
+// fenceOf 查账本条目的租约代次（快照读零拷贝；不在账本返回 0=缺省，hub 宽容）。
+func (s *Service) fenceOf(taskID string) int64 {
+	return s.cfg.Ledger.View()[taskID].FenceEpoch
 }
 
 // send 经 node 端点发帧；未连接（transport.ErrNoEndpoint）静默——ack/started
 // 丢失由 hub 回退重推自愈，task_result 丢失由重发链路闭合（SPEC 4.5）。
 func (s *Service) send(typ string, payload any) {
+	s.sendFenced(typ, 0, payload)
+}
+
+// sendFenced send 的带租约变体（P4/SPEC 4.11）：fence 仅 task_result 回带使用，
+// 其余帧（ack/started 等不设门禁）恒 0=缺省。
+func (s *Service) sendFenced(typ string, fence int64, payload any) {
 	b, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("[node] 载荷编码失败 type=%s: %v", typ, err)
 		return
 	}
 	env := &protocol.Envelope{
-		Version:   protocol.ProtocolVersion,
-		Type:      typ,
-		MessageID: protocol.NewMessageID(),
-		To:        "hub",
-		Payload:   b,
+		Version:    protocol.ProtocolVersion,
+		Type:       typ,
+		MessageID:  protocol.NewMessageID(),
+		To:         "hub",
+		FenceEpoch: fence,
+		Payload:    b,
 	}
 	if err := s.tr.Send("hub", env); err != nil && !isBenignSendErr(err) {
 		log.Printf("[node] 帧发送失败 type=%s: %v", typ, err)
@@ -624,6 +645,7 @@ func resultEnvelopeLen(taskID, from string, res protocol.TaskResult) int {
 		From:         from,                    // 真实发送身份（传输层盖章值）计入计量
 		To:           "hub",
 		SessionEpoch: 1 << 40, // 保守：代次位数上限量级
+		FenceEpoch:   1 << 40, // 保守：租约回带字段同位数上限量级（P4/SPEC 4.11）
 		Payload:      b,
 	}
 	eb, err := json.Marshal(env)

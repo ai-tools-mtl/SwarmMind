@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log"
 
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
@@ -18,8 +19,17 @@ var resultStatuses = map[string]protocol.TaskStatus{
 	protocol.ResultCancelled:   protocol.StatusCancelled,
 }
 
-// handleTaskResult 终态回传仲裁（SPEC 4.3 收敛表）：
+// handleTaskResult 终态回传仲裁（SPEC 4.3 收敛表 + P4 任务租约 4.11）：
 //   - 归属检查先于一切：任何 node 的帧只对其名下任务有效；
+//   - 任务租约门禁（P4，先于状态仲裁）：回带 fence_epoch 与该任务当前派发租约
+//     （Task.Lease.FenceEpoch，派发/重派事务内落库）等值才进入仲裁——重派后旧
+//     派单的迟到回写（zombie 写）据此外科式排除，且不误伤「同租约跨会话的合法
+//     重发」（进程重启恢复重发、offer 超时前的迟到回执，SPEC 4.8/4.5）；缺省
+//     （0，旧版 node/旧账本/未携租约派发）按「缺省=当前租约」宽容放行；过期
+//     → 拒收 zombie 结果：任务维持原状态（不改 Status/UpdatedAt/Result），Lease
+//     审计注记 zombie_result_rejected，回 err(result_conflict) 促停 node 重发
+//     （node 置账本 closed）。送达方身份由会话层担保（帧只经当前会话进入），
+//     租约担保派发代次一致，两层正交；
 //   - 任意非终态（submitted/offered/acknowledged/running）→ 接受（结果优先于
 //     状态机中间态），submitted 需同步释放信箱；
 //   - 已 cancelled 且结果未落（hub 先取消，Result 为 nil）→ cancelled 分支：合并
@@ -47,11 +57,31 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		merged   bool           // cancelled 分支：合并结果（终态钩子已在取消时触发过）
 		dupAck   bool           // 同终态同结果：重发 ack
 		conflict bool           // 保留先到：回冲突
+		zombie   bool           // 租约过期（zombie 写）：维持原状态拒收
 	)
 	err := c.st.Update(func(st *store.State) error {
 		t, ok := st.Tasks[p.TaskID]
 		if !ok || t.TargetNode != env.From {
 			log.Printf("[hub] task_result 未知/归属不符 task=%s from=%s", p.TaskID, env.From)
+			return nil
+		}
+		var lease int64
+		if t.Lease != nil {
+			lease = t.Lease.FenceEpoch
+		}
+		if env.FenceEpoch != 0 && env.FenceEpoch != lease {
+			// P4 任务租约：与当前派发租约不符的回写不进状态仲裁（旧派单 zombie
+			// 结果）。任务维持原状态，只追加固化审计字段。
+			nt := t.Clone()
+			ls := protocol.TaskLease{FenceEpoch: lease, LastRejectedFence: env.FenceEpoch, LastAt: c.now()}
+			if t.Lease != nil {
+				ls.Rejects = t.Lease.Rejects + 1
+			} else {
+				ls.Rejects = 1
+			}
+			nt.Lease = &ls
+			st.Tasks[nt.ID] = nt
+			zombie = true
 			return nil
 		}
 		if t.Status.Terminal() {
@@ -88,6 +118,21 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 	})
 	if err != nil {
 		log.Printf("[hub] task_result 事务失败 task=%s: %v", p.TaskID, err)
+		return
+	}
+	if zombie {
+		stored := c.st.View().Tasks[p.TaskID].Lease.FenceEpoch
+		log.Printf("[hub] zombie_result_rejected 拒收过期租约结果 task=%s from=%s fence_epoch=%d current_lease=%d（任务维持原状态，已记 Lease 审计）",
+			p.TaskID, env.From, env.FenceEpoch, stored)
+		// 回 result_conflict：node 据此置账本 closed 停止重发， zombie 结果不再
+		// 周期性重入仲裁（载荷携 TaskRef，同冲突帧口径）
+		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID,
+			protocol.TaskRef{TaskID: p.TaskID},
+			&protocol.ErrInfo{
+				Code: protocol.CodeResultConflict,
+				Msg: fmt.Sprintf("zombie_result_rejected: 任务租约过期（fence_epoch=%d ≠ current_lease=%d），拒绝回写，任务维持原状态",
+					env.FenceEpoch, stored),
+			})
 		return
 	}
 	switch {

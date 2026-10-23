@@ -240,13 +240,20 @@ func (c *Core) HandleFrame(env *protocol.Envelope) {
 // sendFrame 构造并发送 hub→node 帧；返回传输错误（帧构造不可失败，Payload 由
 // 调用方保证可序列化）。replyTo 关联请求 mid。
 func (c *Core) sendFrame(to, typ, replyTo string, payload any, errInfo *protocol.ErrInfo) error {
+	return c.sendFrameFence(to, typ, replyTo, 0, payload, errInfo)
+}
+
+// sendFrameFence sendFrame 的带租约变体（P4/SPEC 4.11）：fence 供 task_offer /
+// task_cancel 携派发/取消时刻该 node 的注册代次快照；其余帧恒 0=缺省。
+func (c *Core) sendFrameFence(to, typ, replyTo string, fence int64, payload any, errInfo *protocol.ErrInfo) error {
 	env := &protocol.Envelope{
-		Version:   protocol.ProtocolVersion,
-		Type:      typ,
-		MessageID: protocol.NewMessageID(),
-		To:        to,
-		ReplyTo:   replyTo,
-		Err:       errInfo,
+		Version:    protocol.ProtocolVersion,
+		Type:       typ,
+		MessageID:  protocol.NewMessageID(),
+		To:         to,
+		ReplyTo:    replyTo,
+		FenceEpoch: fence,
+		Err:        errInfo,
 	}
 	if payload != nil {
 		b, err := json.Marshal(payload)

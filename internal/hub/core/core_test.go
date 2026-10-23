@@ -72,6 +72,7 @@ type testNode struct {
 	ep *transport.Endpoint
 
 	offers      []protocol.Task
+	offerEnvs   []*protocol.Envelope // 原始 offer 帧（P4 租约帧断言用）
 	submitAcks  []protocol.SubmitAckPayload
 	resultAcks  []string
 	resultEvent []protocol.TaskResultPayload
@@ -79,6 +80,7 @@ type testNode struct {
 	cancels     []protocol.TaskCancelPayload // 收到的 task_cancel 帧（取消链路断言用）
 	errTaskRefs []string                     // err 帧载荷 TaskRef（冲突帧须携引用，回归 2578fd8）
 	autoAck     bool
+	epoch       int64 // 本端会话代次（send 盖章 SessionEpoch；P4 测试模拟重连换代用）
 
 	// ReplyTo 关联记录（Loop 4：本地请求-应答匹配断言用）。
 	submitAckReplyTo []string
@@ -126,6 +128,8 @@ func (n *testNode) handle(env *protocol.Envelope) {
 			return
 		}
 		n.offers = append(n.offers, task)
+		cp := *env
+		n.offerEnvs = append(n.offerEnvs, &cp)
 		if n.autoAck {
 			n.ack(task.ID)
 		}
@@ -180,7 +184,7 @@ func (n *testNode) send(typ string, payload any) {
 	}
 	if err := n.ep.Send("hub", &protocol.Envelope{
 		Version: protocol.ProtocolVersion, Type: typ,
-		MessageID: protocol.NewMessageID(), To: "hub", Payload: b,
+		MessageID: protocol.NewMessageID(), To: "hub", SessionEpoch: n.epoch, Payload: b,
 	}); err != nil {
 		n.t.Fatalf("发送 %s 失败: %v", typ, err)
 	}

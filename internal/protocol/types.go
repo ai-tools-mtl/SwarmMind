@@ -135,6 +135,21 @@ type TaskReview struct {
 	Note string `json:"note,omitempty"`
 }
 
+// TaskLease 任务租约（P4/SPEC 4.11，Task.Lease 载体）：FenceEpoch 是 hub 当前
+// 派发的租约代次（派发事务内捕获的该 node 注册代次快照，重派即刷新），结果
+// 仲裁据此与 node 回带的 fence_epoch 等值比较；其余字段是 zombie 拒收审计
+//（zombie_result_rejected），零值表示无拒收。未派发/旧版记录 Lease 为 nil。
+type TaskLease struct {
+	// FenceEpoch 当前派发租约代次（0=未携租约，缺省宽容）。
+	FenceEpoch int64 `json:"fence_epoch"`
+	// Rejects 该任务累计被拒收的 zombie 结果数（zombie_result_rejected）。
+	Rejects int `json:"rejects,omitempty"`
+	// LastRejectedFence 最近一次被拒结果携带的回带值。
+	LastRejectedFence int64 `json:"last_rejected_fence,omitempty"`
+	// LastAt 最近拒收时刻（UTC）。
+	LastAt time.Time `json:"last_at,omitempty"`
+}
+
 // Task 任务全量（SPEC 4.9）：hub 生成并持久化，随 offer 下发、随 task_status 查询返回。
 type Task struct {
 	// ID 任务唯一标识："t-"+16 字节 hex，hub 生成。
@@ -166,6 +181,11 @@ type Task struct {
 	ExpireAt time.Time `json:"expire_at"`
 	// Result 终态结果（非终态为 nil）。
 	Result *TaskResult `json:"result,omitempty"`
+	// Lease 任务租约（P4/SPEC 4.11）：派发即登记（FenceEpoch=派发时刻该 node
+	// 注册代次，重派刷新），结果仲裁的等值基准；Rejects/Last* 为 zombie 拒收
+	// 审计（zombie_result_rejected）。nil = 未派发或旧版记录；不参与状态机
+	//（不改 Status/UpdatedAt），随快照持久化供控制台/查询面审计。
+	Lease *TaskLease `json:"lease,omitempty"`
 	// Review 人工核对记录（needs_review 任务的管理面追加，SPEC 六.五；
 	// 协议层不感知，不参与状态机与 offer 下发）。
 	Review *TaskReview `json:"review,omitempty"`
@@ -245,6 +265,11 @@ func (t Task) Clone() Task {
 	if t.Review != nil {
 		rv := *t.Review
 		n.Review = &rv
+	}
+	if t.Lease != nil {
+		// 写时复制纪律：*TaskLease 换新指针，禁止与旧状态共享
+		ls := *t.Lease
+		n.Lease = &ls
 	}
 	return n
 }

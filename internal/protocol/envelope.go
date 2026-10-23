@@ -79,6 +79,12 @@ type Envelope struct {
 	IdemKey string `json:"idem,omitempty"`
 	// SessionEpoch 会话代次（SPEC 4.4；register 帧豁免校验）。
 	SessionEpoch int64 `json:"epoch,omitempty"`
+	// FenceEpoch 任务租约代次快照（P4/SPEC 4.11）：task_offer/task_cancel 由 hub
+	// 携派发/取消时刻该 node 的注册代次，task_result 由 node 从账本原样回带；
+	// hub 结果仲裁校验等值，过期即拒收 zombie 写。0=缺省（旧版对端），hub 按
+	// 「缺省=当前 epoch」宽容处理，向后兼容。传输层盖章只覆盖 From/Version/
+	// SessionEpoch，本字段原样透传（node conn.Send / membus 均不改动）。
+	FenceEpoch int64 `json:"fence_epoch,omitempty"`
 	// TraceID 链路追踪 ID。
 	TraceID string `json:"trace_id,omitempty"`
 	// Payload 类型相关载荷（SPEC 4.2 表）。
