@@ -181,7 +181,7 @@ epoch（任务版本号，旧版本的回写自动拒绝）、租约（执行权
 }
 ```
 
-hub 模式 12 个工具：
+hub 模式 13 个工具：
 
 | 工具 | 干什么 |
 |---|---|
@@ -191,6 +191,7 @@ hub 模式 12 个工具：
 | `swarmmind_status` | 查某个任务当前进度（不等待） |
 | `swarmmind_wait` | 等到任务出结果再返回（轮询至终态） |
 | `swarmmind_artifact` | 取回任务的产物文件内容 |
+| `swarmmind_tasks` | 列出网内任务：看正在跑的、最近完成的、失败的，支持按状态/节点筛选 |
 | `swarmmind_decide` | 拿不准派给谁时问一句：返回建议执行者与理由（云端模型不可用自动退回本地规则） |
 | `swarmmind_group_create` | 建协作群：围绕一个目标把几个 agent 拉进同一讨论空间 |
 | `swarmmind_group_list` | 看现有协作群与状态 |

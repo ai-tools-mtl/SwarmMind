@@ -27,8 +27,9 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具：hub 模式 12 个（不变）——nodes / agents / submit / status / wait /
-// artifact / decide + group_create / group_list / group_say / group_messages /
+// 工具：hub 模式 13 个——nodes / agents / submit / status / wait / artifact /
+// tasks（任务列表，P4⑤：正在跑/最近完成/失败速览，hub 视角，node 模式不设）/
+// decide + group_create / group_list / group_say / group_messages /
 // group_close（群聊协作空间，GROUP-RFC 六 MVP）。node 模式 6 个——nodes（本机
 // 节点信息单条）/ agents（本机目录）/ submit（本机派单，prime_token）/ status /
 // wait / artifact（本机直取）。
@@ -43,6 +44,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -272,6 +274,12 @@ func tools() []toolDef {
 			"task_id": toolStr("任务 ID"),
 			"index":   toolNum("产物序号（从 0 开始，默认 0）"),
 		}, "task_id")},
+		{Name: "swarmmind_tasks", Description: "列出网内任务：看正在跑的、最近完成的、失败的；支持按状态/节点筛选", InputSchema: toolObj(map[string]any{
+			"status":  toolStr("按状态筛选（可选，原样匹配）：running 执行中 / failed 失败 / completed 已完成 / needs_review 等你确认 / cancelled 已取消 / submitted、offered、acknowledged 排队中"),
+			"node_id": toolStr("按目标节点 ID 筛选（可选，精确匹配）"),
+			"agent":   toolStr("按目标 agent 名筛选（可选，精确匹配）"),
+			"limit":   toolNum("最多返回条数（可选，默认 20，上限 100；列表新任务在前）"),
+		})},
 		{Name: "swarmmind_decide", Description: "分配决策查询：给定子任务描述与候选执行者列表，返回推荐执行者与置信度；云端决策模型（StartLux）不可用时自动降级本地规则，响应含 used_level 与 degraded 标记", InputSchema: toolObj(map[string]any{
 			"subtask_description": toolStr("子任务描述（做什么，越具体越准）"),
 			"capability_options":  toolArr("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
@@ -383,6 +391,256 @@ func toolAgents() (string, error) {
 		fmt.Fprintf(&b, "%s @ %s：%.120s\n", d.Card.Name, d.NodeID, desc)
 	}
 	return b.String(), nil
+}
+
+/* ---------- swarmmind_tasks：任务列表（P4⑤，hub 模式专属） ---------- */
+
+// taskEntry GET /api/v1/tasks 列表条目解码视图（protocol.Task 的列表子集；
+// 列表主键 JSON tag 是 id，非 task_id）。
+type taskEntry struct {
+	ID            string    `json:"id"`
+	TargetNode    string    `json:"target_node"`
+	TargetAgent   string    `json:"target_agent"`
+	Status        string    `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	BlockedReason string    `json:"blocked_reason"`
+	Result        *struct {
+		Error    string `json:"error"`
+		ExitCode int    `json:"exit_code"`
+	} `json:"result"`
+}
+
+// toolTasks 任务列表（GET /api/v1/tasks）：看正在跑的、最近完成的、失败的。
+// REST 端点 V0 全量直出——不解析任何 query 参数、不分页（server.go
+// handleListTasks「筛选由前端完成」口径），故 status/node_id/agent 筛选与
+// limit 截断全部在本工具本地完成，请求恒为裸路径，不虚构服务端不存在的
+// 透传参数。列表天然是 hub 视角，node 模式不设本工具。
+func toolTasks(args map[string]any) (string, error) {
+	// 参数先本地校验后请求 hub：非法参数（limit 越界/非整数/非数字、status 不在
+	// 状态机词表）直接参数错误拒绝，不打 hub、不静默回落成空结果或默认值。
+	limit := 20
+	if raw, ok := args["limit"]; ok && raw != nil {
+		lv, err := limitArg(raw)
+		if err != nil {
+			return "", err
+		}
+		limit = lv
+	}
+	stFilter, _ := args["status"].(string)
+	nodeFilter, _ := args["node_id"].(string)
+	agentFilter, _ := args["agent"].(string)
+	stFilter, nodeFilter, agentFilter =
+		strings.TrimSpace(stFilter), strings.TrimSpace(nodeFilter), strings.TrimSpace(agentFilter)
+	// 合法集与工具 schema 描述同词表（statusListCN 即八态全集），未收录即非法——
+	// 非法状态按参数错误拒绝，而非误报「没有符合筛选条件的任务」空结果。
+	if stFilter != "" && statusListCN(stFilter) == "" {
+		return "", fmt.Errorf("status 非法：%q（合法值：submitted/offered/acknowledged/running/completed/failed/needs_review/cancelled）", stFilter)
+	}
+	code, data, err := hubAPI("GET", "/api/v1/tasks", nil)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", fmt.Errorf("hub 返回 %d: %s", code, truncate(data))
+	}
+	var out struct {
+		Tasks []taskEntry `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	if len(out.Tasks) == 0 {
+		return "网内还没有任务记录（swarmmind_submit 可派第一单）。", nil
+	}
+	now := time.Now()
+	matched := make([]taskEntry, 0, len(out.Tasks))
+	for _, t := range out.Tasks {
+		if stFilter != "" && t.Status != stFilter {
+			continue
+		}
+		if nodeFilter != "" && t.TargetNode != nodeFilter {
+			continue
+		}
+		if agentFilter != "" && t.TargetAgent != agentFilter {
+			continue
+		}
+		matched = append(matched, t)
+	}
+	if len(matched) == 0 {
+		return fmt.Sprintf("没有符合筛选条件的任务（网内共 %d 个）。", len(out.Tasks)), nil
+	}
+	head := fmt.Sprintf("任务列表：符合 %d 条（网内共 %d 个，新任务在前，时间为 UTC）%s：",
+		len(matched), len(out.Tasks), filtersNote(stFilter, nodeFilter, agentFilter))
+	var b strings.Builder
+	b.WriteString(head)
+	for i, t := range matched {
+		if i == limit {
+			fmt.Fprintf(&b, "\n（仅显示最新 %d 条，其余 %d 条未展示——可用 status/node_id/agent 收窄范围）", limit, len(matched)-limit)
+			break
+		}
+		b.WriteString("\n")
+		b.WriteString(renderTaskRow(t, now))
+	}
+	b.WriteString("\n查详情/等结果/取产物请把上面「全号」传给 swarmmind_status / swarmmind_wait / swarmmind_artifact。")
+	return b.String(), nil
+}
+
+// limitArg 列表 limit 参数解析（codex 审查必须修 1）：接受 JSON number
+// （float64 / json.Number / int），范围校验全部在浮点域完成后才取整——非数字、
+// 非整数、<1、>100（含 1e100 等超出 int64 的巨值）一律参数错误拒绝。禁止先转
+// int 再判断：超界浮点→int 的转换结果随平台实现而定（amd64/CI ubuntu 回绕为
+// 最小负数，负 limit 让渲染循环的截断条件永不命中，绕过 100 上限全量直出；
+// arm64 饱和为 MaxInt64 才被旧钳制侥幸拦下），不得依赖。NaN 也被整数判定拦下
+// （NaN != Trunc(NaN)）。
+func limitArg(raw any) (int, error) {
+	var f float64
+	switch v := raw.(type) {
+	case float64:
+		f = v
+	case json.Number:
+		n, err := v.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("limit 必须为数字（默认 20，上限 100），got %s", v.String())
+		}
+		f = n
+	case int:
+		f = float64(v)
+	default:
+		return 0, fmt.Errorf("limit 必须为数字（默认 20，上限 100），got %T", raw)
+	}
+	if f != math.Trunc(f) {
+		return 0, fmt.Errorf("limit 必须为整数（默认 20，上限 100），got %v", f)
+	}
+	if f < 1 {
+		return 0, fmt.Errorf("limit 必须 ≥ 1（默认 20，上限 100），got %v", f)
+	}
+	if f > 100 {
+		return 0, fmt.Errorf("limit 上限 100（可用 status/node_id/agent 收窄范围），got %v", f)
+	}
+	return int(f), nil
+}
+
+// filtersNote 头部筛选条件回显（让调用方确认筛了什么，防空筛选误判为无任务）。
+func filtersNote(st, node, agent string) string {
+	parts := make([]string, 0, 3)
+	if st != "" {
+		parts = append(parts, "状态="+st)
+	}
+	if node != "" {
+		parts = append(parts, "节点="+node)
+	}
+	if agent != "" {
+		parts = append(parts, "agent="+agent)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（筛选：" + strings.Join(parts, " ") + "）"
+}
+
+// renderTaskRow 单任务列表行：短码/状态人话/节点/agent/提交时间/耗时或错误码，
+// 行尾附全号——短码仅供速读，status/wait/artifact 均按全号精确寻址。终态
+// （completed/failed/needs_review/cancelled）以 Status 判定、不看 Result
+// （cancelled+Result=nil 是真实状态，见 taskTerminal），给耗时（提交→终态时刻
+// UpdatedAt，定格不随 now 增长；UpdatedAt 缺失则不显示时长）；非终态无「耗时」
+// 概念，给已运行/已排队时长；依赖阻塞（blocked_reason 不进状态机，任务仍
+// submitted）追加标注，防误读为卡死。
+func renderTaskRow(t taskEntry, now time.Time) string {
+	st := statusListCN(t.Status)
+	if st == "" {
+		st = t.Status
+	}
+	var tail string
+	switch {
+	case taskTerminal(t.Status):
+		// 终态以 Status 判定（codex 审查必须修 2）：hub 取消即收敛 cancelled
+		// 终态，node 真实执行数据后到才合并 Result（internal/hub/core/cancel.go
+		// CancelTask「Result 留空」）——按 Result 判断会把已取消任务误显示成
+		// 「已排队」且时长持续增长。终态时长定格到终态时刻 UpdatedAt。
+		dur := ""
+		if !t.UpdatedAt.IsZero() {
+			dur = fmt.Sprintf("耗时 %s", fmtDur(t.UpdatedAt.Sub(t.CreatedAt)))
+		}
+		note := ""
+		if t.Result != nil && t.Result.Error != "" {
+			note = fmt.Sprintf("错误码 %s", t.Result.Error)
+		} else if t.Result != nil && t.Result.ExitCode != 0 {
+			note = fmt.Sprintf("退出码 %d", t.Result.ExitCode)
+		}
+		switch {
+		case dur != "" && note != "":
+			tail = fmt.Sprintf("%s（%s）", dur, note)
+		case dur != "":
+			tail = dur
+		default:
+			tail = note
+		}
+	case t.Status == "running":
+		tail = fmt.Sprintf("已运行 %s", fmtDur(now.Sub(t.CreatedAt)))
+	default:
+		tail = fmt.Sprintf("已排队 %s", fmtDur(now.Sub(t.CreatedAt)))
+	}
+	blocked := ""
+	if t.BlockedReason != "" {
+		blocked = "（依赖阻塞，暂不派发）"
+	}
+	return fmt.Sprintf("%s %s %s/%s 提交 %s %s%s｜全号 %s",
+		shortID(t.ID), st, t.TargetNode, t.TargetAgent, fmtWhen(t.CreatedAt, now), tail, blocked, t.ID)
+}
+
+// taskTerminal 列表行终态判定：以 Status 为准，与 renderTaskOK（status/wait
+// 详情页）的终态口径一致——completed/failed/needs_review/cancelled。不能拿
+// Result != nil 当终态：cancelled + Result=nil 是真实状态（取消即收敛终态，
+// node 的 task_result(cancelled) 后到才合并真实执行数据）。
+func taskTerminal(status string) bool {
+	switch status {
+	case "completed", "failed", "needs_review", "cancelled":
+		return true
+	}
+	return false
+}
+
+// statusListCN 列表行状态人话（swarmmind_tasks 专用口径：排队三态合一、
+// needs_review 用「等你确认」短句；详情页仍走 statusCN 全称，两表勿混用）。
+// 未收录状态返回空串，由调用方回退原文。
+func statusListCN(s string) string {
+	return map[string]string{
+		"submitted": "排队中", "offered": "排队中", "acknowledged": "排队中",
+		"running": "执行中", "completed": "已完成", "failed": "失败",
+		"needs_review": "等你确认", "cancelled": "已取消",
+	}[s]
+}
+
+// shortID 任务短码：全号（t-+32 hex）前 10 位，行内速读用。
+func shortID(id string) string {
+	if len(id) > 10 {
+		return id[:10]
+	}
+	return id
+}
+
+// fmtDur 时长人话：秒/分秒/时分/天时四档（列表行与耗时展示用）。
+func fmtDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm%02ds", int(d.Minutes()), int(d.Seconds())%60)
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	default:
+		return fmt.Sprintf("%dd%02dh", int(d.Hours()/24), int(d.Hours())%24)
+	}
+}
+
+// fmtWhen 提交时刻人话（UTC，列表头统一注明；跨年才带年份防误读为今年）。
+func fmtWhen(t, now time.Time) string {
+	t = t.UTC()
+	if t.Year() != now.UTC().Year() {
+		return t.Format("2006-01-02 15:04")
+	}
+	return t.Format("01-02 15:04")
 }
 
 // depArgs 解析 depends_on 工具参数（P4.3 任务依赖透传）：JSON 数组 → 去空白
@@ -1559,6 +1817,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolWait(args)
 	case "swarmmind_artifact":
 		text, err = toolArtifact(args)
+	case "swarmmind_tasks":
+		text, err = toolTasks(args)
 	case "swarmmind_decide":
 		text, err = toolDecide(args)
 	case "swarmmind_group_create":

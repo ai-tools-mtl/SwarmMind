@@ -510,6 +510,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
+| swarmmind_tasks | GET /api/v1/tasks | 任务列表：正在跑/最近完成/失败一屏速览，支持按状态/节点/agent 筛选（P4⑤；REST V0 全量直出不解析 query、不分页，筛选与条数截断在 MCP 侧本地完成、请求恒裸路径；每行短码+状态人话+节点/agent+提交时间+耗时或错误码，行尾附全号供 status/wait/artifact 寻址；hub 视角，node 模式不设） |
 | swarmmind_decide | 外部 StartLux /v1/decisions（bamboonode/MLX 本地） | 分配决策查询：云端 L0 → 规则兜底 L2 自动降级，响应标 used_level（P4.1） |
 | swarmmind_group_create | POST /api/v1/groups | 建协作群（目标+成员；返回 g- 群 ID，创建即 discussing；GROUP-RFC 六 MVP，P4/V1） |
 | swarmmind_group_list | GET /api/v1/groups | 看全部协作群（目标/状态/成员/发言预算） |
