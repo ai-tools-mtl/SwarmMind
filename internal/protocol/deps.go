@@ -36,12 +36,14 @@ func UpstreamFailedReason(idem string) string { return BlockedReasonUpstreamFail
 const DepManifestMarker = "\n[swarmmind:depends_on]"
 
 // EffectiveInput 提交输入的生效形态：声明了 depends_on 时在 stdin 尾部附加
-// 依赖清单（上游 idem_key 供 agent 自取产物）。幂等：已含标记的 stdin 原样返回。
+// 依赖清单（上游 idem_key 供 agent 自取）。幂等：已含标记的 stdin 原样返回。
 //
-// 幂等指纹口径（mailbox.ContentHash / taskContentHash）与本函数共用——重试请求
-// 与落库任务双方都过同一变换，保证「同键同内容」判定不受清单注入影响；未声明
-// 依赖时输出与旧版逐字节一致（向后兼容）。产物挂载（workdir/inputs/<上游id>/
-// 纯复制）为 FILE-COLLAB L2 第二子批能力，本批先以清单附 idem 过渡。
+// 注意（P1 修复后口径）：清单标记文本只服务任务体渲染与落库重建的幂等判据，
+// 不再承担指纹职责——mailbox.ContentHash / BaseContentHash 将规范化依赖列表
+// 独立哈希进指纹材料，标记文本可被提交方预置进 stdin，依赖不得只经本函数
+// 注入的清单间接进指纹。重试与落库双方仍过同一变换，清单注入不破坏重试；
+// 未声明依赖时输出与旧版逐字节一致（向后兼容）。产物挂载（workdir/inputs/
+// <上游id>/ 纯复制）为 FILE-COLLAB L2 第二子批能力，本批先以清单附 idem 过渡。
 func EffectiveInput(in TaskInput, deps []string) TaskInput {
 	out := in.Clone()
 	if len(deps) == 0 || strings.Contains(out.Stdin, DepManifestMarker) {

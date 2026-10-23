@@ -11,8 +11,9 @@ import (
 )
 
 // TestHubSubmitDependsOnPassthrough swarmmind_submit 依赖透传（P4.3/SPEC 六.六
-// 同步规则）：depends_on 数组参数原样进 POST /api/v1/tasks 请求体（TrimSpace 归一、
-// 空项剔除）；未传不下发字段。
+// 同步规则）：depends_on 数组参数原样进 POST /api/v1/tasks 请求体（TrimSpace 归一；
+// 未传不下发字段）。非法输入（空白项等）不在此列——显式拒绝见
+// TestHubSubmitDependsOnInvalid，与 REST invalid_dependency 同语义。
 func TestHubSubmitDependsOnPassthrough(t *testing.T) {
 	var got map[string]any
 	var seen bool
@@ -32,10 +33,10 @@ func TestHubSubmitDependsOnPassthrough(t *testing.T) {
 	hubURL, hubToken = srv.URL, "tok"
 	t.Cleanup(func() { hubURL, hubToken = oldURL, oldTok })
 
-	// 带依赖：透传（含空白归一；空项剔除）
+	// 带依赖：透传（含空白归一）
 	if _, err := toolSubmit(map[string]any{
 		"node_id": "n1", "agent": "echo", "stdin": "x",
-		"depends_on": []any{"up-1", " up-2 ", ""},
+		"depends_on": []any{"up-1", " up-2 "},
 	}); err != nil {
 		t.Fatalf("提交失败: %v", err)
 	}
@@ -58,6 +59,76 @@ func TestHubSubmitDependsOnPassthrough(t *testing.T) {
 	}
 	if _, exists := got["depends_on"]; exists {
 		t.Error("未声明依赖不得下发 depends_on 字段")
+	}
+}
+
+// TestHubSubmitDependsOnInvalid 非法 depends_on 显式拒绝（P2 修复，与 REST
+// invalid_dependency 语义对齐）：非数组、非字符串元素、空白项均返回工具错误
+// 提示修正，不静默降级——修复前非数组/空白项被静默剔除成空列表（任务变无
+// 条件立即执行）、非字符串元素被字符串化透传。拒绝发生在请求 hub 之前。
+func TestHubSubmitDependsOnInvalid(t *testing.T) {
+	var (
+		seen bool
+		got  map[string]any
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/tasks" {
+			seen = true
+			b, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(b, &got)
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"task_id":"t-x"}`))
+	}))
+	defer srv.Close()
+
+	oldURL, oldTok := hubURL, hubToken
+	hubURL, hubToken = srv.URL, "tok"
+	t.Cleanup(func() { hubURL, hubToken = oldURL, oldTok })
+
+	bad := []struct {
+		name string
+		raw  any
+	}{
+		{"非数组", "up-1"},
+		{"对象", map[string]any{"up": "1"}},
+		{"非字符串元素（数字）", []any{"up-1", 42}},
+		{"非字符串元素（布尔）", []any{true}},
+		{"空白项", []any{"up-1", "   "}},
+		{"全空白项", []any{"  "}},
+	}
+	for _, tc := range bad {
+		seen = false
+		out, err := toolSubmit(map[string]any{
+			"node_id": "n1", "agent": "echo", "stdin": "x",
+			"depends_on": tc.raw,
+		})
+		if err == nil {
+			t.Errorf("%s: 应报错提示修正, got %q", tc.name, out)
+			continue
+		}
+		if !strings.Contains(err.Error(), "depends_on") {
+			t.Errorf("%s: 错误应指向 depends_on 参数, got %v", tc.name, err)
+		}
+		if seen {
+			t.Errorf("%s: 拒绝应发生在请求 hub 之前", tc.name)
+		}
+	}
+
+	// 空数组＝不声明依赖（合法）：照常提交且不下发字段
+	seen = false
+	got = nil
+	if _, err := toolSubmit(map[string]any{
+		"node_id": "n1", "agent": "echo", "stdin": "x",
+		"depends_on": []any{},
+	}); err != nil {
+		t.Fatalf("空数组应视为不声明依赖: %v", err)
+	}
+	if !seen {
+		t.Fatal("空数组应照常提交")
+	}
+	if _, exists := got["depends_on"]; exists {
+		t.Error("空数组不得下发 depends_on 字段")
 	}
 }
 

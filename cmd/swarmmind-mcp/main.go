@@ -386,19 +386,31 @@ func toolAgents() (string, error) {
 }
 
 // depArgs 解析 depends_on 工具参数（P4.3 任务依赖透传）：JSON 数组 → 去空白
-// 字符串列表（空项剔除；全空返回 nil 不下发字段）。
-func depArgs(raw any) []string {
+// 字符串列表。非法输入显式拒绝（与 REST invalid_dependency 同语义，不静默
+// 降级——静默剔除/字符串化会把声明依赖的任务变成无条件立即执行）：未传为
+// nil 放行；非数组、非字符串元素、空白项均报错提示修正；合法项 TrimSpace
+// 归一后透传，其余准入（未知 idem/重复/深度/级联/环）交给 hub 统一校验。
+func depArgs(raw any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	arr, ok := raw.([]any)
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("depends_on 必须为字符串数组（invalid_dependency），got %T", raw)
 	}
 	deps := make([]string, 0, len(arr))
-	for _, v := range arr {
-		if s := strings.TrimSpace(fmt.Sprint(v)); s != "" {
-			deps = append(deps, s)
+	for i, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("depends_on[%d] 必须为字符串（invalid_dependency），got %T", i, v)
 		}
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return nil, fmt.Errorf("depends_on[%d] 不能为空或纯空白（invalid_dependency）", i)
+		}
+		deps = append(deps, s)
 	}
-	return deps
+	return deps, nil
 }
 
 func toolSubmit(args map[string]any) (string, error) {
@@ -433,7 +445,11 @@ func toolSubmit(args map[string]any) (string, error) {
 	if gr, ok := args["group_ref"].(string); ok && gr != "" {
 		body["group_ref"] = gr
 	}
-	if deps := depArgs(args["depends_on"]); len(deps) > 0 {
+	deps, err := depArgs(args["depends_on"])
+	if err != nil {
+		return "", err
+	}
+	if len(deps) > 0 {
 		body["depends_on"] = deps
 	}
 	code, data, err := hubAPI("POST", "/api/v1/tasks", body)
