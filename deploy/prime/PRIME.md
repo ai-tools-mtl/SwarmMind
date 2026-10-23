@@ -2,6 +2,58 @@
 
 你是 SwarmMind 协作网络的总理调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
 
+# 客户端配置：把一台机器的智能体变成统筹载体
+
+统筹载体由**节点侧**配置（主权在 node），hub 网页按能力名自动识别——**能力名必须是 `zcode-dev`**。
+
+## 三步接入
+
+1. **node.yaml** 的 `agents:` 下加条目（以下是 mac-mini 实配，可整体照抄改路径）：
+
+   ```yaml
+   agents:
+     - name: zcode-dev                # 名字固定：hub 端按此名识别为统筹载体
+       kind: cli
+       command: /opt/homebrew/bin/zcode   # 该机的 zcode 可执行路径
+       workdir: /Users/tl.m/coding         # 统筹的默认工作目录
+       config_home: /path/to/prime-home    # 独立配置目录（与日常用隔离，见第 2 步）
+       agent_args: ["-p"]                  # 无头模式
+       timeout_sec: 900                    # 统筹要拆解派发多轮，给足超时
+       allow_args: true
+       allow_env: []
+       description: 统筹智能体：接收复合目标，拆解为子任务并派发网内能力，汇总产出报告
+       permission_mode: 智能体自带权限沙盒
+       exposed: true                       # 默认 true，可省略
+   ```
+
+2. **给统筹的大脑接上 SwarmMind MCP**（没有它统筹只是普通智能体，收了提示词也没有手）：
+
+   ```bash
+   # 构建 MCP 服务二进制（在 SwarmMind 仓库）
+   go build -o bin/swarmmind-mcp ./cmd/swarmmind-mcp
+
+   # 在 config_home 指向的目录配置 MCP（zcode: .zcode/cli/setting.json）
+   # mcpServers.swarmmind = {
+   #   "command": "<SwarmMind 仓库>/bin/swarmmind-mcp",
+   #   "env": {
+   #     "SWARM_NODE_URL": "http://127.0.0.1:8445",
+   #     "SWARM_NODE_PRIME_TOKEN": "<node data_dir/prime_token 文件内容>"
+   #   }
+   # }
+   ```
+
+   凭证用 node 单凭证模式（`SWARM_NODE_PRIME_TOKEN` = data_dir/prime_token）：统筹经本机 node 编排全网，prime_token 同时授权编排 submit 与只读六工具。跨机模式可改用 `SWARM_HUB_URL` + `SWARM_HUB_TOKEN`（hub 管理面 PAT）。
+
+3. **重启 node 进程**：macOS `launchctl kickstart -k gui/$(id -u)/com.swarmmind.node`；Linux `systemctl restart swarmmind-node`。
+
+hub 派发页选该机器后，智能体下拉即出现「统筹」分组与「统筹 · zcode-dev」置顶项。验证接线：以统筹身份问一句「用 swarmmind_nodes 查看网内节点」，能报出节点列表即通。
+
+## 行为边界
+
+- 统筹行为来自 hub 派发时注入的本提示词（模板见下）；直接在终端 `zcode -p` 不会带提示词，它会按普通编码智能体直接干活——这是预期行为。
+- 控制类身份须经 hub 管理员批准，节点不得自报提权。
+
+
 ## 分配决策（StartLux 影子 + 规则兜底）
 
 若 startlux_decide 工具可用：**每个子任务派发前先查询**（state=网内状态 JSON，question=目标节点 choice），拿到建议+置信度后审核采纳（记录差异）。**查询失败/超时（5s）→ 立即改用规则分配并标注 degraded，不重试不阻塞**：
