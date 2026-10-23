@@ -212,6 +212,13 @@ custom_field: keep-me  # 未知字段锚点
 // 未钦定态（PrimeAgent 空）、计数轮换回调（tok-declare-1/2/…）。返回服务与
 // node.yaml 路径。
 func newDeclareServer(t *testing.T) (*httptest.Server, string) {
+	return newDeclareServerHome(t, "")
+}
+
+// newDeclareServerHome newDeclareServer 的影子 home 形态（修复轮 R5）：home
+// 非空时 echo 的 ConfigHome 指向它（并发接线测试预置 zcode 布局用）。command
+// 探测注桩命中（R4 后接线要求非占位符）。
+func newDeclareServerHome(t *testing.T, home string) (*httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "node.yaml")
@@ -229,10 +236,12 @@ func newDeclareServer(t *testing.T) (*httptest.Server, string) {
 		Runners: map[string]svcpkg.Runner{"echo": echoStubRunner{}},
 	}, bus.Endpoint("nodeA"))
 	t.Cleanup(svc.Close)
+	echo := echoProfileLocal(t)
+	echo.ConfigHome = home
 	n := 0
-	srv := httptest.NewServer(New(Config{
+	s := New(Config{
 		NodeID: "nodeA", Service: svc, Ledger: led,
-		Agents: newState(t, dir, []protocol.ExecProfile{echoProfileLocal(t),
+		Agents: newState(t, dir, []protocol.ExecProfile{echo,
 			{Name: "sleeper", Kind: protocol.AgentKindCLI, Command: "/bin/sleep",
 				Workdir: t.TempDir(), TimeoutSec: 1, Exposed: false}}),
 		LocalToken:        "tok-local",
@@ -248,7 +257,9 @@ func newDeclareServer(t *testing.T) (*httptest.Server, string) {
 			n++
 			return fmt.Sprintf("tok-declare-%d", n), nil
 		},
-	}).Handler())
+	})
+	s.mcpCommandOverride = "/fake/swarmmind-mcp"
+	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	return srv, cfgPath
 }
@@ -510,8 +521,13 @@ func TestPrimeDeclareRotatesToken(t *testing.T) {
 // 全部 200；任一时刻恰一张有效编排凭证由 declare 即换凭证语义保证）。
 // 修复 6 加强断言：收尾后 status 查询 prime_agent 正确；用最终凭证调 submit
 // 断言 202（「任一时刻恰一张有效凭证」的行为级验证——n 张应答凭证中恰一张可编排）。
+// 修复轮 R5 加强：echo 影子 home 预置 zcode 布局——并发收尾后真实 setting.json
+// 内凭证必须等于唯一存活凭证（轮换+接线同互斥段，最后落盘的必是最后换发的），
+// 且无任何旧凭证残留（否则统筹载体拿旧 token 401）。
 func TestPrimeDeclareRotateConcurrent(t *testing.T) {
-	srv, _ := newDeclareServer(t)
+	home := t.TempDir()
+	setting := writeZcodeSetting(t, home, `{"mcpServers":{"other":{"command":"keep-me"}}}`)
+	srv, _ := newDeclareServerHome(t, home)
 	const n = 6
 	tokens := make([]string, n)
 	var wg sync.WaitGroup
@@ -556,16 +572,32 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 		return code
 	}
-	live := 0
+	live, liveTok := 0, ""
 	for _, tok := range tokens {
 		if code := submit(tok); code == http.StatusAccepted {
 			live++
+			liveTok = tok
 		} else if code != http.StatusUnauthorized {
 			t.Fatalf("非最终凭证应 401, got %d（%s）", code, tok)
 		}
 	}
 	if live != 1 {
 		t.Fatalf("任一时刻应恰一张有效编排凭证, got %d 张可 202: %q", live, tokens)
+	}
+	// 加强③（修复轮 R5）：命中布局后真实 setting.json 的最终凭证——盘上必须
+	// 是唯一存活凭证，且 n-1 张已作废凭证一个都不残留、无关条目原样。
+	doc := readSettingDoc(t, setting)
+	if tok := entryToken(t, doc); tok != liveTok {
+		t.Fatalf("并发收尾后 setting.json 内 token=%q, want 存活凭证 %q", tok, liveTok)
+	}
+	raw := mustRead(t, setting)
+	for _, tok := range tokens {
+		if tok != liveTok && strings.Contains(raw, tok) {
+			t.Fatalf("旧凭证 %q 不得残留在宿主配置", tok)
+		}
+	}
+	if other := serversOf(t, doc)["other"].(map[string]any); other["command"] != "keep-me" {
+		t.Fatalf("其他 MCP 条目应原样: %v", other)
 	}
 }
 
