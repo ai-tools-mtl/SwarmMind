@@ -119,6 +119,10 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .filters .badge{background:none;padding:0;color:inherit;font-weight:650}
 /* 统筹模式徽标：accent 蓝底蓝字，与状态色系区分（橙=待核对、红=失败、蓝=统筹角色） */
 .badge.orch{background:var(--accent-bg);color:var(--accent);font-weight:600;box-shadow:inset 0 0 0 1px var(--accent-ring)}
+/* 派发页统筹状态条：浅蓝底独立行，入口按钮不再藏进帮助长文 */
+.orch-line{display:flex;align-items:center;gap:10px;margin-top:12px;padding:10px 14px;background:var(--accent-bg);border-radius:var(--r-thumb);font-size:13px;color:var(--ink-2)}
+.orch-line .badge{flex-shrink:0}
+.orch-line button{height:auto;padding:5px 14px;font-size:12.5px;flex-shrink:0;margin-left:auto}
 /* 0 量筛选 chip 退灰；选中态（.on 黑底白字）不降透明，可读性优先 */
 .filters button.zero{opacity:.55}
 .filters button.zero.on{opacity:1}

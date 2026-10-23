@@ -1294,7 +1294,8 @@ function controlPage() {
   return head('任务派发', '把任务派给网内任意节点上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
-    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: pickerHelpText() })}
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发。' })}
+    ${orchLineHtml()}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
@@ -1338,8 +1339,18 @@ function pickerNodeOptions(selected) {
     return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
-/* pickerHelpText 派发页机器选择的补充说明：含当前统筹指定状态（网页指定/默认约定）
- * 与「指定统筹」入口（伦哥 2026-10-23 定案：网页配置取代改配置文件）。 */
+/* orchLineHtml 派发页统筹状态条：显眼的独立一行（不再藏在帮助长文尾部——
+ * 2026-10-23 伦哥反馈「找不到统筹怎么设置」，入口可见性失败重做）。 */
+function orchLineHtml() {
+  const btn = S.prime
+    ? `<button type="button" data-act="prime-manage" class="link">更改 / 撤销</button>`
+    : `<button type="button" data-act="prime-manage" class="primary">指定统筹</button>`;
+  const body = S.prime
+    ? `<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)} · 复合目标交给它拆解派发并汇总`
+    : `未指定（默认识别能力名含 <code>zcode-dev</code> 的智能体）；复合目标建议先指定统筹载体`;
+  return `<div class="orch-line">${S.prime ? '<span class="badge orch">统筹</span>' : '<span class="badge">统筹</span>'} <span>${body}</span> ${btn}</div>`;
+}
+/* pickerHelpText 派发页机器选择的补充说明（已精简：统筹信息移至 orchLineHtml 独立状态条）。 */
 function pickerHelpText() {
   const src = S.prime
     ? `已由网页指定统筹载体：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
