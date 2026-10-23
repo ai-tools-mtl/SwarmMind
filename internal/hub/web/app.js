@@ -1413,7 +1413,7 @@ function agentPickerHtml(opts = {}) {
   <label>第一步 · 执行机器<select id="${ids}-node" data-picker="node" data-picker-prefix="${ids}">${pickerNodeOptions(node)}</select></label>
   <label>第二步 · 执行智能体<select id="${ids}-agent" data-picker="agent" data-picker-prefix="${ids}" ${node ? '' : 'disabled'}>${pickerAgentOptions(node, agent)}</select></label>
   </div>
-  ${opts.nodeHelp ? `<small class="muted">${esc(opts.nodeHelp)}</small>` : ''}
+  ${opts.nodeHelp ? `<small class="muted">${opts.nodeHelp}</small>` : ''}   <!-- nodeHelp 为内部常量 HTML（动态值已在 pickerHelpText 内 esc），不再转义以支持内嵌入口按钮 -->
   <div class="row spaced" id="${ids}-summary-line">${pickerSummaryHtml(node, agent)}</div>`;
 }
 /* syncAgentPicker 机器切换联动（DOM 级更新）：按当前机器重建智能体选项，恢复此前
