@@ -101,6 +101,9 @@ const (
 	// CodeWorkdirBusyTimeout workdir 互斥排队超时（P1.5/SPEC 4.10：排队超
 	// WorkdirQueueWait 未获得派发，hub 置 failed）。
 	CodeWorkdirBusyTimeout = "workdir_busy_timeout"
+	// CodeInvalidDependency 依赖声明不合法（P4.3/SPEC 4.12：未知 idem/自引用/
+	// 重复依赖/超深度/超级联/依赖环，提交校验链拒绝；HTTP 400 同码）。
+	CodeInvalidDependency = "invalid_dependency"
 )
 
 // 管理面/本地 API 附加错误码：hub 侧中继与连接状态（非协议帧码，HTTP 错误体用）。

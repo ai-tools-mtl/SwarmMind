@@ -258,6 +258,7 @@ func tools() []toolDef {
 			"trace_id":  toolStr("追踪号（可选，便于关联；统筹任期建议 prime-<任期号>-<序号>）"),
 			"idem_key":  toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
 			"group_ref": toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
+			"depends_on": toolArr("上游任务幂等键列表（可选，P4.3 任务依赖）：全部上游 completed 后本任务才投递；上游 failed/needs_review/cancelled 则保持阻塞（blocked_reason=upstream_failed）。请传上游 idem_key（跨重跑稳定），勿传 task_id"),
 		}, "node_id", "agent")},
 		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: toolObj(map[string]any{
 			"task_id": toolStr("任务 ID"),
@@ -384,6 +385,22 @@ func toolAgents() (string, error) {
 	return b.String(), nil
 }
 
+// depArgs 解析 depends_on 工具参数（P4.3 任务依赖透传）：JSON 数组 → 去空白
+// 字符串列表（空项剔除；全空返回 nil 不下发字段）。
+func depArgs(raw any) []string {
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	deps := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s := strings.TrimSpace(fmt.Sprint(v)); s != "" {
+			deps = append(deps, s)
+		}
+	}
+	return deps
+}
+
 func toolSubmit(args map[string]any) (string, error) {
 	node, _ := args["node_id"].(string)
 	agent, _ := args["agent"].(string)
@@ -415,6 +432,9 @@ func toolSubmit(args map[string]any) (string, error) {
 	}
 	if gr, ok := args["group_ref"].(string); ok && gr != "" {
 		body["group_ref"] = gr
+	}
+	if deps := depArgs(args["depends_on"]); len(deps) > 0 {
+		body["depends_on"] = deps
 	}
 	code, data, err := hubAPI("POST", "/api/v1/tasks", body)
 	if err != nil {
@@ -453,10 +473,13 @@ func taskStatus(taskID string) (string, bool, error) {
 // taskStatus 里（修复 8：node 侧 4xx/5xx 一律 error 透传，不再当终态）。
 func renderTaskOK(taskID string, data []byte) (string, bool) {
 	var t struct {
-		Status      string `json:"status"`
-		TargetAgent string `json:"target_agent"`
-		TargetNode  string `json:"target_node"`
-		Result      *struct {
+		Status        string   `json:"status"`
+		TargetAgent   string   `json:"target_agent"`
+		TargetNode    string   `json:"target_node"`
+		DependsOn     []string `json:"depends_on"`
+		BlockedReason string   `json:"blocked_reason"`
+		SupersededBy  string   `json:"superseded_by"`
+		Result        *struct {
 			Status      string `json:"status"`
 			Error       string `json:"error"`
 			ExitCode    *int   `json:"exit_code"`
@@ -473,6 +496,22 @@ func renderTaskOK(taskID string, data []byte) (string, bool) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "任务 %s（%s @ %s）\n状态：%s\n", taskID, t.TargetAgent, t.TargetNode, statusCN(t.Status))
+	// 依赖门控展示字段（P4.3/SPEC 六.六规则 7：blocked/superseded 人话提示；
+	// blocked 不进状态机，任务仍 submitted——wait 继续轮询至放行或超时）
+	if len(t.DependsOn) > 0 {
+		fmt.Fprintf(&b, "依赖：%s\n", strings.Join(t.DependsOn, "、"))
+	}
+	switch {
+	case strings.HasPrefix(t.BlockedReason, "blocked_by:"):
+		fmt.Fprintf(&b, "依赖等待：上游 %s 尚未完成，本任务暂不派发；全部上游完成后自动执行。\n",
+			strings.TrimPrefix(t.BlockedReason, "blocked_by:"))
+	case strings.HasPrefix(t.BlockedReason, "upstream_failed:"):
+		fmt.Fprintf(&b, "依赖阻塞：上游 %s 已失败/待人工核对/被取消，本任务不会自动执行；请人工决定是否重派上游。\n",
+			strings.TrimPrefix(t.BlockedReason, "upstream_failed:"))
+	}
+	if t.SupersededBy != "" {
+		fmt.Fprintf(&b, "上游已重跑：新版本任务 %s 已完成；本任务保持阻塞不自动放行，请人工决定是否重派（swarmmind_status 查新版本结果）。\n", t.SupersededBy)
+	}
 	if r := t.Result; r != nil {
 		if r.Error != "" {
 			fmt.Fprintf(&b, "中断原因：%s\n", r.Error)

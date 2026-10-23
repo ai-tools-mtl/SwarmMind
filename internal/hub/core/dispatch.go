@@ -41,8 +41,10 @@ func offerEnvelope(t *protocol.Task, fence int64) *protocol.Envelope {
 // dispatch 投递循环：节点在线且投递窗口（从 offered 起算，offered+acknowledged
 // < 8，SPEC 4.6）有余量时持续出队补推。出队为「遍历取首个 eligible」（P1.5：
 // workdir 互斥门控 + head-of-line 修复，SPEC 4.10）——队首任务互斥中时跳过，
-// 同 node 异 workdir 任务照常派发。事件驱动（提交/上线/started/终态）+ 清扫
-// 兜底，幂等。membus 同步分发下 Send 会嵌套执行 node 侧回链，循环内禁止持锁。
+// 同 node 异 workdir 任务照常派发；P4.3 依赖门控同机制复用：BlockedReason 非空
+// （依赖未满足）的 submitted 任务不投递、留信箱占配额（SPEC 4.12）。事件驱动
+// （提交/上线/started/终态）+ 清扫兜底，幂等。membus 同步分发下 Send 会嵌套执行
+// node 侧回链，循环内禁止持锁。
 func (c *Core) dispatch(nodeID string) {
 	if !c.isOnline(nodeID) {
 		return
@@ -58,6 +60,9 @@ func (c *Core) dispatch(nodeID string) {
 				return errWindowFull
 			}
 			t, ok := mailbox.DequeueWhere(st, nodeID, func(cand protocol.Task) bool {
+				if cand.BlockedReason != "" {
+					return false // 依赖门控（P4.3）：未解除阻塞不投递，保留在队
+				}
 				return workdirFree(st, cand) // workdir 互斥门控（P1.5）
 			})
 			if !ok {

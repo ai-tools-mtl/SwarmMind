@@ -171,6 +171,19 @@ type Task struct {
 	// 同键同群重试=dup 命中原任务，同键换群=不同指纹=新任务（对齐批次内容指纹
 	// 口径，SPEC 4.5）。
 	GroupRef string `json:"group_ref,omitempty"`
+	// DependsOn 依赖的上游任务 idem_key 列表（P4.3/SPEC 4.12，提交后不可变）。
+	// 以 idem 寻址跨重跑稳定；提交时准入校验（存在/无自引用/无重复/深度≤4/
+	// 级联≤8），node 会话 task_submit 同样可携带。未声明为 nil。
+	DependsOn []string `json:"depends_on,omitempty"`
+	// BlockedReason 依赖门控标注（P4.3/SPEC 4.12；不进状态机）：依赖未满足时
+	// 保持 submitted 不投递，取值 blocked_by:<idem> / upstream_failed:<idem>；
+	// 空 = 未阻塞（正常调度）。随快照持久化，hub 重启恢复免费。
+	BlockedReason string `json:"blocked_reason,omitempty"`
+	// SupersededBy 上游重跑审计标注（P4.3/SPEC 4.12；不进状态机）：曾因
+	// upstream_failed:<idem> 被挡的下游任务，遇同 idem 新版本 completed 时记录
+	// 该新任务 ID；任务保持 blocked 不自动放行，人工决定是否重派（旧任务审计
+	// 保留）。空 = 未被取代。
+	SupersededBy string `json:"superseded_by,omitempty"`
 	// Status hub 视角任务状态（SPEC 4.3 状态机）。
 	Status TaskStatus `json:"status"`
 	// CreatedAt 创建时刻（UTC RFC3339）。
@@ -206,6 +219,11 @@ type TaskSubmitRequest struct {
 	// GroupRef 可选群引用（管理面扩展）：随任务落库并参与幂等指纹（同键换群=
 	// 新任务，SPEC 4.5）；node 帧提交不携带，群登记由管理面在提交前完成。
 	GroupRef string `json:"group_ref,omitempty"`
+	// DependsOn 可选依赖声明（P4.3/SPEC 4.12）：上游任务的 idem_key 列表。
+	// 全部上游 completed 才投递；提交时准入校验（未知 idem/自引用/重复依赖/
+	// 深度≤4/级联≤8 全部 400 invalid_dependency）。声明后 stdin 尾部附依赖
+	// 清单（EffectiveInput，参与幂等指纹）。
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // 结果终态取值（TaskResult.Status；与 TaskStatus 的四个终态同值，SPEC 4.3/4.9）。
@@ -258,6 +276,7 @@ func randomHex() string {
 func (t Task) Clone() Task {
 	n := t
 	n.Input = t.Input.Clone()
+	n.DependsOn = append([]string(nil), t.DependsOn...)
 	if t.Result != nil {
 		r := t.Result.Clone()
 		n.Result = &r

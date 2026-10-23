@@ -25,6 +25,9 @@ import (
 var (
 	// ErrInvalid 请求字段缺失/非法（HTTP 400）。
 	ErrInvalid = errors.New("core: 无效请求")
+	// ErrInvalidDeps 依赖声明不合法（P4.3/SPEC 4.12：未知 idem/自引用/重复
+	// 依赖/超深度/超级联/依赖环；HTTP 400 invalid_dependency）。
+	ErrInvalidDeps = errors.New("core: 依赖声明不合法")
 	// ErrAgentNotExposed 目标 node 未注册、agent 不存在或 exposed=false（HTTP 404）。
 	ErrAgentNotExposed = errors.New("core: 目标 agent 未接入或已下线")
 	// ErrStorageFull hub 任务存储全局字节预算满（SPEC 4.6 → 503 storage_full）。
