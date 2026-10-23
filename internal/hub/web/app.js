@@ -123,6 +123,7 @@ const S = {
   expAt: 0,                    // 登录应答 expires_in 推算；服务端 401 为权威兜底
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
+  prime: null,                 // 统筹指定 {node_id, agent_name, set_at, set_by}；null=未指定（回退名字约定）
   seq: { nodes: 0, tasks: 0, directory: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
   resSnap: { nodes: '', tasks: '', directory: '' },   // 按资源指纹：任一资源有变才整页重绘
   fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
@@ -235,10 +236,11 @@ async function loadResource(name, path, validate) {
   return { __seq: seq, value, ok: true };
 }
 async function loadAll() {
-  const [nodes, tasks, directory] = await Promise.all([
+  const [nodes, tasks, directory, prime] = await Promise.all([
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
+    loadResource('prime', '/api/v1/prime', d => d?.designation ?? null),
   ]);
   let changed = false;
   const commit = (name, wrapped) => {
@@ -252,6 +254,7 @@ async function loadAll() {
     S.resSnap[name] = fp;
     if (name === 'nodes') S.nodes = value;
     else if (name === 'tasks') S.tasks = value;
+    else if (name === 'prime') S.prime = value;
     else S.directory = value;
     changed = true;
   };
@@ -1275,7 +1278,15 @@ function reviewSection(t) {
 /* 任务描述占位文案：普通/统筹两态共用常量——选中统筹载体切 STDIN_PH_PRIME，选普通恢复。 */
 const STDIN_PH = '用自然语言描述要做什么。编码智能体会读取这段描述并执行；工具脚本则把它作为附加说明。\n例如：在 demo 目录创建一个 Python 脚本，输出当前时间。';
 const STDIN_PH_PRIME = '描述复合目标：统筹会把目标拆解为多个子任务，派发网内其他智能体并行执行，收集结果并汇总报告；自身不执行具体子任务。例如：检查两台机器的磁盘占用并汇总对比报告';
-const PRIME_AGENT_KEY = 'zcode-dev';   // 统筹载体能力名（下拉 value 含此串即选中）
+const PRIME_AGENT_KEY = 'zcode-dev';   // 回退约定：未指定时按能力名含此串识别统筹（向后兼容）
+/* isPrimeDir 统筹载体判定（2026-10-23 伦哥定案：网页指定取代硬编码）：
+ * 有指定 → 目录条目精确匹配 (node_id, agent_name)；未指定 → 回退名字约定。
+ * 所有统筹展示/提交判定统一走此函数。 */
+function isPrimeDir(d) {
+  if (!d) return false;
+  if (S.prime) return d.node_id === S.prime.node_id && d.card.name === S.prime.agent_name;
+  return d.card.name.includes(PRIME_AGENT_KEY);
+}
 function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
@@ -1283,7 +1294,7 @@ function controlPage() {
   return head('任务派发', '把任务派给网内任意节点上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
-    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。智能体列表置顶的「统筹 · zcode-dev」为统筹智能体：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。' })}
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: pickerHelpText() })}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
@@ -1327,6 +1338,14 @@ function pickerNodeOptions(selected) {
     return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
+/* pickerHelpText 派发页机器选择的补充说明：含当前统筹指定状态（网页指定/默认约定）
+ * 与「指定统筹」入口（伦哥 2026-10-23 定案：网页配置取代改配置文件）。 */
+function pickerHelpText() {
+  const src = S.prime
+    ? `已由网页指定统筹载体：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
+    : `未指定统筹载体（默认按能力名 <code>zcode-dev</code> 识别）`;
+  return `离线机器暂不可选：提交端点对离线节点直接跳过、不排队暂存。统筹智能体：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src} <button type="button" data-act="prime-manage" class="link">${S.prime ? '更换 / 撤销' : '指定统筹'}</button>`;
+}
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
  * 2026-10-23 伦哥定案（二轮）：下拉项只留名字（描述收进 title 悬停），
@@ -1336,7 +1355,7 @@ function pickerAgentOptions(nodeId, selected) {
   if (!nodeId) return '<option value="">请先选择机器</option>';
   const list = S.directory.filter(d => d.node_id === nodeId);
   if (!list.length) return '<option value="">该机器暂无开放能力</option>';
-  const isPrime = d => d.card.name.includes(PRIME_AGENT_KEY);
+  const isPrime = isPrimeDir;   // 统筹判定统一走网页指定+回退约定（isPrimeDir）
   const prime = list.filter(isPrime), rest = list.filter(d => !isPrime(d));
   const opt = d => {
     const tip = `${d.card.name}${isPrime(d) ? ' · 统筹：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : ''}）`;
@@ -1353,7 +1372,8 @@ function pickerAgentOptions(nodeId, selected) {
  */
 function pickerSummaryHtml(node, agent) {
   if (node && agent) {
-    const flag = agent.includes(PRIME_AGENT_KEY) ? ' <span class="badge orch">统筹模式 · 自动拆解派发汇总</span>' : '';
+    const d = S.directory.find(x => x.node_id === node && x.card.name === agent);
+    const flag = isPrimeDir(d) ? ' <span class="badge orch">统筹模式 · 自动拆解派发汇总</span>' : '';
     return `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行${flag}</small>`;
   }
   return '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
@@ -1487,7 +1507,7 @@ async function submitControl() {
   const agentName = $('#ctrl-agent')?.value || '';
   if (!node) { toast('请先选择执行机器'); return; }
   if (!agentName) { toast('请先选择该机器上的执行智能体'); return; }
-  const prime = agentName.includes(PRIME_AGENT_KEY);   // 选中置顶「统筹 · zcode-dev」即统筹模式（2026-10-23 定案）
+  const prime = (() => { const d = S.directory.find(x => x.node_id === node && x.card.name === agentName); return d ? isPrimeDir(d) : false; })();   // 选中统筹载体即统筹模式（网页指定优先，未指定回退名字约定）
   C.stdin = $('#ctrl-stdin').value;
   if (prime && !C.stdin.trim()) { toast('统筹需要填写任务描述（复合目标）'); return; }
   C.node = node; C.agent = agentName;
@@ -2024,6 +2044,33 @@ const ACT = {
   <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后节点列表不再出现该机器</small></div>
   </div><div class="notice warn">撤下前该节点在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态 24 小时）继续可查。</div><div class="actions spaced">${button('我知道了，返回节点列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
+  'prime-manage': () => {
+    /* 指定统筹载体弹层（2026-10-23 伦哥定案：网页配置取代改配置文件）：
+     * 两级选择复用 agentPickerHtml（ids='pm'），保存/撤销走 PUT /api/v1/prime。 */
+    const body = `${modalHead('指定统筹载体')}
+    <div class="notice">统筹智能体接收复合目标后拆解、派发网内能力、汇总产出报告；全网同一时刻至多一个。指定前请确认该智能体已接 SwarmMind MCP（否则收了统筹提示词也没有派发工具）。</div>
+    ${agentPickerHtml({ ids: 'pm', node: S.prime?.node_id || '', agent: S.prime?.agent_name || '' })}
+    <div class="actions spaced">${button('保存指定', 'prime-save', 'primary')}${S.prime ? button('撤销指定（回退默认识别）', 'prime-clear', 'danger') : ''}${button('再想想', 'close', 'link')}</div>`;
+    openLayerPlain(body, false, true);
+    // 恢复已保存的选择到弹层下拉
+    syncAgentPicker('pm', S.prime?.agent_name || '');
+  },
+  'prime-save': async () => {
+    const node = $('#pm-node')?.value || '', agent = $('#pm-agent')?.value || '';
+    if (!node || !agent) { toast('请先选择机器和智能体'); return; }
+    try {
+      const r = await api('PUT', '/api/v1/prime', { node_id: node, agent_name: agent });
+      if (r.code === 200) { S.prime = r.data.designation; toast('已指定统筹载体：' + agent + ' @ ' + node); closeLayer(); await loadAll(); render(); }
+      else { toast('指定失败：' + (r.data?.error || r.code)); }
+    } catch { toast('网络异常，请重试'); }
+  },
+  'prime-clear': async () => {
+    try {
+      const r = await api('PUT', '/api/v1/prime', { node_id: '', agent_name: '' });
+      if (r.code === 200) { S.prime = null; toast('已撤销统筹指定，回退默认识别（能力名含 zcode-dev）'); closeLayer(); await loadAll(); render(); }
+      else { toast('撤销失败：' + (r.data?.error || r.code)); }
+    } catch { toast('网络异常，请重试'); }
+  },
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
     <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
     <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),

@@ -9,6 +9,15 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
+// PrimeDesignation 全局统筹载体指定（2026-10-23 伦哥定案：网页指定取代能力名硬编码）。
+// nil = 未指定（前端回退名字约定 zcode-dev，向后兼容）。同一时刻全网至多一个统筹。
+type PrimeDesignation struct {
+	NodeID    string `json:"node_id"`
+	AgentName string `json:"agent_name"`
+	SetAt     string `json:"set_at"` // RFC3339 UTC
+	SetBy     string `json:"set_by"` // 操作者（控制台会话固定 admin）
+}
+
 // NodeRecord hub 为每个 node_id 持久化的记录：epoch 计数（SPEC 4.4）+ 能力表（DoD 7 重启恢复）。
 type NodeRecord struct {
 	// Epoch 注册代次：首次注册成功=1，此后每次新连接注册成功原子 +1 并随快照持久化。
@@ -124,6 +133,9 @@ type State struct {
 	// AgentCard 上报的派生键，hub 不感知路径）。占用从 offered 起算、终态释放；
 	// 随快照持久化，hub 重启恢复（New 时按任务集自愈校正）。
 	WorkdirLocks map[string]map[string]string `json:"workdir_locks"`
+	// Prime 全局统筹载体指定（2026-10-23 网页指定）；nil=未指定，前端回退名字约定。
+	// 写时复制：事务内构造新 *PrimeDesignation 整体替换，禁止原地改。
+	Prime *PrimeDesignation `json:"prime,omitempty"`
 }
 
 // NewState 返回各 map 已初始化的空状态。

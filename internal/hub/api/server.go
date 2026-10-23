@@ -119,6 +119,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
+	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))    // 统筹指定查询（2026-10-23 网页指定）
+	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))    // 指定/撤销（agent_name 空 = 撤销）
 	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                // 群聊 MVP（GROUP-RFC 六）
 	mux.HandleFunc("GET /api/v1/groups", s.auth(s.handleGroupList))                   // 群列表
 	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages)) // 增量拉取
@@ -499,6 +501,30 @@ func (s *Server) handleControlGet(w http.ResponseWriter, r *http.Request) {
 // （不含 ExecProfile 字段；中心端与 node 目录代理共用，SPEC 六.五）。
 func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"directory": s.cfg.Core.ListDirectory()})
+}
+
+// handlePrimeGet GET /api/v1/prime：当前统筹指定（未指定返回 null，前端回退名字约定）。
+func (s *Server) handlePrimeGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"designation": s.cfg.Core.PrimeDesignation()})
+}
+
+// handlePrimeSet PUT /api/v1/prime：指定/撤销统筹载体（伦哥 2026-10-23 定案：
+// 网页指定取代改配置文件；node.yaml 只负责能力本身存在，统筹身份在网页指定）。
+func (s *Server) handlePrimeSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeID    string `json:"node_id"`
+		AgentName string `json:"agent_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+		return
+	}
+	d, err := s.cfg.Core.SetPrimeDesignation(req.NodeID, req.AgentName, adminIdentity)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_target"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"designation": &d})
 }
 
 // ---------- 编码工具 ----------
