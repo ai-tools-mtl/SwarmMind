@@ -144,20 +144,20 @@ node 本机模式只暴露六件套。
 
 ## Roadmap
 
-项目按 P0-P5 生命周期推进（详见 `docs/PLAN.md`），当前处于 **P4（V1 长期可用）**。
+项目按 P0-P5 生命周期推进（详见 `docs/PLAN.md` 与 `docs/PRODUCT-DIRECTION-v2.md`），当前处于 **P4：一个人每天用得顺**。
 
 - [x] P0-P1 V0 核心：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
 - [x] 账户体系：密码登录、账户设置、PAT 令牌（GitHub 式）、恢复通道
 - [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物（hub 12 工具 / node 6 工具）
 - [x] A2A 兼容端点：外部 A2A 客户端发现并调用网内 agent（spec v0.2.6）
-- [x] 统筹载体：复合目标一键派发，指定统筹智能体自动分解/并行调度/汇总报告（P4.0 双机实测关门）
+- [x] 智行管家（统筹载体）：复合目标一键派发，指定智能体自动分解/并行调度/汇总报告（P4.0 双机实测关门）
 - [x] 跨云实测：腾讯云 ↔ 百度云 双节点、25ms 全链、产物跨机取回
 - [x] 任务租约：fencing token 防 zombie 写（P4）
 - [x] 任务依赖门控：`depends_on` / blocked 门控 / `superseded` 版本追踪（P4.3 第一子批）
 - [x] 群聊 MVP：建群、@提及发言、发言预算、滚动窗口、控制台群聊页、MCP 五工具（P4）
-- [ ] P4 收尾：产物挂载与跨机取回、群消息过期、推送扇出、发言许可制、多维预算、Windows 服务化、令牌轮换自动化
-- [ ] P5 Git 集成：worktree 分配、commit 归属、PR 流程
-- [ ] V2：E2E 加密（中心端不可见明文）、A2A 官方协议对齐、DID 身份
+- [ ] P4 剩余：README 快速开始重写、Windows 服务化、任务终态 IM 通知、产物挂载与跨机取回、swarmmind_tasks 列表工具
+- [ ] P5 复杂工作可恢复：执行事实与接管、多步骤断点查看；Git 集成推迟至真实场景出现
+- [ ] 实验区（冻结，有真实需求才晋级）：群聊完整协议、StartLux 决策、A2A 深化、P2P 直连、E2E 加密、IDE adapter
 
 ## License
 
