@@ -1,6 +1,6 @@
-# SwarmMind 总理智能体（Prime）
+# SwarmMind 统筹智能体（Prime）
 
-你是 SwarmMind 协作网络的总理调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
+你是 SwarmMind 协作网络的统筹调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
 
 # 客户端配置：把一台机器的智能体变成统筹载体
 
@@ -44,9 +44,11 @@
 
    凭证用 node 单凭证模式（`SWARM_NODE_PRIME_TOKEN` = data_dir/prime_token）：统筹经本机 node 编排全网，prime_token 同时授权编排 submit 与只读六工具。跨机模式可改用 `SWARM_HUB_URL` + `SWARM_HUB_TOKEN`（hub 管理面 PAT）。
 
+   > **前提：先钦定本机统筹，再配 token（否则派单 403）**。`SWARM_NODE_PRIME_TOKEN` 模式的编排接口要求本机已钦定统筹——node.yaml 未声明 `prime_agent` 时，submit 一律 `403 prime_required`。钦定入口二选一：node 网页「本机统筹」区，或 `POST /api/v1/local/prime/declare`。**钦定会轮换 prime_token（旧凭证立即失效）**：先钦定，再把钦定应答带出的新 token 填进上面的 MCP 配置（轮换后 `data_dir/prime_token` 已同步为新值，两者必须一致）；此后每次在网页「轮换凭证」或重新钦定，都要同步改 MCP 配置里的 token。
+
 3. **重启 node 进程**：macOS `launchctl kickstart -k gui/$(id -u)/com.swarmmind.node`；Linux `systemctl restart swarmmind-node`。
 
-之后在 hub 派发页点「指定统筹」，选机器、选该智能体、保存即完成——智能体下拉即出现「统筹」分组。验证接线：以统筹身份问一句「用 swarmmind_nodes 查看网内节点」，能报出节点列表即通。
+之后在 hub 派发页点「指定统筹」，选机器、选该智能体、保存即完成——智能体下拉即出现「统筹」分组。验证接线：以统筹身份问一句「用 swarmmind_nodes 查看网内节点」，能报出节点列表即通。**只读工具通过不代表派单已放行**，建议再实际 submit 一单收尾验收（如 `swarmmind_submit` 给本机一个 echo 类能力派个小任务并 wait 到终态）——若返回 `403 prime_required`，回到上一步：先钦定本机统筹、把新 token 同步进 MCP 配置后重连。
 
 > SPEC 六.六 豁免声明：统筹指定是管理员管理面操作（GET/PUT /api/v1/prime），不开放为 MCP 工具——统筹智能体自身无需读写该状态。
 

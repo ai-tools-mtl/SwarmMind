@@ -3,6 +3,7 @@ package runner
 import (
 	"os"
 	"context"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,53 @@ func TestRunStdin(t *testing.T) {
 	}
 	if res.FinalAnswer != "stdin-payload\n" {
 		t.Errorf("stdin 未传达到 stdout: %q", res.FinalAnswer)
+	}
+}
+
+// TestRunStdinToArg StdinToArg 正常态：Args 空时小体量 stdin 整体作为单个尾参
+// 追加（args 型 CLI 兼底，2026-10-23）。
+func TestRunStdinToArg(t *testing.T) {
+	r, _ := newRunner(t, func(p *protocol.ExecProfile) {
+		p.StdinToArg = true
+		p.AgentArgs = []string{"-c", `printf "arg:%s stdin:%s\n" "$1" "$(cat)"`, "--"}
+	})
+	task := simpleTask()
+	task.Input.Stdin = "payload-text"
+	res := r.Run(context.Background(), task)
+
+	if res.Status != protocol.ResultCompleted {
+		t.Fatalf("应 completed, got %s err=%q", res.Status, res.Error)
+	}
+	if res.FinalAnswer != "arg:payload-text stdin:payload-text\n" {
+		t.Errorf("stdin 未转为尾参: %q", res.FinalAnswer)
+	}
+}
+
+// TestRunStdinToArgTooLong StdinToArg 长度防御：超 stdinToArgMax 不转参不 spawn，
+// failed/policy_denied + stderr_tail 写明原因与出路（平台单参长度硬约束，P2-9）。
+func TestRunStdinToArgTooLong(t *testing.T) {
+	r, workdir := newRunner(t, func(p *protocol.ExecProfile) {
+		p.StdinToArg = true
+		p.AgentArgs = []string{"-c", `touch should-not-exist`, "--"}
+	})
+	task := simpleTask()
+	task.Input.Stdin = strings.Repeat("x", stdinToArgMax+1)
+	res := r.Run(context.Background(), task)
+
+	if res.Status != protocol.ResultFailed || res.Error != protocol.CodePolicyDenied {
+		t.Fatalf("应 failed/policy_denied, got %s/%q", res.Status, res.Error)
+	}
+	if !strings.Contains(res.StderrTail, "stdin 过长无法转为命令行参数") || !strings.Contains(res.StderrTail, "请改用任务 args") {
+		t.Errorf("stderr_tail 应可读说明原因与出路: %q", res.StderrTail)
+	}
+	if kb := (len(task.Input.Stdin) + 1023) / 1024; !strings.Contains(res.StderrTail, fmt.Sprintf("%d KB > 上限 %d KB", kb, stdinToArgMax/1024)) {
+		t.Errorf("stderr_tail 应含进位取整 KB 对比: %q", res.StderrTail)
+	}
+	if res.ExitCode != protocol.ExitCodeNotRun {
+		t.Errorf("未执行退出码应为 -1, got %d", res.ExitCode)
+	}
+	if _, err := os.Stat(filepath.Join(workdir, "should-not-exist")); !os.IsNotExist(err) {
+		t.Error("超长 stdin 不得执行进程")
 	}
 }
 

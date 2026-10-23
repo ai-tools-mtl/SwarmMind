@@ -478,6 +478,7 @@ func (s *Server) setPendingRestart(v bool) {
 var agentFieldOrder = []string{
 	"name", "kind", "command", "workdir", "agent_args", "timeout_sec",
 	"allow_args", "allow_env", "config_home", "description", "permission_mode", "exposed",
+	"stdin_to_arg",
 }
 
 // agentFieldRank 字段规范序位（未知键 -1）。
@@ -678,6 +679,8 @@ func agentFieldIsDefault(field string, p AgentProfile) bool {
 		return p.PermissionMode == ""
 	case "exposed":
 		return p.Exposed == nil || *p.Exposed
+	case "stdin_to_arg":
+		return !p.StdinToArg
 	}
 	return true
 }
@@ -719,6 +722,9 @@ func newAgentEntry(p AgentProfile) *yaml.Node {
 	if p.Exposed != nil && !*p.Exposed {
 		add("exposed", boolNode(false))
 	}
+	if p.StdinToArg {
+		add("stdin_to_arg", boolNode(true))
+	}
 	return m
 }
 
@@ -757,6 +763,8 @@ func agentFieldNode(field string, p AgentProfile) *yaml.Node {
 			exposed = *p.Exposed
 		}
 		return boolNode(exposed)
+	case "stdin_to_arg":
+		return boolNode(p.StdinToArg)
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
 }

@@ -521,7 +521,14 @@ func (s *Server) handlePrimeSet(w http.ResponseWriter, r *http.Request) {
 	}
 	d, err := s.cfg.Core.SetPrimeDesignation(req.NodeID, req.AgentName, adminIdentity)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_target"})
+		// 目标非法（目录无此 (node_id, agent_name)）才 400；存储故障不得伪装成
+		// 目标问题——500 + 内部日志（与其他 handler 的 5xx 惯例一致）。
+		if errors.Is(err, core.ErrInvalid) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_target"})
+			return
+		}
+		log.Printf("[hub] 统筹指定持久化失败: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal", "统筹指定保存失败")
 		return
 	}
 	if d.AgentName == "" { // 撤销语义：返回 null 而非零值结构（与 GET 未指定口径一致）

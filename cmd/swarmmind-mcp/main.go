@@ -189,8 +189,8 @@ func (nodeBackend) initResult() map[string]any {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": "0.1.1"},
-		"instructions": "SwarmMind 本机编排入口（接入即总理：本机编排）。工具只作用于本机节点：" +
-			"全部工具共用总理凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
+		"instructions": "SwarmMind 本机编排入口（接入即统筹：本机编排）。工具只作用于本机节点：" +
+			"全部工具共用统筹凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。",
 	}
 }
@@ -198,9 +198,9 @@ func (nodeBackend) initResult() map[string]any {
 // nodeTools node 模式工具清单：本机六件套（全网目录/群聊/decide 为 hub 专属）。
 func (nodeBackend) tools() []toolDef {
 	return []toolDef{
-		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机总理、hub 连接与执行账本三态计数", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机统筹、hub 连接与执行账本三态计数", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看本机可用能力（agent 目录）：本机提供哪些可调用的 agent、各自描述与今日执行次数", InputSchema: toolObj(map[string]any{})},
-		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（接入即总理：本机编排，需 SWARM_NODE_PRIME_TOKEN；返回 403 prime_required 即总理未钦定或凭证不符）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（接入即统筹：本机编排，需 SWARM_NODE_PRIME_TOKEN；返回 403 prime_required 即统筹未钦定或凭证不符）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
 			"agent":    toolStr("目标 agent 名（swarmmind_agents 可查；只能是本机 agent）"),
 			"args":     toolArr("命令行参数（可选；agent 须 allow_args）"),
 			"stdin":    toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
@@ -255,7 +255,7 @@ func tools() []toolDef {
 			"agent":     toolStr("目标 agent 名（swarmmind_agents 可查）"),
 			"args":      toolArr("命令行参数（可选）"),
 			"stdin":     toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id":  toolStr("追踪号（可选，便于关联；总理任期建议 prime-<任期号>-<序号>）"),
+			"trace_id":  toolStr("追踪号（可选，便于关联；统筹任期建议 prime-<任期号>-<序号>）"),
 			"idem_key":  toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
 			"group_ref": toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
 		}, "node_id", "agent")},
@@ -611,7 +611,7 @@ func nodeAPIErr(code int, data []byte) error {
 		if msg == "" {
 			msg = truncate(data)
 		}
-		return fmt.Errorf("本机 node 403 prime_required：%s\n请检查总理配置：node.yaml 已声明 prime_agent，且 SWARM_NODE_PRIME_TOKEN 与本机 data_dir/prime_token 一致（轮换后须同步新凭证）。", msg)
+		return fmt.Errorf("本机 node 403 prime_required：%s\n请检查统筹配置：node.yaml 已声明 prime_agent，且 SWARM_NODE_PRIME_TOKEN 与本机 data_dir/prime_token 一致（轮换后须同步新凭证）。", msg)
 	}
 	if e.Message != "" {
 		return fmt.Errorf("本机 node 返回 %d（%s）：%s", code, e.Error, e.Message)
@@ -650,9 +650,9 @@ func (b nodeBackend) toolNodes() (string, error) {
 	var bld strings.Builder
 	fmt.Fprintf(&bld, "本机节点 %s\n形态：%s\nhub 连接：%s（epoch %d）\n", st.NodeID, mode, map[bool]string{true: "在线", false: "离线"}[st.Online], st.Epoch)
 	if st.PrimeAgent != "" {
-		fmt.Fprintf(&bld, "本机总理：%s（编排接口已激活，接入即总理）\n", st.PrimeAgent)
+		fmt.Fprintf(&bld, "本机统筹：%s（编排接口已激活，接入即统筹）\n", st.PrimeAgent)
 	} else {
-		bld.WriteString("本机总理：未钦定（编排接口未激活，submit 将 403 prime_required）\n")
+		bld.WriteString("本机统筹：未钦定（编排接口未激活，submit 将 403 prime_required）\n")
 	}
 	fmt.Fprintf(&bld, "执行账本三态：accepted %d / started %d / finished %d",
 		st.Ledger["accepted"], st.Ledger["started"], st.Ledger["finished"])
@@ -714,7 +714,7 @@ func (b nodeBackend) toolSubmit(args map[string]any) (string, error) {
 		return "", fmt.Errorf("agent 必填（目标只能是本机 agent）")
 	}
 	if b.primeToken == "" {
-		return "", fmt.Errorf("未配置 SWARM_NODE_PRIME_TOKEN：本机编排需总理凭证（接入即总理：本机编排）")
+		return "", fmt.Errorf("未配置 SWARM_NODE_PRIME_TOKEN：本机编排需统筹凭证（接入即统筹：本机编排）")
 	}
 	nodeID, err := b.localNodeID()
 	if err != nil {

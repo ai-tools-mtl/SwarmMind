@@ -124,8 +124,8 @@ const S = {
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
   prime: null,                 // 统筹指定 {node_id, agent_name, set_at, set_by}；null=未指定（回退名字约定）
-  seq: { nodes: 0, tasks: 0, directory: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
-  resSnap: { nodes: '', tasks: '', directory: '' },   // 按资源指纹：任一资源有变才整页重绘
+  seq: { nodes: 0, tasks: 0, directory: 0, prime: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
+  resSnap: { nodes: '', tasks: '', directory: '', prime: '' },   // 按资源指纹：任一资源有变才整页重绘
   fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
   pollBusy: false,             // 轮询 single-flight：上轮在途跳过本轮
   f: { status: '', trace: '', by: '', error: '', from: '', to: '' },   // 任务筛选
@@ -213,6 +213,11 @@ function sessionExpired() {
  * 后端 ListNodes/ListDirectory 按 Go map 遍历序返回（每次调用都不同），先归一化
  * 再存状态：渲染位置稳定（sortNodesStable 注释），指纹只反映真实数据变化。 */
 const DATA_TIMEOUT_MS = 12000;
+/* PRIME_UNSET prime 合法「未指定」标记：GET /api/v1/prime 应答 200 且 designation=null
+ * 是合法态（未指定，前端回退名字约定），与请求失败/结构不合格（normalize 返回 null）
+ * 是两回事——null 会被 loadResource 当失败拒收，故合法 null 以此标记通过加载链，
+ * 提交点（commit）还原为 S.prime = null。 */
+const PRIME_UNSET = { __null: true };
 async function loadResource(name, path, validate) {
   const seq = ++S.seq[name];
   let r = null;
@@ -240,7 +245,7 @@ async function loadAll() {
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
-    loadResource('prime', '/api/v1/prime', d => d?.designation ?? null),
+    loadResource('prime', '/api/v1/prime', d => (!d || !('designation' in d)) ? null : (d.designation ?? PRIME_UNSET)),
   ]);
   let changed = false;
   const commit = (name, wrapped) => {
@@ -254,11 +259,11 @@ async function loadAll() {
     S.resSnap[name] = fp;
     if (name === 'nodes') S.nodes = value;
     else if (name === 'tasks') S.tasks = value;
-    else if (name === 'prime') S.prime = value;
+    else if (name === 'prime') S.prime = value === PRIME_UNSET ? null : value;   // 标记还原为合法 null
     else S.directory = value;
     changed = true;
   };
-  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory);
+  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime);
   updateFreshness();
   return changed;
 }
@@ -1287,6 +1292,13 @@ function isPrimeDir(d) {
   if (S.prime) return d.node_id === S.prime.node_id && d.card.name === S.prime.agent_name;
   return d.card.name.includes(PRIME_AGENT_KEY);
 }
+/* stdinPlaceholder 派单页任务描述占位：按 (node, agent) 对应目录项 isPrimeDir 选
+ * 统筹/普通文案——change 联动与整页重绘共用此口径，选非 zcode-dev 名字的统筹
+ * 载体时提示不再错位，重绘后也不固定回落普通文案。查无目录项（未选齐/已下架）按普通处理。 */
+function stdinPlaceholder(node, agent) {
+  const d = node && agent ? S.directory.find(x => x.node_id === node && x.card.name === agent) : null;
+  return isPrimeDir(d) ? STDIN_PH_PRIME : STDIN_PH;
+}
 function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
@@ -1297,7 +1309,7 @@ function controlPage() {
     ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发。' })}
     ${orchLineHtml()}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
-    <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
+    <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(stdinPlaceholder(C.node, C.agent))}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
     <div id="ctrl-feedback" class="statusline" role="status">${ctrlFeedback()}</div>
@@ -2284,11 +2296,12 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    /* 派单页选中统筹载体（置顶「统筹 · zcode-dev」项）时切换任务描述占位为复合目标
-     * 提示；选普通智能体恢复（取代原「总理模式」勾选框联动，2026-10-23 定案）。 */
+    /* 派单页选中统筹载体时切换任务描述占位为复合目标提示；选普通智能体恢复。
+     * 口径与徽标/提交一致：按 (当前 ctrl-node, 所选 agent) 查 S.directory 后走
+     * isPrimeDir 判定（网页指定优先、名字约定回退），不按名字硬编码（P2-7）。 */
     if (e.target.id === 'ctrl-agent') {
       const ta = $('#ctrl-stdin');
-      if (ta) ta.placeholder = String(e.target.value || '').includes(PRIME_AGENT_KEY) ? STDIN_PH_PRIME : STDIN_PH;
+      if (ta) ta.placeholder = stdinPlaceholder($('#ctrl-node')?.value || '', e.target.value);
       return;
     }
   });
@@ -2296,7 +2309,12 @@ function bindEvents() {
    * 摘要行与计数行统一走组件；派单页把选择持久化到 S.C（整页重绘后恢复），
    * 弹层场景提交时直接读 DOM。 */
   bindAgentPicker(document, info => {
-    if (info.prefix === 'ctrl' && info.node !== undefined) { S.C.node = info.node; S.C.agent = info.agent || ''; }
+    if (info.prefix === 'ctrl' && info.node !== undefined) {
+      S.C.node = info.node; S.C.agent = info.agent || '';
+      /* 机器切换联动同样刷新占位（与 agent 切换同口径）：跨机同名智能体保留选中时占位不残留旧判定。 */
+      const ta = $('#ctrl-stdin');
+      if (ta) ta.placeholder = stdinPlaceholder(S.C.node, S.C.agent);
+    }
   });
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {

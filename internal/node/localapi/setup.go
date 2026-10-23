@@ -313,7 +313,7 @@ func renderSetupYaml(v protocol.JoinValues, ops *SetupOps) (string, error) {
 	add("local_listen", listen, "!!str", "本机回环 API（node 只监听 127.0.0.1，不给公网）")
 	add("data_dir", abs, "!!str", "")
 	add("concurrency", strconv.Itoa(conc), "!!int", "")
-	add("prime_agent", "", "!!str", "钦定本机唯一总理（agent 名）；空 = 编排接口未激活（403）")
+	add("prime_agent", "", "!!str", "钦定本机唯一统筹（agent 名）；空 = 编排接口未激活（403）")
 	doc := &yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}}
 	out, err := yaml.Marshal(doc)
 	if err != nil {

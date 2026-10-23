@@ -36,16 +36,17 @@ func (c *Core) SetPrimeDesignation(nodeID, agentName, by string) (store.PrimeDes
 		if strings.TrimSpace(nodeID) == "" {
 			return ErrInvalid
 		}
+		// 精确匹配该 (node_id, agent_name)：全网找同名 exposed 会把指定落到
+		// 无此能力的节点上（跨节点同名能力时目测成立、实际不可派发）。
+		rec, ok := st.Nodes[nodeID]
+		if !ok {
+			return ErrInvalid
+		}
 		found := false
-		for _, rec := range st.Nodes {
-			for _, a := range rec.Agents {
-				// 与目录口径一致（ListDirectory=全网 exposed=true）：未暴露的能力不可指定
-				if a.Name == agentName && a.Exposed {
-					found = true
-					break
-				}
-			}
-			if found {
+		for _, a := range rec.Agents {
+			// 与目录口径一致（ListDirectory=全网 exposed=true）：未暴露的能力不可指定
+			if a.Name == agentName && a.Exposed {
+				found = true
 				break
 			}
 		}
