@@ -116,7 +116,7 @@ func TestFullChainWorkdirSerialTimestamps(t *testing.T) {
 		OutputMode: "answer+artifacts", PermissionMode: echo.PermissionMode,
 		ProtocolVer: 1, WorkspaceID: "ws-sleep", Exposed: true,
 	}
-	newExecNode(f, "nodeB", map[string]*runner.Runner{
+	newExecNode(f, "nodeB", map[string]execRunner{
 		"sleeper": runner.New(echo, baseTestEnv2(), f.t.TempDir()),
 	}, []protocol.AgentCard{card})
 

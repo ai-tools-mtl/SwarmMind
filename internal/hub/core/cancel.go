@@ -28,9 +28,9 @@ var ErrNotCancellable = errors.New("core: 任务已终态，不可取消")
 // 由 node 侧超时兜底）。返回取消后的任务与幂等命中标记（此前已是 cancelled）。
 func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 	var (
-		out   protocol.Task
-		dup   bool
-		fence int64 // 取消时刻该 node 的注册代次（取消回执重臂用，P4/SPEC 4.11）
+		out         protocol.Task
+		dup         bool
+		cancelFence int64 // 该任务当前落库租约（cancel_fence，P1-2）：node 取消回执对账基准
 	)
 	err := c.st.Update(func(st *store.State) error {
 		t, ok := st.Tasks[taskID]
@@ -56,7 +56,9 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 未投递直接撤回，释放信箱配额
 		}
 		out = nt
-		fence = st.Nodes[nt.TargetNode].Epoch
+		if t.Lease != nil {
+			cancelFence = t.Lease.FenceEpoch
+		}
 		return nil
 	})
 	if err != nil {
@@ -67,11 +69,13 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 	}
 	c.noteTask(&out)
 	// task_cancel 尽力送达（submitted 撤回路径也发：ack 超时回退的任务可能已
-	// 在 node 手中，迟到执行由 node 侧取消与 hub 冲突收敛共同兜底）。帧携取消
-	// 时刻代次：node 据此重臂，其 task_result(cancelled) 回执等值通过（P4）。
+	// 在 node 手中，迟到执行由 node 侧取消与 hub 冲突收敛共同兜底）。P1-2：帧
+	// 携该任务当前落库租约（cancel_fence）——重派推进租约而 node 未及重臂时
+	//（如 ack 丢后重派、重派 offer 送达失败留 submitted），node 对账取大者回
+	// cancelled 回执，hub 按 cancel_fence ≥ 落库租约宽校验接受，取消结果不滞留。
 	if err := c.sendFrameFence(out.TargetNode, protocol.MsgTaskCancel, "",
-		fence, protocol.TaskCancelPayload{TaskID: out.ID, Reason: reason}, nil); err != nil {
-		log.Printf("[hub] task_cancel 发送失败（node 离线/会话竞态，迟到结果按冲突收敛） node=%s task=%s: %v",
+		cancelFence, protocol.TaskCancelPayload{TaskID: out.ID, Reason: reason}, nil); err != nil {
+		log.Printf("[hub] task_cancel 发送失败（node 离线/会话竞态，重连补发携 cancel_fence 重试） node=%s task=%s: %v",
 			out.TargetNode, out.ID, err)
 	}
 	// result_event 不在此发：取消时 Result 恒为 nil（真实执行数据由 node 结果
@@ -85,29 +89,37 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 // 语义）：node 离线期间管理面取消的任务，task_cancel 尽力送达可能失败（CancelTask
 // 只记日志，状态已终态不重试）——节点重新注册成功（会话层注册事务发布后回调
 // SetOnline 上线）时，对其名下 status=cancelled 且 Result==nil（真实执行数据尚待
-// node 回传合并）的任务逐个补发 task_cancel。node 侧幂等：在跑则终止执行，已终
-// 态/不在账本回 task_cancelled ack；已合并结果（Result 非 nil）的任务无需再补。
-// 触发时机对齐注册成功处（session.register → SetOnline(true)），membus 测试链路
-// 同口径。
+// node 回传合并）的任务逐个补发 task_cancel，帧携各自任务当前落库租约
+//（cancel_fence，P1-2：node 对账取大者后回执宽校验收敛）。node 侧幂等：在跑则
+// 终止执行，已终态/不在账本回 task_cancelled ack；已合并结果（Result 非 nil）的
+// 任务无需再补。触发时机对齐注册成功处（session.register → SetOnline(true)），
+// membus 测试链路同口径。
 func (c *Core) resendPendingCancels(nodeID string) {
-	var ids []string
+	type cancelPing struct {
+		id    string
+		fence int64 // 该任务当前落库租约（cancel_fence）
+	}
+	var pings []cancelPing
 	for id, t := range c.st.View().Tasks {
 		if t.TargetNode == nodeID && t.Status == protocol.StatusCancelled && t.Result == nil {
-			ids = append(ids, id)
+			var fence int64
+			if t.Lease != nil {
+				fence = t.Lease.FenceEpoch
+			}
+			pings = append(pings, cancelPing{id: id, fence: fence})
 		}
 	}
-	if len(ids) == 0 {
+	if len(pings) == 0 {
 		return
 	}
-	fence := c.st.View().Nodes[nodeID].Epoch // 补发时刻代次（node 据此重臂，P4）
-	for _, id := range ids {
+	for _, p := range pings {
 		if err := c.sendFrameFence(nodeID, protocol.MsgTaskCancel, "",
-			fence, protocol.TaskCancelPayload{TaskID: id, Reason: "hub 重连补发"}, nil); err != nil {
+			p.fence, protocol.TaskCancelPayload{TaskID: p.id, Reason: "hub 重连补发"}, nil); err != nil {
 			log.Printf("[hub] 补发 task_cancel 失败（node 已再离线，下轮注册再补） node=%s task=%s: %v",
-				nodeID, id, err)
+				nodeID, p.id, err)
 		}
 	}
-	log.Printf("[hub] 节点注册取消补发 node=%s 补发 task_cancel 数量=%d", nodeID, len(ids))
+	log.Printf("[hub] 节点注册取消补发 node=%s 补发 task_cancel 数量=%d", nodeID, len(pings))
 }
 
 // handleTaskCancelledAck node→hub 的 task_cancelled ack：任务在 node 侧已终态或

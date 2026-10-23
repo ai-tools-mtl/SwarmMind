@@ -191,9 +191,13 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 	err := s.cfg.Ledger.AcceptFenced(task, ledger.OriginHub, env.FenceEpoch)
 	if errors.Is(err, ledger.ErrDuplicate) {
 		// 重复 offer：不再执行，直接重发 task_ack；已 finished 附带重发 result（SPEC 4.3）。
-		// 重臂后重发：回执携带 hub 本次重派的新租约（等值仲裁通过，收口闭合）
+		// 重臂后重发：回执携带 hub 本次重派的新租约（等值仲裁通过，收口闭合）。
+		// P1-1：重臂落盘失败立即返回、不发 ack/result——此时回执仍按旧租约回带，
+		// hub 已存新租约必拒收；ack 又让任务离开 offered 不再重派，合法任务将
+		// 永久无法回写。不 ack 则 hub 按 offer-ack 超时重推本帧，恢复后重臂重试。
 		if err := s.cfg.Ledger.RearmFence(task.ID, env.FenceEpoch); err != nil {
-			log.Printf("[node] 重复 offer 重臂失败 task=%s: %v", task.ID, err)
+			log.Printf("[node] 重复 offer 重臂失败，不确认待重推 task=%s: %v", task.ID, err)
+			return
 		}
 		log.Printf("[node] 重复 offer，重发确认 task=%s", task.ID)
 		s.sendRef(protocol.MsgTaskAck, task.ID)
@@ -248,7 +252,7 @@ func (s *Service) execute(task protocol.Task) {
 				// 授予与关闭竞态：持有已生效，按持有走下方关闭检查退出
 			case <-ce.doneCh():
 				if s.wsLocks.withdraw(ws, task.ID, wake) {
-					s.finishCancelledBeforeRun(task.ID) // 管理面取消：不再执行，落终态回传
+					s.finishCancelledBeforeRun(task.ID, ce.cancelFence()) // 管理面取消：不再执行，落终态回传
 					return
 				}
 				// 授予与取消竞态：持有已生效，按持有走下方取消检查退出
@@ -265,7 +269,7 @@ func (s *Service) execute(task protocol.Task) {
 			if ws != "" {
 				s.wsLocks.release(ws, task.ID)
 			}
-			s.finishCancelledBeforeRun(task.ID)
+			s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
 			return
 		}
 		defer func() { <-s.sem }()
@@ -282,7 +286,7 @@ func (s *Service) execute(task protocol.Task) {
 		// 终态（账本先到为准，与取消路径竞争失败则幂等收敛）。
 		if runCtx.Err() != nil {
 			if ce.triggered() {
-				s.finishCancelledBeforeRun(task.ID)
+				s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
 			}
 			return
 		}
@@ -341,6 +345,18 @@ func (s *Service) execute(task protocol.Task) {
 		if err := s.cfg.Ledger.MarkFinished(task.ID, final); err != nil {
 			log.Printf("[node] 写入终态失败 task=%s: %v", task.ID, err)
 			return
+		}
+		// P1-2 取消回写对账：确以 cancelled 收尾时，账本租约与本帧 cancel_fence
+		// 取大者重臂后再回带——重派租约已推进而 node 未及重臂（如 ack 丢后重派
+		// 的 offer 送达失败）时，回执按 hub 落库租约宽校验（cancel_fence ≥ 租约）
+		// 收敛，不再被等值门禁拒收置 closed。重臂失败不发：滞留重发队列按旧租约
+		// 回带虽会被拒，hub 的取消重发（至少一次）会再携 cancel_fence 对账解除
+		//（RearmFence 换新代次同时解除 closed）。
+		if ce.triggered() && final.Status == protocol.ResultCancelled {
+			if err := s.rearmTo(task.ID, ce.cancelFence()); err != nil {
+				log.Printf("[node] 取消回写重臂失败，待取消重发对账 task=%s: %v", task.ID, err)
+				return
+			}
 		}
 		s.sendResult(task.ID, final)
 	}()
@@ -415,8 +431,12 @@ func (s *Service) handleResultAck(env *protocol.Envelope) {
 	}
 }
 
-// handleErr 协议错误帧：result_conflict（终态冲突保留先到）或 expired 拒收 →
-// 账本置 closed 停止重传，记录保留作冲突审计（SPEC 4.5）。
+// handleErr 协议错误帧：result_conflict（终态冲突保留先到）或过期拒收 → 账本置
+// closed 停止重传，记录保留作冲突审计（SPEC 4.5）。
+// P1-3（任务租约拒收的收窄）：err 结构化携带被拒的 fence_epoch 时，仅当它与
+// 账本条目当前 fence 等值才置 closed——拒收旧代次不得关闭已重臂的新租约条目
+//（新租约结果首发丢失后，周期/重启补传须继续，否则任务永久滞留）；未携 fence
+//（旧版对端、普通终态冲突）按既有规则无条件关闭。
 func (s *Service) handleErr(env *protocol.Envelope) {
 	if env.Err == nil || env.Err.Code != protocol.CodeResultConflict {
 		log.Printf("[node] 收到 err 帧 code=%s msg=%s", errCode(env), envErrMsg(env))
@@ -426,6 +446,18 @@ func (s *Service) handleErr(env *protocol.Envelope) {
 	if err := json.Unmarshal(env.Payload, &ref); err != nil || ref.TaskID == "" {
 		log.Printf("[node] result_conflict 帧缺 task 引用: %v", err)
 		return
+	}
+	if rejected := env.Err.FenceEpoch; rejected != 0 {
+		e, ok := s.cfg.Ledger.Get(ref.TaskID)
+		if !ok {
+			log.Printf("[node] result_conflict 命中不在账本任务 task=%s", ref.TaskID)
+			return
+		}
+		if e.FenceEpoch != rejected {
+			log.Printf("[node] 拒收针对旧代次（rejected=%d ≠ 当前 %d），不关闭保留重发 task=%s",
+				rejected, e.FenceEpoch, ref.TaskID)
+			return
+		}
 	}
 	if err := s.cfg.Ledger.MarkResendClosed(ref.TaskID); err != nil {
 		log.Printf("[node] 置 closed 失败 task=%s: %v", ref.TaskID, err)
@@ -529,6 +561,21 @@ func (s *Service) sendResult(taskID string, res protocol.TaskResult) {
 // fenceOf 查账本条目的租约代次（快照读零拷贝；不在账本返回 0=缺省，hub 宽容）。
 func (s *Service) fenceOf(taskID string) int64 {
 	return s.cfg.Ledger.View()[taskID].FenceEpoch
+}
+
+// rearmTo 取消回写对账（P1-2）：账本条目租约与 task_cancel 携带的 cancel_fence
+// 取大者重臂——取消是管理面意图，重派推进的租约经取消帧补授给 node，回执按
+// hub 落库租约宽校验（cancel_fence ≥ 租约）收敛。cancel_fence ≤ 条目租约（无
+// 滞后）或非正（旧版 hub）为 no-op 成功；仅 hub 显式授予的取消帧触发，zombie
+// 无当前会话收不到帧即无法自臂。
+func (s *Service) rearmTo(taskID string, cancelFence int64) error {
+	if cancelFence <= 0 {
+		return nil
+	}
+	if cancelFence <= s.fenceOf(taskID) {
+		return nil
+	}
+	return s.cfg.Ledger.RearmFence(taskID, cancelFence)
 }
 
 // send 经 node 端点发帧；未连接（transport.ErrNoEndpoint）静默——ack/started

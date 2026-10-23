@@ -79,10 +79,12 @@ type Envelope struct {
 	IdemKey string `json:"idem,omitempty"`
 	// SessionEpoch 会话代次（SPEC 4.4；register 帧豁免校验）。
 	SessionEpoch int64 `json:"epoch,omitempty"`
-	// FenceEpoch 任务租约代次快照（P4/SPEC 4.11）：task_offer/task_cancel 由 hub
-	// 携派发/取消时刻该 node 的注册代次，task_result 由 node 从账本原样回带；
-	// hub 结果仲裁校验等值，过期即拒收 zombie 写。0=缺省（旧版对端），hub 按
-	// 「缺省=当前 epoch」宽容处理，向后兼容。传输层盖章只覆盖 From/Version/
+	// FenceEpoch 任务租约代次快照（P4/SPEC 4.11）：task_offer 由 hub 携派发时刻
+	// 该 node 的注册代次；task_cancel 由 hub 携该任务当前落库租约（cancel_fence，
+	// P1-2）；task_result 由 node 从账本原样回带。hub 结果仲裁：一般终态校验
+	// 等值，cancelled 回执宽校验（cancel_fence ≥ 落库租约即接受——取消是管理面
+	// 意图）；过期即拒收 zombie 写。0=缺省（旧版对端），hub 按「缺省=当前
+	// epoch」宽容处理，向后兼容。传输层盖章只覆盖 From/Version/
 	// SessionEpoch，本字段原样透传（node conn.Send / membus 均不改动）。
 	FenceEpoch int64 `json:"fence_epoch,omitempty"`
 	// TraceID 链路追踪 ID。
@@ -103,6 +105,14 @@ type ErrInfo struct {
 	Code string `json:"code"`
 	// Msg 人类可读补充信息。
 	Msg string `json:"msg"`
+	// FenceEpoch 被拒结果的租约代次（P4/SPEC 4.11，仅任务租约拒收的
+	// result_conflict 回执结构化携带）：node 收拒收时据此判定「被拒的是否当前
+	// 条目」——仅当与账本条目 fence 等值才置 closed 停止重发，避免拒收旧代次
+	// 误伤已重臂的新租约重发。0=未关联（旧版对端/普通终态冲突），node 按
+	// 既有规则无条件置 closed。
+	FenceEpoch int64 `json:"fence_epoch,omitempty"`
+	// LeaseEpoch 拒收时刻 hub 的任务落库租约（同上，审计对账用）。
+	LeaseEpoch int64 `json:"lease_epoch,omitempty"`
 }
 
 // Encode 序列化信封为一条文本帧字节，并按 SPEC 4.6 以最终编码实测校验 1MiB 上限。

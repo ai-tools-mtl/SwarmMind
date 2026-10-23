@@ -109,6 +109,8 @@ type Entry struct {
 	FirstAckedAt time.Time `json:"first_acked_at"`
 	// Closed 重传终止标记（SPEC 4.5）：task_result 被 hub 拒收（result_conflict /
 	// expired 终态拒绝）后置位并持久化，停止重发；记录保留作冲突审计，不删除、不参与清理。
+	// 重臂成功（RearmFence 换新代次，P1-3）即解除——新租约下的结果重发必须恢复，
+	// 否则重派后结果首发丢失的任务永久滞留。
 	Closed bool `json:"closed"`
 	// FenceEpoch 任务租约代次快照（P4/SPEC 4.11）：task_offer 携带的派发时刻
 	// hub 代次，task_result 原样回带供 hub 等值仲裁。仅 hub 显式（重）授予时
@@ -139,6 +141,7 @@ func (e Entry) Clone() Entry {
 
 // txnReq 单写队列中的一个事务请求。
 type txnReq struct {
+	op     string // 操作名（故障注入按 op+stage 定位，见 inject）
 	mutate func(map[string]Entry) error
 	reply  chan error
 }
@@ -162,8 +165,9 @@ type Ledger struct {
 	closeOnce sync.Once
 	closeErr  error
 
-	// inject 故障注入钩子：按阶段返回非 nil 错误即中断事务（仅包内测试设置，生产为 nil）。
-	inject func(stage string) error
+	// inject 故障注入钩子：按「操作名+阶段」返回非 nil 错误即中断事务（op 为
+	// 触发事务的导出方法名，如 "RearmFence"；仅测试设置，生产为 nil）。
+	inject func(op, stage string) error
 }
 
 // Open 打开 node 账本：取 data_dir 单实例 flock（冲突即报错）、加载 ledger.json、
@@ -173,9 +177,15 @@ func Open(dataDir string) (*Ledger, *Recovery, error) {
 	return open(dataDir, nil)
 }
 
+// OpenForTest Open 的可注入变体（跨包测试专用，如 service 端到端注入重臂写盘
+// 失败）：inject 按「操作名+阶段」拦截事务；生产恒走 Open。
+func OpenForTest(dataDir string, inject func(op, stage string) error) (*Ledger, *Recovery, error) {
+	return open(dataDir, inject)
+}
+
 // open Open 的可注入变体：inject 透传账本事务（含启动恢复的降级写），
 // 供包内测试模拟恢复期落盘失败；生产恒走 Open（inject=nil）。
-func open(dataDir string, inject func(string) error) (*Ledger, *Recovery, error) {
+func open(dataDir string, inject func(op, stage string) error) (*Ledger, *Recovery, error) {
 	lock, err := AcquireLock(dataDir)
 	if err != nil {
 		return nil, nil, err
@@ -280,7 +290,7 @@ func (l *Ledger) AcceptOrigin(t protocol.Task, origin Origin) error {
 // task_offer 链路专用——把派发帧携带的 fence_epoch 快照随条目持久化，
 // task_result 据此回带。fence=0 = 派发帧未携租约（旧版 hub），条目照常入账。
 func (l *Ledger) AcceptFenced(t protocol.Task, origin Origin, fence int64) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("AcceptFenced", func(m map[string]Entry) error {
 		if _, ok := m[t.ID]; ok {
 			return ErrDuplicate
 		}
@@ -291,12 +301,15 @@ func (l *Ledger) AcceptFenced(t protocol.Task, origin Origin, fence int64) error
 
 // RearmFence 重臂任务租约（P4/SPEC 4.11）：把条目回带用的 fence_epoch 更新为
 // hub 帧携带的新代次。仅 hub 显式授予的帧（重复 task_offer=重派收口、
-// task_cancel=取消收口）触发——二者只能经当前会话送达，重臂即承认「本条目的
-// 收口回执对齐 hub 当前代次」；zombie 进程无当前会话，收不到帧即无法自臂。
-// node 自发路径（重连重发/恢复执行）永不调用本方法。幂等（同值 no-op）；
-// origin=local 条目拒臂（hub 租约只管 hub 链路）。
+// task_cancel=取消收口——node 侧对账取大者后调用，P1-2）触发——二者只能经当前
+// 会话送达，重臂即承认「本条目的收口回执对齐 hub 当前代次」；zombie 进程无当前
+// 会话，收不到帧即无法自臂。node 自发路径（重连重发/恢复执行）永不调用本方法。
+// 幂等（同值 no-op）；origin=local 条目拒臂（hub 租约只管 hub 链路）。
+// 换新代次成功时同时解除 closed（P1-3）：拒收关闭绑定的是被拒旧代次，重臂即
+// 承认新租约下的结果尚未收口，须恢复重发——同值 no-op 不解除（同代次被拒的
+// 审计保留，重发只会再被拒）。
 func (l *Ledger) RearmFence(taskID string, fence int64) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("RearmFence", func(m map[string]Entry) error {
 		e, ok := m[taskID]
 		if !ok {
 			return ErrNotFound
@@ -306,6 +319,7 @@ func (l *Ledger) RearmFence(taskID string, fence int64) error {
 		}
 		ne := e.Clone()
 		ne.FenceEpoch = fence
+		ne.Closed = false
 		m[taskID] = ne
 		return nil
 	})
@@ -326,7 +340,7 @@ func (l *Ledger) AcceptOriginIdempotent(t protocol.Task, origin Origin, idemKey 
 	if idemKey == "" {
 		return protocol.Task{}, false, l.AcceptOrigin(t, origin)
 	}
-	err = l.Update(func(m map[string]Entry) error {
+	err = l.updateOp("AcceptOriginIdempotent", func(m map[string]Entry) error {
 		for _, e := range m {
 			if e.normalized().Origin != origin || e.Task.IdemKey != idemKey {
 				continue
@@ -353,7 +367,7 @@ func (l *Ledger) AcceptOriginIdempotent(t protocol.Task, origin Origin, idemKey 
 
 // MarkStarted accepted→started（调用方须待成功后再发 task_started 并 spawn，SPEC 4.7）。
 func (l *Ledger) MarkStarted(taskID string) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("MarkStarted", func(m map[string]Entry) error {
 		e, ok := m[taskID]
 		if !ok {
 			return ErrNotFound
@@ -377,7 +391,7 @@ func (l *Ledger) MarkStarted(taskID string) error {
 // 本机账本，落盘即送达——不经 hub 确认，天然退出重发队列（切换组网后不成批
 // 推 hub），终态 24h 清理（CleanupAcked）同样按 first_acked_at 起算收敛。
 func (l *Ledger) MarkFinished(taskID string, res protocol.TaskResult) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("MarkFinished", func(m map[string]Entry) error {
 		e, ok := m[taskID]
 		if !ok {
 			return ErrNotFound
@@ -406,7 +420,7 @@ func (l *Ledger) MarkFinished(taskID string, res protocol.TaskResult) error {
 // MarkResultAcked 收到 result_ack：置 result_acked 并记录首次确认时刻 first_acked_at
 // （保留期限起算点，SPEC 4.6）；对已 acked 条目幂等（no-op 成功，不更新 first_acked_at）。
 func (l *Ledger) MarkResultAcked(taskID string) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("MarkResultAcked", func(m map[string]Entry) error {
 		e, ok := m[taskID]
 		if !ok {
 			return ErrNotFound
@@ -430,7 +444,7 @@ func (l *Ledger) MarkResultAcked(taskID string) error {
 // 记录）。条目须为 finished 终态；对已 closed 条目幂等；closed 条目退出重发队列，
 // 重启恢复也不再进入 Resend。
 func (l *Ledger) MarkResendClosed(taskID string) error {
-	return l.Update(func(m map[string]Entry) error {
+	return l.updateOp("MarkResendClosed", func(m map[string]Entry) error {
 		e, ok := m[taskID]
 		if !ok {
 			return ErrNotFound
@@ -455,7 +469,7 @@ func (l *Ledger) MarkResendClosed(taskID string) error {
 // 返回清理条数；由 node 主循环周期性调用（后续 Loop 接线）。
 func (l *Ledger) CleanupAcked(now time.Time) (int, error) {
 	removed := 0
-	err := l.Update(func(m map[string]Entry) error {
+	err := l.updateOp("CleanupAcked", func(m map[string]Entry) error {
 		for id, e := range m {
 			if !e.ResultAcked || e.Result == nil || e.FirstAckedAt.IsZero() {
 				continue
@@ -504,6 +518,12 @@ func (l *Ledger) CleanupCancelTombstones(now time.Time) error {
 //     新状态已提交磁盘（rename 成）乃至已发布内存（before_ack），但调用方未获 Ack——
 //     「已提交但确认丢失」，重启后以磁盘为准。调用方须按幂等重试处理，不得假设事务未发生。
 func (l *Ledger) Update(mutate func(map[string]Entry) error) error {
+	return l.updateOp("Update", mutate)
+}
+
+// updateOp Update 的操作名标注变体：op 随事务进入单写队列，供故障注入按
+// 「op+阶段」拦截（仅测试路径使用；生产 inject=nil 时与 Update 等价）。
+func (l *Ledger) updateOp(op string, mutate func(map[string]Entry) error) error {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -513,7 +533,7 @@ func (l *Ledger) Update(mutate func(map[string]Entry) error) error {
 	l.mu.Unlock()
 	defer l.inflight.Done()
 
-	req := &txnReq{mutate: mutate, reply: make(chan error, 1)}
+	req := &txnReq{op: op, mutate: mutate, reply: make(chan error, 1)}
 	// Close 等 inflight 归零后才关 ch，此处不会向已关闭通道发送
 	l.ch <- req
 	return <-req.reply
@@ -537,12 +557,12 @@ func (l *Ledger) Close() error {
 func (l *Ledger) writeLoop() {
 	defer close(l.writerDone)
 	for req := range l.ch {
-		req.reply <- l.apply(req.mutate)
+		req.reply <- l.apply(req.op, req.mutate)
 	}
 }
 
 // apply 执行一次先写后见事务；返回 nil 即完成「落盘 + 发布 + Ack」。
-func (l *Ledger) apply(mutate func(map[string]Entry) error) (err error) {
+func (l *Ledger) apply(op string, mutate func(map[string]Entry) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("ledger: 事务 panic（副本已丢弃）: %v", r)
@@ -556,25 +576,25 @@ func (l *Ledger) apply(mutate func(map[string]Entry) error) (err error) {
 	if err = mutate(next); err != nil {
 		return fmt.Errorf("ledger: 事务被拒绝: %w", err)
 	}
-	if err = l.persist(next); err != nil {
+	if err = l.persist(op, next); err != nil {
 		return err
 	}
-	if err = l.injectFail(stageAfterRename); err != nil {
+	if err = l.injectFail(op, stageAfterRename); err != nil {
 		return err
 	}
-	if err = l.injectFail(stageBeforePublish); err != nil {
+	if err = l.injectFail(op, stageBeforePublish); err != nil {
 		return err
 	}
 	l.cur.Store(&next) // 原子发布（此前失败路径均不触发布）
-	if err = l.injectFail(stageBeforeAck); err != nil {
+	if err = l.injectFail(op, stageBeforeAck); err != nil {
 		return err
 	}
 	return nil
 }
 
 // persist 将新账本写入临时文件并 rename 原子替换（SPEC 4.7：临时文件+rename）。
-func (l *Ledger) persist(entries map[string]Entry) error {
-	if err := l.injectFail(stageBeforeWrite); err != nil {
+func (l *Ledger) persist(op string, entries map[string]Entry) error {
+	if err := l.injectFail(op, stageBeforeWrite); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(entries, "", "  ")
@@ -603,9 +623,9 @@ func (l *Ledger) persist(entries map[string]Entry) error {
 }
 
 // injectFail 调用注入钩子；未设置时恒返回 nil。
-func (l *Ledger) injectFail(stage string) error {
+func (l *Ledger) injectFail(op, stage string) error {
 	if l.inject == nil {
 		return nil
 	}
-	return l.inject(stage)
+	return l.inject(op, stage)
 }
