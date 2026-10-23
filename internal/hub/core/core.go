@@ -63,6 +63,11 @@ type Config struct {
 	// 群聊闭环「结果回流群」的接线点（GROUP-RFC）：实现方不得长时间阻塞，错误
 	// 自行消化，不影响任务状态机。
 	OnTaskTerminal func(protocol.Task)
+	// Notifier 任务终态 IM 通知器（P4③，可选，nil=禁用）：与 OnTaskTerminal 同一
+	// 触发点（首次落终态；重复结果、冲突、cancelled 合并不触发——去重即挂在
+	// 转换点，Sweep/重放不重复通知）。实现方自行异步化并消化错误，不得阻塞
+	// 状态机（PRODUCT-DIRECTION v2 P4③：通知失败绝不影响任务终态与主流程）。
+	Notifier TerminalNotifier
 }
 
 // Core hub 任务服务。
@@ -71,6 +76,7 @@ type Core struct {
 	tr         transport.Transport
 	now        func() time.Time
 	onTerminal func(protocol.Task)
+	notifier   TerminalNotifier
 
 	// 在线会话表（会话层经 SetOnline 维护；V0 内存 transport 下注册即在线）。
 	mu     sync.Mutex
@@ -108,6 +114,7 @@ func New(cfg Config) (*Core, error) {
 		tr:         cfg.Transport,
 		now:        now,
 		onTerminal: cfg.OnTaskTerminal,
+		notifier:   cfg.Notifier,
 		online:     make(map[string]bool),
 		sizes:      make(map[string]int64),
 		fetches:    make(map[string]*fetchWaiter),
@@ -300,10 +307,21 @@ func (c *Core) noteDelete(taskID string) {
 	delete(c.sizes, taskID)
 }
 
-// fireTerminal 终态旁路钩子触发（nil 安全；同步调用，见 Config.OnTaskTerminal）。
+// TerminalNotifier 任务终态 IM 通知器（P4③，可选依赖，nil=禁用）。实现方自行
+// 异步化并消化错误，不得阻塞状态机（通知失败绝不影响任务终态与主流程，
+// PRODUCT-DIRECTION v2 P4③）；同任务同终态本方法只会被调用一次。
+type TerminalNotifier interface {
+	TaskFinal(t protocol.Task)
+}
+
+// fireTerminal 终态旁路钩子触发（nil 安全；同步调用，见 Config.OnTaskTerminal
+// 与 Config.Notifier）。
 func (c *Core) fireTerminal(t *protocol.Task) {
 	if c.onTerminal != nil {
 		c.onTerminal(*t)
+	}
+	if c.notifier != nil {
+		c.notifier.TaskFinal(*t)
 	}
 }
 
