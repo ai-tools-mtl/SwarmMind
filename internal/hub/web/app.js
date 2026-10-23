@@ -570,8 +570,12 @@ function overviewPage() {
   const nr = c.needs_review || 0;
   const offline = sortNodesStable(S.nodes.filter(n => !n.online));
   // 状态分布 chips = 下钻入口：点某个状态直达任务监管页对应筛选（总览无列表，就地筛选无意义）
-  const drillChips = Object.keys(STATES).map(s =>
-    `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link">${badge(s)} ${c[s] || 0} →</button>`).join('');
+  // 计数为 0 时 badge 不上彩色（橙描边/蓝点脉冲只给有量的状态），避免「待人工核对 0」像告警（2026-10-23 伦哥实测抓出）
+  const drillChips = Object.keys(STATES).map(s => {
+    const n = c[s] || 0;
+    const bd = n ? badge(s) : `<span class="badge">${esc(STATES[s] || s)}</span>`;
+    return `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link${n ? '' : ' zero'}">${bd} ${n} →</button>`;
+  }).join('');
   return head('总览', `${online} / ${S.nodes.length} 台节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
     + `<section class="panel"><div class="stat-grid">
     ${metric('全网任务', S.tasks.length, '查看全部 →', '', 'data-act="go" data-page="tasks"')}
@@ -1895,7 +1899,8 @@ const ACT = {
     if (enrollBundleBusy) { toast('正在生成部署包，请稍候…'); return; }
     if (!ENROLL) return;
     ENROLL.plat = b.dataset.plat || 'linux-amd64';
-    openLayerPlain(enrollHtml(), false, true);
+    // 局部 toggle 而非整层重绘：openLayerPlain(enrollHtml()) 会重建整个 modal DOM，视觉上白闪一帧（2026-10-23 伦哥实测抓出）
+    document.querySelectorAll('[data-act="enroll-plat"]').forEach(x => x.classList.toggle('on', x === b));
   },
   'enroll-bundle-dl': () => enrollBundleDownload(),
   /* 手动折叠区内的系统 tab：只局部更新启动命令，整层重绘会把 <details> 合上 */
