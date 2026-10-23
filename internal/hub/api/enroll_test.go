@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -630,8 +629,7 @@ func TestEnrollInfo(t *testing.T) {
 	}
 	loginGet := func(srv *httptest.Server, reqHost string) (int, string) {
 		t.Helper()
-		jar, _ := cookiejar.New(nil)
-		hc := &http.Client{Jar: jar}
+		hc := &http.Client{}
 		resp, err := hc.Post(srv.URL+"/api/v1/login", "application/json", strings.NewReader(`{"token":"test-admin-token"}`))
 		if err != nil {
 			t.Fatalf("登录失败: %v", err)
@@ -640,8 +638,14 @@ func TestEnrollInfo(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("登录应 200, got %d", resp.StatusCode)
 		}
+		// 显式携带会话 cookie（不依赖 cookiejar）：GET 需重写 req.Host 模拟不同
+		// 请求主机名，而 Go 1.25+ 的 client 对 Host 改写后的请求不回发 jar 中的
+		// URL-host cookie（CI go1.27 实测 401，cookiejar probe 实锤，2026-10-24）。
 		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/nodes/enroll-info", nil)
 		req.Host = reqHost
+		for _, c := range resp.Cookies() {
+			req.AddCookie(c)
+		}
 		resp, err = hc.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -677,9 +681,8 @@ func TestEnrollInfo(t *testing.T) {
 		t.Fatalf("NodeEntry 未装配应 503, got %d %s", code, body)
 	}
 
-	// 未登录一律 401（与其它管理面端点同门）
-	jar, _ := cookiejar.New(nil)
-	hc := &http.Client{Jar: jar}
+	// 未登录一律 401（与其它管理面端点同门）：裸客户端无 cookie，必 401
+	hc := &http.Client{}
 	resp, err := hc.Get(mkSrv(&NodeEntryConfig{Scheme: "ws", Listen: "127.0.0.1:64310"}).URL + "/api/v1/nodes/enroll-info")
 	if err != nil {
 		t.Fatal(err)
