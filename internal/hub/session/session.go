@@ -412,6 +412,9 @@ func (s *session) closeHandshake() {
 // CloseRead：后者对数据帧回 1008，会把优雅关闭变成 PolicyViolation 踢出）。
 // 唯一 reader（readLoop 已退出）；对端 close 回帧也由此循环消费。
 func (s *session) discardInbound() {
+	// 对端 close 回帧被本循环消费后由这里关闭底层连接（原 CloseRead 的库内
+	// 行为：握手完成即关底层；不补则 client 侧读挂起、连接泄漏）。
+	defer s.conn.CloseNow()
 	for {
 		if _, _, err := s.conn.Read(s.ctx); err != nil {
 			return
