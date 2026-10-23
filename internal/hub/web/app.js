@@ -8,11 +8,13 @@
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-/* ---------- PRIME 系统提示词（总理模式派发用） ---------- */
-/* 与 deploy/prime/PRIME.md 同步维护——模板以 {{GOAL}} 结尾，拼接时替换为用户目标。 */
-const PRIME_PROMPT = `# SwarmMind 总理智能体（Prime）
+/* ---------- PRIME 系统提示词（统筹模式派发用） ---------- */
+/* 与 deploy/prime/PRIME.md 同步维护——模板以 {{GOAL}} 结尾，拼接时替换为用户目标。
+ * 2026-10-23 伦哥定案：UI 称呼「总理」改「统筹」（三方 zcode/codex/Hana 讨论收敛），
+ * 内部代号 Prime 与 API 字段不变。 */
+const PRIME_PROMPT = `# SwarmMind 统筹智能体（Prime）
 
-你是 SwarmMind 协作网络的总理调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
+你是 SwarmMind 协作网络的统筹调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
 
 ## 分配决策（StartLux 影子 + 规则兜底）
 
@@ -144,9 +146,9 @@ const S = {
   groupsOff: false,            // hub 未接线群存储（端点 503）
 };
 function freshControl() {
-  /* node/agent 分开存（两级选择：先机器后智能体）；primePrev* 勾总理前的原选择。 */
-  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null,
-    primePrevNode: '', primePrevAgent: '' };
+  /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
+   * 列表置顶的「统筹 · zcode-dev」项即统筹模式（2026-10-23 伦哥定案）。 */
+  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null };
 }
 function newIdem() {
   return 'ctrl-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -1270,10 +1272,10 @@ function reviewSection(t) {
 }
 
 /* ---------- 运维控制 ---------- */
-/* 任务描述占位文案：普通/总理两态共用常量——applyPrimeMode 切换与恢复取同一份，保证精确还原。 */
+/* 任务描述占位文案：普通/统筹两态共用常量——选中统筹载体切 STDIN_PH_PRIME，选普通恢复。 */
 const STDIN_PH = '用自然语言描述要做什么。编码智能体会读取这段描述并执行；工具脚本则把它作为附加说明。\n例如：在 demo 目录创建一个 Python 脚本，输出当前时间。';
-const STDIN_PH_PRIME = '描述复合目标：总理会自动分解为多个子任务并调度网内能力执行。例如：检查两台机器的磁盘占用并汇总对比报告';
-const PRIME_AGENT_KEY = 'zcode-dev';   // 总理载体能力名（下拉 value 含此串即选中）
+const STDIN_PH_PRIME = '描述复合目标：统筹会把目标拆解为多个子任务，派发网内其他智能体并行执行，收集结果并汇总报告；自身不执行具体子任务。例如：检查两台机器的磁盘占用并汇总对比报告';
+const PRIME_AGENT_KEY = 'zcode-dev';   // 统筹载体能力名（下拉 value 含此串即选中）
 function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
@@ -1281,8 +1283,7 @@ function controlPage() {
   return head('任务派发', '把任务派给网内任意节点上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
-    <label class="checkline"><input type="checkbox" id="ctrl-prime"> 总理模式：勾选后由 zcode-dev 总理智能体自动分解目标、并行派发给网内多个能力、收集结果并产出汇总报告（适合复合目标；单点任务不必勾选）</label>
-    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。' })}
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：当前提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发；未开放能力的机器同样不可选。智能体列表置顶的「统筹 · zcode-dev」为统筹智能体：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。' })}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(STDIN_PH)}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
@@ -1297,7 +1298,7 @@ function controlPage() {
     <section class="card spaced"><h3>运行规则</h3>
     <div class="step"><span>1</span><p>单目标派发：任务只提交给你选定的机器上的选定智能体；离线机器暂不可选（提交端点不排队，上线后再派）。</p></div>
     <div class="step"><span>2</span><p>提交后返回批次报告；任务在节点本机执行，「任务监管」页全程可追踪。</p></div>
-    <div class="step"><span>3</span><p>总理模式会自动定位总理载体（zcode-dev）所在机器，由总理分解目标并调度网内多节点执行。</p></div></section>`;
+    <div class="step"><span>3</span><p>统筹智能体（zcode-dev）由各节点在能力目录中开放后出现在智能体列表顶部；选中它即统筹模式：目标由它拆解并调度网内多节点执行，产出汇总报告。</p></div></section>`;
 }
 
 /* ---------- 智能体选择公共组件（2026-10-22 抽取：派单 / 建群 / 转任务三处共用） ----------
@@ -1307,7 +1308,7 @@ function controlPage() {
  * · 按机器分组的 checkbox 树（机器名做分组标题含在线状态，组内为该机器的 agent
  *   项）——建群成员多选（multi: true）
  * agentPickerHtml 渲染；bindAgentPicker 统一 change 联动（委托，全局绑一次覆盖三
- * 处实例）；机器切换用 DOM 级更新不整页重绘（避免重置已填内容——与总理模式同款
+ * 处实例）；机器切换用 DOM 级更新不整页重绘（避免重置已填内容）。
  * 手法）。可选机器 = 在线且已开放能力；离线（提交端点直接 skip、不排队）与在线但
  * 无开放能力（not_exposed）的机器禁选并在选项上注明原因。
  * 宽屏化（2026-10-22 伦哥定）：两级下拉包 .form-grid 成对并排、成员树两列流式
@@ -1327,15 +1328,21 @@ function pickerNodeOptions(selected) {
   }).join('');
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
- * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。 */
+ * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
+ * 统筹载体（zcode-dev）置顶并加「统筹 · 」前缀（三处共用组件同步生效），
+ * 选中它即统筹模式——取代原游离勾选框（2026-10-23 伦哥定案）。 */
 function pickerAgentOptions(nodeId, selected) {
   if (!nodeId) return '<option value="">请先选择机器</option>';
   const list = S.directory.filter(d => d.node_id === nodeId);
   if (!list.length) return '<option value="">该机器暂无开放能力</option>';
-  return '<option value="">请选择智能体</option>' + list.map(d => {
-    const tip = `输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
-    return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(d.card.name)} — ${esc(d.card.description || '（无描述）')}</option>`;
-  }).join('');
+  const isPrime = d => d.card.name.includes(PRIME_AGENT_KEY);
+  const prime = list.filter(isPrime), rest = list.filter(d => !isPrime(d));
+  const opt = d => {
+    const tip = `输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '') + (isPrime(d) ? ' · 统筹：拆解复合目标并派发汇总，不亲自执行子任务' : '');
+    const label = isPrime(d) ? `统筹 · ${d.card.name}` : d.card.name;
+    return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(label)} — ${esc(d.card.description || '（无描述）')}</option>`;
+  };
+  return '<option value="">请选择智能体</option>' + prime.map(opt).join('') + rest.map(opt).join('');
 }
 /* pickerSummaryHtml / updatePickerSummary 摘要行（提交前一句话确认）：机器与智能体
  * 齐备时显示「将在 X 上用 Y 执行」，否则提示下一步先选什么。 */
@@ -1383,8 +1390,8 @@ function agentPickerHtml(opts = {}) {
   <div class="row spaced" id="${ids}-summary-line">${pickerSummaryHtml(node, agent)}</div>`;
 }
 /* syncAgentPicker 机器切换联动（DOM 级更新）：按当前机器重建智能体选项，恢复此前
- * 选中的智能体（若仍属于新机器）。preferAgent 供总理模式精确指定。返回新选择
- * {node, agent} 由调用方决定持久化（组件本身不碰页面状态）。 */
+ * 选中的智能体（若仍属于新机器）。返回新选择 {node, agent} 由调用方决定持久化
+ * （组件本身不碰页面状态）。 */
 function syncAgentPicker(prefix, preferAgent) {
   const nodeSel = $('#' + prefix + '-node'), agentSel = $('#' + prefix + '-agent');
   if (!nodeSel || !agentSel) return { node: '', agent: '' };
@@ -1457,42 +1464,7 @@ function controlResult() {
     <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
     </section>`;
 }
-/* applyPrimeMode 总理模式勾选联动（PRIME-DESIGN 8.1）：不整页重渲染（公共组件
- * 同款 DOM 级更新，避免 5s 轮询式重置打断填写）。勾选：暂记当前机器/智能体选择，
- * 自动定位总理载体（zcode-dev）所在机器并选中它；取消：恢复勾选前原状（原机器
- * 已不在可选列表则清空重选）。广播复选框已随两级派单模型移除（单目标语义）。 */
-function applyPrimeMode(on) {
-  const nodeSel = $('#ctrl-node');
-  if (nodeSel) {
-    /* 程序化设选（非用户 change 事件）：经组件联动后手动同步 S.C，语义与
-     * bindAgentPicker 的 onChange 持久化一致，保证后续整页重绘可恢复。 */
-    const setSel = (node, agent) => {
-      nodeSel.value = node;
-      const sel = syncAgentPicker('ctrl', agent);
-      S.C.node = sel.node; S.C.agent = sel.agent;
-      updatePickerSummary('ctrl');
-    };
-    if (on) {
-      S.C.primePrevNode = nodeSel.value;
-      S.C.primePrevAgent = $('#ctrl-agent')?.value || '';
-      /* 只认在线载体（双审 2026-10-22）：离线机器提交端点直接 skip，选中即派发
-       * 失败——目录条目自带 online 字段（core.DirectoryEntry）。 */
-      const entry = S.directory.find(d => d.card.name.includes(PRIME_AGENT_KEY) && d.online);
-      if (entry) setSel(entry.node_id, entry.card.name);
-      else toast('网内暂无在线的 ' + PRIME_AGENT_KEY + '（总理）能力：请先在在线节点开放该能力再使用总理模式');
-    } else {
-      if (S.C.primePrevNode && [...nodeSel.options].some(o => o.value === S.C.primePrevNode)) {
-        setSel(S.C.primePrevNode, S.C.primePrevAgent);
-      } else {
-        setSel('', '');
-      }
-      S.C.primePrevNode = ''; S.C.primePrevAgent = '';
-    }
-  }
-  const ta = $('#ctrl-stdin');
-  if (ta) ta.placeholder = on ? STDIN_PH_PRIME : STDIN_PH;
-}
-/* primeArgs 总理模式任务入参：PRIME 系统提示词 + 本次目标。模板含 {{GOAL}}
+/* primeArgs 统筹模式任务入参：PRIME 系统提示词 + 本次目标。模板含 {{GOAL}}
  * 占位（deploy/prime/PRIME.md 以「# 本次目标 / {{GOAL}}」结尾）时原位替换；
  * 模板漂移失去占位符时退回追加「# 本次目标」段，保证目标文本必在 args[0]。 */
 function primeArgs(goal) {
@@ -1508,13 +1480,13 @@ async function submitControl() {
   const agentName = $('#ctrl-agent')?.value || '';
   if (!node) { toast('请先选择执行机器'); return; }
   if (!agentName) { toast('请先选择该机器上的执行智能体'); return; }
-  const prime = !!$('#ctrl-prime')?.checked;
+  const prime = agentName.includes(PRIME_AGENT_KEY);   // 选中置顶「统筹 · zcode-dev」即统筹模式（2026-10-23 定案）
   C.stdin = $('#ctrl-stdin').value;
-  if (prime && !C.stdin.trim()) { toast('总理模式需要填写任务描述（复合目标）'); return; }
+  if (prime && !C.stdin.trim()) { toast('统筹需要填写任务描述（复合目标）'); return; }
   C.node = node; C.agent = agentName;
   C.unknownPending = false;
   C.stage = 'submitting'; C.message = '';
-  render(); toast(prime ? '已锁定表单：正在提交总理任期…' : '已锁定表单：正在提交任务…');
+  render(); toast(prime ? '已锁定表单：正在提交统筹任务…' : '已锁定表单：正在提交任务…');
   const body = {
     agent: agentName,
     targets: [node],   // 两级选择：target_node=所选机器、target_agent=所选智能体，不再按能力反查节点
@@ -2247,7 +2219,13 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    if (e.target.id === 'ctrl-prime') { applyPrimeMode(e.target.checked); return; }
+    /* 派单页选中统筹载体（置顶「统筹 · zcode-dev」项）时切换任务描述占位为复合目标
+     * 提示；选普通智能体恢复（取代原「总理模式」勾选框联动，2026-10-23 定案）。 */
+    if (e.target.id === 'ctrl-agent') {
+      const ta = $('#ctrl-stdin');
+      if (ta) ta.placeholder = String(e.target.value || '').includes(PRIME_AGENT_KEY) ? STDIN_PH_PRIME : STDIN_PH;
+      return;
+    }
   });
   /* 智能体选择公共组件（派单 ctrl / 建群 gnew / 转任务 task）：机器切换联动、
    * 摘要行与计数行统一走组件；派单页把选择持久化到 S.C（整页重绘后恢复），

@@ -115,30 +115,54 @@ async function main() {
   const summary = await page.textContent('#ctrl-summary-line, body');
   record('E09b', '选机器后智能体联动非空，摘要行出现', agentOptionsAfter >= 1 && summary.includes('将在'), `智能体选项 ${agentOptionsAfter}`);
 
-  // TC-E10 总理模式（PRIME-DESIGN 8.1）：勾选联动（agent→zcode-dev、广播隐藏、
-  // placeholder 切换、节点提示同步）→ 取消全恢复 → 再勾选提交复合目标 → 批次报告
-  const PRIME_GOAL = 'E2E 总理模式链路验证：查询网内能力目录并回报在线节点数量，无需派发子任务';
+  // TC-E10 统筹模式（2026-10-23 定案：总理→统筹；勾选框改为智能体列表置顶标记项）：
+  // 定位统筹载体所在机器 → 选机器 → 首个真实选项应为「统筹 · zcode-dev」→ 选中切 placeholder
+  // → 选普通项恢复 → 再选统筹提交复合目标 → 批次报告
+  const PRIME_GOAL = 'E2E 统筹模式链路验证：查询网内能力目录并回报在线节点数量，无需派发子任务';
   let e10ok = false, e10note = '';
-  // 机器优先交互：先选机器+智能体（已选），勾总理 → 自动定位在线载体（agent 含 zcode-dev）+placeholder 切换
-  const selBefore = await page.inputValue('#ctrl-agent');
-  await page.check('#ctrl-prime');
-  await page.waitForTimeout(300);
-  const selOn = await page.inputValue('#ctrl-agent');
-  const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
-  await page.uncheck('#ctrl-prime');
-  await page.waitForTimeout(300);
-  const selOff = await page.inputValue('#ctrl-agent');
-  const phOff = await page.getAttribute('#ctrl-stdin', 'placeholder');
-  const toggleOk = selOn.includes('zcode-dev') && phOn.startsWith('描述复合目标')
-    && selOff === selBefore && phOff.startsWith('用自然语言描述');
-  if (!toggleOk) e10note = `联动异常: on=${selOn} ph=${String(phOn).slice(0, 12)}… off=${selOff}`;
-  await page.check('#ctrl-prime');
-  await page.fill('#ctrl-stdin', PRIME_GOAL);
-  await page.click('button:has-text("提交任务")');
-  await page.waitForSelector('[data-act="detail"]', { timeout: 30000 }); // 提交后任务行出现
-  const reportOk = (await page.textContent('body')).includes('已提交');
-  e10ok = toggleOk && reportOk;
-  record('E10', '总理模式：勾选自动定位载体+placeholder 切换，提交复合目标', e10ok, e10note);
+  const primeNode = await page.evaluate(() => {
+    /* 顶层 const S 不在 window 上：经动态脚本桥取（new Function 在全局作用域看不到
+     * 模块内 const——改从 DOM 拉：能力目录无直读 DOM，退回 API 拉取） */
+    return fetch('/api/v1/directory', { credentials: 'same-origin' })
+      .then(r => r.json()).then(j => {
+        const list = j?.directory || [];
+        const d = list.find(x => (x.card?.name || '').includes('zcode-dev') && x.online);
+        return d ? (d.node_id || '') : '';
+      }).catch(() => '');
+  });
+  if (!primeNode) {
+    record('E10', '统筹置顶项与 placeholder 联动', false, '网内无在线 zcode-dev，跳过提交流程');
+  } else {
+    await page.selectOption('#ctrl-node', primeNode);
+    await page.waitForTimeout(400);
+    const firstReal = await page.evaluate(() => {
+      const sel = document.querySelector('#ctrl-agent');
+      const o = [...sel.options].find(x => x.value);
+      return o ? { v: o.value, t: o.textContent } : null;
+    });
+    const pinnedOk = !!firstReal && firstReal.v.includes('zcode-dev') && firstReal.t.includes('统筹 ·');
+    await page.selectOption('#ctrl-agent', firstReal.v);
+    await page.waitForTimeout(300);
+    const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
+    // 切回普通智能体验证恢复
+    const normal = await page.evaluate(() => {
+      const sel = document.querySelector('#ctrl-agent');
+      const o = [...sel.options].find(x => x.value && !x.value.includes('zcode-dev'));
+      return o ? o.value : '';
+    });
+    let phOff = null;
+    if (normal) { await page.selectOption('#ctrl-agent', normal); await page.waitForTimeout(300); phOff = await page.getAttribute('#ctrl-stdin', 'placeholder'); }
+    const toggleOk = pinnedOk && phOn.startsWith('描述复合目标') && (!normal || phOff.startsWith('用自然语言描述'));
+    if (!toggleOk) e10note = `置顶=${pinnedOk} first=${JSON.stringify(firstReal)} phOn=${String(phOn).slice(0, 10)}… phOff=${String(phOff).slice(0, 10)}…`;
+    // 选回统筹项提交复合目标
+    await page.selectOption('#ctrl-agent', firstReal.v);
+    await page.fill('#ctrl-stdin', PRIME_GOAL);
+    await page.click('button:has-text("提交任务")');
+    await page.waitForSelector('[data-act="detail"]', { timeout: 30000 }); // 提交后任务行出现
+    const reportOk = (await page.textContent('body')).includes('已提交');
+    e10ok = toggleOk && reportOk;
+    record('E10', '统筹置顶项选中即统筹模式：placeholder 切换+提交复合目标', e10ok, e10note);
+  }
 
   // TC-E10b 总理模式任务入参：经任务详情 API 断言 args[0] 以 PRIME 提示词开头、
   // 含「# 本次目标」段与用户输入的目标文本
@@ -148,9 +172,9 @@ async function main() {
     return r.status === 200 ? r.json() : null;
   }, primeTaskId);
   const a0 = primeTask?.input?.args?.[0] || '';
-  const primeArgsOk = a0.startsWith('# SwarmMind 总理智能体（Prime）')
+  const primeArgsOk = a0.startsWith('# SwarmMind 统筹智能体（Prime）')
     && a0.includes('# 本次目标') && a0.includes(PRIME_GOAL);
-  record('E10b', '总理模式任务 args[0] 含 PRIME 提示词特征与目标文本（任务详情 API）', primeArgsOk,
+  record('E10b', '统筹模式任务 args[0] 含 PRIME 提示词特征与目标文本（任务详情 API）', primeArgsOk,
     primeArgsOk ? `任务 ${primeTaskId}` : `PENDING/异常：任务 ${primeTaskId} args[0] 头 40 字=${a0.slice(0, 40)}`);
 
   // TC-E11 批次报告「查看任务」直达详情（BUG 回归：提交后快照即时刷新）
