@@ -66,7 +66,7 @@ func New(profile protocol.ExecProfile, baseEnv map[string]string, defaultHome st
 // TaskResult，status ∈ completed|failed（needs_review 只产生于重启恢复与
 // service 关闭收尾，不由本包产生：调用方取消 ctx 时 service 以
 // needs_review/node_restarted_midway 覆写本包结果）。返回前进程必已被 Wait
-//（CLAUDE.md：kill 后必须 Wait）。
+// （CLAUDE.md：kill 后必须 Wait）。
 func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResult {
 	now := protocol.NowUTC()
 	res := protocol.TaskResult{StartedAt: now, ExitCode: protocol.ExitCodeNotRun}
@@ -114,9 +114,17 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 	cmd := exec.CommandContext(ctx, r.profile.Command, argv...)
 	cmd.Dir = r.profile.Workdir
 	cmd.Env = r.buildEnv(task)
-	configureProcessGroup(cmd) // Unix：spawn 前 setpgid 独立进程组（SPEC 五）
+	// spawn 前治理装配（Unix setpgid 独立进程组 / Windows 挂起启动+Job Object，
+	// SPEC 五）：装配失败拒绝执行（返工必修4②：宁可任务 failed 也不放弃整组
+	// 终止承诺，绝不静默降级）。
+	if err := configureProcessGroup(cmd); err != nil {
+		res.Status = protocol.ResultFailed
+		res.Error = "job_setup_failed: " + err.Error()
+		return finish()
+	}
 	cmd.Cancel = func() error {
-		// 超时/取消：kill(-pgid) 整组终止（exec 默认只杀直接子进程）
+		// 超时/取消：整组终止（Unix kill(-pgid) / Windows TerminateJobObject，
+		// exec 默认只杀直接子进程）
 		return killProcessGroup(cmd)
 	}
 	cmd.WaitDelay = waitDelay // 管道未排干时兜底强杀+关闭，防 Wait 永久阻塞
@@ -138,8 +146,8 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 		_ = os.MkdirAll(r.homeDir, 0o755)
 	}
 
-	runErr := cmd.Run()
-	timedOut := ctx.Err() != nil // Cancel 路径下 Run 可能回传信号错误，以 ctx 为准
+	runErr := launchGoverned(cmd) // Start+Wait（Windows 在两步间挂接 Job Object）
+	timedOut := ctx.Err() != nil  // Cancel 路径下 Run 可能回传信号错误，以 ctx 为准
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode() // 信号终止/未运行 = -1
 	}
@@ -147,7 +155,7 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 		// 整组收尾（含正常返回路径，P1.5 二轮必修3）：后台派生进程一并终止并
 		// 等待全组退出——产物扫描及调用方随后释放的 workdir 互斥都以此为前提，
 		// 目录在 Run 返回后不得再有组内写入者。
-		reapProcessGroup(cmd.Process.Pid)
+		reapProcessGroup(cmd)
 	}
 
 	switch {
@@ -216,7 +224,7 @@ func deniedEnvKey(allow []string, overrides map[string]string) (string, bool) {
 // buildEnv 组装进程环境：base_env + HOME=ConfigHome + 白名单内的任务覆盖 +
 // SWARM_* 系统变量（SPEC 4.9 产物链：agent 由此得知任务标识与产物输出目录）。
 // 系统变量最后写入；任务侧 SWARM_* 覆盖一律丢弃——白名单仅决定该覆盖是否准入
-//（准入也不生效），保证 runner 注入值不可被任务 env 改写。不继承 daemon 自身
+// （准入也不生效），保证 runner 注入值不可被任务 env 改写。不继承 daemon 自身
 // 环境（SPEC 五：防凭证泄漏进子进程），键序确定。
 func (r *Runner) buildEnv(task protocol.Task) []string {
 	env := make([]string, len(r.baseEnv), len(r.baseEnv)+len(task.Input.Env)+4)

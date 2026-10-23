@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -39,23 +40,39 @@ import (
 // agents 条目用 localapi.AgentProfile（yaml 镜像自 cmd/node 迁入共享——方案 3.5
 // 配置编辑端点与装配方同源解析，protocol 包保持纯协议层）。
 type nodeConfig struct {
-	NodeID        string                   `yaml:"node_id"`
-	HubURL        string                   `yaml:"hub_url"` // 形态开关：空 = standalone（方案 3.1）
-	RegisterToken string                   `yaml:"register_token"`
-	HubPubkeyFP   string                   `yaml:"hub_pubkey_fp"` // SPKI SHA-256；空则 TOFU 记录首连（Loop 4 已实现）
-	LocalListen   string                   `yaml:"local_listen"`  // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
-	LocalToken    string                   `yaml:"local_token"`   // 本地 API 管理令牌（空则生成存 data_dir/local_token）
-	PrimeAgent    string                   `yaml:"prime_agent"`   // 本机唯一总理声明（仅展示；prime_token 存 data_dir/prime_token，方案 3.2.1）
-	Concurrency   int                      `yaml:"concurrency"`
-	DataDir       string                   `yaml:"data_dir"`
-	BaseEnv       map[string]string        `yaml:"base_env"`
-	Agents        []localapi.AgentProfile  `yaml:"agents"`
+	NodeID        string                  `yaml:"node_id"`
+	HubURL        string                  `yaml:"hub_url"` // 形态开关：空 = standalone（方案 3.1）
+	RegisterToken string                  `yaml:"register_token"`
+	HubPubkeyFP   string                  `yaml:"hub_pubkey_fp"` // SPKI SHA-256；空则 TOFU 记录首连（Loop 4 已实现）
+	LocalListen   string                  `yaml:"local_listen"`  // 本地 API 监听（默认 127.0.0.1:8445，强制回环）
+	LocalToken    string                  `yaml:"local_token"`   // 本地 API 管理令牌（空则生成存 data_dir/local_token）
+	PrimeAgent    string                  `yaml:"prime_agent"`   // 本机唯一总理声明（仅展示；prime_token 存 data_dir/prime_token，方案 3.2.1）
+	Concurrency   int                     `yaml:"concurrency"`
+	DataDir       string                  `yaml:"data_dir"`
+	BaseEnv       map[string]string       `yaml:"base_env"`
+	Agents        []localapi.AgentProfile `yaml:"agents"`
 }
 
 func main() {
+	// service 子命令（P4② Windows 服务化：install/remove/start/stop/status；
+	// 非 Windows 报错指引 systemd/launchd）
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		if err := serviceCommand(os.Args[2:]); err != nil {
+			log.Fatalf("[node] %v", err)
+		}
+		return
+	}
 	cfgPath := flag.String("config", "configs/node.example.yaml", "配置文件路径（yaml；不存在则进 setup 模式）")
 	dataDir := flag.String("data-dir", "", "覆盖配置中的 data_dir")
 	flag.Parse()
+
+	// SCM 拉起（Windows 服务上下文）：进服务主循环，复用下方 run() 全路径；
+	// 前台/非 Windows 恒返回 false，行为零变化。
+	if handled, err := maybeRunService(*cfgPath, *dataDir); err != nil {
+		log.Fatalf("[node] Windows 服务模式启动失败: %v", err)
+	} else if handled {
+		return
+	}
 
 	if err := run(*cfgPath, *dataDir); err != nil {
 		log.Fatalf("[node] %v", err)
@@ -65,6 +82,34 @@ func main() {
 // setupRestartDelay 向导落盘后延时优雅退出的预算：留出 HTTP 应答送达用户浏览器的
 // 时间（方案 3.3「应答先返回 → 延时退出」），由 launchd/systemd KeepAlive 拉起。
 const setupRestartDelay = 1500 * time.Millisecond
+
+// svcStopChan Windows 服务模式停机通道：service_windows.go（仅 //go:build
+// windows）在 svc.Handler.Execute 里设置并在 SCM Stop/Shutdown 时关闭，run()
+// 内经 mergeStopChan 桥接为 ctx 取消——与 SIGTERM 同一条优雅关闭路径。前台
+// 运行与非 Windows 平台恒 nil，行为零变化。
+var svcStopChan chan struct{}
+
+// svcReadyChan Windows 服务模式初始化就绪通道：run() 完成账本恢复、本地 API
+// 监听与恢复任务重调度后关闭，服务主循环收到即报 Running（此前 SCM 一直看到
+// StartPending，返工建议5）。前台/非 Windows 恒 nil，行为零变化。
+var svcReadyChan chan struct{}
+
+// mergeStopChan 在父 ctx 基础上并入外部停机通道：任一触发（通道关闭或父 ctx
+// 取消）即取消返回的 ctx。ch 为 nil 原样返回父 ctx（前台/非 Windows 恒此路径）。
+func mergeStopChan(parent context.Context, ch <-chan struct{}) context.Context {
+	if ch == nil {
+		return parent
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		defer cancel() // 两分支退出都收口，不留悬挂 cancel
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
+}
 
 func run(cfgPath, dataDirOverride string) error {
 	// 形态三态判定（方案 3.1，返工 #2）：读失败分「不存在」与「损坏」两种——
@@ -142,8 +187,32 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("创建 data_dir 失败: %w", err)
 	}
 
+	// Windows 兜底 Job（返工必修4③）：本进程整体加入 Kill-on-Job-Close Job，
+	// 进程被杀/崩溃时 OS 兜底终止全部遗留子进程（任务级 Job 之外的双保险；显式
+	// breakaway 按需豁免）。失败仅告警不拒启：任务级治理（spawn 侧致命拦截）
+	// 不依赖本兜底，优雅关闭路径照常整组收尾；非 Windows 平台恒 nil 错误。
+	if err := runner.InitSelfJobGuard(); err != nil {
+		log.Printf("[node] 兜底 Job 加入失败（进程异常终止时遗留子进程可能残留）: %v", err)
+	}
+
+	// Windows 服务模式（svcStopChan 已设置）：无控制台，标准 log 落
+	// data_dir/logs/node.log（16MiB 单代轮转，见 servicelog.go）。打开失败降级
+	// stderr 继续跑（服务起停事件 SCM 事件日志仍可见），不因日志盘故障拒服。
+	if svcStopChan != nil {
+		if f, err := openServiceLog(cfg.DataDir); err != nil {
+			log.Printf("[node] 服务日志文件打开失败（降级 stderr）: %v", err)
+		} else {
+			log.SetOutput(io.MultiWriter(os.Stderr, f))
+			defer f.Close()
+			log.Printf("[node] ===== 服务进程启动（配置 %s，数据 %s）=====", cfgPath, cfg.DataDir)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// Windows 服务模式并入 SCM Stop/Shutdown（svcStopChan 由 service_windows.go
+	// 设置）；前台/非 Windows 恒 nil，mergeStopChan 原样返回，行为零变化。
+	ctx = mergeStopChan(ctx, svcStopChan)
 
 	// 本机 agent 运行时状态（Loop 7）：agents-state.json 覆盖叠加 YAML 基线，
 	// effective 视图同时供注册能力表与执行器装配——开关重启保持、三处同源。
@@ -281,7 +350,7 @@ func run(cfgPath, dataDirOverride string) error {
 		LocalListen:       cfg.LocalListen,
 		DataDir:           cfg.DataDir, // 影子 home 兜底 data_dir/home（primewire 与 runner HOME 同口径）
 		RotatePrime:       rotatePrime,
-		ArtifactFetch: svc.FetchArtifactLocal,
+		ArtifactFetch:     svc.FetchArtifactLocal,
 		ConfigOps: &localapi.ConfigOps{
 			ConfigPath: cfgPath, // 读改写启动时 --config 原路径（绝不写示例文件）
 			ReloadExecutors: func(profiles []protocol.ExecProfile) error {
@@ -338,6 +407,10 @@ func run(cfgPath, dataDirOverride string) error {
 	default:
 		log.Printf("[node] 启动完成 node=%s hub=%s agents=%d concurrency=%d data=%s",
 			cfg.NodeID, cfg.HubURL, len(profiles), cfg.Concurrency, cfg.DataDir)
+	}
+	// 服务模式（返工建议5）：初始化全部就绪，svc 主循环此刻才向 SCM 报 Running。
+	if svcReadyChan != nil {
+		close(svcReadyChan)
 	}
 
 	var runErr error
@@ -403,7 +476,7 @@ func newToken() (string, error) {
 }
 
 // ensureTokenFile 读取或生成 256bit 随机令牌并存 path；已有令牌文件则复用
-//（重启不换令牌）。
+// （重启不换令牌）。
 func ensureTokenFile(path string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil && len(b) >= 32 {
 		return string(b), nil
