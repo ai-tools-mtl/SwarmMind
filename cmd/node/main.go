@@ -279,6 +279,7 @@ func run(cfgPath, dataDirOverride string) error {
 		// 回填本机监听（应答 mcp_config 的 SWARM_NODE_URL 数据源）。
 		DeclareConfigPath: cfgPath,
 		LocalListen:       cfg.LocalListen,
+		DataDir:           cfg.DataDir, // 影子 home 兜底 data_dir/home（primewire 与 runner HOME 同口径）
 		RotatePrime:       rotatePrime,
 		ArtifactFetch: svc.FetchArtifactLocal,
 		ConfigOps: &localapi.ConfigOps{

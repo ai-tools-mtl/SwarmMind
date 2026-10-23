@@ -47,7 +47,8 @@ const S = {
   focusForm: false,
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
-  primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp} 钦定完成一次性展示
+  primeNewWire: null,      // 轮换自动接线结果（t20261023-62a2）：{target} 命中 zcode 布局；null=降级手动配给
+  primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp,wired,target} 钦定完成一次性展示
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
          restart_cmd: '', config_path: '', structural: [], msg: '', editing: false },  // 能力配置编辑（方案 3.5）；editing=编辑 details 展开中（轮询挂起重绘）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
@@ -64,6 +65,7 @@ function resetPrimeState() {
   S.sessionEpoch++;
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
+  S.primeNewWire = null;
 }
 
 /* ---------- API 访问（Bearer 本机管理令牌） ---------- */
@@ -318,7 +320,7 @@ function primeCard() {
   const head = `<section class="card"><div class="row"><h2>本机统筹 · 形态</h2>
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
   <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>`;
-  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个统筹」重新走钦定。</small></div>` : '';
+  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入统筹的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个统筹」重新走钦定。` : '请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个统筹」重新走钦定。'}</small></div>` : '';
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
   if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
   return head + `<small class="muted">统筹经 MCP 用 prime_token 本机派单；本机主人（local_token）在网页派单同样放行（2026-10-22 鉴权裁决）。declare/轮换/配置管理等管理面仅主人可操作。</small>
@@ -332,16 +334,21 @@ function primePickView(pa) {
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为统筹', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
 }
-/* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段（JSON 格式化）+ 粘贴指引。 */
+/* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段。wired=true（t20261023-62a2
+   自动接线）：明示已写入的影子 home 配置路径，零手贴；降级：保留手动粘贴指引。 */
 function primeDoneView() {
   const d = S.primeDecl.done;
   if (!d) return '';
   const mcpJSON = d.mcp ? JSON.stringify(d.mcp, null, 2) : '（应答未含 mcp_config，请点「换一个统筹」重新钦定）';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机统筹——已写入 node.yaml prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>
-  <div class="notice warn spaced"><b>统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}</div>
-  <label>MCP 配置片段（加入统筹 agent 的 mcpServers 即完成授权——接入即统筹）<pre><code>${esc(mcpJSON)}</code></pre></label>
+  const wiredNote = d.wired
+    ? `<div class="notice ok spaced"><b>已自动接线</b>：统筹 MCP 连接已写入 <code>${esc(d.target)}</code>（mcpServers.swarmmind）——零手贴，agent 重连后即可本机派单；原配置备份在同目录 <code>setting.json.bak-prime</code>。</div>`
+    : '';
+  const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机统筹——已写入 node.yaml prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${wiredNote}
+  <div class="notice warn spaced"><b>统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
+  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入统筹 agent 的 mcpServers 即完成授权——接入即统筹'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
   <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个统筹', 'prime-pick', 'link')}</div>
-  <p class="footer-note">把上方 JSON 片段粘进统筹 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。</p>`;
+  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权）；轮换统筹凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段粘进统筹 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。'}</p>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -736,7 +743,7 @@ async function wizApply() {
 }
 
 async function primeRotate(btn) {
-  if (!confirm('轮换统筹凭证？旧凭证将立即失效，统筹的 MCP 连接需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
+  if (!confirm('轮换统筹凭证？旧凭证将立即失效；统筹宿主配置若可自动接线会随轮换刷新（重连生效），否则需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
   if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
@@ -744,7 +751,8 @@ async function primeRotate(btn) {
     if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回内存
     if (r.code === 200) {
       S.primeNew = r.data?.prime_token || '';
-      toast('已轮换 · 新凭证仅此一次展示，请立即复制');
+      S.primeNewWire = r.data?.wired ? { target: r.data?.wired_target || '' } : null;
+      toast(r.data?.wired ? '已轮换 · 新凭证已自动写入统筹宿主配置' : '已轮换 · 新凭证仅此一次展示，请立即复制');
     } else {
       toast('轮换失败 · ' + errLine(r.data));
     }
@@ -770,10 +778,12 @@ async function primeDeclare(btn) {
     const r = await api('POST', '/api/v1/local/prime/declare', { prime_agent: name });
     if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回状态（busy 已随 resetPrimeState 复位）
     if (r.code === 200) {
-      S.primeDecl.done = { agent: name, token: r.data?.prime_token || '', mcp: r.data?.mcp_config || null };
+      S.primeDecl.done = { agent: name, token: r.data?.prime_token || '', mcp: r.data?.mcp_config || null,
+        wired: !!r.data?.wired, target: r.data?.wired_target || '' };
       S.primeDecl.picking = false;
       S.primeNew = ''; // 轮换提示与钦定完成视图不同时堆叠
-      toast('钦定完成 · 统筹凭证仅此一次展示，请立即复制');
+      S.primeNewWire = null;
+      toast(r.data?.wired ? '钦定完成 · MCP 连接已自动写入统筹宿主配置' : '钦定完成 · 统筹凭证仅此一次展示，请立即复制');
       S.snap = '';
       await loadAll().catch(() => {});
     } else {

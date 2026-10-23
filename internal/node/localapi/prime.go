@@ -1,14 +1,18 @@
 // 总理凭证与钦定（方案 3.2.1，2026-10-22）：
 //   - POST /api/v1/local/prime/rotate  控制台一键轮换 prime_token——重生成
 //     → 原子写盘（data_dir/prime_token，0600）→ 即时重载（旧凭证下一请求即
-//     失效）。新凭证仅在应答中返回一次（与 hub 令牌创建同约定），持有人自行
-//     配给总理的 MCP 连接。
+//     失效）。新凭证仅在应答中返回一次（与 hub 令牌创建同约定）。
 //   - POST /api/v1/local/prime/declare 控制台网页钦定总理——校验 agent 存在
 //     → 自动轮换出新 prime_token（钦定即换凭证：旧持有者先失效——安全审查修复
 //     2 的次序不变式：声明生效时旧凭证必已失效）→ yaml.Node round-trip 写
 //     node.yaml 顶层 prime_agent（保真纪律同 config.go，读改写持 writeConfigMu
 //     事务锁）→ 即时生效（SetPrimeAgent）→ 应答带 mcp_config 配置片段（仅 prime
-//     凭证，不含 local_token），控制台展示后复制给总理 agent 即完成授权闭环。
+//     凭证，不含 local_token）。
+//
+// 钦定即接线（t20261023-62a2，2026-10-23）：declare/rotate 成功后自动把
+// swarmmind MCP 配置合并写入被钦定 agent 影子 home 的宿主配置文件
+//（primewire.go，zcode 布局命中时零手贴；应答带 wired/wired_target 口径），
+// 探测未命中降级手动片段——mcp_config 始终随应答给出，降级时人工粘贴兜底。
 //
 // 换总理原三步（文档口径：改 node.yaml prime_agent 声明 → 轮换 → 新总理配新
 // 凭证）由 declare 一次收口；运行中旧总理 MCP 连接下一请求 401/403。
@@ -46,12 +50,23 @@ func (s *Server) handlePrimeRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.primeTok = tok // 同锁内即时重载：旧凭证下一请求即失效
+
+	// 自动接线（t20261023-62a2，primewire.go）：已钦定总理的影子 home 内刷新
+	// SWARM_NODE_PRIME_TOKEN——否则旧 token 留在宿主配置里，统筹载体下一请求
+	// 401。仍在 muPrime 互斥段内：轮换+接线串行，杜绝并发轮换的「旧 token 后
+	// 落盘盖掉新 token」交错。未钦定/布局未命中 → 降级手动片段，不影响轮换成功。
+	agent := s.primeAgent()
+	mcp := s.mcpConfig(tok) // R3（codex 审查）：与 declare 复用同一构造，应答同带 mcp_config——降级时主人拿得到片段（SPEC/PRIME 承诺口径）
+	wired, target, _ := s.wirePrime(agent, mcp)
 	s.muPrime.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{
+
+	resp := map[string]any{
 		"prime_token": tok,
-		"prime_agent": s.primeAgent(),
-		"note":        "新凭证仅此一次展示，请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）；旧凭证已即时失效",
-	})
+		"prime_agent": agent,
+		"mcp_config":  mcp,
+	}
+	resp["note"] = applyWiredFields(resp, wired, target) + "；旧凭证已即时失效"
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // primeDeclareRequest POST /api/v1/local/prime/declare 请求体。
@@ -160,13 +175,23 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	s.SetPrimeAgent(name)
 	writeConfigMu.Unlock()
 
-	// 5. 应答：三字段一次带全，控制台据此走「复制给总理」闭环。
-	writeJSON(w, http.StatusOK, map[string]any{
+	// 5. 自动接线（t20261023-62a2，primewire.go）：钦定即接线——被钦定 agent
+	//    影子 home 命中 zcode 布局（.zcode/cli/setting.json）则合并写入
+	//    mcpServers.swarmmind，纸条不经人的手；布局未命中降级手动片段，不影响
+	//    钦定成功。仍持 muPrime：与并发 rotate/declare 的「轮换+接线」串行，
+	//    杜绝旧 token 后落盘盖掉新 token 的交错。
+	mcp := s.mcpConfig(tok)
+	wired, target, _ := s.wirePrime(name, mcp)
+
+	// 6. 应答：钦定名 + 一次性凭证 + mcp_config 片段（降级口径保留，wired 命中
+	//    时控制台优先展示已写入路径）+ wired/wired_target 接线口径 note。
+	resp := map[string]any{
 		"prime_agent": name,
 		"prime_token": tok,
-		"mcp_config":  s.mcpConfig(tok),
-		"note":        "已写入 node.yaml prime_agent 并即时生效（无需重启）；新凭证仅此一次展示，请立即配给统筹的 MCP 连接",
-	})
+		"mcp_config":  mcp,
+	}
+	resp["note"] = "已写入 node.yaml prime_agent 并即时生效（无需重启）；" + applyWiredFields(resp, wired, target)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // agentConfigured name 是否在本机 agents 配置中（AgentState effective 视图，
@@ -214,13 +239,20 @@ func (s *Server) mcpConfig(primeTok string) map[string]any {
 	}
 }
 
+// mcpCommandPlaceholder mcpCommand 探测未命中时返回的占位符。接线侧（wirePrime）
+// 据此降级（R4 裁决）：占位 command 落盘无用（MCP 启动不了），一律 wired=false
+// 不写占位配置。
+const mcpCommandPlaceholder = "<swarmmind-mcp 绝对路径>"
+
 // mcpCommand 探测本进程（node）同目录的 swarmmind-mcp：存在返回绝对路径，
 // 不存在返回占位符（部署形态二进制同目录放置；开发态明示需自行补路径）。
 func (s *Server) mcpCommand() string {
-	const placeholder = "<swarmmind-mcp 绝对路径>"
+	if s.mcpCommandOverride != "" { // 同包测试注桩（生产不设）：注入确定 command
+		return s.mcpCommandOverride
+	}
 	exe, err := os.Executable()
 	if err != nil {
-		return placeholder
+		return mcpCommandPlaceholder
 	}
 	name := "swarmmind-mcp"
 	if runtime.GOOS == "windows" {
@@ -230,7 +262,7 @@ func (s *Server) mcpCommand() string {
 	if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
 		return cand
 	}
-	return placeholder
+	return mcpCommandPlaceholder
 }
 
 // setPrimeAgentYAML 读入 node.yaml，原位更新顶层 prime_agent 标量并重编码：

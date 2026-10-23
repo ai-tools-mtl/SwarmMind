@@ -76,6 +76,10 @@ type Config struct {
 	// DeclareConfigPath node.yaml 路径（declare 钦定 round-trip 写盘目标，与
 	// ConfigOps/SetupOps 同纪律写启动时 --config 原路径；空 = declare 端点 503）。
 	DeclareConfigPath string
+	// DataDir node 数据目录（declare/rotate 自动接线：agent 影子 home 兜底
+	// data_dir/home 的数据源，与 runner HOME 同口径；空 = ConfigHome 未配置的
+	// agent 接线降级手动片段）。
+	DataDir string
 	// LocalListen 本地 API 监听地址（declare 应答 mcp_config 的 SWARM_NODE_URL
 	// 数据源；仅展示，监听本体在装配方 net.Listen）。
 	LocalListen string
@@ -119,6 +123,10 @@ type Server struct {
 	muCfg              sync.Mutex
 	pendingRestartFlag bool
 	primeAgentName     string
+
+	// mcpCommandOverride swarmmind-mcp 探测结果注桩（同包测试专用；空 = 走
+	// mcpCommand 真实探测。生产装配不设，不构成公共配置面）。
+	mcpCommandOverride string
 }
 
 // New 构造本地 API 服务。
