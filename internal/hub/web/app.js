@@ -1890,6 +1890,9 @@ function taskFromMsgModal(seq) {
 }
 
 /* ---------- 动作表（事件委托） ---------- */
+/* primeBusy 统筹指定互斥（P1 复审）：prime-save / prime-clear 共享——PUT /prime 在途时
+ * 两入口（含跨按钮连点）都直接拒绝，防重复提交与迟到响应互相覆盖、误关新层。 */
+let primeBusy = false;
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
   fchip: b => { S.f.status = b.dataset.fchip || ''; render(); },
@@ -2078,21 +2081,65 @@ const ACT = {
     // 恢复已保存的选择到弹层下拉
     syncAgentPicker('pm', S.prime?.agent_name || '');
   },
-  'prime-save': async () => {
+  'prime-save': async b => {
     const node = $('#pm-node')?.value || '', agent = $('#pm-agent')?.value || '';
     if (!node || !agent) { toast('请先选择机器和智能体'); return; }
+    if (primeBusy) { toast('统筹指定处理中，请稍候'); return; }
+    primeBusy = true;
+    const gen = S.layerGen;   // 在途世代快照（D3）：响应回来层已关/换则只静默落账
+    b.disabled = true; b.textContent = '保存中…';
     try {
       const r = await api('PUT', '/api/v1/prime', { node_id: node, agent_name: agent });
-      if (r.code === 200) { S.prime = r.data.designation; toast('已指定统筹载体：' + agent + ' @ ' + node); closeLayer(); await loadAll(); render(); }
-      else { toast('指定失败：' + (r.data?.error || r.code)); }
-    } catch { toast('网络异常，请重试'); }
+      if (gen !== S.layerGen) {   // 用户已关层/换层：不 closeLayer 不 render 抢页面
+        if (r.code === 200) S.prime = r.data.designation;
+        loadAll();   // 静默刷新（loadResource 逐资源兜错，不会 reject）
+        return;
+      }
+      if (r.code === 200) {
+        S.prime = r.data.designation;
+        toast('已指定统筹载体：' + agent + ' @ ' + node);
+        closeLayer();
+        await loadAll();
+        render();
+      } else {
+        b.disabled = false; b.textContent = '保存指定';   // 失败路径按钮必须恢复（FE-09 同款）
+        toast('指定失败：' + (r.data?.error || r.code));
+      }
+    } catch (e) {
+      if (!e.unauthorized) {   // 401 已走 api 统一 sessionExpired 路径，勿叠加「网络异常」
+        b.disabled = false; b.textContent = '保存指定';
+        toast('网络异常，请重试');
+      }
+    } finally { primeBusy = false; }
   },
-  'prime-clear': async () => {
+  'prime-clear': async b => {
+    if (primeBusy) { toast('统筹指定处理中，请稍候'); return; }
+    primeBusy = true;
+    const gen = S.layerGen;
+    b.disabled = true; b.textContent = '撤销中…';
     try {
       const r = await api('PUT', '/api/v1/prime', { node_id: '', agent_name: '' });
-      if (r.code === 200) { S.prime = null; toast('已撤销统筹指定，回退默认识别（能力名含 zcode-dev）'); closeLayer(); await loadAll(); render(); }
-      else { toast('撤销失败：' + (r.data?.error || r.code)); }
-    } catch { toast('网络异常，请重试'); }
+      if (gen !== S.layerGen) {   // 同 prime-save：层已关/换只静默落账
+        if (r.code === 200) S.prime = null;
+        loadAll();
+        return;
+      }
+      if (r.code === 200) {
+        S.prime = null;
+        toast('已撤销统筹指定，回退默认识别（能力名含 zcode-dev）');
+        closeLayer();
+        await loadAll();
+        render();
+      } else {
+        b.disabled = false; b.textContent = '撤销指定（回退默认识别）';
+        toast('撤销失败：' + (r.data?.error || r.code));
+      }
+    } catch (e) {
+      if (!e.unauthorized) {
+        b.disabled = false; b.textContent = '撤销指定（回退默认识别）';
+        toast('网络异常，请重试');
+      }
+    } finally { primeBusy = false; }
   },
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
     <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
