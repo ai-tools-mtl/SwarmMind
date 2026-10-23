@@ -360,9 +360,11 @@ func TestRunTailCap(t *testing.T) {
 }
 
 // TestRunUTF8Sanitize 非法 UTF-8 字节清洗为 U+FFFD（SPEC 4.9）。
+// 用八进制 \377（POSIX 保证）：dash 0.5.12（ubuntu-latest 的 /bin/sh）不支持 \xHH，
+// 会输出字面文本导致非法字节从未产生（CI 首日全红根因，2026-10-24 诊断实锤）。
 func TestRunUTF8Sanitize(t *testing.T) {
 	r, _ := newRunner(t, nil)
-	task := simpleTask("-c", `printf 'ok\xffbad'`)
+	task := simpleTask("-c", `printf 'ok\377bad'`)
 	res := r.Run(context.Background(), task)
 	if res.Status != protocol.ResultCompleted {
 		t.Fatalf("应 completed, got %s", res.Status)
