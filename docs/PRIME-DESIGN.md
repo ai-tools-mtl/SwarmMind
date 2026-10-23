@@ -156,7 +156,7 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 
 ## 八、评审闭环记录（2026-10-21）
 
-- 评审：codex 不可用（区域 403），按协作制度降级独立 zcode 会话评审 → docs/PRIME-REVIEW.md（M1-M6/S1-S7/Q1-Q6）
+- 评审：codex 不可用（区域 403），按协作制度降级独立 zcode 会话评审 → docs/archive/PRIME-REVIEW.md（M1-M6/S1-S7/Q1-Q6）
 - 修订：M1-M6 全部闭合（M2 含 MCP submit 增 idem_key/trace_id 参数与 SPEC 六.六同步）；S3 八处提示词补丁全收；S1 契约草案入文档（P4.1 实现）；S4c 群范围标签修正；S5/S6/S7 声明纳入
 - 闭合：Q1 禁自干（入提示词）；Q2 跨机大数据 V1 禁用（入分解合法性规则）；Q5 mac diskcheck 已就绪（epoch=24 agents=3）
 - 待办：Q3 已闭合（开源模型接口查实，见上）；Q4 群模式提示词变体（P4.2 决策）；Q6 反代 QoS（部署时定）

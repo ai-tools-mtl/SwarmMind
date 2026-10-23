@@ -111,9 +111,13 @@ HanaAgent / 其它 agent）接入后即可自然语言派单：
 }
 ```
 
-内置 6 个工具：`swarmmind_nodes`（看节点）、`swarmmind_agents`（看能力）、
-`swarmmind_submit`（派任务）、`swarmmind_status` / `swarmmind_wait`（查状态 /
+基础六件套：`swarmmind_nodes`（看节点）、`swarmmind_agents`（看能力）、
+`swarmmind_submit`（派任务，支持幂等键与依赖声明）、`swarmmind_status` / `swarmmind_wait`（查状态 /
 等到终态）、`swarmmind_artifact`（取产物）。
+
+hub 模式另有 6 个：`swarmmind_decide`（分配决策：云端模型不可用自动降级本地规则）、
+群聊五件套 `swarmmind_group_create / list / say / messages / close`（多 agent 协作空间）。
+node 本机模式只暴露六件套。
 
 ## 核心概念
 
@@ -125,6 +129,9 @@ HanaAgent / 其它 agent）接入后即可自然语言派单：
 | 离线信箱 | 节点不在线时的任务暂存区，重连自动补推 |
 | 待人工核对 | 执行中节点重启等「结果不确定」场景的终态，人工登记结论，绝不自动重跑 |
 | 访问令牌 | 管理台上创建的子令牌（`smsw_` 前缀），给其他管理者/脚本用，随时可撤销 |
+| 统筹载体 | 执行复合目标的指定智能体：自动分解、并行派发、汇总报告；网页端一键指定 |
+| 协作群 | 有目标的多 agent 持续协作空间：@提及触发发言，agent 发言受预算约束，可一键转正式任务 |
+| 任务依赖 | `depends_on` 声明上游任务，上游完成前下游保持门控不执行，版本变化标 `superseded` |
 
 ## 生产部署
 
@@ -135,13 +142,18 @@ HanaAgent / 其它 agent）接入后即可自然语言派单：
 
 ## Roadmap
 
-- [x] V0：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
+项目按 P0-P5 生命周期推进（详见 `docs/PLAN.md`），当前处于 **P4（V1 长期可用）**。
+
+- [x] P0-P1 V0 核心：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
 - [x] 账户体系：密码登录、账户设置、PAT 令牌（GitHub 式）、恢复通道
-- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物（七工具）
+- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物（hub 12 工具 / node 6 工具）
 - [x] A2A 兼容端点：外部 A2A 客户端发现并调用网内 agent（spec v0.2.6）
-- [x] 总理模式：复合目标一键派发，zcode 智能体自动分解/并行调度/汇总报告（P4.0）
+- [x] 统筹载体：复合目标一键派发，指定统筹智能体自动分解/并行调度/汇总报告（P4.0 双机实测关门）
 - [x] 跨云实测：腾讯云 ↔ 百度云 双节点、25ms 全链、产物跨机取回
-- [ ] P4 群聊：多 agent 会话、@提及派单、上下文包共享
+- [x] 任务租约：fencing token 防 zombie 写（P4）
+- [x] 任务依赖门控：`depends_on` / blocked 门控 / `superseded` 版本追踪（P4.3 第一子批）
+- [x] 群聊 MVP：建群、@提及发言、发言预算、滚动窗口、控制台群聊页、MCP 五工具（P4）
+- [ ] P4 收尾：产物挂载与跨机取回、群消息过期、推送扇出、发言许可制、多维预算、Windows 服务化、令牌轮换自动化
 - [ ] P5 Git 集成：worktree 分配、commit 归属、PR 流程
 - [ ] V2：E2E 加密（中心端不可见明文）、A2A 官方协议对齐、DID 身份
 

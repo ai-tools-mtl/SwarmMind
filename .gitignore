@@ -20,3 +20,6 @@ tmp-rest-probe.py
 p2-mac/zcode-home/
 internal/hub/api/embedded/*.gz
 bin/
+
+# 验收截图：过程性产物不入库（TASK 文档文字引用，仅本地保留）
+docs/**/*.png
