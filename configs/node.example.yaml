@@ -1,21 +1,21 @@
 node_id: mac-mini
-hub_url: ws://127.0.0.1:8443/ws/node   # 开发模式（insecure_loopback=true）；部署时改 wss:// + 证书指纹
-register_token: token-for-mac-mini      # 每 node 独立，与 node_id 绑定
-hub_pubkey_fp: ""                       # SPKI SHA-256（base64）；空则 TOFU 首连记录 trusted_hubs.json
-local_listen: 127.0.0.1:8445            # 本地回环 API（仅本机进程可用，强制回环）；浏览器开 http://127.0.0.1:8445/ 即本地控制台（Loop 7）
-local_token: ""                         # 本地 API 管理令牌（Bearer）；空则启动时生成存 data_dir/local_token（控制台登录用同一令牌）
+hub_url: ws://127.0.0.1:8443/ws/node   # 开发模式（hub 侧 insecure_loopback=true）；生产为 wss://<hub 地址>/ws/node
+register_token: token-for-mac-mini      # 每 node 独立，与 node_id 绑定（与 hub.yaml nodes: 段一致）
+hub_pubkey_fp: ""                       # hub 证书指纹；留空 = 首次连接自动记录到 trusted_hubs.json（TOFU：首连需自行可信，之后指纹变化才拒绝；防范首连冒充请预填指纹）
+local_listen: 127.0.0.1:8445            # 本机控制台/API，只监听回环；浏览器开 http://127.0.0.1:8445/ 即本机控制台
+local_token: ""                         # 本机 API 管理令牌（Bearer）；留空则启动时自动生成存 data_dir/local_token（本机控制台登录用同一令牌）
 concurrency: 2
 data_dir: data
-# 注意：data_dir/agents-state.json 由本地控制台的 exposed 开关自动维护（覆盖下方
+# 注意：data_dir/agents-state.json 由本机控制台的 exposed 开关自动维护（覆盖下方
 # agents 的 exposed 基线，重启保持），勿手工编辑；改配置基线请改本文件并重启 node。
-base_env:                               # 执行环境基线：不继承 daemon 进程环境
+base_env:                               # 任务执行环境基线：不继承 node 进程的环境变量
   PATH: /usr/bin:/bin
   TMPDIR: /tmp
   LANG: en_US.UTF-8
-# runner 系统变量（SPEC 4.9 产物链）：spawn 前 runner 注入 SWARM_TASK_ID、
-# SWARM_TRACE_ID、SWARM_OUTPUTS_DIR=<workdir>/outputs/<task_id>（绝对路径），
-# 不受 base_env/allow_env 约束、任务 env 不可覆盖；agent 将产物写入
-# SWARM_OUTPUTS_DIR，进程结束后 runner 自动扫描登记为 Artifacts。
+# 任务执行时自动注入三个环境变量：SWARM_TASK_ID、SWARM_TRACE_ID、
+# SWARM_OUTPUTS_DIR=<workdir>/outputs/<task_id>（绝对路径）——不受 base_env/
+# allow_env 约束、任务不可覆盖。agent 把产物写进 $SWARM_OUTPUTS_DIR，
+# 进程结束后自动登记为产物（artifact），可跨机取回。
 agents:
   - name: echo-demo
     kind: cli
@@ -24,10 +24,10 @@ agents:
     config_home: ""                     # 空 = data_dir/home；agent 配置/凭证目录（HOME 指此，与 workdir 分离）
     agent_args: []                      # 固定附加参数（如 codex: [--sandbox, read-only]），任务不可改
     timeout_sec: 30
-    allow_args: true                    # 授权该命令的全部参数能力（解释器类=通用执行，文档明示）；false 时非空 args → policy_denied
-    allow_env: ["TMPDIR"]               # 允许任务覆盖的 env 键；默认 []；"PATH" 需显式列出
-    description: 回声测试（产物约定：runner 注入 SWARM_TASK_ID/SWARM_OUTPUTS_DIR/SWARM_TRACE_ID，agent 把产物写入 $SWARM_OUTPUTS_DIR，结束后自动登记为 Artifacts）  # 生成 AgentCard.Description 的源
-    permission_mode: no-shell           # 映射 agent 自带权限机制的说明（对外 Card 可见）
+    allow_args: true                    # 授权任务传命令行参数（false 时非空 args → policy_denied 拒绝执行）
+    allow_env: ["TMPDIR"]               # 允许任务覆盖的环境变量键；默认 []；"PATH" 需显式列出，"*" 全开
+    description: 回声测试（把产物写入 $SWARM_OUTPUTS_DIR，结束后自动登记为 Artifacts）  # 显示在全网能力目录里的一句话
+    permission_mode: no-shell           # 对 agent 自带权限机制的说明，展示在能力卡上
   - name: sleeper
     kind: cli
     command: /bin/sleep
