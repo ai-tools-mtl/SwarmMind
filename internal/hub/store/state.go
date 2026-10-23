@@ -205,5 +205,10 @@ func (s *State) Clone() *State {
 		}
 		n.WorkdirLocks[nodeID] = inner
 	}
+	if s.Prime != nil {
+		// 写时复制纪律：*PrimeDesignation 换新指针，禁止与旧状态共享
+		cp := *s.Prime
+		n.Prime = &cp
+	}
 	return n
 }

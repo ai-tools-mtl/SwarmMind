@@ -32,6 +32,11 @@ const waitDelay = 5 * time.Second
 // 信息而非任务侧覆盖，不受 allow_env 白名单约束，任务 env 不可改写。
 const swarmEnvPrefix = "SWARM_"
 
+// stdinToArgMax StdinToArg 追加尾参的单参字节上限（128KiB 保守值）：平台 execve
+// 对单个参数长度有硬约束（Linux MAX_ARG_STRLEN=128KiB，macOS/Windows 各有更紧
+// 总量上限），超限 spawn 必败（E2BIG）——任务直接 failed，提示改用任务 args。
+const stdinToArgMax = 128 << 10
+
 // Runner 某一 agent（ExecProfile）的任务执行器。
 type Runner struct {
 	profile protocol.ExecProfile
@@ -95,7 +100,15 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 	// StdinToArg 兼底（2026-10-23 伦哥实测抓出）：args 型 CLI（zcode -p 等）从
 	// 控制台/表单收到的描述在 stdin 里，Args 空时旗标缺参必打 usage 退出——
 	// 此时将 stdin 整体作为单个尾参追加（追加源是 stdin 非任务入参，不绕 AllowArgs 白名单）。
+	// 超过 stdinToArgMax 不追加、不 spawn：超长单参平台必拒（E2BIG），与其让
+	// spawn_failed 晕到用户，不如 failed + 可读说明（KB 按进位取整，不出现 N>N）。
 	if r.profile.StdinToArg && len(task.Input.Args) == 0 && task.Input.Stdin != "" {
+		if n := len(task.Input.Stdin); n > stdinToArgMax {
+			res.Status = protocol.ResultFailed
+			res.Error = protocol.CodePolicyDenied
+			res.StderrTail = fmt.Sprintf("stdin 过长无法转为命令行参数（%d KB > 上限 %d KB），请改用任务 args 或缩小输入", (n+1023)/1024, stdinToArgMax/1024)
+			return finish()
+		}
 		argv = append(argv, task.Input.Stdin)
 	}
 	cmd := exec.CommandContext(ctx, r.profile.Command, argv...)

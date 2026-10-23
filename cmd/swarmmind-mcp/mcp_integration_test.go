@@ -164,15 +164,15 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 		t.Fatalf("node 工具清单不符: %v", names)
 	}
 	for _, td := range bd.tools() {
-		if td.Name == "swarmmind_submit" && !strings.Contains(td.Description, "接入即总理：本机编排") {
-			t.Fatalf("submit 描述未明示「接入即总理：本机编排」: %s", td.Description)
+		if td.Name == "swarmmind_submit" && !strings.Contains(td.Description, "接入即统筹：本机编排") {
+			t.Fatalf("submit 描述未明示「接入即统筹：本机编排」: %s", td.Description)
 		}
 	}
 
-	// ① nodes：本机信息单条（形态/总理/账本计数）
+	// ① nodes：本机信息单条（形态/统筹/账本计数）
 	text, isErr := callText(t, bd, "swarmmind_nodes", nil)
 	if isErr || !strings.Contains(text, "nodeA") || !strings.Contains(text, "standalone") ||
-		!strings.Contains(text, "本机总理：echo") {
+		!strings.Contains(text, "本机统筹：echo") {
 		t.Fatalf("nodes 应答不符（isErr=%v）: %s", isErr, text)
 	}
 
@@ -268,7 +268,7 @@ func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
 	if !isErr {
 		t.Fatalf("未钦定总理时 submit 应 isError: %s", text)
 	}
-	for _, want := range []string{"prime_required", "尚未钦定总理", "请检查总理配置"} {
+	for _, want := range []string{"prime_required", "尚未钦定总理", "请检查统筹配置"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("403 透传缺 %q: %s", want, text)
 		}
@@ -475,7 +475,7 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 		t.Fatalf("initialize 应答解析失败: %v: %s", err, resp.Result)
 	}
 	if initRes.ProtocolVersion != "2024-11-05" || initRes.ServerInfo.Name != "swarmmind-node" ||
-		!strings.Contains(initRes.Instructions, "接入即总理：本机编排") {
+		!strings.Contains(initRes.Instructions, "接入即统筹：本机编排") {
 		t.Fatalf("initialize 应答不符: %+v", initRes)
 	}
 
@@ -495,7 +495,7 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	// tools/call：nodes 打到真 localapi
 	writeRPC(w, 3, "tools/call", map[string]any{"name": "swarmmind_nodes", "arguments": map[string]any{}})
 	resp = next(3)
-	if !bytes.Contains(resp.Result, []byte("nodeA")) || !bytes.Contains(resp.Result, []byte("本机总理：echo")) {
+	if !bytes.Contains(resp.Result, []byte("nodeA")) || !bytes.Contains(resp.Result, []byte("本机统筹：echo")) {
 		t.Fatalf("tools/call nodes 应答不符: %s", resp.Result)
 	}
 

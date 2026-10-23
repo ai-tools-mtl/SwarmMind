@@ -46,7 +46,7 @@ const S = {
   f: { stage: 'idle', target: '', stdin: '', idem: newIdem(), message: '' },   // 派单表单状态机
   focusForm: false,
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
-  primeNew: '',            // 总理凭证轮换后的新凭证（仅此一次展示），
+  primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
   primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp} 钦定完成一次性展示
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
          restart_cmd: '', config_path: '', structural: [], msg: '', editing: false },  // 能力配置编辑（方案 3.5）；editing=编辑 details 展开中（轮询挂起重绘）
@@ -56,7 +56,7 @@ const S = {
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
 }
-/* 一次性总理凭证内存清理（安全审查修复 5）：登出/401/换令牌时清空——退出登录后
+/* 一次性统筹凭证内存清理（安全审查修复 5）：登出/401/换令牌时清空——退出登录后
    prime_token 不得残留在 JS 内存（下个会话重新进页可见）。同时递增会话代次
   （第五轮收敛 3）：清理前已发出的在途请求，其迟到应答凭代次不一致被丢弃，
    不得把已清理的一次性凭证写回 S.primeNew / S.primeDecl.done。 */
@@ -287,7 +287,7 @@ function overviewPage() {
       <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
       <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「我的服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
-      <div class="step"><span>3</span><div><b>钦定总理并派单</b><div class="muted">在「本机总理」区钦定一个 agent，随后即可在本机派单；需要网内调用时再开 exposed 开关。</div></div></div></section>`
+      <div class="step"><span>3</span><div><b>钦定统筹并派单</b><div class="muted">在「本机统筹」区钦定一个 agent，随后即可在本机派单；需要网内调用时再开 exposed 开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '');
   }
   return head + `
@@ -301,9 +301,9 @@ function overviewPage() {
   </div>
   ${primeCard()}${recentTasksCard()}`;
 }
-/* 本机总理 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换总理走选择视图
+/* 本机统筹 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换统筹走选择视图
  * → declare → 钦定完成视图（一次性凭证 + MCP 配置片段）→ 已钦定常态（轮换 +
- * 换总理入口）；setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
+ * 换统筹入口）；setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
 function primeCard() {
   const st = S.status;
   const pa = st?.prime_agent || '';
@@ -311,37 +311,37 @@ function primeCard() {
     : st?.mode === 'setup' ? 'setup（未接入）' : '组网在线';
   const foot = `<p class="footer-note">断开组网后：hub 信箱内未收任务将待过期；本机历史任务不受影响，本机派单照常可用。</p>`;
   if (st?.mode === 'setup') {
-    return `<section class="card"><h2>本机总理 · 形态</h2>
-    <div class="mini-stat spaced"><span><b>未钦定</b><small>本机总理</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>
-    <small class="muted">先完成接入并配置能力后再钦定总理。</small></section>`;
+    return `<section class="card"><h2>本机统筹 · 形态</h2>
+    <div class="mini-stat spaced"><span><b>未钦定</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>
+    <small class="muted">先完成接入并配置能力后再钦定统筹。</small></section>`;
   }
-  const head = `<section class="card"><div class="row"><h2>本机总理 · 形态</h2>
+  const head = `<section class="card"><div class="row"><h2>本机统筹 · 形态</h2>
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
-  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机总理</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>`;
-  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新总理凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；请立即配给总理的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个总理」重新走钦定。</small></div>` : '';
+  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>`;
+  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个统筹」重新走钦定。</small></div>` : '';
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
   if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
-  return head + `<small class="muted">总理经 MCP 用 prime_token 本机派单；本机主人（local_token）在网页派单同样放行（2026-10-22 鉴权裁决）。declare/轮换/配置管理等管理面仅主人可操作。</small>
-  <div class="row spaced">${button('轮换总理凭证', 'prime-rotate', 'link')}${button('换一个总理', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
+  return head + `<small class="muted">统筹经 MCP 用 prime_token 本机派单；本机主人（local_token）在网页派单同样放行（2026-10-22 鉴权裁决）。declare/轮换/配置管理等管理面仅主人可操作。</small>
+  <div class="row spaced">${button('轮换统筹凭证', 'prime-rotate', 'link')}${button('换一个统筹', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
 }
-/* 钦定选择视图（未钦定引导态与「换一个总理」共用；数据源本机 agents 列表）。 */
+/* 钦定选择视图（未钦定引导态与「换一个统筹」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前总理将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 作为总理，它将经 MCP（prime_token）获得本机编排权；本机主人网页派单不依赖总理凭证。'}</small>
+  return `<small class="muted">${pa ? '当前统筹将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 作为统筹，它将经 MCP（prime_token）获得本机编排权；本机主人网页派单不依赖统筹凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
-  <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为总理', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
+  <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为统筹', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
 }
 /* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段（JSON 格式化）+ 粘贴指引。 */
 function primeDoneView() {
   const d = S.primeDecl.done;
   if (!d) return '';
-  const mcpJSON = d.mcp ? JSON.stringify(d.mcp, null, 2) : '（应答未含 mcp_config，请点「换一个总理」重新钦定）';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机总理——已写入 node.yaml prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>
-  <div class="notice warn spaced"><b>总理凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}</div>
-  <label>MCP 配置片段（加入总理 agent 的 mcpServers 即完成授权——接入即总理）<pre><code>${esc(mcpJSON)}</code></pre></label>
-  <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个总理', 'prime-pick', 'link')}</div>
-  <p class="footer-note">把上方 JSON 片段粘进总理 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。</p>`;
+  const mcpJSON = d.mcp ? JSON.stringify(d.mcp, null, 2) : '（应答未含 mcp_config，请点「换一个统筹」重新钦定）';
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机统筹——已写入 node.yaml prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>
+  <div class="notice warn spaced"><b>统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}</div>
+  <label>MCP 配置片段（加入统筹 agent 的 mcpServers 即完成授权——接入即统筹）<pre><code>${esc(mcpJSON)}</code></pre></label>
+  <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个统筹', 'prime-pick', 'link')}</div>
+  <p class="footer-note">把上方 JSON 片段粘进统筹 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。</p>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -494,7 +494,7 @@ function cfgSection() {
     </div>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
-    exposed=false 仅关闭网内准入，本机总理派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
+    exposed=false 仅关闭网内准入，本机统筹派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
 }
 
 function cfgRow(a, i) {
@@ -658,7 +658,7 @@ async function submitForm() {
   render();
 }
 
-/* ---------- 接入向导 / 总理钦定与轮换 / 断开组网动作 ----------
+/* ---------- 接入向导 / 统筹钦定与轮换 / 断开组网动作 ----------
  * 端点契约（localapi，均 Bearer local_token）：POST /api/v1/local/setup/parse|apply|
  * disconnect（setup.go）、POST /api/v1/local/prime/rotate|declare（prime.go）。
  * 全部走 api() 封装与 toast 通道；向导失败信息在页内 stageView 呈现（可反复重试）。 */
@@ -736,7 +736,7 @@ async function wizApply() {
 }
 
 async function primeRotate(btn) {
-  if (!confirm('轮换总理凭证？旧凭证将立即失效，总理的 MCP 连接需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
+  if (!confirm('轮换统筹凭证？旧凭证将立即失效，统筹的 MCP 连接需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
   if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
@@ -762,7 +762,7 @@ async function primeRotate(btn) {
 async function primeDeclare(btn) {
   const name = $('#prime-select')?.value;
   if (!name) { toast('先选择一个本机 agent'); return; }
-  if (!confirm(`钦定「${name}」为本机总理？旧总理凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
+  if (!confirm(`钦定「${name}」为本机统筹？旧统筹凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
   S.primeDecl.busy = true;
   if (btn) { btn.disabled = true; btn.textContent = '钦定中…'; }
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
@@ -773,7 +773,7 @@ async function primeDeclare(btn) {
       S.primeDecl.done = { agent: name, token: r.data?.prime_token || '', mcp: r.data?.mcp_config || null };
       S.primeDecl.picking = false;
       S.primeNew = ''; // 轮换提示与钦定完成视图不同时堆叠
-      toast('钦定完成 · 总理凭证仅此一次展示，请立即复制');
+      toast('钦定完成 · 统筹凭证仅此一次展示，请立即复制');
       S.snap = '';
       await loadAll().catch(() => {});
     } else {
@@ -809,7 +809,7 @@ async function netDisconnect(btn) {
 async function copyPrimeToken() {
   try {
     await navigator.clipboard.writeText(S.primeNew);
-    toast('新总理凭证已复制 · 旧凭证已失效，请立即配给总理的 MCP 连接');
+    toast('新统筹凭证已复制 · 旧凭证已失效，请立即配给统筹的 MCP 连接');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }
@@ -819,7 +819,7 @@ async function copyPrimeToken() {
 async function copyPrimeDeclare() {
   try {
     await navigator.clipboard.writeText(S.primeDecl.done?.token || '');
-    toast('总理凭证已复制 · 请立即配给总理的 MCP 连接（SWARM_NODE_PRIME_TOKEN）');
+    toast('统筹凭证已复制 · 请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }
@@ -829,7 +829,7 @@ async function copyPrimeMcp() {
   if (!d?.mcp) { toast('没有可复制的 MCP 配置'); return; }
   try {
     await navigator.clipboard.writeText(JSON.stringify(d.mcp, null, 2));
-    toast('MCP 配置已复制 · 粘贴进总理 agent 的 mcpServers 即完成授权');
+    toast('MCP 配置已复制 · 粘贴进统筹 agent 的 mcpServers 即完成授权');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }

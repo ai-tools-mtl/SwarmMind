@@ -64,3 +64,61 @@ func TestPrimeDesignation(t *testing.T) {
 		t.Fatalf("重复撤销应幂等: %v", err)
 	}
 }
+
+// TestPrimeDesignationBoundToNode P1 回归：目录校验必须精确绑定 (node_id, agent_name)。
+// 旧实现全网找同名 exposed 能力——跨节点同名能力时，把指定落到无此能力的节点也放行，
+// 派发端点按 (node_id, agent_name) 找不到目标即跳过，指定形同虚设。
+func TestPrimeDesignationBoundToNode(t *testing.T) {
+	f := newHub(t)
+	// 跨节点同名：zcode-dev 只在 mac-mini 上 exposed，node-b 没有这个能力
+	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
+		{Name: "zcode-dev", Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+		{Name: "echo", Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// node-b 无 zcode-dev（虽然全网存在同名 exposed 能力）：必须拒绝
+	if _, err := f.core.SetPrimeDesignation("node-b", "zcode-dev", "admin"); err == nil {
+		t.Fatal("指定到无此能力的节点应被拒绝")
+	}
+	// 节点不存在：必须拒绝
+	if _, err := f.core.SetPrimeDesignation("ghost-node", "zcode-dev", "admin"); err == nil {
+		t.Fatal("指定到不存在的节点应被拒绝")
+	}
+	// 精确匹配命中：正常指定
+	if _, err := f.core.SetPrimeDesignation("mac-mini", "zcode-dev", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.core.PrimeDesignation(); got == nil || got.NodeID != "mac-mini" {
+		t.Fatalf("精确匹配应放行: %+v", got)
+	}
+}
+
+// TestPrimeDesignationSurvivesUnrelatedTx 回归（P0）：任何事务都从 Clone 副本构造
+// 新状态——Clone 曾遗漏 Prime 字段，导致指定后任意无关事务（如 RegisterNode）都会
+// 把统筹指定丢掉并落盘为未指定。指定后执行一次无关事务，读回 Prime 必须仍在。
+func TestPrimeDesignationSurvivesUnrelatedTx(t *testing.T) {
+	f := newHub(t)
+	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
+		{Name: "zcode-dev", Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.core.SetPrimeDesignation("mac-mini", "zcode-dev", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	// 无关事务：注册另一个节点（走 Update → Clone 全链）
+	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+		{Name: "echo", Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := f.core.PrimeDesignation()
+	if got == nil || got.NodeID != "mac-mini" || got.AgentName != "zcode-dev" {
+		t.Fatalf("无关事务后统筹指定丢失: %+v", got)
+	}
+}

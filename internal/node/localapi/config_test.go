@@ -150,10 +150,78 @@ func TestUpdateAgentsYAMLEmptyTableAndAppend(t *testing.T) {
 	if len(got) != 1 || got[0].Name != "gamma" || got[0].Kind != "cli" || got[0].TimeoutSec != 60 {
 		t.Fatalf("agents 键缺失应追加条目: %+v", got)
 	}
-	for _, key := range []string{"agent_args", "allow_args", "allow_env", "config_home", "description", "permission_mode", "exposed"} {
+	for _, key := range []string{"agent_args", "allow_args", "allow_env", "config_home", "description", "permission_mode", "exposed", "stdin_to_arg"} {
 		if strings.Contains(string(appended), key+":") {
 			t.Errorf("新增条目缺省键 %s 不应写盘（最小形态）:\n%s", key, appended)
 		}
+	}
+}
+
+// TestUpdateAgentsYAMLStdinToArgRoundTrip stdin_to_arg 写回链路（P1 回归）：规范
+// 字段表曾遗漏该键——网页保存不落盘、新建条目无缺省口径、已有键改值失效。对照
+// allow_args 同款 bool 三态全覆盖：既有键改值显式写盘（true→false 保留键位防重启
+// 回跳）、缺失键非缺省补写、新增条目缺省不写/非缺省写。
+func TestUpdateAgentsYAMLStdinToArgRoundTrip(t *testing.T) {
+	initial := `node_id: node-a
+agents:
+  - name: alpha
+    command: /bin/echo
+    workdir: /w
+    timeout_sec: 900
+    stdin_to_arg: true # 手写键注释
+  - name: beta
+    command: /bin/cat
+    workdir: /b
+    timeout_sec: 30
+`
+	// alpha 提交 false（既有键改值 true→false）；beta 提交 true（缺失键补写）
+	agents := []AgentProfile{
+		{Name: "alpha", Command: "/bin/echo", Workdir: "/w", TimeoutSec: 900},
+		{Name: "beta", Command: "/bin/cat", Workdir: "/b", TimeoutSec: 30, StdinToArg: true},
+	}
+	out, err := updateAgentsYAML([]byte(initial), agents)
+	if err != nil {
+		t.Fatalf("updateAgentsYAML: %v", err)
+	}
+	got := parseAgents(t, out)
+	if len(got) != 2 {
+		t.Fatalf("应保留两条: %+v", got)
+	}
+	if got[0].StdinToArg {
+		t.Errorf("alpha 应改写为 false: %+v", got[0])
+	}
+	if !strings.Contains(string(out), "stdin_to_arg: false") {
+		t.Errorf("alpha 既有键应显式写 false（保留键位防回跳）:\n%s", out)
+	}
+	if !strings.Contains(string(out), "# 手写键注释") {
+		t.Errorf("既有键注释应保留:\n%s", out)
+	}
+	if !got[1].StdinToArg {
+		t.Errorf("beta 缺失键应补写为提交值 true: %+v", got[1])
+	}
+	if !strings.Contains(string(out), "stdin_to_arg: true") {
+		t.Errorf("beta 应落盘 stdin_to_arg: true:\n%s", out)
+	}
+
+	// 新增条目：缺省 false 不写键（最小形态）；true 写键
+	appended, err := updateAgentsYAML([]byte("node_id: node-a\n"), []AgentProfile{
+		{Name: "gamma", Command: "/bin/echo", Workdir: "/w", TimeoutSec: 60},
+	})
+	if err != nil {
+		t.Fatalf("追加: %v", err)
+	}
+	if strings.Contains(string(appended), "stdin_to_arg:") {
+		t.Errorf("新增条目 stdin_to_arg 缺省 false 不应写盘:\n%s", appended)
+	}
+	appendedTrue, err := updateAgentsYAML([]byte("node_id: node-a\n"), []AgentProfile{
+		{Name: "delta", Command: "/bin/echo", Workdir: "/w", TimeoutSec: 60, StdinToArg: true},
+	})
+	if err != nil {
+		t.Fatalf("追加: %v", err)
+	}
+	gotDelta := parseAgents(t, appendedTrue)
+	if len(gotDelta) != 1 || !gotDelta[0].StdinToArg {
+		t.Fatalf("新增条目 stdin_to_arg=true 应写盘: %+v", gotDelta)
 	}
 }
 
