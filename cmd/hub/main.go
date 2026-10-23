@@ -24,6 +24,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/api"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
+	"github.com/mtl802/swarmmind/internal/hub/notify"
 	"github.com/mtl802/swarmmind/internal/hub/session"
 	"github.com/mtl802/swarmmind/internal/hub/store"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -39,6 +40,10 @@ type hubConfig struct {
 	Nodes      map[string]string `yaml:"nodes"`       // node_id → register_token
 	AdminToken string            `yaml:"admin_token"` // 管理面登录令牌（空则生成存 data_dir/admin_token）
 	DataDir    string            `yaml:"data_dir"`    // 默认 data
+	Notify     struct {
+		WebhookURL string `yaml:"webhook_url"` // 任务终态 IM 通知 webhook（空=禁用）
+		Format     string `yaml:"format"`      // raw（默认）| feishu
+	} `yaml:"notify"` // 任务终态 IM 通知（P4③）：失败重试后放弃，绝不影响任务终态
 }
 
 func main() {
@@ -134,9 +139,28 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 			}
 		},
 	})
+	// 任务终态 IM 通知（P4③）：webhook 未配置=禁用（nil notifier）。格式启动即
+	// 校验——拼错尽快失败，不静默回落 raw。
+	var notifier core.TerminalNotifier
+	if cfg.Notify.WebhookURL != "" {
+		nc, err := notify.NewClient(notify.Config{
+			WebhookURL: cfg.Notify.WebhookURL,
+			Format:     cfg.Notify.Format,
+		})
+		if err != nil {
+			return fmt.Errorf("notify 配置非法: %w", err)
+		}
+		notifier = nc
+		format := cfg.Notify.Format
+		if format == "" {
+			format = notify.FormatRaw
+		}
+		log.Printf("[hub] 任务终态通知已启用 format=%s（失败重试 3 次后放弃，不影响任务）", format)
+	}
 	coreSvc, err = core.New(core.Config{
 		Store:     st,
 		Transport: mgr,
+		Notifier:  notifier,
 		// 群聊闭环（GROUP-RFC）：任务终态自动回流引用它的群（幂等由群存储的
 		// 已回流集合保证）；失败只记日志，不影响任务状态机。
 		OnTaskTerminal: func(t protocol.Task) {
