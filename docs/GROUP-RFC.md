@@ -1,8 +1,8 @@
 # SwarmMind GROUP-RFC：群聊/协作空间（v1.0 草案，2026-10-20）
 
 > 三方讨论产物：Hana（产品编排）+ zcode（实现者视角）+ codex（协议/架构视角）。
-> 状态：**MVP 已合入**（2026-10-21：group store + REST + 控制台群聊页 + MCP 五工具），实现偏差与恢复归属见第八节；归入生命周期 P4（V1）主特性。
-> **R7 终审待闭合项（P4 开工前完成）**：①协议闭环补帧（group_ack/发言许可/stop/转任务与终态回流）；②历史补齐的缺口响应与游标落盘规则；③人类主体与权限模型（observer 权限/邀请授权与 exposed 协调）；④MVP 与 DoD 对齐（waiting_human 与 paused 关系/预算预留结算纳入 MVP）。
+> 状态：**MVP 已合入**（2026-10-22：group store + REST + 控制台群聊页 + MCP 五工具），实现偏差与恢复归属见第八节；归入生命周期 P4（V1）主特性。
+> **R7 终审待闭合项（P4 关门前闭合，进度见第八节）**：①协议闭环补帧（group_ack/发言许可/stop/转任务与终态回流）；②历史补齐的缺口响应与游标落盘规则；③人类主体与权限模型（observer 权限/邀请授权与 exposed 协调）；④MVP 与 DoD 对齐（waiting_human 与 paused 关系/预算预留结算纳入 MVP）。
 
 ## 一、问题与定位
 
@@ -76,7 +76,7 @@ Session      {(group_id, member) → session_id/resume能力映射}   // 协议�
 ## 八、MVP 实现偏差记录（2026-10-22）
 
 > 独立评审后补记：MVP 已合入部分（hub group store + REST + 控制台群聊页 + MCP
-> 五工具，2026-10-21）相对本 RFC 的已知偏差。均属「六、MVP 切法」范围内的裁剪，
+> 五工具，2026-10-22）相对本 RFC 的已知偏差。均属「六、MVP 切法」范围内的裁剪，
 > 逐条注明恢复归属，防后续实现者误把 MVP 现状当 RFC 全量。
 
 1. **预算全维裁为 max_rounds**：四.3 所列 token/墙钟/单次上下文/输出长度/每成员等维度均未实现，仅剩 agent 消息条数一维（默认 20，`group.Store` 代码强制，用尽返回 `budget_exhausted`）。

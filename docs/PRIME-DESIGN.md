@@ -1,13 +1,13 @@
-# SwarmMind 总理智能体与决策引擎设计（PRIME-DESIGN v0.9 草案）
+# SwarmMind 统筹载体与决策引擎设计（PRIME-DESIGN v0.9 草案）
 
-> 2026-10-21。回应伦哥需求：①群聊/团队分工，同时调用不同机器的不同 agent；②总理 agent 负责调度 vs StartLux-Decision-v1.1 决策引擎如何取舍。
+> 2026-10-21。回应伦哥需求：①群聊/团队分工，同时调用不同机器的不同 agent；②统筹载体负责调度 vs StartLux-Decision-v1.1 决策引擎如何取舍。
 > 流程：Hana 起草 → codex 审查 → 修订定稿 → 伦哥批准。归入 P4。
 
-## 一、核心判断：总理是「角色」，不是「组件」
+## 一、核心判断：统筹载体是「角色」，不是「组件」
 
-**总理 agent（Prime）不新建任何基础设施。** 它的定义：
+**统筹载体（Prime）不新建任何基础设施。** 它的定义：
 
-> 任何连接了 SwarmMind MCP、被授权调度权、以 LLM 为大脑的智能体，扮演总理角色时即为 Prime。
+> 任何连接了 SwarmMind MCP、被授权调度权、以 LLM 为大脑的智能体，扮演统筹角色时即为 Prime。
 
 理由：
 - MCP 六工具（nodes/agents/submit/status/wait/artifact）已经是完整的编排原语——看网络、派任务、等结果、取产物，DAG 编排天然成立
@@ -46,7 +46,7 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 | 串行依赖 | submit A → wait A → artifact 取 A 产物 → 产物内容嵌入 B 的任务描述 → submit B。**嵌入 ≤200KiB 纯文本**（1MiB 信封硬上限+信箱字节预算）；超限或跨节点大数据依赖在 L2 就绪前禁止编排，上报用户 |
 | 失败处理 | wait 返回 failed → 失败矩阵分类（参数越界改描述重派/环境类原样重派/未知上报），同键幂等保护 |
 | needs_review | 视为终态阻断：Prime 上报人，不自行重跑（对齐 4.8）；其 FinalAnswer 不进结论 |
-| 取消 | **V1 无取消原语**（显式声明）：误派最大代价 = timeout_sec × 受影响任务数；hub→node cancel 帧列入 backlog（runner 进程组终止已就绪，成本可控） |
+| 取消 | 原声明「V1 无取消原语」已过时：task_cancel 帧与管理面取消端点已交付（2026-10-22，SPEC 4.2；六.六豁免①——取消保留人工管理员，agent 面无取消原语） |
 | 同 workdir | 同名 agent 的并行子任务强制串行（同 agent ⇒ 同 ExecProfile ⇒ 同 workdir）；跨 agent 同节点并行由 hub L1 互斥兜底（workdir_busy_timeout 属环境类可重派一次） |
 | 超时预算 | wait 的 timeout_sec 参数 + Prime 自身轮次预算（对齐 GROUP-RFC 预算护栏） |
 
@@ -72,8 +72,7 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 
 规则分配算法（L2 具体化）：能力目录关键词匹配（子任务描述 ↔ agent 描述）→ 同能力多节点取 inflight 最低 → 无匹配 → 上报用户。**每次降级记 relation=degraded**（影子数据不丢样本）。
 
-实现形态：swarmmind-mcp 增第七工具 `startlux_decide`（env：SWARM_STARTLUX_URL/KEY；内部自动 L0→L2 降级，响应标注 used_level）。验证脚本：tests/startlux-verify.sh。
-集成形态：swarmmind-mcp 增第七工具 `startlux_decide`（state+question → 概率集），对齐 SPEC 六.六 同步规则。
+实现形态：swarmmind-mcp 增第七工具（已交付名 `swarmmind_decide`；state+question → 概率集；env：SWARM_STARTLUX_URL/KEY；内部自动 L0→L2 降级，响应标注 used_level；对齐 SPEC 六.六 同步规则）。验证脚本：tests/startlux-verify.sh。
 
 **影子数据契约（P4.1 开工前补齐实现，格式草案）**：每任期 JSONL（deploy/prime/shadow/<term_id>.jsonl），行结构 {ts, term_id, subtask_id, goal_digest, candidates, startlux_rec{node,agent,confidence,rationale}, prime_final, relation: adopted\|overridden\|degraded, task_id, terminal_status}。度量：top-1 命中率 + 采纳/否决组成功率对比。晋级标准（可判定）：连续 ≥50 条、命中率 ≥90%、采纳组成功率不劣 → 报伦哥批准。降级期记 relation=degraded（样本不丢）。**P4.1 验收的「10 个决策」是冒烟非收敛证据**。
 
@@ -88,7 +87,7 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 
 **预算强制降级声明（S5）**：GROUP-RFC 的预算「代码强制」原则在 P4.0/P4.1 控制台形态下降级为 prompt 层；兜底方案（MCP 进程内调用计数超限报错 / hub 按 token 限速）二选一列入 P4.x。
 
-**并发任期互斥（S6）**：控制台加软约束——任一 Prime 任期进行中禁止新总理派发（避免叠加派发与预算互不可见）。
+**并发任期互斥（S6）**：控制台加软约束——任一 Prime 任期进行中禁止新的统筹派发（避免叠加派发与预算互不可见）。
 
 ## 七、风险与开放问题（含评审增补）
 
@@ -97,18 +96,18 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 3. **StartLux 评估文档已散佚**（工作台清理）——P4.1 开工前需伦哥提供 StartLux-Decision-v1.1 的接口规格/模型文件位置
 4. **成本**：Prime 每次复合目标消耗 GLM tokens——预算代码是否有 token 维度（GROUP-RFC 已留「估算/未知兜底」条款）
 5. **并发写冲突**：同名 agent 并行子任务强制串行；跨 agent 同节点由 hub 互斥兜底（workdir_busy_timeout 环境类可重派）；完备解是 L2 depends_on
-6. **无取消原语（M6）**：误派代价 = timeout_sec × 任务数；cancel 帧入 backlog
+6. **无取消原语（M6）**：已闭合（2026-10-22 task_cancel 帧与管理面取消端点交付，取消保留管理面人工触发，agent 面无取消原语；SPEC 4.2）
 7. **Prime 会话崩溃接管（S7）**：in-flight 任务照常执行至终态但无人收集；任期幂等键约定（prime-<term>-<seq>）是程序化重建状态的前提
 8. **提示词注入面（S7）**：Prime 持 admin 令牌而 stderr 是任意文本——提示词已含注入防御条款；MCP 层后续加内容转义
 9. **产物 24h 保留与延迟验收的时序竞争（S7）**：超时统一上报/人延迟验收路径下产物可能过期——重要产物 Prime 任期内即时回读并存入报告
 
-## 八、总理智能体规格（v1 提示词与编排算法，2026-10-21 补）
+## 八、统筹载体规格（v1 提示词与编排算法，2026-10-21 补）
 
 ### 8.1 运行形态（V1）
 
-- **载体**：mac-mini 的 zcode-dev 会话。人在控制台勾选「总理模式」派复合目标 → 控制台以 PRIME 系统提示词包装目标 → zcode 执行完整编排循环 → 会话即总理任期
+- **载体**：mac-mini 的 zcode-dev 会话。人在控制台选中统筹载体（派发页智能体列表置顶「统筹 · …」标记项）派复合目标 → 控制台以 PRIME 系统提示词包装目标 → zcode 执行完整编排循环 → 会话即统筹任期
 - **提示词资产化**：系统提示词存 `deploy/prime/PRIME.md`（版本管理，控制台派发时拼接），修改走 git
-- 每次派发 = 一次总理任期（无跨任期记忆）；任期结束输出完整报告
+- 每次派发 = 一次统筹任期（无跨任期记忆）；任期结束输出完整报告
 
 ### 8.2 系统提示词（deploy/prime/PRIME.md，全文如下，修改走评审）
 
@@ -154,7 +153,7 @@ hub     路由 / 持久化 / 可靠性（不感知 Prime 存在——Prime 就�
 - 幂等：重派自然产生新幂等键（hub 按 idem 去重保护同键重试）
 
 
-## 八、评审闭环记录（2026-10-21）
+## 九、评审闭环记录（2026-10-21）
 
 - 评审：codex 不可用（区域 403），按协作制度降级独立 zcode 会话评审 → docs/archive/PRIME-REVIEW.md（M1-M6/S1-S7/Q1-Q6）
 - 修订：M1-M6 全部闭合（M2 含 MCP submit 增 idem_key/trace_id 参数与 SPEC 六.六同步）；S3 八处提示词补丁全收；S1 契约草案入文档（P4.1 实现）；S4c 群范围标签修正；S5/S6/S7 声明纳入

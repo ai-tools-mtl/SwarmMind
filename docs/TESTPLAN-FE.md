@@ -2,7 +2,7 @@
 
 > 本文件是 FE-PLAN v3 的验收规程本体。用例固定 ID，每例含准备/操作/断言/超时/清理。
 > 执行方式：独立会话逐条执行并输出逐条结果；必测项 SKIP 不算全绿。
-> 登记入口：docs/TESTPLAN.md「FE 子计划」节。
+> 登记入口：docs/archive/FE-PLAN-v3.md（FE-PLAN v3，已归档）。
 
 ## 通用约定
 
