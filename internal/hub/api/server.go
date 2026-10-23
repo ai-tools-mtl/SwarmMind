@@ -524,6 +524,10 @@ func (s *Server) handlePrimeSet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_target"})
 		return
 	}
+	if d.AgentName == "" { // 撤销语义：返回 null 而非零值结构（与 GET 未指定口径一致）
+		writeJSON(w, http.StatusOK, map[string]any{"designation": nil})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"designation": &d})
 }
 
