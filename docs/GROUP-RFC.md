@@ -1,8 +1,9 @@
 # SwarmMind GROUP-RFC：群聊/协作空间（v1.0 草案，2026-10-20）
 
 > 三方讨论产物：Hana（产品编排）+ zcode（实现者视角）+ codex（协议/架构视角）。
-> 状态：**MVP 已合入**（2026-10-22：group store + REST + 控制台群聊页 + MCP 五工具），实现偏差与恢复归属见第八节；归入生命周期 P4（V1）主特性。
-> **R7 终审待闭合项（P4 关门前闭合，进度见第八节）**：①协议闭环补帧（group_ack/发言许可/stop/转任务与终态回流）；②历史补齐的缺口响应与游标落盘规则；③人类主体与权限模型（observer 权限/邀请授权与 exposed 协调）；④MVP 与 DoD 对齐（waiting_human 与 paused 关系/预算预留结算纳入 MVP）。
+> 状态：**MVP 已合入**（2026-10-22：group store + REST + 控制台群聊页 + MCP 五工具），实现偏差与恢复归属见第八节。
+> **2026-10-24 产品方向 v2**：关门清单（发言许可制/推送扇出 group_msg_event/多维预算/24h 过期）转入**实验区冻结**——单人群场景 MVP 子集够用，有真实自治讨论需求再晋级（docs/PRODUCT-DIRECTION-v2.md）。
+> **R7 终审待闭合项（原要求 P4 关门前闭合；2026-10-24 产品方向 v2 起随完整协议一并转实验区冻结，见顶部注与第八节）**：①协议闭环补帧（group_ack/发言许可/stop/转任务与终态回流）；②历史补齐的缺口响应与游标落盘规则；③人类主体与权限模型（observer 权限/邀请授权与 exposed 协调）；④MVP 与 DoD 对齐（waiting_human 与 paused 关系/预算预留结算纳入 MVP）。
 
 ## 一、问题与定位
 
@@ -70,7 +71,7 @@ Session      {(group_id, member) → session_id/resume能力映射}   // 协议�
 
 - hub 可见明文在群聊暴露面变大：群消息体 8KiB 上限 + 文档级警告；端到端加密按规划 V2
 - 群是新的信任边界：拉人进群=暴露群历史给新成员，邀请需 host 确认（与 D7 接入主权协调）
-- **阶段归属（codex 建议，采纳）**：V0/P1-P2 只留边界（信封寻址扩展、消息类型命名空间，不实现群状态机）；V0.5/P3 验证持续上下文+控制台鉴权；**P4/V1 交付完整协作空间**（Group、邀请授权、历史补齐、主持权、预算护栏、人 observer/member）；V2/P5 深度桌面联动、跨组织联邦、群端到端加密
+- **阶段归属（codex 建议，采纳）**：V0/P1-P2 只留边界（信封寻址扩展、消息类型命名空间，不实现群状态机）；V0.5/P3 验证持续上下文+控制台鉴权；**P4/V1 交付完整协作空间**（Group、邀请授权、历史补齐、主持权、预算护栏、人 observer/member）——*2026-10-24 冻结：完整协议转实验区，仅保留 MVP 子集，见 PRODUCT-DIRECTION-v2*；V2/P5 深度桌面联动、跨组织联邦、群端到端加密
 - 业界借鉴：A2A contextId、SLIM 群会话成员控制、Mattermost since 补取、AgentBridge 有界收敛——V1 不引入 SLIM/MLS/新中间件，维持轻量自研路线
 
 ## 八、MVP 实现偏差记录（2026-10-22）
@@ -85,4 +86,4 @@ Session      {(group_id, member) → session_id/resume能力映射}   // 协议�
 4. **协议 6 帧中 group_sync / group_msg_event 未实现**：历史补齐与事件推送由 REST since 增量拉取替代（语义等价：seq 单调 + 只补增量）；group_create / group_msg / group_close / group_task_created 以 REST 端点语义落地（POST groups、POST messages、POST close、转任务注记）。
 5. **发言许可制简化为 @提及触发**：四.1 的许可仲裁未做——成员智能体不因群消息自动启动计算，仅在人点名提及（或其操作者主动经 MCP `swarmmind_group_say`）时参与发言；补历史/重放不触发回复的原则不变。
 
-**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，已落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）、**200 条滚动窗口**（`group.MaxGroupMessages`，2026-10-22 双审批 C 落地：超窗口从最小 seq 起丢最旧，seq 账本与 agent 预算计数独立累计不回退；`ListMessages` 响应以 `pruned_before_seq` 标注已裁区间上界供调用方对齐游标；裁剪随先写后见事务落盘，`groups.json` 不无限膨胀）与 agent 发言预算护栏。**24h 过期仍未做**，与 node 推送扇出同列 **P4 关门前清单**（关门 DoD 核实项）；过期落地前，防刷屏挤兑任务信箱靠 200 条滚动 + max_rounds 预算（仅约束 agent 发言；人/system 发言无条数上限，靠 8KiB 单体上限、200 条滚动与群终态兜底）。
+**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，已落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）、**200 条滚动窗口**（`group.MaxGroupMessages`，2026-10-22 双审批 C 落地：超窗口从最小 seq 起丢最旧，seq 账本与 agent 预算计数独立累计不回退；`ListMessages` 响应以 `pruned_before_seq` 标注已裁区间上界供调用方对齐游标；裁剪随先写后见事务落盘，`groups.json` 不无限膨胀）与 agent 发言预算护栏。**24h 过期仍未做**，与 node 推送扇出原列 **P4 关门前清单**——2026-10-24 起转实验区冻结（PRODUCT-DIRECTION-v2），不再作为关门 DoD 核实项；过期落地前，防刷屏挤兑任务信箱靠 200 条滚动 + max_rounds 预算（仅约束 agent 发言；人/system 发言无条数上限，靠 8KiB 单体上限、200 条滚动与群终态兜底）。

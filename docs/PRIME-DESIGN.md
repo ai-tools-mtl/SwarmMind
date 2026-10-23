@@ -1,5 +1,7 @@
 # SwarmMind 统筹载体与决策引擎设计（PRIME-DESIGN v0.9 草案）
 
+> **显示名对照（2026-10-24）**：界面与文档显示名已定「智行管家」（伦哥钦点，见 docs/PRODUCT-DIRECTION-v2.md）；本文档与代码中的「总理/统筹载体/Prime」为历史称谓与机器契约标识符（`prime_*`、`/api/v1/prime`），原样保留。
+
 > 2026-10-21。回应伦哥需求：①群聊/团队分工，同时调用不同机器的不同 agent；②统筹载体负责调度 vs StartLux-Decision-v1.1 决策引擎如何取舍。
 > 流程：Hana 起草 → codex 审查 → 修订定稿 → 伦哥批准。归入 P4。
 

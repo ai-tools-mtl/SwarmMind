@@ -14,7 +14,8 @@
 | TESTPLAN.md | hub/node/E2E 测试计划（持续使用） | 持续追加 |
 | TESTPLAN-FE.md | 前端验收规程（FE-PLAN v3 的用例本体，持续回归用） | 持续回归 |
 | TESTREPORT.md | 测试报告（按轮次追加） | 持续追加 |
-| DEPLOY-P2.md | 双机部署指南与 DoD 11 验收清单 | 稳定 |
+| DEPLOY-P2.md | 双机部署指南与 DoD 11 验收清单 |
+| PRODUCT-DIRECTION-v2.md | 产品演进方向 v2（2026-10-24 三方审查收敛）：重定位、名词人话化、阶段重排 | 稳定 |
 
 ## 子目录
 
