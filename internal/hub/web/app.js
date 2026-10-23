@@ -1008,7 +1008,7 @@ function tasksPage() {
   return head('任务监管', '全网任务只读监管；从异常下钻，以证据核对交付。', button('↓ 导出 JSON（当前筛选）', 'export'))
     + `<section class="card">
     <div class="filters">${[''].concat(Object.keys(STATES)).map(s => s
-    ? `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}">${badge(s)} ${counts[s] || 0}</button>`
+    ? (() => { const n = counts[s] || 0; const bd = n ? badge(s) : `<span class="badge">${esc(STATES[s] || s)}</span>`; return `<button data-act="fchip" data-fchip="${s}" class="${S.f.status === s ? 'on' : ''}${n ? '' : ' zero'}">${bd} ${n}</button>`; })()
     : `<button data-act="fchip" data-fchip="" class="${!S.f.status ? 'on' : ''}">全部 (${S.tasks.length})</button>`).join('')}</div>
     <div class="fields">
       <label>搜索任务 ID<input id="f-trace" data-f="trace" value="${esc(S.f.trace)}" placeholder="输入任务 ID 或追踪号"></label>
