@@ -346,14 +346,14 @@ func (s *session) writeLoop() {
 		if closed, grace := s.q.state(); closed {
 			if grace {
 				// 优雅关闭：先排空控制帧（如 register_ack / auth 拒绝应答）再握手。
-				// 入站残余帧静默丢弃（协议错误断开前对端连发的帧）：不读而关会触发
-				// RST、冲掉对端已接收的应答帧。不用库的 CloseRead——它读到数据帧会
-				// 自动回 close 1008 PolicyViolation，覆盖优雅握手（CI macos 实测：
-				// client 连发坏帧挤入缓冲，client 收到 1008 而非 1000，2026-10-24
-				// 诊断实锤）。ping/pong 由库在读路径内自动应答；close 握手完成后
-				// Read 返回错误、循环退出；s.ctx 取消兜底。
+				// CloseRead 代读入站残余（协议错误断开前对端连发的帧）：不读而关会
+				// 触发 RST、冲掉对端已接收的应答帧；CloseRead 同时代答 ping/pong/
+				// close，保证关闭握手可完成。已知库行为：读到数据帧会自动回 close
+				// 1008（PolicyViolation）——残余坏帧场景下优雅关闭退化为 1008，
+				// 调用方（C1 拒绝路径）按单帧拒绝语义使用，测试侧避免连发（见
+				// TestServiceStageUnsupportedVersion 注释）。
 				s.drainCtrlGraceful()
-				go s.discardInbound()
+				_ = s.conn.CloseRead(s.ctx)
 				s.closeHandshake()
 			} else {
 				// 非优雅（心跳超时/停滞/被替换/读失败/强断）：立即断，解除并发 Read 阻塞
@@ -405,20 +405,6 @@ func (s *session) closeHandshake() {
 	case <-s.ctx.Done():
 		_ = s.conn.CloseNow()
 		<-done
-	}
-}
-
-// discardInbound 静默丢弃入站残余帧直至连接关闭（优雅关闭专用，替代库的
-// CloseRead：后者对数据帧回 1008，会把优雅关闭变成 PolicyViolation 踢出）。
-// 唯一 reader（readLoop 已退出）；对端 close 回帧也由此循环消费。
-func (s *session) discardInbound() {
-	// 对端 close 回帧被本循环消费后由这里关闭底层连接（原 CloseRead 的库内
-	// 行为：握手完成即关底层；不补则 client 侧读挂起、连接泄漏）。
-	defer s.conn.CloseNow()
-	for {
-		if _, _, err := s.conn.Read(s.ctx); err != nil {
-			return
-		}
 	}
 }
 

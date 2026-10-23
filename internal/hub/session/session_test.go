@@ -142,14 +142,17 @@ func TestServiceStageUnsupportedVersion(t *testing.T) {
 	if s == nil {
 		t.Fatal("会话应已在表")
 	}
-	// v=2 的心跳 / card_update / task_result（正确 epoch 搭配错误版本）
-	for _, typ := range []string{protocol.MsgPing, protocol.MsgCardUpdate, protocol.MsgTaskAck} {
-		wsWriteEnv(t, c, &protocol.Envelope{
-			Version: 2, Type: typ, MessageID: protocol.NewMessageID(),
-			SessionEpoch: ack.Epoch,
-			Payload:      mustJSON(protocol.CardUpdatePayload{Agents: []protocol.AgentCard{cardDemo("hacked")}}),
-		})
-	}
+	// 单个坏版本心跳帧（正确 epoch 搭配错误版本）。版本校验是 readLoop 单一
+	// 入口（checkVersion），帧型与拒绝路径无关；不连发多帧——hub 回 err 后即
+	// 优雅关闭，残余帧会触发 coder/websocket CloseRead 的自动 1008 应答，把
+	// 优雅关闭退化成 PolicyViolation（CI macos 实测竞态，2026-10-24）。「坏帧
+	// 不进 core」由下方 got 断言覆盖，「应回 err(unsupported_version)」覆盖
+	// 拒绝路径本身。
+	wsWriteEnv(t, c, &protocol.Envelope{
+		Version: 2, Type: protocol.MsgPing, MessageID: protocol.NewMessageID(),
+		SessionEpoch: ack.Epoch,
+		Payload:      mustJSON(protocol.CardUpdatePayload{Agents: []protocol.AgentCard{cardDemo("hacked")}}),
+	})
 	got2 := wsReadEnv(t, c, 2*time.Second)
 	if got2.Type != protocol.MsgErr || got2.Err == nil || got2.Err.Code != protocol.CodeUnsupportedVersion {
 		t.Fatalf("应回 err(unsupported_version), got %+v", got2)
