@@ -31,9 +31,9 @@ API 直验补充：改密码全链 curl 200×4；PAT 生命周期（创建/鉴�
 - E2E 脚本与 TESTPLAN curl 用例合并为持续回归套件（P4 开发时随功能同步扩展）
 
 
-## 附：P4.0 总理验收实测（2026-10-22 00:50）
+## 附：P4.0 统筹验收实测（2026-10-22 00:50）
 
-**场景**：总理模式复合目标「检查 mac-mini 和 baidu-node 磁盘并汇总对比报告」（PRIME.md 全文包装，用户明示直接干）
+**场景**：统筹模式复合目标「检查 mac-mini 和 baidu-node 磁盘并汇总对比报告」（PRIME.md 全文包装，用户明示直接干）
 
 **执行**：zcode（GLM）+ SwarmMind MCP（.zcode/config.json mcp.servers 挂载）→ 自主分解 2 并行 diskcheck → wait 收集 → 产出对比报告
 

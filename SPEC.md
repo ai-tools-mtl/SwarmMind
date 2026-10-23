@@ -3,6 +3,20 @@
 > 上位文档：PLAN.md v3.0 FINAL。本文是 V0 的唯一执行真相源。
 > 版本轨迹：v2 契约闭合 → v2.1 Schema/产物/权限升级（内容升级时未滚动版本号，终审修正）→ v3.0 FINAL：终审修订——产物拉取协议、FinalAnswer 提取规则、版本号统一、校验链顺序、60s 断开规则、ExecProfile 字段补齐、DoD 十一条。
 
+**目录**
+
+- [一、V0 目标](#一v0-目标)
+- [二、进程、端口与 TLS](#二进程端口与-tls)
+- [三、目录结构](#三目录结构)
+- [四、协议](#四协议internalprotocol)
+- [五、node 配置](#五node-配置configsnodeexampleyaml)
+- [六、交互面与管理 API](#六交互面与管理-api)
+- [六.五、P3 增补契约（Web 控制台）](#六五p3-增补契约web-控制台按-interactionmd-分级清单落地)
+- [六.六、MCP 服务](#六六mcp-服务agent-统一入口2026-10-21-立)
+- [七、验证标准（DoD 十一条）](#七验证标准dod-十一条)
+- [八、实现顺序](#八实现顺序工程路线先协议后网络)
+- [九、已知陷阱](#九已知陷阱写代码前必读)
+
 ## 一、V0 目标
 
 单机回环跑通完整拓扑：hub + 两个 node 经 WSS 长会话组网，HTTP 管理面提交任务，推送执行，结果回传；断线重连、离线信箱、幂等去重、白名单、needs_review 全部落地。**所有代码按公网部署标准写**（鉴权、配额、背压、epoch），只是部署在回环上。
@@ -338,7 +352,7 @@ type TaskSubmitRequest struct {
 **幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。
 
 **门控与调度**：
-- **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；七态状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用，SPEC 4.10）。
+- **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；七态状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用）。
 - **blocked 任务留信箱占配额**：入箱/计量口径与普通 submitted 任务一致；信箱满拒新提交的既有语义不变（SPEC 4.6）。
 - **事件触发复评**：上游任务到终态的仲裁事务处——result.go 首次落终态（task_result 接受分支）、CancelTask 置 cancelled、Sweep 三处置终态（expired/排队超时/offer 超时过期）——**同一单写事务内**复评其 idem 的全部下游任务（依赖全 completed → 解除阻塞，发布后按目标节点 dispatch；任一上游 failed/needs_review/cancelled → 保持 blocked 并更新标注）。单事务原子生效，无「上游已 completed 而下游仍 blocked」的事件丢失窗口。
 - **Sweep 兜底**：每秒扫描（`sweepInterval` tick）对全部 blocked 的 submitted 任务全量复评，防御未知路径的事件丢失；解除阻塞随本轮 dispatch。
@@ -406,7 +420,6 @@ data_dir: data
 ```
 
 insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`；部署模式为 `wss://` + 证书指纹。
-```
 
 **执行环境规则**：runner 使用 base_env（+任务在 allow_env 白名单内的覆盖）构造进程环境，不继承 daemon 自身环境（防凭证泄漏进子进程）。**runner 额外注入三个系统变量（不受 base_env/allow_env 约束、任务 env 不可覆盖）：`SWARM_TASK_ID`、`SWARM_OUTPUTS_DIR`（=workdir/outputs/<task_id> 绝对路径，agent 产物约定输出位置）、`SWARM_TRACE_ID`**。**HOME 由 runner 固定设为 ExecProfile.ConfigHome**（agent 配置/凭证目录，默认 data_dir/home，与 workdir 分离——不破坏 agent 的配置查找），cwd=workdir。越界（env 键不在名单）任务直接 failed，error=`policy_denied`，不执行。
 **能力边界声明**（写入文档）：CLI agent 的行为边界由 command 本身性质与其自带权限机制决定；stdin/env 是输入面；allow_args 授权解释器类命令等同全权授权，选用即知情；PermissionMode 把 agent 自带权限映射告知调用方。
@@ -415,9 +428,9 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 ## 六、交互面与管理 API
 
-**交互形态（V0）**：人工操作走 `swarmmindctl` CLI（submit/query/agents/nodes/review 五命令，薄包装管理面 API，与 hub/node 同仓库同二进制集）；其中 review 在 V0 仅展示待核对上下文与处理指引（核对记录的持久化接口属 P3 增补，见 PLAN 生命周期）；agent/脚本直接调 HTTP API。**Web 控制台列入 P3（生命周期 PLAN 第七节）：登录制 + 派任务 + 任务管理 + needs_review 核对（原型 v2 已出，亮色带操作页）；实现时 hub 需增加控制台鉴权（访问令牌登录），安全模型从「纯回环无鉴权」扩展为「数据面回环 + 控制台登录制」，具体契约在 P3 开工前的 SPEC 增补中定义。**
+**交互形态（V0）**：人工操作走 `swarmmindctl` CLI（submit/query/agents/nodes/review 五命令，薄包装管理面 API，与 hub/node 同仓库同二进制集）；其中 review 在 V0 仅展示待核对上下文与处理指引（核对记录的持久化接口属 P3 增补，见 PLAN 生命周期）；agent/脚本直接调 HTTP API。**Web 控制台已随 P3 交付（生命周期 PLAN 第七节）：登录制 + 派任务 + 任务管理 + needs_review 核对；hub 控制台鉴权（访问令牌登录）已实现，安全模型为「数据面回环 + 控制台登录制」，契约见六.五。**
 
-### hub HTTP 管理面（api_listen，V0 无鉴权但绑回环）
+### hub HTTP 管理面（api_listen，绑回环；P3 起登录制会话鉴权，见六.五）
 
 | 方法 | 路径 | 请求 | 响应 |
 |---|---|---|---|
@@ -437,7 +450,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：`POST /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`，语义与 hub 管理面一致，内部经 WSS 会话转发为 task_submit/task_query 帧。任意本机进程（脚本/agent）都能对本机派单与查询，但**只限本机**：`target_node` 非本机 node_id 即 400 拒绝（不发帧、不留提交日志），hub 侧 D9/D10 双保险兜底——node 无全网派发与全网视图，跨机协作统一经 hub（MCP/A2A）发起。**已知限制**：提交方若非 node 本机而是 hub 侧回环调用方，取结果靠 hub 管理面轮询；node 提交方的终态经 result_event 推送。
 
-**统筹凭证与钦定·自动接线（方案 3.2.1 + t20261023-62a2）**：`POST /api/v1/local/prime/rotate`（轮换 prime_token：重生成→原子写盘→即时重载，旧凭证下一请求失效）与 `POST /api/v1/local/prime/declare`（网页钦定总理：校验 agent 存在→钦定即换凭证→yaml round-trip 写 node.yaml `prime_agent`→即时生效）均仅 local_token 可调（主人人工操作，六.六豁免③④）。**钦定即自动接线**：declare/rotate 成功后，node 自动把 swarmmind MCP 配置片段（含最新 prime_token）合并写入被钦定 agent 影子 home（`ExecProfile.ConfigHome`，空则 `data_dir/home`，与 runner HOME 同口径）内的宿主配置文件——布局探测只认 zcode 一种（`<home>/.zcode/cli/setting.json`，注意文件名单数）：存在且为合法 JSON 才命中（合法 = 全文恰一个 JSON 对象：`null`、尾部多余内容均不命中）；命中即合并顶层 `mcpServers.swarmmind`（幂等覆盖同键、不动其他键），写前备份 `<file>.bak-prime`（直接覆盖旧备份不堆积），临时文件+rename 原子写、0600（文件内含凭证）。应答带 `wired: true|false` 与 `wired_target`（命中时的绝对路径），declare/rotate 两口径一致、应答均带 `mcp_config` 片段（降级时主人拿得到手贴内容）；**降级口径**：文件/目录不存在、JSON 非法（含 `null` 与尾部多余内容）、顶层或 mcpServers 非对象、写失败、或 swarmmind-mcp 探测未命中（command 为占位符——占位配置落盘无用，一律不写）→ `wired:false`，绝不硬写、绝不创建宿主目录，应答保留 `mcp_config` 片段与手动指引由主人粘贴（宁可手贴，不猜布局乱写）。rotate 同步刷新影子 home 内的 `SWARM_NODE_PRIME_TOKEN`（否则旧 token 残留，统筹载体下一请求 401）；撤销统筹不清理已写入配置（token 已即时失效，残留无害）。全部接线动作发生在 declare/rotate 这个主人人工操作的事务内，prime_token 仍不经 agent 面分发（豁免③口径不变）。
+**统筹凭证与钦定·自动接线（docs/archive/PLAN-node-standalone.md §3.2.1 + 任务 t20261023-62a2）**：`POST /api/v1/local/prime/rotate`（轮换 prime_token：重生成→原子写盘→即时重载，旧凭证下一请求失效）与 `POST /api/v1/local/prime/declare`（网页钦定统筹载体：校验 agent 存在→钦定即换凭证→yaml round-trip 写 node.yaml `prime_agent`→即时生效）均仅 local_token 可调（主人人工操作，六.六豁免③④）。**钦定即自动接线**：declare/rotate 成功后，node 自动把 swarmmind MCP 配置片段（含最新 prime_token）合并写入被钦定 agent 影子 home（`ExecProfile.ConfigHome`，空则 `data_dir/home`，与 runner HOME 同口径）内的宿主配置文件——布局探测只认 zcode 一种（`<home>/.zcode/cli/setting.json`，注意文件名单数）：存在且为合法 JSON 才命中（合法 = 全文恰一个 JSON 对象：`null`、尾部多余内容均不命中）；命中即合并顶层 `mcpServers.swarmmind`（幂等覆盖同键、不动其他键），写前备份 `<file>.bak-prime`（直接覆盖旧备份不堆积），临时文件+rename 原子写、0600（文件内含凭证）。应答带 `wired: true|false` 与 `wired_target`（命中时的绝对路径），declare/rotate 两口径一致、应答均带 `mcp_config` 片段（降级时主人拿得到手贴内容）；**降级口径**：文件/目录不存在、JSON 非法（含 `null` 与尾部多余内容）、顶层或 mcpServers 非对象、写失败、或 swarmmind-mcp 探测未命中（command 为占位符——占位配置落盘无用，一律不写）→ `wired:false`，绝不硬写、绝不创建宿主目录，应答保留 `mcp_config` 片段与手动指引由主人粘贴（宁可手贴，不猜布局乱写）。rotate 同步刷新影子 home 内的 `SWARM_NODE_PRIME_TOKEN`（否则旧 token 残留，统筹载体下一请求 401）；撤销统筹不清理已写入配置（token 已即时失效，残留无害）。全部接线动作发生在 declare/rotate 这个主人人工操作的事务内，prime_token 仍不经 agent 面分发（豁免③口径不变）。
 
 ## 六.五、P3 增补契约（Web 控制台，按 INTERACTION.md 分级清单落地）
 
@@ -522,8 +535,8 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 3. **人工管理专属豁免（2026-10-22）**：以下管理面端点不设 MCP 工具——
    ① `POST /api/v1/tasks/{id}/cancel`（任务取消）：取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）；
    ② `POST /api/v1/nodes/enroll-bundle`（节点接入部署包生成）：端点为管理端人工装机操作专属——生成的部署包内嵌节点 register_token 凭据，agent 无权获取凭据，部署包亦不经 agent 面分发，只对管理端会话开放。
-   ③ `POST /api/v1/local/prime/declare`（node 网页钦定总理，2026-10-22）：本机主人人工操作专属（仅 local_token 可调）——钦定即凭据授予（应答带新 prime_token 与 MCP 连接片段），暴露给 agent 面等于 agent 可自行换发总理凭证，属提权通道；授权交接由本机主人在 node 控制台完成。t20261023-62a2 自动接线补充口径：钦定/轮换后 node 合并写入被钦定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
-   ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接总理凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
+   ③ `POST /api/v1/local/prime/declare`（node 网页钦定统筹载体，2026-10-22）：本机主人人工操作专属（仅 local_token 可调）——钦定即凭据授予（应答带新 prime_token 与 MCP 连接片段），暴露给 agent 面等于 agent 可自行换发统筹凭证，属提权通道；授权交接由本机主人在 node 控制台完成。t20261023-62a2 自动接线补充口径：钦定/轮换后 node 合并写入被钦定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
+   ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接统筹凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
    ⑤ `GET /api/v1/nodes/enroll-info`（节点接入入口地址查询，2026-10-23 第六轮修复 2）：接入向导人工装机流程的配套元数据端点（与豁免 ② 同一人工流程）——返回 hub 自身节点接入入口地址（node_listen 推导，无凭据），供控制台向导预填 hub_url；agent 面无使用场景，豁免 MCP 映射。
    ⑥ `GET /api/v1/prime`、`PUT /api/v1/prime`（hub 网页指定统筹载体，2026-10-23）：管理员管理面操作（hub 控制台指定/撤销全网唯一统筹载体），统筹智能体自身无需读写该状态，豁免 MCP 映射。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。

@@ -4,17 +4,17 @@
 
 ## 顶层文档
 
-| 文档 | 定位 |
-|---|---|
-| PLAN.md | 总方案书（FINAL v3.0）：定位、架构、生命周期 P0-P5、风险与开放问题 |
-| INTERACTION.md | 交互设计与生命周期规格：旅程矩阵、页面树、反馈闭环五规则 |
-| GROUP-RFC.md | 群聊/协作空间 RFC（P4 主特性）：MVP 已合入，实现偏差与恢复归属见第八节 |
-| FILE-COLLAB.md | 文件协作计划：L1 互斥（已交付）/ L2 产物链与依赖（进行中）/ L3 Git 集成（P5） |
-| PRIME-DESIGN.md | 统筹载体设计：指定、declare/rotate 与 MCP 接线 |
-| TESTPLAN.md | hub/node/E2E 测试计划（持续使用） |
-| TESTPLAN-FE.md | 前端验收规程（FE-PLAN v3 的用例本体，持续回归用） |
-| TESTREPORT.md | 测试报告（按轮次追加） |
-| DEPLOY-P2.md | 双机部署指南与 DoD 11 验收清单 |
+| 文档 | 定位 | 状态 |
+|---|---|---|
+| PLAN.md | 总方案书（FINAL v3.0）：定位、架构、生命周期 P0-P5、风险与开放问题 | FINAL（进度随阶段更新） |
+| INTERACTION.md | 交互设计与生命周期规格：旅程矩阵、页面树、反馈闭环五规则 | FINAL |
+| GROUP-RFC.md | 群聊/协作空间 RFC（P4 主特性）：MVP 已合入，实现偏差与恢复归属见第八节 | 草案 v1.0 · MVP 已合入 · 关门清单跟踪中 |
+| FILE-COLLAB.md | 文件协作计划：L1 互斥（已交付）/ L2 产物链与依赖（进行中）/ L3 Git 集成（P5） | FINAL（L2 进行中） |
+| PRIME-DESIGN.md | 统筹载体（Prime）设计：角色边界、StartLux 影子决策与 MCP 编排原语、提示词规格 | 评审闭环 |
+| TESTPLAN.md | hub/node/E2E 测试计划（持续使用） | 持续追加 |
+| TESTPLAN-FE.md | 前端验收规程（FE-PLAN v3 的用例本体，持续回归用） | 持续回归 |
+| TESTREPORT.md | 测试报告（按轮次追加） | 持续追加 |
+| DEPLOY-P2.md | 双机部署指南与 DoD 11 验收清单 | 稳定 |
 
 ## 子目录
 
