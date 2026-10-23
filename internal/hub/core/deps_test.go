@@ -59,6 +59,21 @@ func markCompletedInStore(t *testing.T, f *hubFixture, taskID string) {
 	}
 }
 
+// markFailedInStore 绕过 handleTaskResult 直接置 failed（离线场景模拟上游失败
+// 终态；无下游复评——由随后的 Sweep 兜底触发）。
+func markFailedInStore(t *testing.T, f *hubFixture, taskID string) {
+	t.Helper()
+	if err := f.st.Update(func(st *store.State) error {
+		tk := st.Tasks[taskID].Clone()
+		tk.Status = protocol.StatusFailed
+		tk.Result = &protocol.TaskResult{Status: protocol.ResultFailed, ExitCode: protocol.ExitCodeNotRun}
+		st.Tasks[taskID] = tk
+		return nil
+	}); err != nil {
+		t.Fatalf("注入 failed 失败: %v", err)
+	}
+}
+
 // TestDependsAdmissionRejections 依赖准入拒绝矩阵（SPEC 4.12：未知 idem/自引用/
 // 重复依赖/空项/超深度/超级联/依赖环 → ErrInvalidDeps）。
 func TestDependsAdmissionRejections(t *testing.T) {
@@ -464,5 +479,229 @@ func TestDependsRestartRecovery(t *testing.T) {
 	core2.Sweep()
 	if td, _ := core2.GetTask(downID); td.BlockedReason != "" {
 		t.Fatalf("重启后 Sweep 兜底应解除阻塞, got %q", td.BlockedReason)
+	}
+}
+
+// TestUpstreamFailedHistorySurvivesCleanup 清理后 Sweep（P1 修复）：下游
+// upstream_failed:<idem> 后旧上游被终态清理，Sweep 复评不得把标注降级改写为
+// blocked_by（失败史持久保留）；同 idem 新版本 completed 时补记 superseded_by
+// 且保持阻塞——人工决定是否重派，不得静默解除阻塞。
+func TestUpstreamFailedHistorySurvivesCleanup(t *testing.T) {
+	f := newHub(t)
+	n := f.newNode("nodeB", agentsOf("echo"), true)
+
+	up1 := submitDeps(t, f, "nodeB", "v1", nil, "fh-1")
+	downID := submitDeps(t, f, "nodeB", "down", []string{"fh-1"}, "")
+	completeViaNode(n, up1, protocol.ResultFailed)
+	if td := f.taskOf(downID); td.BlockedReason != "upstream_failed:fh-1" {
+		t.Fatalf("前置失败：下游应 upstream_failed:fh-1, got %q", td.BlockedReason)
+	}
+
+	// 旧上游清理（idem 短暂消失）→ Sweep 复评：失败史不得被降级抹除
+	removeByIDem(t, f, "fh-1")
+	f.core.Sweep()
+	td := f.taskOf(downID)
+	if td.BlockedReason != "upstream_failed:fh-1" {
+		t.Fatalf("清理后 Sweep 不得降级失败史, got %q", td.BlockedReason)
+	}
+	if td.SupersededBy != "" {
+		t.Errorf("无新版本不得记 superseded_by, got %q", td.SupersededBy)
+	}
+	if offers := countOffers(n, downID); offers != 0 {
+		t.Errorf("失败史任务不得投递, got %d offers", offers)
+	}
+
+	// 同 idem 新版本 completed：补记 superseded_by，保持阻塞（人工决定重派）
+	up2 := submitDeps(t, f, "nodeB", "v2", nil, "fh-1")
+	completeViaNode(n, up2, protocol.ResultCompleted)
+	td = f.taskOf(downID)
+	if td.SupersededBy != up2 {
+		t.Errorf("应记 superseded_by=%s, got %q", up2, td.SupersededBy)
+	}
+	if td.Status != protocol.StatusSubmitted || td.BlockedReason != "upstream_failed:fh-1" {
+		t.Errorf("superseded 不进状态机：应保持 submitted+失败史标注, got %s/%q", td.Status, td.BlockedReason)
+	}
+	if countOffers(n, downID) != 0 {
+		t.Error("superseded 任务不得自动放行投递")
+	}
+}
+
+// TestUpstreamFailedHistorySurvivesRerun 重跑期间 Sweep（P1 修复）：旧上游
+// 清理后同 idem 新版本运行中（非终态，复评解析为 pending）——Sweep 不得把
+// 失败史降级为 blocked_by；新版本 completed 时按失败史补记 superseded_by。
+func TestUpstreamFailedHistorySurvivesRerun(t *testing.T) {
+	f := newHub(t)
+	n := f.newNode("nodeB", agentsOf("echo"), true)
+
+	up1 := submitDeps(t, f, "nodeB", "v1", nil, "rr-1")
+	downID := submitDeps(t, f, "nodeB", "down", []string{"rr-1"}, "")
+	completeViaNode(n, up1, protocol.ResultFailed)
+	removeByIDem(t, f, "rr-1")
+
+	// 重跑新版本已投递运行中（非终态）→ Sweep 复评：保持失败史标注
+	up2 := submitDeps(t, f, "nodeB", "v2", nil, "rr-1")
+	if f.taskOf(up2).Status == protocol.StatusCompleted {
+		t.Fatal("前置失败：新版本应处于运行中")
+	}
+	f.core.Sweep()
+	td := f.taskOf(downID)
+	if td.BlockedReason != "upstream_failed:rr-1" {
+		t.Fatalf("重跑运行中 Sweep 不得降级失败史, got %q", td.BlockedReason)
+	}
+	if td.SupersededBy != "" {
+		t.Errorf("新版本未 completed 不得记 superseded_by, got %q", td.SupersededBy)
+	}
+
+	// 新版本 completed：失败史识别生效 → superseded_by + 保持阻塞
+	completeViaNode(n, up2, protocol.ResultCompleted)
+	td = f.taskOf(downID)
+	if td.SupersededBy != up2 || td.BlockedReason != "upstream_failed:rr-1" {
+		t.Errorf("应记 superseded_by=%s 并保持失败史标注, got %q/%q", up2, td.SupersededBy, td.BlockedReason)
+	}
+	if countOffers(n, downID) != 0 {
+		t.Error("superseded 任务不得自动放行投递")
+	}
+}
+
+// TestUpstreamFailedHistorySurvivesRestart 重启后 Sweep（P1 修复）：失败史
+// 标注随快照持久化，重启复评不降级；同 idem 新版本 completed → 补记
+// superseded_by 且保持阻塞。
+func TestUpstreamFailedHistorySurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	bus := transport.NewBus()
+	st1, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	clock := newFakeClock()
+	core1, err := New(Config{Store: st1, Transport: bus.Endpoint("hub"), Now: clock.Now, SweepInterval: 0})
+	if err != nil {
+		t.Fatalf("构造 core: %v", err)
+	}
+	f1 := &hubFixture{t: t, bus: bus, hubEP: bus.Endpoint("hub"), st: st1, core: core1, clock: clock}
+	f1.registerOffline("nodeB", agentsOf("echo")) // 离线：上游失败经注入+Sweep 兜底
+
+	upID := submitDeps(t, f1, "nodeB", "up", nil, "rh-1")
+	downID := submitDeps(t, f1, "nodeB", "down", []string{"rh-1"}, "")
+	markFailedInStore(t, f1, upID)
+	core1.Sweep()
+	if td := f1.taskOf(downID); td.BlockedReason != "upstream_failed:rh-1" {
+		t.Fatalf("前置失败：下游应 upstream_failed:rh-1, got %q", td.BlockedReason)
+	}
+	removeByIDem(t, f1, "rh-1") // 旧上游清理后关停
+
+	_ = core1.Close()
+	_ = st1.Close()
+
+	// 第二代 hub：同一 data_dir 重开
+	st2, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("重开 store: %v", err)
+	}
+	defer func() { _ = st2.Close() }()
+	core2, err := New(Config{Store: st2, Transport: bus.Endpoint("hub"), Now: clock.Now, SweepInterval: 0})
+	if err != nil {
+		t.Fatalf("重构造 core: %v", err)
+	}
+	defer func() { _ = core2.Close() }()
+
+	// 失败史随快照恢复；重启后 Sweep 不得降级
+	td, ok := core2.GetTask(downID)
+	if !ok {
+		t.Fatal("任务未随快照恢复")
+	}
+	if td.BlockedReason != "upstream_failed:rh-1" {
+		t.Fatalf("失败史未恢复: %q", td.BlockedReason)
+	}
+	core2.Sweep()
+	if td, _ = core2.GetTask(downID); td.BlockedReason != "upstream_failed:rh-1" {
+		t.Fatalf("重启后 Sweep 不得降级失败史, got %q", td.BlockedReason)
+	}
+
+	// 同 idem 新版本 completed（离线注入）→ Sweep 补记 superseded_by
+	f2 := &hubFixture{t: t, bus: bus, hubEP: bus.Endpoint("hub"), st: st2, core: core2, clock: clock}
+	f2.registerOffline("nodeB", agentsOf("echo"))
+	up2 := submitDeps(t, f2, "nodeB", "v2", nil, "rh-1")
+	markCompletedInStore(t, f2, up2)
+	core2.Sweep()
+	td, _ = core2.GetTask(downID)
+	if td.SupersededBy != up2 {
+		t.Errorf("重启后应记 superseded_by=%s, got %q", up2, td.SupersededBy)
+	}
+	if td.Status != protocol.StatusSubmitted || td.BlockedReason != "upstream_failed:rh-1" {
+		t.Errorf("应保持 submitted+失败史标注, got %s/%q", td.Status, td.BlockedReason)
+	}
+}
+
+// TestUpstreamFailedHistoryNoUnlockViaOtherDeps 失败史冻结不受其余依赖影响
+// （P1 修复）：失败 idem 被清理（消失）后其余依赖全部满足——常规复评会得出
+// 「全满足」结论解除阻塞，冻结口径下必须保持 blocked 且无 superseded_by
+// （失败 idem 无 completed 新版本，人工决定重派或 7d expire 兜底）。
+func TestUpstreamFailedHistoryNoUnlockViaOtherDeps(t *testing.T) {
+	f := newHub(t)
+	n := f.newNode("nodeB", agentsOf("echo"), true)
+
+	badID := submitDeps(t, f, "nodeB", "bad", nil, "fx-bad")
+	okID := submitDeps(t, f, "nodeB", "ok", nil, "fx-ok")
+	downID := submitDeps(t, f, "nodeB", "down", []string{"fx-bad", "fx-ok"}, "")
+	completeViaNode(n, badID, protocol.ResultFailed)
+	if td := f.taskOf(downID); td.BlockedReason != "upstream_failed:fx-bad" {
+		t.Fatalf("前置失败：应 upstream_failed:fx-bad, got %q", td.BlockedReason)
+	}
+
+	// 失败上游清理 + 其余依赖满足：不得解除阻塞、不得降级标注
+	removeByIDem(t, f, "fx-bad")
+	completeViaNode(n, okID, protocol.ResultCompleted)
+	f.core.Sweep()
+	td := f.taskOf(downID)
+	if td.BlockedReason != "upstream_failed:fx-bad" {
+		t.Fatalf("其余依赖满足不得越过失败史解锁, got %q", td.BlockedReason)
+	}
+	if td.SupersededBy != "" {
+		t.Errorf("失败 idem 无新版本不得记 superseded_by, got %q", td.SupersededBy)
+	}
+	if countOffers(n, downID) != 0 {
+		t.Errorf("失败史任务不得投递, got %d offers", countOffers(n, downID))
+	}
+}
+
+// TestDependsDepthLongestChain 长短路径汇合（P1 修复）：深度按逐节点最长链
+// 计（记忆化 DFS），去重集合只用于级联计数——既有链 A←B←C←D←E，新任务声明
+// [E, C] 时两路径在 C 汇合，全局去重 BFS 按短路径（3 边）放行实际 5 边的
+// 最长链；修复后按最长链拒绝。共享祖先在去重口径下只计一次。
+func TestDependsDepthLongestChain(t *testing.T) {
+	f := newHub(t)
+	f.registerOffline("nodeB", agentsOf("echo"))
+
+	// 链 gp-a←gp-b←gp-c←gp-d←gp-e
+	chain := []string{"gp-a", "gp-b", "gp-c", "gp-d", "gp-e"}
+	for i, idem := range chain {
+		var deps []string
+		if i > 0 {
+			deps = []string{chain[i-1]}
+		}
+		submitDeps(t, f, "nodeB", idem, deps, idem)
+	}
+
+	// 长短路径汇合：经 gp-e 最长 5 边（>4）须拒绝（修复前被去重按 3 边放行）
+	nLong := submitReq("nodeB", "echo", "n-long")
+	nLong.DependsOn = []string{"gp-e", "gp-c"}
+	if _, err := f.core.Submit(nLong, ""); !errors.Is(err, ErrInvalidDeps) {
+		t.Errorf("汇合最长链 5 边应拒绝, got %v", err)
+	}
+
+	// 恰 4 边的汇合放行：声明 [gp-d, gp-c]，经 gp-d 4 边；共享祖先
+	// gp-c/gp-b/gp-a 去重只计一次，上游共 4 个 ≤ 8
+	nEdge := submitReq("nodeB", "echo", "n-edge")
+	nEdge.DependsOn = []string{"gp-d", "gp-c"}
+	if _, err := f.core.Submit(nEdge, ""); err != nil {
+		t.Errorf("汇合最长链恰 4 边应放行, got %v", err)
+	}
+
+	// 短路径单独声明不受链上更深节点存在的影响
+	nShort := submitReq("nodeB", "echo", "n-short")
+	nShort.DependsOn = []string{"gp-c"}
+	if _, err := f.core.Submit(nShort, ""); err != nil {
+		t.Errorf("短路径 3 边应放行, got %v", err)
 	}
 }

@@ -136,24 +136,64 @@ func validateDepends(st *store.State, req protocol.TaskSubmitRequest) ([]string,
 		seen[k] = true
 		deps = append(deps, k)
 	}
-	// 上溯 BFS：frontier 为 idem 层；depth 计边层数、cascade 计去重上游任务数。
-	// visited 以 idem 为界（预置 ownIdem——链上任何一层解析回自身 idem 即环）。
-	visited := make(map[string]bool)
+	// 深度（最长链边数）：记忆化 DFS 逐节点计算。层序 BFS 的全局去重集合
+	// 不能用于深度——长短路径汇合时先到者定深度，后到的长路径被去重截断
+	// （N 声明 [E, C]，E→D→C→B→A 与 N→C→B→A 在 C 汇合，实际最长链 5 边
+	// 被按 3 边放行）。onPath 为当前递归栈（环检测：链上任何一层解析回栈中
+	// idem 即环，覆盖 idem 跨终态清理期复用构环；链上出现自身 idem 同罪——
+	// 本任务落库后即成环）。
+	depthMemo := make(map[string]int, len(deps)*2)
+	onPath := make(map[string]bool, len(deps))
+	var depthOf func(idem string) (int, error)
+	depthOf = func(idem string) (int, error) {
+		if req.IdemKey != "" && idem == req.IdemKey {
+			return 0, fmt.Errorf("%w: 依赖环（上游链引用自身 idem %q）", ErrInvalidDeps, idem)
+		}
+		if d, ok := depthMemo[idem]; ok {
+			return d, nil
+		}
+		if onPath[idem] {
+			return 0, fmt.Errorf("%w: 依赖环（上游链引用自身 idem %q）", ErrInvalidDeps, idem)
+		}
+		onPath[idem] = true
+		defer delete(onPath, idem)
+		_, id := resolveIDem(st, idem)
+		if id == "" {
+			return 0, fmt.Errorf("%w: 未知依赖 idem %q（不存在或已清理）", ErrInvalidDeps, idem)
+		}
+		longest := 0
+		for _, up := range st.Tasks[id].DependsOn {
+			d, err := depthOf(up)
+			if err != nil {
+				return 0, err
+			}
+			if d+1 > longest {
+				longest = d + 1
+			}
+		}
+		depthMemo[idem] = longest
+		return longest, nil
+	}
+	for _, k := range deps {
+		d, err := depthOf(k)
+		if err != nil {
+			return nil, err
+		}
+		if d+1 > protocol.MaxDependsDepth {
+			return nil, fmt.Errorf("%w: 依赖深度超过上限 %d", ErrInvalidDeps, protocol.MaxDependsDepth)
+		}
+	}
+	// 级联（上溯去重上游任务数）：BFS + 全局去重集合——计数口径允许去重共享
+	// 祖先只计一次，深度把关已由上方最长路径 DFS 完成。
+	visited := make(map[string]bool, len(deps)*2)
 	if req.IdemKey != "" {
 		visited[req.IdemKey] = true
 	}
 	frontier := append([]string(nil), deps...)
-	depth, cascade := 0, 0
+	cascade := 0
 	for len(frontier) > 0 {
-		depth++
-		if depth > protocol.MaxDependsDepth {
-			return nil, fmt.Errorf("%w: 依赖深度超过上限 %d", ErrInvalidDeps, protocol.MaxDependsDepth)
-		}
 		var next []string
 		for _, k := range frontier {
-			if req.IdemKey != "" && k == req.IdemKey {
-				return nil, fmt.Errorf("%w: 依赖环（上游链引用自身 idem %q）", ErrInvalidDeps, k)
-			}
 			if visited[k] {
 				continue
 			}
@@ -198,35 +238,41 @@ func evalDeps(st *store.State, deps []string) depEval {
 // reevaluateTask 单个下游任务复评（事务内调用；返回是否改动与是否解除阻塞）：
 //   - 仅门控 submitted 任务（已投递/终态不回收——解除阻塞是单向的，依赖均为
 //     终态不再变化，已放行任务不因上游清理被重新挡回）；
-//   - 曾因 upstream_failed:<idem> 被挡且该 idem 现由新版本满足 → 记
-//     SupersededBy（superseded 语义：上游重跑不自动解锁，任务保持 blocked，
-//     人工决定是否重派；FILE-COLLAB L2）；
-//   - 其余按复评结论更新 BlockedReason；由 blocked 转空即解除阻塞。
+//   - 失败史冻结：曾因 upstream_failed:<idem> 被挡的下游任务，失败历史持久
+//     保留（BlockedReason 随快照持久化，重启后照旧生效）——旧上游被终态清理
+//     （idem 短暂消失）或同 idem 新版本重跑运行中（解析为 pending）都不得把
+//     标注降级改写为 blocked_by:<idem>，更不得因其余依赖满足而解除阻塞；
+//   - superseded：失败史任务遇同 idem 新版本 completed → 记 SupersededBy
+//     （供人工重派），任务保持 blocked 不自动放行（FILE-COLLAB L2）；
+//   - 其余（无失败史）按复评结论更新 BlockedReason；由 blocked 转空即解除阻塞。
 func reevaluateTask(st *store.State, d *protocol.Task) (changed, unlocked bool) {
 	if d.Status != protocol.StatusSubmitted || len(d.DependsOn) == 0 {
 		return false, false
 	}
-	wasBlocked := d.BlockedReason != ""
-	ev := evalDeps(st, d.DependsOn)
-	if d.SupersededBy == "" && strings.HasPrefix(d.BlockedReason, protocol.BlockedReasonUpstreamFailedPrefix) {
-		oldIDem := strings.TrimPrefix(d.BlockedReason, protocol.BlockedReasonUpstreamFailedPrefix)
-		if id, ok := ev.satisfied[oldIDem]; ok {
-			d.SupersededBy = id
-			changed = true
+	// 失败史冻结先行：前缀即持久失败史（「上游失败不可自愈，人工决定是否重派」），
+	// 复评不得降级/清空标注——旧上游清理或重跑运行中解析为 pending/消失时，
+	// 按常规复评会得出 blocked_by 甚至全满足结论，抹掉失败史并在新版本
+	// completed 时错误放行且漏记 superseded_by。
+	if strings.HasPrefix(d.BlockedReason, protocol.BlockedReasonUpstreamFailedPrefix) {
+		failedIDem := strings.TrimPrefix(d.BlockedReason, protocol.BlockedReasonUpstreamFailedPrefix)
+		if d.SupersededBy == "" {
+			if state, id := resolveIDem(st, failedIDem); state == idemSatisfied {
+				d.SupersededBy = id // 同 idem 新版本满足：记审计，供人工重派
+				return true, false
+			}
 		}
+		return false, false // 冻结：保持 blocked 现状（不降级、不解锁、不重复记录）
 	}
-	if d.SupersededBy != "" {
-		return changed, false // 已被上游新版本取代：冻结门控（保持 blocked 现状）
+	if d.BlockedReason == "" {
+		return false, false // 未阻塞任务不复评（放行单向；依赖终态不会回退）
 	}
-	if !wasBlocked {
-		return changed, false // 未阻塞任务不复评（放行单向；依赖终态不会回退）
-	}
+	ev := evalDeps(st, d.DependsOn)
 	reason := ev.blockedReason()
 	if reason != d.BlockedReason {
 		d.BlockedReason = reason
-		changed = true
+		return true, reason == ""
 	}
-	return changed, changed && d.BlockedReason == ""
+	return false, false
 }
 
 // depReview 一次下游复评的结果：改动任务（调用方事务发布后 noteTask 记账）与
