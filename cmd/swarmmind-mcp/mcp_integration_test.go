@@ -348,11 +348,13 @@ func TestNodeBackendReadOnlyPrimeToken(t *testing.T) {
 	}
 }
 
-// TestHubToolListRegression hub 模式回归：12 工具清单与顺序不变；分发委托 callTool
+// TestHubToolListRegression hub 模式回归：13 工具清单与顺序不变（P4⑤ 新增
+// swarmmind_tasks，位于 artifact 之后、decide 之前）；分发委托 callTool
 //（未知工具协议错误、未配置 hub 的人话提示均保持原行为）。
 func TestHubToolListRegression(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
-		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact", "swarmmind_decide",
+		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact", "swarmmind_tasks",
+		"swarmmind_decide",
 		"swarmmind_group_create", "swarmmind_group_list", "swarmmind_group_say",
 		"swarmmind_group_messages", "swarmmind_group_close"}
 	got := []string{}
