@@ -1329,8 +1329,9 @@ function pickerNodeOptions(selected) {
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
- * 统筹载体（zcode-dev）置顶并加「统筹 · 」前缀（三处共用组件同步生效），
- * 选中它即统筹模式——取代原游离勾选框（2026-10-23 伦哥定案）。 */
+ * 2026-10-23 伦哥定案（二轮）：下拉项只留名字（描述收进 title 悬停），
+ * 统筹载体单独 optgroup 分组「统筹」并加前缀，与普通智能体视觉分区；
+ * 选中后的角色详情看摘要行（pickerSummaryHtml）。 */
 function pickerAgentOptions(nodeId, selected) {
   if (!nodeId) return '<option value="">请先选择机器</option>';
   const list = S.directory.filter(d => d.node_id === nodeId);
@@ -1338,18 +1339,24 @@ function pickerAgentOptions(nodeId, selected) {
   const isPrime = d => d.card.name.includes(PRIME_AGENT_KEY);
   const prime = list.filter(isPrime), rest = list.filter(d => !isPrime(d));
   const opt = d => {
-    const tip = `输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '') + (isPrime(d) ? ' · 统筹：拆解复合目标并派发汇总，不亲自执行子任务' : '');
+    const tip = `${d.card.name}${isPrime(d) ? ' · 统筹：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : ''}）`;
     const label = isPrime(d) ? `统筹 · ${d.card.name}` : d.card.name;
-    return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(label)} — ${esc(d.card.description || '（无描述）')}</option>`;
+    return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(label)}</option>`;
   };
-  return '<option value="">请选择智能体</option>' + prime.map(opt).join('') + rest.map(opt).join('');
+  const group = (label, arr) => arr.length ? `<optgroup label="${esc(label)}">${arr.map(opt).join('')}</optgroup>` : '';
+  return '<option value="">请选择智能体</option>'
+    + group('统筹 · 复合目标拆解派发汇总（选中即统筹模式）', prime)
+    + group('智能体与工具', rest);
 }
 /* pickerSummaryHtml / updatePickerSummary 摘要行（提交前一句话确认）：机器与智能体
- * 齐备时显示「将在 X 上用 Y 执行」，否则提示下一步先选什么。 */
+ * 齐备时显示「将在 X 上用 Y 执行」；选中统筹载体时附加统筹徽标（角色可见性）。
+ */
 function pickerSummaryHtml(node, agent) {
-  return node && agent
-    ? `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行</small>`
-    : '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
+  if (node && agent) {
+    const flag = agent.includes(PRIME_AGENT_KEY) ? ' <span class="badge orch">统筹模式 · 自动拆解派发汇总</span>' : '';
+    return `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行${flag}</small>`;
+  }
+  return '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
 }
 function updatePickerSummary(prefix) {
   const line = $('#' + prefix + '-summary-line');

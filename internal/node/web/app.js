@@ -583,11 +583,19 @@ function tasksPage() {
   const standalone = S.status?.mode === 'standalone';
   const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
     <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
-  const opts = S.catalog.map(e => {
+  /* 2026-10-23 同步 hub 端口径：下拉项只留名字（描述收进 title），统筹载体
+   * （zcode-dev）单独 optgroup 分组加前缀，与普通智能体视觉分区 */
+  const isPrime = e => e.card.name.includes('zcode-dev');
+  const optOf = e => {
     const v = e.node_id + '|' + e.card.name;
     const off = standalone || e.online ? '' : ' · 离线（任务进信箱，重连后执行）';
-    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''}>${esc(e.card.name)} — ${esc(e.card.description || '（无描述）')} · ${esc(e.card.permission_mode || '—')}${off}</option>`;
-  }).join('');
+    const tip = `${e.card.name}${isPrime(e) ? ' · 统筹：拆解复合目标并派发汇总' : ''} — ${e.card.description || '（无描述）'} · 权限 ${e.card.permission_mode || '—'}${off}`;
+    const label = isPrime(e) ? `统筹 · ${e.card.name}` : e.card.name;
+    return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''} title="${esc(tip)}">${esc(label)}${off}</option>`;
+  };
+  const primeOpts = S.catalog.filter(isPrime), restOpts = S.catalog.filter(e => !isPrime(e));
+  const group = (label, arr) => arr.length ? `<optgroup label="${esc(label)}">${arr.map(optOf).join('')}</optgroup>` : '';
+  const opts = group('统筹 · 复合目标拆解派发汇总', primeOpts) + group('智能体与工具', restOpts);
   const target = S.catalog.find(e => e.node_id + '|' + e.card.name === c.target);
   const stageView = {
     idle: '',
