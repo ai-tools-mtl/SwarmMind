@@ -75,6 +75,11 @@ func TestRearmPersistFailureSuppressesAckAndResend(t *testing.T) {
 	}) {
 		t.Fatal("任务应完成")
 	}
+	// task_result 由执行器 goroutine 在 MarkFinished 之后异步发出——账本可见
+	// 不代表帧已抵达记录器，断言计数前先等帧到位（否则偶发 0 帧）
+	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= 1 }) {
+		t.Fatalf("前置：首次结果帧应发出, got %v", f.resultFences())
+	}
 	if n := len(f.ofTypes(protocol.MsgTaskAck)); n != 1 {
 		t.Fatalf("前置：首次 offer 应恰一次 ack, got %d", n)
 	}
@@ -140,9 +145,13 @@ func TestInFlightCancelWriteBackTakesMaxFence(t *testing.T) {
 	if e, _ := f.svc.cfg.Ledger.Get("t-cf-1"); e.FenceEpoch != 7 {
 		t.Fatalf("取消回写应对账重臂为 7, got %d", e.FenceEpoch)
 	}
-	got := f.resultFences()
-	if len(got) == 0 || got[len(got)-1] != 7 {
-		t.Fatalf("取消回执应按对账后租约 7 回带, got %v", got)
+	// 回执帧由执行器 goroutine 异步发出且跨任务帧序无串行化保证——按任务过滤
+	// 并等帧到位断言（全局 resultFences() 的末帧在多任务并存时属于谁不确定）
+	if !waitFor(2*time.Second, func() bool {
+		g := f.resultFencesFor("t-cf-1")
+		return len(g) > 0 && g[len(g)-1] == 7
+	}) {
+		t.Fatalf("取消回执应按对账后租约 7 回带, got %v", f.resultFencesFor("t-cf-1"))
 	}
 
 	// 旧版 hub（取消帧不携租约，fence=0）：不重臂，回执按条目租约回带
@@ -163,8 +172,11 @@ func TestInFlightCancelWriteBackTakesMaxFence(t *testing.T) {
 	if e, _ := f.svc.cfg.Ledger.Get("t-cf-2"); e.FenceEpoch != 3 {
 		t.Fatalf("fence=0 取消不得改写租约, got %d", e.FenceEpoch)
 	}
-	if got := f.resultFences(); got[len(got)-1] != 3 {
-		t.Fatalf("回执应按条目租约 3 回带, got %v", got[len(got)-1:])
+	if !waitFor(2*time.Second, func() bool {
+		g := f.resultFencesFor("t-cf-2")
+		return len(g) > 0 && g[len(g)-1] == 3
+	}) {
+		t.Fatalf("回执应按条目租约 3 回带, got %v", f.resultFencesFor("t-cf-2"))
 	}
 }
 

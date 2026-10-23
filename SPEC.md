@@ -138,7 +138,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 | offer → task_ack | node 账本 accepted 已持久化 | hub 30s 后回退 submitted 重推 |
 | task_result → result_ack | hub 终态已持久化 | node 账本 finished 未 acked，重连后重发 |
 
-幂等规则：idem_key 作用域为 hub 全局，与任务同生命周期（过期/清理同步删除）；同键同内容 → 返回原 task_id + dup=true；同键不同内容 → 409 conflict。**提交流程顺序固定：鉴权 → idem 查重（命中即返回，不做配额检查）→ 容量/字节预检 → 持久化（单写事务内全部重检）→ Ack**。保证同键重试在信箱满时仍能取回原 task_id。
+幂等规则：idem_key 作用域为 hub 全局，与任务同生命周期（过期/清理同步删除）；同键同内容 → 返回原 task_id + dup=true；同键不同内容 → 409 conflict。**提交流程顺序固定：鉴权 → idem 查重（命中即返回，不做配额检查）→ 依赖准入校验（4.12，P4.3）→ 容量/字节预检 → 持久化（单写事务内全部重检）→ Ack**。保证同键重试在信箱满时仍能取回原 task_id（且旧提交的幂等重试不因依赖此后被清理而失败——依赖准入位于 idem 查重之后）。
 重复消息去重后必须重放对应 Ack（见 4.3 收敛表），禁止静默丢弃导致确认悬挂。
 
 **结果重传与终止条件（node 侧）**：账本 finished 未 acked 的结果在每次重连成功后立即重发，此后每 60s 重发一次；收到 result_ack → 停止；收到 result_conflict 或任务已 expired 终态拒绝 → 停止重传，账本标记 `closed`（冲突审计日志保留），不删除记录。
@@ -254,7 +254,11 @@ type Task struct {
     Input       TaskInput   `json:"input"`
     SubmittedBy string      `json:"submitted_by"`   // HTTP 提交=调用方标记；node 提交=hub 覆盖为该 node_id
     IdemKey     string      `json:"idem,omitempty"`
+    GroupRef    string      `json:"group_ref,omitempty"` // 群引用（管理面扩展，SPEC 4.5 指纹口径）
+    DependsOn   []string    `json:"depends_on,omitempty"` // 依赖的上游 idem_key 列表（P4.3/4.12，提交后不可变）
     Status      TaskStatus  `json:"status"`         // 见 4.3 状态机
+    BlockedReason string    `json:"blocked_reason,omitempty"` // 依赖门控标注（P4.3/4.12，不进状态机）
+    SupersededBy  string    `json:"superseded_by,omitempty"`  // 上游重跑审计标注（P4.3/4.12，不进状态机）
     CreatedAt   time.Time   `json:"created_at"`     // UTC RFC3339
     UpdatedAt   time.Time   `json:"updated_at"`
     ExpireAt    time.Time   `json:"expire_at"`      // CreatedAt+7d
@@ -275,6 +279,8 @@ type TaskSubmitRequest struct {
     Input       TaskInput `json:"input"`
     SubmittedBy string    `json:"submitted_by"` // 必填（人/agent 名）
     IdemKey     string    `json:"idem_key,omitempty"`
+    GroupRef    string    `json:"group_ref,omitempty"` // 群引用（管理面扩展）
+    DependsOn   []string  `json:"depends_on,omitempty"` // 依赖声明（P4.3/4.12）：上游 idem_key 列表
 }
 ```
 
@@ -305,6 +311,48 @@ type TaskSubmitRequest struct {
 **已知代价（声明）**：跨代次的执行若任务未重派（如 node 执行中掉线重连、hub 侧任务仍 running），其合法结果与 zombie 结果对 hub 不可区分，按本契约回带原租约**接受**（等值）——状态机安全由会话层身份担保；真正的残留风险窗口仅「同 node_id 双进程且旧进程抢回会话且任务未重派」，此时回执来自当前会话持有者、且 node 单账本保证每任务至多一个执行，污染面为诊断数据而非状态机。租约拒收后的滞留任务（如重派竞态失败留 running）由 7d expire 兜底，V2 自动回收以此为输入。
 
 **MCP 同步检查**：本变更为协议内防写机制 + 审计字段，结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更（任务查询工具返回体透传 `lease` 展示字段，不构成工具面变更）。
+
+### 4.12 任务依赖（P4.3 第一子批，2026-10-23；FILE-COLLAB L2 依赖门控+调度）
+
+**范围声明**：本子批只做依赖门控与调度；产物挂载（`workdir/inputs/<上游id>/` 纯复制 + SHA 校验）与跨机取回为 L2 第二子批，不在本节。
+
+**寻址（FILE-COLLAB 终审口径）**：`depends_on` 使用 **idem_key**（跨重跑稳定）而非 task_id；声明后不可变（提交即定，无改边路径）。
+
+**Schema（新字段全部 optional，七态状态机/收敛表/终态规则零改动）**：
+
+| 字段 | 载体 | 语义 |
+|---|---|---|
+| `depends_on []string` | TaskSubmitRequest / Task | 依赖的上游任务 idem_key 列表；提交时准入校验后随任务落库 |
+| `blocked_reason string` | Task | 依赖门控标注（**不进状态机**）：`blocked_by:<idem>`（等待中，含 idem 已随终态清理消失的兜底等待）/ `upstream_failed:<idem>`（上游 failed/needs_review/cancelled）；空=未阻塞。多依赖时取声明序首个，失败优先于等待（失败不可自愈需人工，等待可自行恢复） |
+| `superseded_by string` | Task | 上游重跑审计标注（**不进状态机**）：曾因 `upstream_failed:<idem>` 被挡的下游任务，遇同 idem 新版本 completed 时记录该新任务 ID；任务保持 blocked 不自动放行，人工决定是否重派（「上游重跑自动解锁」已删除——FILE-COLLAB L2 终审；旧任务审计保留） |
+
+**准入校验（提交校验链 idem 查重之后、体积预检之前预检；单写事务内按快照重检——上游在两检之间被清理即拒绝）**，违规 → 400 `invalid_dependency`（err 帧同码）：
+1. 未知 idem：快照中无携带该 idem 的任务（不存在或已随终态清理）；
+2. 自引用：`depends_on` 含自身 `idem_key`（未携 idem 的提交无从自引用）；
+3. 重复依赖；
+4. 空项/纯空白项（入库前 TrimSpace 归一）；
+5. 深度超限：沿依赖图上溯最长链边数 > 4（链上至多 5 任务）；
+6. 级联超限：上溯可达的去重上游任务总数 > 8；
+7. 依赖环：边只指向已存在任务天然无环；防御 idem 跨终态清理期被复用构环——上溯链解析回自身 idem 即拒绝。
+
+**幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。
+
+**门控与调度**：
+- **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；七态状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用，SPEC 4.10）。
+- **blocked 任务留信箱占配额**：入箱/计量口径与普通 submitted 任务一致；信箱满拒新提交的既有语义不变（SPEC 4.6）。
+- **事件触发复评**：上游任务到终态的仲裁事务处——result.go 首次落终态（task_result 接受分支）、CancelTask 置 cancelled、Sweep 三处置终态（expired/排队超时/offer 超时过期）——**同一单写事务内**复评其 idem 的全部下游任务（依赖全 completed → 解除阻塞，发布后按目标节点 dispatch；任一上游 failed/needs_review/cancelled → 保持 blocked 并更新标注）。单事务原子生效，无「上游已 completed 而下游仍 blocked」的事件丢失窗口。
+- **Sweep 兜底**：每秒扫描（`sweepInterval` tick）对全部 blocked 的 submitted 任务全量复评，防御未知路径的事件丢失；解除阻塞随本轮 dispatch。
+- **排队超时豁免**：blocked 任务不适用 P1.5 `workdir_busy_timeout`（等待的是上游终态而非 workdir，`workdirBusyFor` 不因门控成立）；7d expire 兜底照常（SPEC 4.3/4.6）。
+- **放行单向**：已解除阻塞（含未及投递）的任务不因上游终态清理被重新挡回——依赖均为终态不再变化，复评只作用于 `submitted` 且仍 blocked 的任务。
+- **hub 重启恢复免费**：依赖门控全部字段随任务快照持久化（Clone/JSON 覆盖），重启后 blocked 状态原样恢复，Sweep 兜底继续复评，无独立恢复流程。
+
+**依赖解析口径**：依赖 idem 解析当前快照——有 completed 任务即满足（任一版本；多活同键（group_ref 装饰边，SPEC 4.5）宽松口径取最早 completed）；否则有非终态任务为等待中；否则（仅 failed/needs_review/cancelled）为上游失败；快照无该 idem 保持等待（`blocked_by:<idem>`，7d expire 兜底）。
+
+**本子批的产物过渡**：上游 completed 但产物不挂载（挂载为 L2 第二子批）；本子批放行投递时任务 stdin 已附上游 idem 依赖清单，供 agent 经管理面/MCP（swarmmind_artifact 按上游 task_id）自取。
+
+**边界声明**：依赖门控仅 hub 提交链生效（HTTP 管理面 + node 会话 task_submit 帧）；node 本地直执行链（node localapi POST /tasks，origin=local）不经过 hub 状态机，不支持依赖声明。node 收到的 task_offer 载荷可能携带 `depends_on`/`blocked_reason` 字段（Task 全量透传），node 侧不感知、不入状态机。
+
+**MCP 同步**：`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（见六.六规则 7）；REST 提交请求体透传（handleSubmit 平铺解码 TaskSubmitRequest）、任务查询返回体携带三字段——均为 optional 字段，既有 API 兼容性不变。
 
 ## 五、node 配置（configs/node.example.yaml）
 
@@ -373,7 +421,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 | 方法 | 路径 | 请求 | 响应 |
 |---|---|---|---|
-| POST | /api/v1/tasks | `{target_node, target_agent, input, submitted_by, idem_key?}` | 202 `{task_id, trace_id}`；幂等命中 200 同 task_id + `dup:true`；同键不同内容 409；信箱满 503 `mailbox_full`；目标不存在 404；超限 400 |
+| POST | /api/v1/tasks | `{target_node, target_agent, input, submitted_by, idem_key?, depends_on?}` | 202 `{task_id, trace_id}`；幂等命中 200 同 task_id + `dup:true`；同键不同内容 409；依赖声明不合法 400 `invalid_dependency`（4.12）；信箱满 503 `mailbox_full`；目标不存在 404；超限 400 |
 | GET | /api/v1/tasks/{id} | - | 200 Task（含状态/结果/needs_review） |
 | GET | /api/v1/agents | - | `{agents:[{card, node_id, online}]}`；card=AgentCard，**绝不包含 ExecProfile 字段**（执行配置不出本机） |
 | GET | /api/v1/nodes | - | `{nodes:[{node_id, online, epoch, inflight}]}` |
@@ -381,7 +429,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 | POST | /api/v1/tasks/{id}/cancel | `{reason?}` | 202 取消已受理（hub 置 cancelled 终态 + 下发 task_cancel，node 结果异步回传）；幂等命中 200；已终态（completed/failed/needs_review）409 `not_cancellable`；不存在 404。管理面能力，**不设 MCP 工具**（取消保留给人工管理员，agent 不可互删任务） |
 
 **无 HTTP 轮询回退**：离线路径=信箱+重连补推，别无分叉（避免绕过账本/Ack 的第二条路径）。旧 `/tasks/fetch` 概念废除。
-任务提交校验链（顺序与 §4.5 一致）：**鉴权/目标存在且 exposed=true（未接入 → 404 `agent_not_exposed`）→ idem 查重（命中即返回，不做配额检查）→ 序列化体积实测预检 → 信箱配额与字节预算 → 持久化（单写事务内全部重检）→ submit_ack**。全链失败则无 Ack。
+任务提交校验链（顺序与 §4.5 一致）：**鉴权/目标存在且 exposed=true（未接入 → 404 `agent_not_exposed`）→ idem 查重（命中即返回，不做配额检查）→ 依赖准入校验（P4.3/4.12：未知 idem/自引用/重复/超深度/超级联/环 → 400 `invalid_dependency`）→ 序列化体积实测预检 → 信箱配额与字节预算 → 持久化（单写事务内全部重检）→ submit_ack**。全链失败则无 Ack。
 
 **node 会话边界锁（方案 v2 D9/D10，hub 兜底）**：node 会话的 task_submit 在一切校验前强制 `target == env.From`（身份由会话层覆盖，违规拒绝）；task_query 按 `Task.TargetNode == env.From` 收敛，他节点任务拒绝。hub 核心层双保险保证 node 无全网派发与全网视图。
 
@@ -443,7 +491,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 |---|---|---|
 | swarmmind_nodes | GET /api/v1/nodes | 在线节点与负载 |
 | swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面） |
-| swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id 透传，幂等重派与任期追踪） |
+| swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id/depends_on 透传，幂等重派、任期追踪与任务依赖 P4.3） |
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
@@ -480,6 +528,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
 6. **P4 任务租约同步检查声明（2026-10-23）**：任务租约（4.11）为协议内防写机制（Envelope fence_epoch 门禁 + Task.Lease 审计），结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更——豁免映射表补行；任务查询工具返回体透传新增 `lease` 展示字段，不构成工具面变更。
+7. **P4.3 任务依赖同步声明（2026-10-23，第一子批）**：任务依赖（4.12）为既有 REST 能力的参数扩展——`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（上游 idem_key 列表；node 本机直执行模式不经过 hub 状态机，不支持该参数），本表 `swarmmind_submit` 行已同步；`swarmmind_status`/`swarmmind_wait` 返回体透传 `depends_on`/`blocked_reason`/`superseded_by` 展示字段（含 blocked/upstream_failed/superseded 的人话提示），不构成新工具。依赖声明不合法经 submit 工具以 `invalid_dependency` 人话文本返回。
 
 ## 七、验证标准（DoD 十一条）
 

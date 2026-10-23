@@ -76,10 +76,12 @@ func TestResultEchoesOfferFence(t *testing.T) {
 	}) {
 		t.Fatal("两任务应完成")
 	}
-	got := f.resultFences()
-	if len(got) != 2 {
-		t.Fatalf("应各回一次 result, got %v", got)
+	// task_result 由执行器 goroutine 在 MarkFinished 之后异步发出——先等两帧
+	// 到位再做集合断言（账本 finished 可见时帧可能尚未抵达记录器）
+	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= 2 }) {
+		t.Fatalf("应各回一次 result, got %v", f.resultFences())
 	}
+	got := f.resultFences()
 	// 回带值与派发租约一一对应：5（携租约）与 0（缺省），到达序不敏感
 	seen := map[int64]int{5: 0, 0: 0}
 	for _, fence := range got {

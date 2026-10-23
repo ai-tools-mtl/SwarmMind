@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"strings"
 
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
 	"github.com/mtl802/swarmmind/internal/hub/store"
@@ -38,9 +39,12 @@ func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyT
 //     V0 绑回环，身份仅为调用方标记）；
 //  3. 目标 exposed=true，否则 ErrAgentNotExposed；
 //  4. idem 查重——命中即返回，不做配额检查；
-//  5. 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
-//  6. 信箱配额/字节预算 + 存储全局预算预检；
-//  7. 单写事务持久化（事务内全部重检）→ SubmitAck。
+//  5. 依赖准入（P4.3/SPEC 4.12）：depends_on 声明校验（未知 idem/自引用/重复
+//     依赖/深度/级联/环 → ErrInvalidDeps），置于 idem 查重之后——旧提交的
+//     幂等重试不因上游此后被清理而失败；
+//  6. 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
+//  7. 信箱配额/字节预算 + 存储全局预算预检；
+//  8. 单写事务持久化（事务内全部重检，依赖准入以事务内快照为准）→ SubmitAck。
 //
 // submitterNode 非 "" 表示 node 会话提交：SubmittedBy 被覆盖为该 node_id
 // （SPEC 4.9），确认与失败经帧回给该 node（submit_ack/err 帧，ReplyTo=replyTo），
@@ -62,6 +66,8 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
 	}
+	// 依赖项规范化（TrimSpace）：先于 idem 查重执行，保证重试指纹稳定
+	req.DependsOn = trimDeps(req.DependsOn)
 
 	view := c.st.View()
 
@@ -87,7 +93,13 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		}
 	}
 
-	// 5. 构造任务 + 序列化体积实测预检（完整 TaskOffer 信封编码计字节）
+	// 5. 依赖准入预检（事务内按快照重检——上游在两检之间被清理即拒绝）
+	if _, err := validateDepends(view, req); err != nil {
+		c.ackSubmitter(submitterNode, replyTo, nil, err)
+		return nil, err
+	}
+
+	// 6. 构造任务 + 序列化体积实测预检（完整 TaskOffer 信封编码计字节）
 	task := c.newTask(req, taskIDHint)
 	if err := checkOfferSize(&task); err != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
@@ -95,13 +107,13 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 	}
 	size := mailbox.TaskBytes(&task)
 
-	// 6. 信箱配额/字节预算 + 存储全局预算预检
+	// 7. 信箱配额/字节预算 + 存储全局预算预检
 	if err := c.checkCapacity(view, req.TargetNode, size); err != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
 	}
 
-	// 7. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）
+	// 8. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）
 	var (
 		txnDup *SubmitAck
 		txnErr error
@@ -137,6 +149,13 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 			txnErr = ErrInvalid
 			return nil
 		}
+		// 依赖准入重检（上游被清理/并发变更以事务内快照为准）+ 依赖门控初评：
+		// 依赖未满足即落 blocked_reason，保持 submitted 不投递（P4.3，状态机不变）
+		if _, err := validateDepends(st, req); err != nil {
+			txnErr = err
+			return nil
+		}
+		task.BlockedReason = evalDeps(st, req.DependsOn).blockedReason()
 		st.Tasks[task.ID] = task
 		return mailbox.Enqueue(st, task.TargetNode, &task)
 	})
@@ -201,14 +220,31 @@ func submitErrCode(err error) string {
 		return protocol.CodeFrameTooLarge
 	case errors.Is(err, mailbox.ErrConflict):
 		return "conflict"
+	case errors.Is(err, ErrInvalidDeps):
+		return protocol.CodeInvalidDependency
 	case errors.Is(err, ErrInvalid):
 		return "invalid"
 	}
 	return "internal"
 }
 
+// trimDeps 依赖项规范化：逐项 TrimSpace（提交入口先于 idem 查重执行，保证
+// 重试指纹稳定；空项留待 validateDepends 拒绝）。
+func trimDeps(deps []string) []string {
+	if len(deps) == 0 {
+		return nil
+	}
+	out := make([]string, len(deps))
+	for i, k := range deps {
+		out[i] = strings.TrimSpace(k)
+	}
+	return out
+}
+
 // newTask 按提交请求构造任务（ID/时间/身份 hub 生成，SPEC 4.9）。idHint 非空
-// 时沿用调用方预生成的任务 ID（SubmitWithID「先登记后提交」路径）。
+// 时沿用调用方预生成的任务 ID（SubmitWithID「先登记后提交」路径）。声明依赖时
+// Input 过 EffectiveInput 生效形态（stdin 尾部附依赖清单，与幂等指纹同一变换；
+// 产物自动挂载为 L2 第二子批，本批先附上游 idem 供 agent 自取）。
 func (c *Core) newTask(req protocol.TaskSubmitRequest, idHint string) protocol.Task {
 	now := c.now()
 	id := idHint
@@ -220,10 +256,11 @@ func (c *Core) newTask(req protocol.TaskSubmitRequest, idHint string) protocol.T
 		TraceID:     protocol.NewTraceID(),
 		TargetNode:  req.TargetNode,
 		TargetAgent: req.TargetAgent,
-		Input:       req.Input.Clone(),
+		Input:       protocol.EffectiveInput(req.Input, req.DependsOn),
 		SubmittedBy: req.SubmittedBy,
 		IdemKey:     req.IdemKey,
 		GroupRef:    req.GroupRef,
+		DependsOn:   append([]string(nil), req.DependsOn...),
 		Status:      protocol.StatusSubmitted,
 		CreatedAt:   now,
 		UpdatedAt:   now,

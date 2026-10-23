@@ -290,6 +290,9 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusServiceUnavailable, protocol.CodeStorageFull, err.Error())
 	case errors.Is(err, protocol.ErrFrameTooLarge):
 		writeErr(w, http.StatusBadRequest, protocol.CodeFrameTooLarge, err.Error())
+	case errors.Is(err, core.ErrInvalidDeps):
+		// 依赖声明不合法（P4.3/SPEC 4.12：未知 idem/自引用/重复/超深度/超级联/环）
+		writeErr(w, http.StatusBadRequest, protocol.CodeInvalidDependency, err.Error())
 	case errors.Is(err, core.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:

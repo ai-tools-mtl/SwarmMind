@@ -37,13 +37,15 @@ type groupContent struct {
 }
 
 // ContentHash 提交内容全量指纹（含群引用）：canonical JSON（encoding/json 确定性
-// 输出）的 SHA-256 hex。
+// 输出）的 SHA-256 hex。Input 过 EffectiveInput 生效形态（P4.3：声明 depends_on
+// 时 stdin 尾部附依赖清单）——与 newTask 落库的任务体同一变换，重试指纹与落库
+// 任务指纹逐字节一致。
 func ContentHash(req protocol.TaskSubmitRequest) string {
 	c := groupContent{
 		content: content{
 			TargetNode:  req.TargetNode,
 			TargetAgent: req.TargetAgent,
-			Input:       req.Input.Clone(),
+			Input:       protocol.EffectiveInput(req.Input, req.DependsOn),
 			SubmittedBy: req.SubmittedBy,
 		},
 		GroupRef: req.GroupRef,
@@ -57,7 +59,7 @@ func BaseContentHash(req protocol.TaskSubmitRequest) string {
 	return contentHashJSON(content{
 		TargetNode:  req.TargetNode,
 		TargetAgent: req.TargetAgent,
-		Input:       req.Input.Clone(),
+		Input:       protocol.EffectiveInput(req.Input, req.DependsOn),
 		SubmittedBy: req.SubmittedBy,
 	})
 }
@@ -73,7 +75,8 @@ func contentHashJSON(v any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// taskContentHash 从已持久化任务体提取同口径全量指纹。
+// taskContentHash 从已持久化任务体提取同口径全量指纹（EffectiveInput 幂等：
+// 落库任务的 stdin 已含依赖清单，原样返回不重复追加）。
 func taskContentHash(t *protocol.Task) string {
 	return ContentHash(protocol.TaskSubmitRequest{
 		TargetNode:  t.TargetNode,
@@ -81,6 +84,7 @@ func taskContentHash(t *protocol.Task) string {
 		Input:       t.Input,
 		SubmittedBy: t.SubmittedBy,
 		GroupRef:    t.GroupRef,
+		DependsOn:   t.DependsOn,
 	})
 }
 
@@ -91,6 +95,7 @@ func taskBaseContentHash(t *protocol.Task) string {
 		TargetAgent: t.TargetAgent,
 		Input:       t.Input,
 		SubmittedBy: t.SubmittedBy,
+		DependsOn:   t.DependsOn,
 	})
 }
 

@@ -30,7 +30,8 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 	var (
 		out         protocol.Task
 		dup         bool
-		cancelFence int64 // 该任务当前落库租约（cancel_fence，P1-2）：node 取消回执对账基准
+		cancelFence int64      // 该任务当前落库租约（cancel_fence，P1-2）：node 取消回执对账基准
+		depRev      *depReview // 依赖门控下游复评（P4.3：取消终态事务内原子复评）
 	)
 	err := c.st.Update(func(st *store.State) error {
 		t, ok := st.Tasks[taskID]
@@ -56,6 +57,9 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 未投递直接撤回，释放信箱配额
 		}
 		out = nt
+		// 依赖门控（P4.3）：cancelled 终态同 failed 口径——下游保持 blocked，
+		// blocked_reason 更新为 upstream_failed:<idem>
+		depRev = reevaluateDependents(st, nt.IdemKey)
 		if t.Lease != nil {
 			cancelFence = t.Lease.FenceEpoch
 		}
@@ -68,6 +72,8 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 		return out, true, nil
 	}
 	c.noteTask(&out)
+	noteDepReview(c, depRev)
+	dispatchDepReview(c, depRev) // superseded 之外的复评若解除其他依赖组合的阻塞，即投递
 	// task_cancel 尽力送达（submitted 撤回路径也发：ack 超时回退的任务可能已
 	// 在 node 手中，迟到执行由 node 侧取消与 hub 冲突收敛共同兜底）。P1-2：帧
 	// 携该任务当前落库租约（cancel_fence）——重派推进租约而 node 未及重臂时

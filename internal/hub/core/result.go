@@ -61,6 +61,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		conflict bool           // 保留先到：回冲突
 		zombie   bool           // 租约过期（zombie 写）：维持原状态拒收
 		zLease   int64          // zombie 分支事务内捕获的落库租约（P1-4：事务外不得重读 Tasks——Sweep 并发删除超保留期任务时零值解引用）
+		depRev   *depReview     // 依赖门控下游复评（P4.3：首次落终态事务内原子复评）
 	)
 	err := c.st.Update(func(st *store.State) error {
 		t, ok := st.Tasks[p.TaskID]
@@ -129,6 +130,10 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 直达终态即释放信箱
 		}
 		accepted = &nt
+		// 依赖门控（P4.3）：上游到终态在同一事务内复评下游——全依赖 completed 的
+		// 下游解除阻塞（发布后 dispatch 投递），上游 failed/needs_review/cancelled
+		// 的下游更新 blocked_reason；superseded 标注在此产生
+		depRev = reevaluateDependents(st, nt.IdemKey)
 		return nil
 	})
 	if err != nil {
@@ -158,6 +163,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 	switch {
 	case accepted != nil:
 		c.noteTask(accepted)
+		noteDepReview(c, depRev)
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)
 		c.notifyResultEvent(accepted)
@@ -167,8 +173,9 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 			c.dispatch(env.From)
 			break
 		}
-		c.fireTerminal(accepted) // 群聊闭环回流等终态旁路（GROUP-RFC）
-		c.dispatch(env.From)     // 窗口释放一格，恢复出队
+		c.fireTerminal(accepted)     // 群聊闭环回流等终态旁路（GROUP-RFC）
+		c.dispatch(env.From)         // 窗口释放一格，恢复出队
+		dispatchDepReview(c, depRev) // 解除阻塞的下游任务进入正常投递（P4.3）
 	case dupAck:
 		_ = c.sendFrame(env.From, protocol.MsgResultAck, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID}, nil)
