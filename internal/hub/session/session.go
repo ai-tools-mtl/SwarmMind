@@ -31,15 +31,15 @@ const staleEpochLimit = 5
 // goroutine 布局与退出：读循环（run 本体）退出即 finish → 关队列 → 写 goroutine
 // 排空后 Close 连接（反过来解除 Read 阻塞）→ 各 goroutine 退出 → finish 等待
 // 全部结束后向 Manager 注销。生命周期信号统一是队列的 done 通道与会话 ctx
-//（非优雅关闭时取消在途读写，L4），不另设关闭通道。
+// （非优雅关闭时取消在途读写，L4），不另设关闭通道。
 type session struct {
 	mgr    *Manager
 	nodeID string // 注册成功后有效
 	epoch  int64  // 注册事务分配的会话代次（注册成功后有效）
 
-	conn *websocket.Conn
-	q    *outboundQ
-	ctx  context.Context    // 会话生命周期：非优雅关闭即取消（在途 Read/Write 随之中断）
+	conn   *websocket.Conn
+	q      *outboundQ
+	ctx    context.Context // 会话生命周期：非优雅关闭即取消（在途 Read/Write 随之中断）
 	cancel context.CancelFunc
 
 	lastPong atomic.Int64 // 上次收到 pong 的 UnixNano（心跳计时基于上次 pong 收到时刻，SPEC 4.6）
@@ -92,7 +92,7 @@ func (s *session) finish() {
 
 // beginClose 关闭发送队列（幂等）；graceful=true 时写 goroutine 先排空控制帧
 // （关闭握手）再断开。非优雅关闭同时取消会话 ctx：在途 Write/Read 立即中断
-//（L4：关闭不得被 60s 写超时拖住）——但队列已按优雅模式关闭时不得取消（会中止
+// （L4：关闭不得被 60s 写超时拖住）——但队列已按优雅模式关闭时不得取消（会中止
 // 在途握手，close 帧无法送达对端）；强断走 forceClose 无条件取消。连接的实际
 // Close 一律由写 goroutine 执行（唯一写方）。
 func (s *session) beginClose(graceful bool) {
@@ -115,7 +115,7 @@ func (s *session) forceClose() {
 // 不发 ack、断开。
 //
 // L1：提交持久化 → 会话表发布 → ack → 上线回调 → 旧连接清理，整段按 node 串行
-//（mgr.nodeLock）。同 node 并发注册时「先提交后发布」的逆序覆盖从此不可能发生：
+// （mgr.nodeLock）。同 node 并发注册时「先提交后发布」的逆序覆盖从此不可能发生：
 // 后到注册在前一注册发布/ack 完成前无法进入提交。
 func (s *session) register() bool {
 	m := s.mgr
@@ -346,11 +346,14 @@ func (s *session) writeLoop() {
 		if closed, grace := s.q.state(); closed {
 			if grace {
 				// 优雅关闭：先排空控制帧（如 register_ack / auth 拒绝应答）再握手。
-				// CloseRead 代读入站残余（协议错误断开前对端连发的帧）：不读而关会
-				// 触发 RST、冲掉对端已接收的应答帧；CloseRead 同时代答 ping/pong/
-				// close，保证关闭握手可完成。
+				// 入站残余帧静默丢弃（协议错误断开前对端连发的帧）：不读而关会触发
+				// RST、冲掉对端已接收的应答帧。不用库的 CloseRead——它读到数据帧会
+				// 自动回 close 1008 PolicyViolation，覆盖优雅握手（CI macos 实测：
+				// client 连发坏帧挤入缓冲，client 收到 1008 而非 1000，2026-10-24
+				// 诊断实锤）。ping/pong 由库在读路径内自动应答；close 握手完成后
+				// Read 返回错误、循环退出；s.ctx 取消兜底。
 				s.drainCtrlGraceful()
-				_ = s.conn.CloseRead(s.ctx)
+				go s.discardInbound()
 				s.closeHandshake()
 			} else {
 				// 非优雅（心跳超时/停滞/被替换/读失败/强断）：立即断，解除并发 Read 阻塞
@@ -405,9 +408,20 @@ func (s *session) closeHandshake() {
 	}
 }
 
+// discardInbound 静默丢弃入站残余帧直至连接关闭（优雅关闭专用，替代库的
+// CloseRead：后者对数据帧回 1008，会把优雅关闭变成 PolicyViolation 踢出）。
+// 唯一 reader（readLoop 已退出）；对端 close 回帧也由此循环消费。
+func (s *session) discardInbound() {
+	for {
+		if _, _, err := s.conn.Read(s.ctx); err != nil {
+			return
+		}
+	}
+}
+
 // readFrame 读一条文本帧并解码。超限帧（>1MiB）消费后返回 ErrFrameTooLarge
 // 供调用方按协议回 err 帧；其余读错误原样返回。读受 parent 会话 ctx 约束
-//（非优雅关闭立即解除 Read 阻塞，L4）。
+// （非优雅关闭立即解除 Read 阻塞，L4）。
 func (s *session) readFrame(parent context.Context, timeout time.Duration) (*protocol.Envelope, error) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
