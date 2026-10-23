@@ -118,6 +118,8 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .filters button.on{background:var(--ink);color:var(--white);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.16)}
 .filters .badge{background:none;padding:0;color:inherit;font-weight:650}
 .chip-link{cursor:pointer}
+/* 0 量状态 chip 降饱和：数字为 0 的下钻入口整体退灰，不给告警联想 */
+.chip-link.zero{opacity:.55}
 /* ---- 表单（草案 B.8）：focus 焦点环；label 与字段间距均匀化（修 audit 呼吸感） ---- */
 .fields{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px}.fields label{flex:1;min-width:150px;margin:0}
 label{display:block;font-size:var(--fs-small);font-weight:600;margin-bottom:6px;color:var(--ink-2)}
@@ -147,6 +149,9 @@ td small{display:block;color:var(--ink-4);font-family:var(--mono);font-size:var(
 code,pre{font-family:var(--mono);font-size:var(--fs-table);line-height:1.7}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);padding:15px}
 code{color:var(--ink-2)}
+/* 行内 code 嵌在中文句中时字号与基线贴正文，避免全角括号/粗体夹等宽体的离析感；
+ * 令牌/配置行的大块 code（.enroll-token-row/.enroll-row 内）不受影响 */
+.notice code,.muted code,.footer-note code,small code,p code,label code,.row code{font-size:.92em;vertical-align:baseline}
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 空状态（草案 B.7） ---- */
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
@@ -197,7 +202,7 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .enroll-row code{padding:10px 14px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-2);background:var(--hover)}
 .enroll-row small{padding:10px 14px;color:var(--ink-3);border-left:1px dashed var(--hairline);display:flex;align-items:center;background:var(--hover)}
 /* 平台 tab：灰 pill 常态、选中黑 pill（与筛选 chips 同一强选择语言） */
-.os-tabs{display:flex;gap:6px}
+.os-tabs{display:flex;gap:6px;flex-wrap:wrap}
 .os-tabs button{height:auto;padding:6px 16px;font-size:12.5px}
 .os-tabs .on{background:var(--ink);color:var(--white);font-weight:600}
 /* Step3 部署方式三卡（radio 视觉：点状圆 + 描述行）；选中 accent 描边；生成中转圈见 .spin */
