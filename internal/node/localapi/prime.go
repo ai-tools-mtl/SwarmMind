@@ -35,7 +35,7 @@ import (
 // 交错，盘上凭证与内存凭证分叉（持盘上凭证的新总理反而 401）。
 func (s *Server) handlePrimeRotate(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.RotatePrime == nil {
-		writeErr(w, http.StatusServiceUnavailable, "internal", "总理凭证轮换未装配（RotatePrime 回调缺失）")
+		writeErr(w, http.StatusServiceUnavailable, "internal", "统筹凭证轮换未装配（RotatePrime 回调缺失）")
 		return
 	}
 	s.muPrime.Lock()
@@ -50,7 +50,7 @@ func (s *Server) handlePrimeRotate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"prime_token": tok,
 		"prime_agent": s.primeAgent(),
-		"note":        "新凭证仅此一次展示，请立即配给总理的 MCP 连接（SWARM_NODE_PRIME_TOKEN）；旧凭证已即时失效",
+		"note":        "新凭证仅此一次展示，请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）；旧凭证已即时失效",
 	})
 }
 
@@ -165,7 +165,7 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 		"prime_agent": name,
 		"prime_token": tok,
 		"mcp_config":  s.mcpConfig(tok),
-		"note":        "已写入 node.yaml prime_agent 并即时生效（无需重启）；新凭证仅此一次展示，请立即配给总理的 MCP 连接",
+		"note":        "已写入 node.yaml prime_agent 并即时生效（无需重启）；新凭证仅此一次展示，请立即配给统筹的 MCP 连接",
 	})
 }
 

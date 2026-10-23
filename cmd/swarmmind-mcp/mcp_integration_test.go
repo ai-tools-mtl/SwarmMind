@@ -268,7 +268,7 @@ func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
 	if !isErr {
 		t.Fatalf("未钦定总理时 submit 应 isError: %s", text)
 	}
-	for _, want := range []string{"prime_required", "尚未钦定总理", "请检查统筹配置"} {
+	for _, want := range []string{"prime_required", "尚未钦定统筹", "请检查统筹配置"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("403 透传缺 %q: %s", want, text)
 		}

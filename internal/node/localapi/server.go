@@ -282,11 +282,11 @@ func (s *Server) authOrchestrate(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if s.primeAgent() == "" {
-			writeErr(w, http.StatusForbidden, "prime_required", "尚未钦定总理，编排接口未激活；本机主人可在控制台「本机总理」区钦定（写入 node.yaml prime_agent 即时生效，无需重启）")
+			writeErr(w, http.StatusForbidden, "prime_required", "尚未钦定统筹，编排接口未激活；本机主人可在控制台「本机统筹」区钦定（写入 node.yaml prime_agent 即时生效，无需重启）")
 			return
 		}
 		if s.primeToken() == "" {
-			writeErr(w, http.StatusForbidden, "prime_required", "总理凭证未配置（data_dir/prime_token 缺失且生成失败），编排接口未激活")
+			writeErr(w, http.StatusForbidden, "prime_required", "统筹凭证未配置（data_dir/prime_token 缺失且生成失败），编排接口未激活")
 			return
 		}
 		next(w, r)

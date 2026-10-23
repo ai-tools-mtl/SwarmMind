@@ -71,16 +71,16 @@ func TestAuthPrime403Priority(t *testing.T) {
 			want:  "setup 模式编排接口未激活",
 		},
 		{
-			name:  "未钦定总理",
+			name:  "未钦定统筹",
 			cfg:   Config{NodeID: "nodeA", PrimeAgent: "", PrimeToken: "tok-prime", LocalToken: "tok-local"},
 			token: "tok-prime",
-			want:  "尚未钦定总理",
+			want:  "尚未钦定统筹",
 		},
 		{
-			name:  "总理凭证未配置",
+			name:  "统筹凭证未配置",
 			cfg:   Config{NodeID: "nodeA", PrimeAgent: "echo", PrimeToken: "", LocalToken: "tok-local"},
 			token: "tok-local", // local_token 过认证（levelRead），命中 PrimeToken 空分支
-			want:  "总理凭证未配置",
+			want:  "统筹凭证未配置",
 		},
 	}
 	for _, tc := range cases {
@@ -368,7 +368,7 @@ func TestPrimeDeclareImmediateEffect(t *testing.T) {
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	}
 	// 前置：未钦定时持预生成凭证调编排 → 403 prime_required（尚未钦定）
-	if code, out := submit("tok-old"); code != http.StatusForbidden || !strings.Contains(out, "尚未钦定总理") {
+	if code, out := submit("tok-old"); code != http.StatusForbidden || !strings.Contains(out, "尚未钦定统筹") {
 		t.Fatalf("声明前编排应 403 尚未钦定, got %d: %s", code, out)
 	}
 	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
