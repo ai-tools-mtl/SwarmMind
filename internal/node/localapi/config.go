@@ -67,6 +67,7 @@ type AgentProfile struct {
 	Description    string   `yaml:"description" json:"description"`
 	PermissionMode string   `yaml:"permission_mode" json:"permission_mode"`
 	Exposed        *bool    `yaml:"exposed" json:"exposed"`
+	StdinToArg     bool     `yaml:"stdin_to_arg" json:"stdin_to_arg"`
 }
 
 // ToExecProfile 转协议层 ExecProfile（kind 空 = cli、exposed 未写 = true，与
@@ -84,7 +85,7 @@ func (p AgentProfile) ToExecProfile() protocol.ExecProfile {
 		Name: p.Name, Kind: kind, Command: p.Command, Workdir: p.Workdir,
 		AgentArgs: p.AgentArgs, TimeoutSec: p.TimeoutSec, AllowArgs: p.AllowArgs,
 		AllowEnv: p.AllowEnv, ConfigHome: p.ConfigHome, Description: p.Description,
-		PermissionMode: p.PermissionMode, Exposed: exposed,
+		PermissionMode: p.PermissionMode, Exposed: exposed, StdinToArg: p.StdinToArg,
 	}
 }
 

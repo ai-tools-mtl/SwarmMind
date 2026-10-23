@@ -72,6 +72,11 @@ type ExecProfile struct {
 	// Exposed 接入开关（默认 true）：下线后新任务 404，已排队任务正常继续执行至终态；
 	// 审计保留一条下线登记。
 	Exposed bool `json:"exposed"`
+	// StdinToArg 输入语义转换（2026-10-23 伦哥实测抓出）：true 时若任务 Args 为空且
+	// stdin 非空，执行前将 stdin 整体作为单个尾参追加到命令行——供 zcode -p 等
+	// 「旗标后必须接提示词参数」的 args 型 CLI；控制台/表单派单走 stdin 语义，
+	// 不加此开关此类 agent 必因旗标缺参打印 usage 退出。默认 false（行为不变）。
+	StdinToArg bool `json:"stdin_to_arg"`
 }
 
 // TaskInput 任务输入（SPEC 4.9）。

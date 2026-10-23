@@ -92,6 +92,12 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 		defer cancel()
 	}
 	argv := append(append([]string(nil), r.profile.AgentArgs...), task.Input.Args...)
+	// StdinToArg 兼底（2026-10-23 伦哥实测抓出）：args 型 CLI（zcode -p 等）从
+	// 控制台/表单收到的描述在 stdin 里，Args 空时旗标缺参必打 usage 退出——
+	// 此时将 stdin 整体作为单个尾参追加（追加源是 stdin 非任务入参，不绕 AllowArgs 白名单）。
+	if r.profile.StdinToArg && len(task.Input.Args) == 0 && task.Input.Stdin != "" {
+		argv = append(argv, task.Input.Stdin)
+	}
 	cmd := exec.CommandContext(ctx, r.profile.Command, argv...)
 	cmd.Dir = r.profile.Workdir
 	cmd.Env = r.buildEnv(task)

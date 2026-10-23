@@ -444,6 +444,7 @@ function normalizeProfile(p) {
     agent_args: p.agent_args || [], timeout_sec: p.timeout_sec || 600,
     allow_args: !!p.allow_args, allow_env: p.allow_env || [], config_home: p.config_home || '',
     description: p.description || '', permission_mode: p.permission_mode || '', exposed: p.exposed !== false,
+    stdin_to_arg: !!p.stdin_to_arg,
   };
 }
 
@@ -514,6 +515,7 @@ function cfgRow(a, i) {
           ${cfgField(i, 'agent_args', 'agent_args（逗号分隔）', (a.agent_args || []).join(','))}
           ${cfgField(i, 'allow_env', 'allow_env（逗号分隔或 *）', (a.allow_env || []).join(','))}
           <label class="cfg-check"><input type="checkbox" data-cfg="${i}.allow_args" ${a.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
+          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.stdin_to_arg" ${a.stdin_to_arg ? 'checked' : ''}> stdin_to_arg（args 型 CLI 兼底：任务描述转命令行尾参，如 zcode -p）</label>
           <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> exposed（对网内暴露；本机派单不受限）</label>
           ${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}
         </div>
