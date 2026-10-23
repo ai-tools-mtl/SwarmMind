@@ -12,28 +12,35 @@ import (
 )
 
 // 管理面任务取消（task_cancel 生命周期，SPEC 4.3 cancelled 终态）：
-// hub→node task_cancel {task_id, reason}。语义至少一次+幂等——重复 cancel 对同
-// task_id 收敛为一次执行中断、一次终态回传：
+// hub→node task_cancel {task_id, reason}，信封携 hub 当前任务落库租约
+//（cancel_fence，P1-2）。语义至少一次+幂等——重复 cancel 对同 task_id 收敛为
+// 一次执行中断、一次终态回传：
 //   - 任务在途（accepted/started，执行 goroutine 存活）：触发 cancelEntry →
 //     执行 goroutine 在任一等待点（workdir 互斥/并发槽/进程执行）观察到取消，
 //     killProcessGroup 整组终止，账本写 finished(cancelled/user_cancelled) 后回
-//     task_result(cancelled)（走既有三段确认，task_result→result_ack）；
-//   - 已终态：回 task_cancelled 幂等 ack（无可取消对象）；
+//     task_result(cancelled)（走既有三段确认，task_result→result_ack）；回带前
+//     对账本租约与 cancel_fence 取大者重臂（P1-2：重派推进的租约经取消帧补授，
+//     hub 侧按 cancel_fence ≥ 落库租约宽校验接受，不再被等值门禁拒收）；
+//   - 已终态：结果未闭合的先对账重臂再重发回执（同上）；已确认/closed 审计的
+//     回 task_cancelled 幂等 ack（无可取消对象）；
 //   - 不在账本（取消先于投递）：除回 task_cancelled ack 外落持久化取消墓碑
 //     （ledger cancels.json）——随后同 task_id 的 task_offer 后到时查墓碑拒绝
 //     执行，直接以 cancelled/user_cancelled 落终态回传（finishCancelledOffer），
 //     堵死「取消先于 offer，offer 后到仍执行」窗口（2026-10-22 修复轮2）；
 //   - 在途注册表未命中但账本仍 accepted/started（等待点放弃的窄窗口/关闭竞态）：
-//     直接账本落 cancelled 终态并回传；与执行 goroutine 的落盘竞争由账本
-//     「先到为准」收敛（ErrWrongState → 回幂等 ack）。
+//     直接账本落 cancelled 终态并回传（同样先对账重臂）；与执行 goroutine 的
+//     落盘竞争由账本「先到为准」收敛（ErrWrongState → 回幂等 ack）。
 
 // cancelEntry 单个在途任务的取消开关：trigger 关闭 done 并联动已绑定的执行
 // ctx；bind 在执行 ctx 创建后挂接（此前已触发则立即生效）。done 关闭即取消
-// 请求成立，各等待点以 select 观察。
+// 请求成立，各等待点以 select 观察。cancelFence 记录取消帧携带的 hub 当前任务
+// 落库租约（P1-2：取消回写对账取大者的基准；重复取消取更大者，noteCancelFence
+// 先于 trigger 执行——done 关闭前的写入对收尾 goroutine 可见）。
 type cancelEntry struct {
 	mu     sync.Mutex
 	done   chan struct{}
 	cancel context.CancelFunc // 执行 ctx（runCtx）的取消函数；bind 后非 nil
+	fence  int64              // 取消帧携 cancel_fence（多次取消取大者）
 }
 
 func newCancelEntry() *cancelEntry {
@@ -51,6 +58,26 @@ func (ce *cancelEntry) triggered() bool {
 	default:
 		return false
 	}
+}
+
+// noteCancelFence 记录取消帧携带的 cancel_fence（幂等取大者）；须先于 trigger
+// 调用，保证收尾 goroutine 经 done 关闭观察到取消时对账基准已就绪。
+func (ce *cancelEntry) noteCancelFence(fence int64) {
+	if fence <= 0 {
+		return
+	}
+	ce.mu.Lock()
+	if fence > ce.fence {
+		ce.fence = fence
+	}
+	ce.mu.Unlock()
+}
+
+// cancelFence 返回已记录的 cancel_fence（0=取消帧未携租约，旧版 hub）。
+func (ce *cancelEntry) cancelFence() int64 {
+	ce.mu.Lock()
+	defer ce.mu.Unlock()
+	return ce.fence
 }
 
 // trigger 发起取消（幂等）：关闭 done，并联动已绑定的执行 ctx。
@@ -104,21 +131,26 @@ func (s *Service) lookupCancel(taskID string) (*cancelEntry, bool) {
 }
 
 // handleTaskCancel task_cancel 入口：见包内「管理面任务取消」注释。
-// 任务租约（P4/SPEC 4.11）：取消帧携带的 fence_epoch 仅作取消时刻代次的口径
-// 记录，node 不据此改账本租约——取消回执（task_result(cancelled)）恒按派发
-// 时的租约回带，与 hub 任务落库租约等值（未重派则必然一致）。取消执行本身无
-// 需门禁：取消⇒任务 hub 侧终态⇒同 task_id 永不重派（旧取消不可能命中新派单
-// 执行），重复取消由墓碑/幂等 ack 收敛，无状态污染面；zombie 进程的取消回执
-// 由 hub 结果仲裁的租约门禁兜底。
+// 任务租约（P4/SPEC 4.11 + P1-2）：取消帧携带 hub 当前任务落库租约
+//（cancel_fence）。取消执行本身无需门禁：取消⇒任务 hub 侧终态⇒同 task_id
+// 永不重派（旧取消不可能命中新派单执行），重复取消由墓碑/幂等 ack 收敛；
+// zombie 进程无当前会话收不到取消帧即无法伪造新 cancel_fence。取消回写
+//（task_result(cancelled)）回带前按「账本租约 vs cancel_fence 取大者」重臂：
+// 重派已推进租约而 node 未及重臂的滞后（如 ack 丢后重派、重派 offer 送达失败
+// 留 submitted）经此补授，hub 对 cancelled 回执按 cancel_fence ≥ 落库租约宽
+// 校验接受，真实取消结果不再滞留 node。
 func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 	var p protocol.TaskCancelPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil || p.TaskID == "" {
 		log.Printf("[node] task_cancel 载荷解析失败: %v", err)
 		return
 	}
-	// 1) 在途：触发执行中断（执行 goroutine 负责整组终止、落盘与回传）
+	// 1) 在途：记录对账基准并触发执行中断（执行 goroutine 负责整组终止、落盘
+	//    对账重臂与回传）
 	if ce, ok := s.lookupCancel(p.TaskID); ok {
-		log.Printf("[node] 收到取消，中断在途执行 task=%s reason=%q", p.TaskID, p.Reason)
+		log.Printf("[node] 收到取消（cancel_fence=%d），中断在途执行 task=%s reason=%q",
+			env.FenceEpoch, p.TaskID, p.Reason)
+		ce.noteCancelFence(env.FenceEpoch)
 		ce.trigger()
 		return
 	}
@@ -133,21 +165,41 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 				log.Printf("[node] 取消墓碑落盘失败 task=%s: %v", p.TaskID, err)
 			}
 			log.Printf("[node] 取消命中未入账任务，落墓碑防后到 offer 执行 task=%s", p.TaskID)
-		} else if e.ResultAcked || e.Closed {
-			log.Printf("[node] 取消幂等命中（已终态）task=%s state=%s", p.TaskID, e.State)
-		} else {
-			// 已终态且结果未闭合：立即重发一次——原结果可能滞留重发队列（重连
-			// 换代后由周期补传送达），取消回执按派发租约回带，hub cancelled 分支
-			// 合并收敛；closed 条目不重发（冲突审计保留）
-			log.Printf("[node] 取消命中已终态未确认条目，重发回执 task=%s state=%s", p.TaskID, e.State)
-			s.sendResult(p.TaskID, *e.Result)
+		} else if e.ResultAcked {
+			log.Printf("[node] 取消幂等命中（终态已确认）task=%s state=%s", p.TaskID, e.State)
+		} else if err := s.rearmTo(p.TaskID, env.FenceEpoch); err != nil {
+			// P1-1 同口径：对账重臂落盘失败不重发不 ack——此时回执仍按旧租约
+			// 回带必被宽校验前的滞后再拒；hub 至少一次取消重发会再携
+			// cancel_fence 对账重试（重臂成功同时解除 closed）。
+			log.Printf("[node] 取消对账重臂失败，待取消重发重试 task=%s: %v", p.TaskID, err)
 			return
+		} else {
+			cur, ok := s.cfg.Ledger.Get(p.TaskID)
+			if !ok || cur.Closed {
+				// 同值 no-op 且已 closed：拒收审计保留，重发只会再被拒
+				log.Printf("[node] 取消命中已 closed 条目（审计保留）task=%s", p.TaskID)
+			} else {
+				// 已终态且结果未闭合：立即重发回执（重臂成功即含 closed 解除，
+				// P1-3），回执按对账后的租约回带，hub cancelled 分支合并收敛
+				log.Printf("[node] 取消命中未确认终态，对账后重发回执 task=%s state=%s fence=%d",
+					p.TaskID, cur.State, cur.FenceEpoch)
+				if cur.Result != nil {
+					s.sendResult(p.TaskID, *cur.Result)
+					return
+				}
+			}
 		}
 		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
 		return
 	}
-	// 3) 账本在途但在途注册表未命中（等待点放弃/关闭竞态窗口）：直接落 cancelled
-	// 终态并回传；与执行 goroutine 竞争由账本先到为准收敛
+	// 3) 账本在途但在途注册表未命中（等待点放弃/关闭竞态窗口）：先对账重臂再落
+	//    cancelled 终态并回传；与执行 goroutine 竞争由账本先到为准收敛。
+	//    重臂失败仍落终态（在途条目不得滞留，重启会重执行已取消任务），只跳过
+	//    发送——结果滞留重发队列，hub 取消重发再对账闭合。
+	rearmErr := s.rearmTo(p.TaskID, env.FenceEpoch)
+	if rearmErr != nil {
+		log.Printf("[node] 取消对账重臂失败 task=%s: %v", p.TaskID, rearmErr)
+	}
 	res := protocol.TaskResult{
 		Status:     protocol.ResultCancelled,
 		ExitCode:   protocol.ExitCodeNotRun,
@@ -157,6 +209,9 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 	if err := s.cfg.Ledger.MarkFinished(p.TaskID, res); err != nil {
 		log.Printf("[node] 取消落盘未生效（先到终态为准）task=%s: %v", p.TaskID, err)
 		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
+		return
+	}
+	if rearmErr != nil {
 		return
 	}
 	log.Printf("[node] 任务已取消（未再执行）task=%s reason=%q", p.TaskID, p.Reason)
@@ -173,18 +228,27 @@ func cancelledResult(res protocol.TaskResult) protocol.TaskResult {
 }
 
 // finishCancelledBeforeRun 未获执行即取消（等待互斥/并发槽期间被打断）：账本
-// finished(cancelled/user_cancelled) + 回传 task_result。账本已有终态（先到为准，
-// SPEC 4.3 收敛表）返回 false，不写不发。
-func (s *Service) finishCancelledBeforeRun(taskID string) bool {
+// finished(cancelled/user_cancelled) + 回传 task_result。cancelFence 为取消帧
+// 携带的 hub 当前任务租约（P1-2）：落盘前先对账取大者重臂，回执按对账后租约
+// 回带（hub 宽校验收敛）。账本已有终态（先到为准，SPEC 4.3 收敛表）返回
+// false，不写不发；对账重臂失败落盘照常（在途条目不得滞留），跳过发送，结果
+// 滞留重发队列由 hub 取消重发再对账闭合。
+func (s *Service) finishCancelledBeforeRun(taskID string, cancelFence int64) bool {
 	res := protocol.TaskResult{
 		Status:     protocol.ResultCancelled,
 		ExitCode:   protocol.ExitCodeNotRun,
 		Error:      protocol.CodeUserCancelled,
 		FinishedAt: protocol.NowUTC(),
 	}
+	if err := s.rearmTo(taskID, cancelFence); err != nil {
+		log.Printf("[node] 取消对账重臂失败，待取消重发重试 task=%s: %v", taskID, err)
+	}
 	if err := s.cfg.Ledger.MarkFinished(taskID, res); err != nil {
 		log.Printf("[node] 取消落盘未生效（先到终态为准）task=%s: %v", taskID, err)
 		return false
+	}
+	if cancelFence > 0 && cancelFence > s.fenceOf(taskID) {
+		return true // 重臂未生效（落盘失败竞争）：不按旧租约回发，留重发/对账闭合
 	}
 	s.sendResult(taskID, res)
 	return true

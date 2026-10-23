@@ -68,9 +68,17 @@ func (c *Core) dispatch(nodeID string) {
 			nt.UpdatedAt = c.now() // offer 超时计时段（Sweep 据此回退）
 			// 任务租约（P4/SPEC 4.11）：每次派发捕获该 node 当下注册代次并落库
 			//（重派即换新租约），作为结果仲裁的等值基准；0=未注册代次（membus
-			// 等价链路）不落库，回带缺失走缺省宽容。
+			// 等价链路）不落库，回带缺失走缺省宽容。P2-6 写时复制：重派只刷新
+			// 代次，拒收审计（Rejects/LastRejectedFence/LastAt）随任务累计保留，
+			// 不得清零重建。
 			if fence = st.Nodes[nodeID].Epoch; fence > 0 {
-				nt.Lease = &protocol.TaskLease{FenceEpoch: fence}
+				ls := protocol.TaskLease{FenceEpoch: fence}
+				if t.Lease != nil {
+					ls.Rejects = t.Lease.Rejects
+					ls.LastRejectedFence = t.Lease.LastRejectedFence
+					ls.LastAt = t.Lease.LastAt
+				}
+				nt.Lease = &ls
 			}
 			st.Tasks[nt.ID] = nt
 			acquireWorkdirLock(st, &nt) // 占用从 offered 起算（SPEC 4.10）

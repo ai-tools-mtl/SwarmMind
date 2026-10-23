@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -13,23 +14,35 @@ import (
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
+// execRunner 执行器最小接口（*runner.Runner 满足；评审修复测试可注入桩执行器）。
+type execRunner interface {
+	Run(ctx context.Context, task protocol.Task) protocol.TaskResult
+}
+
 // execNode 真实执行 node 桩：真账本 + 真 runner，按 SPEC 4.7 顺序处理 offer——
 // accepted 落盘 → task_ack；started 落盘 → task_started → spawn；
-// finished+result 落盘 → task_result。重复 offer 不再执行，直接重发 ack
-//（若已 finished 附带重发 result，SPEC 4.3）。
+// finished+result 落盘 → task_result。重复 offer 不再执行，重臂后重发 ack
+//（已 finished 附带按新租约重发 result，SPEC 4.3/P4）。P4 任务租约：入账捕获
+// offer 携带的 fence_epoch，result 回带账本条目租约（对齐真实 service 语义）；
+// 重臂失败不确认不回发（P1-1 同型）。asyncExec=true 时执行体异步（真实 node
+// 形态，门控执行器不阻塞投递链）；dropAcks=true 时 task_ack 丢失（P2-7 注入口）。
 type execNode struct {
 	t       *testing.T
 	ep      *transport.Endpoint
 	led     *ledger.Ledger
-	runners map[string]*runner.Runner // agent name → runner
+	runners map[string]execRunner // agent name → runner
 
 	offers      int
 	submitAcks  []protocol.SubmitAckPayload
 	resultEvent []protocol.TaskResultPayload
 	errs        []protocol.ErrInfo
+
+	epoch     atomic.Int64 // 本端会话代次（send 盖章 SessionEpoch，跨会话测试用；异步执行体并发读）
+	asyncExec bool         // 置于投递前、此后只读
+	dropAcks  atomic.Bool  // task_ack 丢失注入口（异步执行体并发读）
 }
 
-func newExecNode(f *hubFixture, name string, runners map[string]*runner.Runner, cards []protocol.AgentCard) *execNode {
+func newExecNode(f *hubFixture, name string, runners map[string]execRunner, cards []protocol.AgentCard) *execNode {
 	f.t.Helper()
 	led, _, err := ledger.Open(f.t.TempDir())
 	if err != nil {
@@ -54,10 +67,17 @@ func (n *execNode) handle(env *protocol.Envelope) {
 			return
 		}
 		n.offers++
-		err := n.led.Accept(task)
+		err := n.led.AcceptFenced(task, ledger.OriginHub, env.FenceEpoch)
 		if errors.Is(err, ledger.ErrDuplicate) {
-			// 重复 offer：不再执行，重发 ack；已 finished 附带重发 result
-			n.ack(task.ID)
+			// 重复 offer（重派收口）：重臂换新租约后重发 ack；已 finished 附带按
+			// 新租约重发 result。重臂失败不确认不回发（P1-1：hub 重推重试）
+			if rerr := n.led.RearmFence(task.ID, env.FenceEpoch); rerr != nil {
+				n.t.Logf("重臂失败不确认 task=%s: %v", task.ID, rerr)
+				return
+			}
+			if !n.dropAcks.Load() {
+				n.ack(task.ID)
+			}
 			if e, ok := n.led.Get(task.ID); ok && e.State == ledger.StateFinished && e.Result != nil {
 				n.sendResult(task.ID, *e.Result)
 			}
@@ -67,28 +87,37 @@ func (n *execNode) handle(env *protocol.Envelope) {
 			n.t.Errorf("账本入账失败: %v", err)
 			return
 		}
-		n.ack(task.ID) // accepted 落盘成功后才发（SPEC 4.7）
-		if err := n.led.MarkStarted(task.ID); err != nil {
-			n.t.Errorf("标记 started 失败: %v", err)
-			return
+		if !n.dropAcks.Load() {
+			n.ack(task.ID) // accepted 落盘成功后才发（SPEC 4.7）
 		}
-		n.send(protocol.MsgTaskStarted, protocol.TaskRef{TaskID: task.ID})
-		res := func() protocol.TaskResult {
-			r, ok := n.runners[task.TargetAgent]
-			if !ok {
-				return protocol.TaskResult{
-					Status: protocol.ResultFailed, ExitCode: protocol.ExitCodeNotRun,
-					Error: protocol.CodeAgentNotFound,
-				}
+		exec := func() {
+			if err := n.led.MarkStarted(task.ID); err != nil {
+				n.t.Errorf("标记 started 失败: %v", err)
+				return
 			}
-			return r.Run(context.Background(), task)
-		}()
-		// SPEC 4.7 顺序：finished+result 落盘成功后才发 task_result
-		if err := n.led.MarkFinished(task.ID, res); err != nil {
-			n.t.Errorf("MarkFinished 失败: %v", err)
+			n.send(protocol.MsgTaskStarted, protocol.TaskRef{TaskID: task.ID})
+			res := func() protocol.TaskResult {
+				r, ok := n.runners[task.TargetAgent]
+				if !ok {
+					return protocol.TaskResult{
+						Status: protocol.ResultFailed, ExitCode: protocol.ExitCodeNotRun,
+						Error: protocol.CodeAgentNotFound,
+					}
+				}
+				return r.Run(context.Background(), task)
+			}()
+			// SPEC 4.7 顺序：finished+result 落盘成功后才发 task_result
+			if err := n.led.MarkFinished(task.ID, res); err != nil {
+				n.t.Errorf("MarkFinished 失败: %v", err)
+				return
+			}
+			n.sendResult(task.ID, res)
+		}
+		if n.asyncExec {
+			go exec()
 			return
 		}
-		n.sendResult(task.ID, res)
+		exec()
 	case protocol.MsgResultAck:
 		var ref protocol.TaskRef
 		if err := jsonUnmarshal(env.Payload, &ref); err != nil {
@@ -119,22 +148,40 @@ func (n *execNode) send(typ string, payload any) {
 	n.t.Helper()
 	b, err := jsonMarshal(payload)
 	if err != nil {
-		n.t.Fatalf("marshal %s: %v", typ, err)
+		n.t.Errorf("marshal %s: %v", typ, err)
+		return
 	}
 	if err := n.ep.Send("hub", &protocol.Envelope{
 		Version: protocol.ProtocolVersion, Type: typ,
-		MessageID: protocol.NewMessageID(), To: "hub", Payload: b,
+		MessageID: protocol.NewMessageID(), To: "hub",
+		SessionEpoch: n.epoch.Load(), Payload: b,
 	}); err != nil {
-		n.t.Fatalf("发送 %s: %v", typ, err)
+		n.t.Errorf("发送 %s: %v", typ, err)
 	}
 }
 
 func (n *execNode) ack(taskID string) { n.send(protocol.MsgTaskAck, protocol.TaskRef{TaskID: taskID}) }
 
+// sendResult 回带账本条目租约（P4/SPEC 4.11：result echo fence，重连重发/重复
+// offer 重发同源同值）。
 func (n *execNode) sendResult(taskID string, res protocol.TaskResult) {
-	n.send(protocol.MsgTaskResult, protocol.TaskResultPayload{
-		TaskID: taskID, Status: res.Status, Result: &res,
-	})
+	n.t.Helper()
+	fence := int64(0)
+	if e, ok := n.led.Get(taskID); ok {
+		fence = e.FenceEpoch
+	}
+	b, err := jsonMarshal(protocol.TaskResultPayload{TaskID: taskID, Status: res.Status, Result: &res})
+	if err != nil {
+		n.t.Errorf("marshal result: %v", err)
+		return
+	}
+	if err := n.ep.Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub",
+		SessionEpoch: n.epoch.Load(), FenceEpoch: fence, Payload: b,
+	}); err != nil {
+		n.t.Errorf("发送 result: %v", err)
+	}
 }
 
 // echoProfile 构造 /bin/echo 的 ExecProfile（产物约定目录以 workdir 隔离）。
@@ -159,7 +206,7 @@ func TestFullChain(t *testing.T) {
 		InputMode: "prompt_text", OutputMode: "answer+artifacts",
 		PermissionMode: echo.PermissionMode, ProtocolVer: 1, Exposed: true,
 	}
-	nodeB := newExecNode(f, "nodeB", map[string]*runner.Runner{
+	nodeB := newExecNode(f, "nodeB", map[string]execRunner{
 		"echo-demo": runner.New(echo, baseTestEnv2(), filepath.Join(t.TempDir(), "home")),
 	}, []protocol.AgentCard{card})
 
@@ -213,7 +260,7 @@ func TestFullChainOfflineMailbox(t *testing.T) {
 		OutputMode: "answer+artifacts", PermissionMode: "no-shell",
 		ProtocolVer: 1, Exposed: true,
 	}
-	runners := map[string]*runner.Runner{"echo-demo": runner.New(echo, baseTestEnv2(), t.TempDir())}
+	runners := map[string]execRunner{"echo-demo": runner.New(echo, baseTestEnv2(), t.TempDir())}
 	f.registerOffline("nodeB", []protocol.AgentCard{card}) // 只注册不上线
 	nodeB := &execNode{t: f.t, ep: f.bus.Endpoint("nodeB"), led: nil, runners: runners}
 	led, _, err := ledger.Open(filepath.Join(t.TempDir(), "ledger"))
@@ -255,7 +302,7 @@ func TestFullChainNeedsReview(t *testing.T) {
 		OutputMode: "answer+artifacts", PermissionMode: "no-shell",
 		ProtocolVer: 1, Exposed: true,
 	}
-	nodeB := newExecNode(f, "nodeB", map[string]*runner.Runner{
+	nodeB := newExecNode(f, "nodeB", map[string]execRunner{
 		"echo-demo": runner.New(echo, baseTestEnv2(), t.TempDir()),
 	}, []protocol.AgentCard{card})
 
@@ -350,7 +397,7 @@ func TestHubRestartRecovery(t *testing.T) {
 	}
 
 	// node 上线 → 补推完成（真 runner）
-	nodeB := newExecNode(f, "nodeB", map[string]*runner.Runner{
+	nodeB := newExecNode(f, "nodeB", map[string]execRunner{
 		"echo-demo": runner.New(echo, baseTestEnv2(), t.TempDir()),
 	}, nil) // 能力表已在快照中，不重注册
 	_ = nodeB

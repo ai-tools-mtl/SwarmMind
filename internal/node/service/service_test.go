@@ -30,17 +30,24 @@ type frameRec struct {
 
 func newFixture(t *testing.T, profiles []protocol.ExecProfile) *frameRec {
 	t.Helper()
-	bus := transport.NewBus()
-	led, _, err := ledger.Open(filepath.Join(t.TempDir(), "ledger"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = led.Close() })
-	f := &frameRec{ep: bus.Endpoint("hub")}
 	runners := make(map[string]Runner, len(profiles))
 	for _, p := range profiles {
 		runners[p.Name] = runner.New(p, map[string]string{"PATH": "/usr/bin:/bin"}, filepath.Join(t.TempDir(), "home"))
 	}
+	led, _, err := ledger.Open(filepath.Join(t.TempDir(), "ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newFixtureWith(t, runners, led)
+}
+
+// newFixtureWith 自定义执行器与账本的夹具变体（评审修复测试用：可注入
+// OpenForTest 账本做事务故障注入、可注入门控 runner 控制在途窗口）。
+func newFixtureWith(t *testing.T, runners map[string]Runner, led *ledger.Ledger) *frameRec {
+	t.Helper()
+	bus := transport.NewBus()
+	t.Cleanup(func() { _ = led.Close() })
+	f := &frameRec{ep: bus.Endpoint("hub")}
 	nodeEP := bus.Endpoint("n1")
 	f.svc = New(Config{Ledger: led, Runners: runners}, nodeEP)
 	nodeEP.Subscribe(f.svc.HandleFrame)           // New 内已订阅；显式重申以对齐「最后一次为准」

@@ -24,8 +24,10 @@ var resultStatuses = map[string]protocol.TaskStatus{
 //   - 任务租约门禁（P4，先于状态仲裁）：回带 fence_epoch 与该任务当前派发租约
 //     （Task.Lease.FenceEpoch，派发/重派事务内落库）等值才进入仲裁——重派后旧
 //     派单的迟到回写（zombie 写）据此外科式排除，且不误伤「同租约跨会话的合法
-//     重发」（进程重启恢复重发、offer 超时前的迟到回执，SPEC 4.8/4.5）；缺省
-//     （0，旧版 node/旧账本/未携租约派发）按「缺省=当前租约」宽容放行；过期
+//     重发」（进程重启恢复重发、offer 超时前的迟到回执，SPEC 4.8/4.5）；P1-2
+//     宽校验：cancelled 回执按 cancel_fence ≥ 落库租约接受（取消是管理面意图，
+//     覆盖重派推进租约后 node 未及重臂的滞后）；缺省（0，旧版 node/旧账本/未携
+//     租约派发）按「缺省=当前租约」宽容放行；过期
 //     → 拒收 zombie 结果：任务维持原状态（不改 Status/UpdatedAt/Result），Lease
 //     审计注记 zombie_result_rejected，回 err(result_conflict) 促停 node 重发
 //     （node 置账本 closed）。送达方身份由会话层担保（帧只经当前会话进入），
@@ -58,6 +60,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		dupAck   bool           // 同终态同结果：重发 ack
 		conflict bool           // 保留先到：回冲突
 		zombie   bool           // 租约过期（zombie 写）：维持原状态拒收
+		zLease   int64          // zombie 分支事务内捕获的落库租约（P1-4：事务外不得重读 Tasks——Sweep 并发删除超保留期任务时零值解引用）
 	)
 	err := c.st.Update(func(st *store.State) error {
 		t, ok := st.Tasks[p.TaskID]
@@ -69,9 +72,20 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		if t.Lease != nil {
 			lease = t.Lease.FenceEpoch
 		}
-		if env.FenceEpoch != 0 && env.FenceEpoch != lease {
-			// P4 任务租约：与当前派发租约不符的回写不进状态仲裁（旧派单 zombie
-			// 结果）。任务维持原状态，只追加固化审计字段。
+		// P4 任务租约门禁（先于状态仲裁）。P1-2 宽校验：cancelled 回执是管理面
+		// 取消意图的回执——帧携 cancel_fence（hub 当前任务落库租约，经当前会话
+		// 送达，zombie 无法伪造），node 对账取大者回带，故 ≥ 落库租约即接受，
+		// 覆盖「重派推进租约而 node 未及重臂」的取消回执滞后；其余终态维持
+		// 等值。过期 → 拒收 zombie 结果：任务维持原状态，只追加固化审计字段。
+		stale := false
+		if env.FenceEpoch != 0 {
+			if toStatus == protocol.StatusCancelled {
+				stale = env.FenceEpoch < lease
+			} else {
+				stale = env.FenceEpoch != lease
+			}
+		}
+		if stale {
 			nt := t.Clone()
 			ls := protocol.TaskLease{FenceEpoch: lease, LastRejectedFence: env.FenceEpoch, LastAt: c.now()}
 			if t.Lease != nil {
@@ -82,6 +96,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 			nt.Lease = &ls
 			st.Tasks[nt.ID] = nt
 			zombie = true
+			zLease = lease
 			return nil
 		}
 		if t.Status.Terminal() {
@@ -121,17 +136,22 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		return
 	}
 	if zombie {
-		stored := c.st.View().Tasks[p.TaskID].Lease.FenceEpoch
+		// P1-4：租约值取自拒收事务内捕获的 zLease——事务外重读 Tasks[id] 会与
+		// Sweep 的终态清理（删除超保留期任务）竞态，零值条目的 Lease 解引用 panic。
 		log.Printf("[hub] zombie_result_rejected 拒收过期租约结果 task=%s from=%s fence_epoch=%d current_lease=%d（任务维持原状态，已记 Lease 审计）",
-			p.TaskID, env.From, env.FenceEpoch, stored)
+			p.TaskID, env.From, env.FenceEpoch, zLease)
 		// 回 result_conflict：node 据此置账本 closed 停止重发， zombie 结果不再
-		// 周期性重入仲裁（载荷携 TaskRef，同冲突帧口径）
+		// 周期性重入仲裁（载荷携 TaskRef，同冲突帧口径；ErrInfo 结构化携带被拒
+		// fence 与当时落库租约——P1-3：node 仅当被拒 fence 与账本条目当前 fence
+		// 等值才置 closed，拒收旧代次不得关闭已重臂条目的新租约重发）
 		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID,
 			protocol.TaskRef{TaskID: p.TaskID},
 			&protocol.ErrInfo{
 				Code: protocol.CodeResultConflict,
 				Msg: fmt.Sprintf("zombie_result_rejected: 任务租约过期（fence_epoch=%d ≠ current_lease=%d），拒绝回写，任务维持原状态",
-					env.FenceEpoch, stored),
+					env.FenceEpoch, zLease),
+				FenceEpoch: env.FenceEpoch,
+				LeaseEpoch: zLease,
 			})
 		return
 	}

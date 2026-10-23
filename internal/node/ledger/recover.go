@@ -38,7 +38,7 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 		}
 	}
 	if needDowngrade {
-		err := l.Update(func(m map[string]Entry) error {
+		err := l.updateOp("recover", func(m map[string]Entry) error {
 			for id, e := range m {
 				var down *protocol.TaskResult
 				switch e.State {

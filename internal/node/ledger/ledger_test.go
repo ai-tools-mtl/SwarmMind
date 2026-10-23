@@ -344,7 +344,7 @@ func TestLedgerWriteFailureNoPublishNoAck(t *testing.T) {
 // TestLedgerFailureInjection before_write 注入：事务失败、账本不变；解除注入后成功。
 func TestLedgerFailureInjection(t *testing.T) {
 	l, _ := mustOpen(t, t.TempDir())
-	l.inject = func(stage string) error {
+	l.inject = func(_, stage string) error {
 		if stage == stageBeforeWrite {
 			return errInjected
 		}
@@ -457,7 +457,7 @@ func TestLedgerInjectionStages(t *testing.T) {
 	}
 
 	// before_write：盘与内存都不变（写盘失败语义：副本丢弃无可见变化）
-	l.inject = func(stage string) error {
+	l.inject = func(_, stage string) error {
 		if stage == stageBeforeWrite {
 			return errInjected
 		}
@@ -474,7 +474,7 @@ func TestLedgerInjectionStages(t *testing.T) {
 	}
 
 	// after_rename：盘已是新状态、内存未发布（「已提交但确认丢失」崩溃窗口模拟）
-	l.inject = func(stage string) error {
+	l.inject = func(_, stage string) error {
 		if stage == stageAfterRename {
 			return errInjected
 		}
@@ -497,7 +497,7 @@ func TestLedgerInjectionStages(t *testing.T) {
 	}
 
 	// before_publish：表现同 after_rename（盘新、内存未发布）
-	l.inject = func(stage string) error {
+	l.inject = func(_, stage string) error {
 		if stage == stageBeforePublish {
 			return errInjected
 		}
@@ -518,7 +518,7 @@ func TestLedgerInjectionStages(t *testing.T) {
 	if err := l.Accept(sampleTask("t-3", protocol.NowUTC().Add(time.Hour))); err != nil {
 		t.Fatalf("对齐 Accept: %v", err)
 	}
-	l.inject = func(stage string) error {
+	l.inject = func(_, stage string) error {
 		if stage == stageBeforeAck {
 			return errInjected
 		}
@@ -550,7 +550,7 @@ func TestLedgerRecoveryDowngradePersistFailure(t *testing.T) {
 	})
 
 	injected := errors.New("注入恢复降级落盘失败")
-	if _, _, err := open(dir, func(stage string) error {
+	if _, _, err := open(dir, func(_, stage string) error {
 		if stage == stageBeforeWrite {
 			return injected
 		}

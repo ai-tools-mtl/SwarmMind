@@ -77,7 +77,8 @@ type testNode struct {
 	resultAcks  []string
 	resultEvent []protocol.TaskResultPayload
 	errs        []protocol.ErrInfo
-	cancels     []protocol.TaskCancelPayload // 收到的 task_cancel 帧（取消链路断言用）
+	cancels      []protocol.TaskCancelPayload // 收到的 task_cancel 帧（取消链路断言用）
+	cancelFences []int64                      // task_cancel 帧信封的 cancel_fence（P1-2 断言用）
 	errTaskRefs []string                     // err 帧载荷 TaskRef（冲突帧须携引用，回归 2578fd8）
 	autoAck     bool
 	epoch       int64 // 本端会话代次（send 盖章 SessionEpoch；P4 测试模拟重连换代用）
@@ -173,6 +174,7 @@ func (n *testNode) handle(env *protocol.Envelope) {
 			return
 		}
 		n.cancels = append(n.cancels, p)
+		n.cancelFences = append(n.cancelFences, env.FenceEpoch)
 	}
 }
 

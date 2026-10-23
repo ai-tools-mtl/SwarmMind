@@ -243,8 +243,9 @@ func (c *Core) sendFrame(to, typ, replyTo string, payload any, errInfo *protocol
 	return c.sendFrameFence(to, typ, replyTo, 0, payload, errInfo)
 }
 
-// sendFrameFence sendFrame 的带租约变体（P4/SPEC 4.11）：fence 供 task_offer /
-// task_cancel 携派发/取消时刻该 node 的注册代次快照；其余帧恒 0=缺省。
+// sendFrameFence sendFrame 的带租约变体（P4/SPEC 4.11）：fence 供 task_offer 携
+// 派发时刻该 node 的注册代次、task_cancel 携该任务当前落库租约（cancel_fence，
+// P1-2）；其余帧恒 0=缺省。
 func (c *Core) sendFrameFence(to, typ, replyTo string, fence int64, payload any, errInfo *protocol.ErrInfo) error {
 	env := &protocol.Envelope{
 		Version:    protocol.ProtocolVersion,
