@@ -10,6 +10,125 @@
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/* ===== md 渲染器 shared block begin（双端同步维护：本块在 node/hub 两端 app.js
+ * 逐字节一致，internal/node/localapi/web_md_render_test.go 抽块比对锁一致性——
+ * 改本块必须两端同改同验。规格见 docs/TASK-md-render.md。）
+ * 架构铁律：先全文 HTML escape，再在已转义文本上解析结构/行内标记——不存在任何
+ * HTML 直通路径，agent 输出 <script>/<img onerror> 必然显示为字面文本。 ===== */
+function mdToHtml(text) {
+  try {
+    const src = String(text ?? '');
+    if (!src.trim()) return '';
+    const escaped = src.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return mdBlocks(escaped.split('\n'), 0);
+  } catch (e) { return `<pre>${esc(text)}</pre>`; } // 审查 R1 纵深防御：任何渲染缺陷降级为原文展示，抽屉永不崩
+}
+function mdBlocks(lines, depth) {
+  const out = [];
+  let i = 0;
+  // 块级起始判定（段落收集据此断行）：围栏/标题/引用/分隔线/列表/表格候选行
+  const blockStart = s =>
+    /^```/.test(s) || /^#{1,6}\s/.test(s) || /^\s*&gt;/.test(s) ||
+    /^\s*(-{3,}|\*{3,})\s*$/.test(s) || /^\s*([-*]|\d{1,9}[.)])\s+/.test(s) || mdIsRow(s);
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    // 围栏代码块 ```（可带语言标注 → 徽标；内部文本已转义，只直出不解析行内）
+    const fence = line.match(/^```([\w#+.-]*)\s*$/);
+    if (fence) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++;   // 跳过闭合 ```；未闭合到文末按已闭合处理
+      out.push(`<div class="md-code">${fence[1] ? `<span class="md-lang">${fence[1]}</span>` : ''}<pre><code>${buf.join('\n')}</code></pre></div>`);
+      continue;
+    }
+    // 标题 # ~ ######（h1-h6，抽屉内分级字号见 style.css .md-body h1-h6）
+    const h = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (h) { const n = h[1].length; out.push(`<h${n} class="md-h md-h${n}">${mdInline(h[2])}</h${n}>`); i++; continue; }
+    // 引用 >（escape-first 后行首 > 为 &gt;）：连续行收齐后递归按块解析；
+    // 深度封顶 32（审查 R1：单行数千个 > 的递归爆栈 DoS——超限直接平铺已转义文本）
+    if (/^\s*&gt;/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*&gt;/.test(lines[i])) buf.push(lines[i++].replace(/^\s*&gt; ?/, ''));
+      out.push(`<blockquote class="md-quote">${depth >= 32 ? esc(buf.join('\n')) : mdBlocks(buf, depth + 1)}</blockquote>`);
+      continue;
+    }
+    // 分隔线 --- / ***（单独成行）
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+    // 列表（无序 -/*、有序 1./1)；两层缩进嵌套（行首 ≥2 空格为二级，更深并入二级）
+    const li = line.match(/^( *)([-*]|\d{1,9}[.)])\s+(.*)$/);
+    if (li) {
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^( *)([-*]|\d{1,9}[.)])\s+(.*)$/);
+        if (!m) break;
+        items.push({ d: m[1].length >= 2 ? 1 : 0, mk: m[2], tx: m[3].trim() });
+        i++;
+      }
+      let p = 0;
+      // 同层标记类型（有序/无序）一致为一段列表；类型变化即另起列表（- a 后紧跟
+      // 1. b 不并入同一 ul，序号不丢）。嵌套层递归消费至遇到更浅缩进。
+      const build = depth => {
+        let html = '';
+        while (p < items.length && items[p].d === depth) {
+          const ordered = /^\d/.test(items[p].mk), tag = ordered ? 'ol' : 'ul';
+          let body = '';
+          while (p < items.length && items[p].d === depth && /^\d/.test(items[p].mk) === ordered) {
+            const it = items[p++];
+            let inner = mdInline(it.tx);
+            if (p < items.length && items[p].d > depth) inner += build(depth + 1);
+            body += `<li>${inner}</li>`;
+          }
+          html += `<${tag}>${body}</${tag}>`;
+        }
+        return html;
+      };
+      out.push(build(items[0].d));
+      continue;
+    }
+    // 表格：头行 + |---|---| 分隔行 + 数据行；头/分隔列数不匹配则整块按段落降级
+    if (mdIsRow(line) && i + 1 < lines.length && mdIsSep(lines[i + 1])) {
+      const head = mdCells(line), sep = mdCells(lines[i + 1]);
+      if (head.length >= 2 && head.length === sep.length) {
+        const rows = [];
+        i += 2;
+        while (i < lines.length && mdIsRow(lines[i])) rows.push(mdCells(lines[i++]));
+        out.push(`<div class="md-table"><table><thead><tr>${head.map(c => `<th>${mdInline(c)}</th>`).join('')}</tr></thead><tbody>${
+          rows.map(r => `<tr>${head.map((_, k) => `<td>${mdInline(r[k] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+        continue;
+      }
+    }
+    // 普通段落：连续非空行合并，段内换行 <br>；块级起始行不并入
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !blockStart(lines[i])) buf.push(lines[i++].trim());
+    if (!buf.length) { out.push(`<p>${mdInline(lines[i++].trim())}</p>`); continue; }   // 表格降级等孤立行单独成段
+    out.push(`<p>${buf.map(mdInline).join('<br>')}</p>`);
+  }
+  return out.join('\n');
+}
+// mdInline 行内标记（输入为已转义文本）：`code` 占位保护 → **粗体** → *斜体*
+//（两端须紧贴非空白才配对，不配对字面保留）→ [文本](url)（url 白名单 http(s)://
+// 与 / 相对路径，其余如 javascript: 降级纯文本原样显示；外链 target=_blank +
+// noopener noreferrer）。不支持：图片、脚注、HTML 直通、删除线、强调嵌套。
+function mdInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `\x00${codes.push(c) - 1}\x00`);
+  s = s.replace(/\*\*([^*\s](?:[^*]*[^*\s])?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\s](?:[^*]*[^*\s])?)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^()\s]+)\)/g, (m, label, url) =>
+    /^(https?:\/\/|\/(?!\/|\\))/i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : m);
+  return s.replace(/\x00(\d+)\x00/g, (m, k) => { const c = codes[+k]; return c === undefined ? m : `<code>${c}</code>`; }); // 审查 R3：越界占位原样保留（NUL 伪造防复制错位）
+}
+// 表格行/分隔行/拆格：mdIsRow 要求首尾竖线全形式；mdIsSep 每格须为 :?-+:?（对齐
+// 冒号可带）；mdCells 去首尾竖线后按 | 拆格。
+function mdIsRow(s) { return /^\s*\|.*\|\s*$/.test(s); }
+function mdIsSep(s) { const c = mdCells(s); return c.length >= 1 && c.every(x => /^:?-+:?$/.test(x)); }
+function mdCells(s) { return s.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()); }
+/* ===== md 渲染器 shared block end ===== */
+
 /* ---------- 展示词典：技术态永远配人话（INTERACTION 四.5） ---------- */
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
@@ -50,7 +169,7 @@ const S = {
   primeNewWire: null,      // 轮换自动接线结果（t20261023-62a2）：{target} 命中 zcode 布局；null=降级手动配给
   primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp,wired,target} 钦定完成一次性展示
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
-         restart_cmd: '', config_path: '', structural: [], msg: '', editing: false },  // 能力配置编辑（方案 3.5）；editing=编辑 details 展开中（轮询挂起重绘）
+         restart_cmd: '', config_path: '', structural: [], msg: '' },  // 能力配置编辑（方案 3.5）；编辑会话在模块级 cfgEdit（t20261023-a4b1 抽屉化）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
                            // 在途请求发起时捕获，应答返回时代次不一致 = 迟到应答，丢弃不写状态
 };
@@ -133,21 +252,11 @@ async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   try {
     if (await loadAll()) {
-      syncCfgEditing();
-      if (S.cfg.editing) return; // 能力配置编辑中：数据照常刷，DOM 不动（防重绘丢未保存输入）
+      if (cfgEdit) return; // 能力配置编辑抽屉开着：数据照常刷，表格 DOM 不动（编辑会话不受重绘干扰）
       render();
     }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
 }
-
-// syncCfgEditing 编辑态检测：能力配置任一「编辑」details 展开即为编辑中。
-// 以 DOM 为真相源（toggle 不冒泡，捕获监听 + 轮询前各同步一次，cfg 动作后也准）。
-function syncCfgEditing() {
-  S.cfg.editing = !!document.querySelector('.cfg-edit[open]');
-}
-document.addEventListener('toggle', e => {
-  if (e.target.classList?.contains('cfg-edit')) syncCfgEditing();
-}, true);
 
 /* ---------- 令牌门（本机管理令牌 = 本机控制台的登录） ---------- */
 async function tryToken(token) {
@@ -293,10 +402,10 @@ function overviewPage() {
       + (st?.mode === 'setup' ? primeCard() : '');
   }
   return head + `
-  <div class="grid cols3">
+  <div class="grid cols3 spaced">
     <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线' : '离线'}</span></div>
       <small class="muted">epoch ${esc(st?.epoch ?? 0)} · 掉线自动重连，重连后代次 +1</small></section>
-    <section class="card"><h3>执行账本（三态）</h3><div class="mini-stat spaced"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div>
+    <section class="card"><h3>执行账本（三态）</h3><div class="mini-stat"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div>
       <small class="muted">重启恢复：started 未完 → needs_review，绝不自动重跑</small></section>
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
@@ -313,11 +422,11 @@ function primeCard() {
     : st?.mode === 'setup' ? 'setup（未接入）' : '组网在线';
   const foot = `<p class="footer-note">断开组网后：hub 信箱内未收任务将待过期；本机历史任务不受影响，本机派单照常可用。</p>`;
   if (st?.mode === 'setup') {
-    return `<section class="card"><h2>本机统筹 · 形态</h2>
+    return `<section class="card spaced"><h2>本机统筹 · 形态</h2>
     <div class="mini-stat spaced"><span><b>未钦定</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>
     <small class="muted">先完成接入并配置能力后再钦定统筹。</small></section>`;
   }
-  const head = `<section class="card"><div class="row"><h2>本机统筹 · 形态</h2>
+  const head = `<section class="card spaced"><div class="row"><h2>本机统筹 · 形态</h2>
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
   <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>`;
   const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入统筹的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个统筹」重新走钦定。` : '请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个统筹」重新走钦定。'}</small></div>` : '';
@@ -352,7 +461,7 @@ function primeDoneView() {
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
-  return `<section class="card"><div class="row"><h2>最近任务（本机派出的）</h2><small>${S.tasks.length} 条留痕</small></div>
+  return `<section class="card spaced"><div class="row"><h2>最近任务（本机派出的）</h2><small>${S.tasks.length} 条留痕</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${t ? badge(t.status) : '<span class="badge offline">状态待查</span>'}</td></tr>`; }).join('')}
   </tbody></table></div><p class="footer-note">点击行查看详情；任务真相在本机账本（本页实时补查），终态保留 24h。</p>`
@@ -374,7 +483,6 @@ async function loadCfg() {
       // pending=true（第六轮修复 1）：本表读自盘上 node.yaml = 用户最新提交；
       // 待应用窗口期刷新页面拿到的不再是被覆盖前的旧运行时表。
       msg: d.pending ? '下方表格为盘上最新提交（结构性变更待重启生效），可直接继续编辑或「应用并重启」' : '',
-      editing: false, // render 重建 DOM 后编辑 details 全部闭合
     };
     render();
   } catch (e) { if (!e?.unauthorized) { S.cfg.unavailable = true; S.cfg.loaded = true; render(); } }
@@ -385,7 +493,9 @@ async function loadCfg() {
 // 编辑副本才是用户最新意图，重新 GET 会用它覆盖编辑中的表单（丢未保存输入）。
 // 第六轮修复 1 后 pending 窗口期 GET 已回盘上表（=用户已保存的提交），刷新页面
 // 不再丢提交；本处保持不 GET 只是保护编辑中副本，与后端口径互补。
-async function cfgSave(btn) {
+// t20261023-a4b1：label 参数区分入口按钮文案（表格「保存全部」/抽屉「保存」），
+// 协议不变；返回是否成功——抽屉入口凭它决定关抽屉（被拒保持打开，副本保留）。
+async function cfgSave(btn, label = '保存全部（校验+写盘）') {
   if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
   try {
     const r = await api('PUT', '/api/v1/local/config', { agents: S.cfg.agents });
@@ -402,13 +512,16 @@ async function cfgSave(btn) {
         await loadCfg();
         await loadAll().catch(() => {}); render();
       }
+      return true;
     } else {
-      // 拒绝（校验/写盘失败）：编辑副本与展开的编辑表单原样保留，仅弹服务端错误
+      // 拒绝（校验/写盘失败）：编辑副本与编辑抽屉原样保留，仅弹服务端错误
       alert('保存被拒：' + errLine(r.data));
+      return false;
     }
   } catch (e) {
     if (!e?.unauthorized) alert('网络层失败：结果未知，请刷新后从文件重载核对');
-  } finally { if (btn) { btn.disabled = false; btn.textContent = '保存全部（校验+写盘）'; } }
+    return false;
+  } finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
 }
 
 // cfgReload 从文件重载（丢弃未保存编辑，服务端重读走同一校验/分类链）。
@@ -472,11 +585,11 @@ function servicesPage() {
 function cfgSection() {
   const c = S.cfg;
   if (!c.loaded) {
-    return `<section class="card"><div class="row"><div><h2>能力配置</h2></div>
+    return `<section class="card spaced"><div class="row"><div><h2>能力配置</h2></div>
       ${button('加载配置', 'cfg-load', '')}</div><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。</p></section>`;
   }
   if (c.unavailable) {
-    return `<section class="card"><h2>能力配置</h2><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
+    return `<section class="card spaced"><h2>能力配置</h2><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
   }
   // 功能性修复 4：待应用横幅注明「下方表格为最新编辑」——pending 窗口期编辑
   // 副本是用户意图的权威（盘上已是新表，运行时基线待重启收敛）。
@@ -489,10 +602,10 @@ function cfgSection() {
   const msg = c.msg ? `<div class="notice ok spaced">${esc(c.msg)}</div>` : '';
   const rows = c.agents.map((a, i) => cfgRow(a, i)).join('') ||
     '<p class="muted">（空表：新增至少一个 agent 才能对外提供服务）</p>';
-  return `<section class="card"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>
+  return `<section class="card spaced"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>
     <small class="muted">配置文件：<code>${esc(c.config_path)}</code> · 保存时服务端强校验；yaml 注释与未知字段保留（round-trip）。普通字段保存即热重载；增删 agent / 改 command 需重启。</small></div></div>
     ${pending}${msg}
-    <div class="table-wrap"><table><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>暴露</th><th></th></tr></thead>
+    <div class="table-wrap"><table class="cfg-table"><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>暴露</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <div class="row spaced">
       ${button('＋ 新增 agent', 'cfg-add', '')}
@@ -510,29 +623,71 @@ function cfgRow(a, i) {
     <td><code>${esc(a.command)}</code></td>
     <td>${a.timeout_sec}s</td>
     <td>${a.exposed ? '网内' : '仅本机'}</td>
-    <td class="table-action">
-      <details class="cfg-edit"><summary class="link">编辑</summary>
-        <div class="cfg-form">
-          ${cfgField(i, 'name', '名称', a.name)}
-          ${cfgField(i, 'command', 'command（绝对路径）', a.command)}
-          ${cfgField(i, 'workdir', 'workdir（绝对路径）', a.workdir)}
-          ${cfgField(i, 'timeout_sec', 'timeout_sec（秒）', String(a.timeout_sec), 'number')}
-          ${cfgField(i, 'description', '描述', a.description)}
-          ${cfgField(i, 'config_home', 'config_home（可空）', a.config_home)}
-          ${cfgField(i, 'agent_args', 'agent_args（逗号分隔）', (a.agent_args || []).join(','))}
-          ${cfgField(i, 'allow_env', 'allow_env（逗号分隔或 *）', (a.allow_env || []).join(','))}
-          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.allow_args" ${a.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
-          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.stdin_to_arg" ${a.stdin_to_arg ? 'checked' : ''}> stdin_to_arg（args 型 CLI 兼底：任务描述转命令行尾参，如 zcode -p）</label>
-          <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> exposed（对网内暴露；本机派单不受限）</label>
-          ${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}
-        </div>
-      </details>
-    </td>
+    <td class="table-action">${button('编辑', 'cfg-open:' + i)}</td>
   </tr>`;
 }
 
 function cfgField(idx, field, label, value, type = 'text') {
   return `<label class="cfg-field">${esc(label)}<input type="${type}" data-cfg="${idx}.${field}" value="${esc(value)}"></label>`;
+}
+
+/* ---------- 能力配置编辑抽屉（t20261023-a4b1：行内 details 展开改右侧弹窗） ----------
+ * 基建与任务详情抽屉同家族（#layer + .overlay/.drawer-overlay/.drawer）；数据流
+ * 不动：data-cfg 输入仍直写 S.cfg.agents[idx]（编辑副本即真相），保存仍走
+ * cfgSave 的 PUT 整表协议。新增单行取消语义：打开时对 agent 深拷贝快照，
+ * 取消/遮罩/×关闭还原该行。cfgEdit 非空 = 编辑会话进行中（pollTick 守卫位：
+ * 数据照常拉，表格 DOM 不重绘，抽屉内输入不丢）。 */
+let cfgEdit = null;    // {idx, snap} 打开中的编辑抽屉；null=无编辑会话
+let cfgSaving = false; // 抽屉保存在途：收抽屉一律暂拒（防「取消还原」与在途 PUT 竞态分叉）
+function openCfgDrawer(idx) {
+  const a = S.cfg.agents[idx];
+  if (!a) return;
+  if (S.drawer) closeDrawer(); // 同一 #layer 互斥：任务详情抽屉让位
+  if (cfgEdit && S.cfg.agents[cfgEdit.idx]) S.cfg.agents[cfgEdit.idx] = cfgEdit.snap; // 换行编辑（UI 不可达，防御）：旧行先还原
+  cfgEdit = { idx, snap: JSON.parse(JSON.stringify(a)) };
+  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="cfg-drawer">${cfgDrawerView(a, idx)}</div></div>`;
+  $('#layer').addEventListener('click', cfgMaskClose); // 具名引用重复注册幂等去重（与任务抽屉遮罩关闭同机制）
+}
+function cfgMaskClose(e) {
+  if (!cfgEdit) return; // 抽屉已关后残留监听不动作（免与任务抽屉遮罩隐式耦合）
+  if (e.target.classList.contains('overlay')) closeCfgDrawer(true); // 遮罩关闭=取消语义（还原单行）
+}
+// closeCfgDrawer 关编辑抽屉并重绘表格；restore=true 还原快照（取消/遮罩/×），
+// false 保留编辑副本（保存成功/删除——内容已是意图终态）。
+function closeCfgDrawer(restore) {
+  if (cfgSaving) return;
+  if (cfgEdit && restore && S.cfg.agents[cfgEdit.idx]) S.cfg.agents[cfgEdit.idx] = cfgEdit.snap;
+  cfgEdit = null;
+  $('#layer').innerHTML = '';
+  render();
+}
+// cfgDrawerSave 抽屉保存：同一 PUT 整表协议，口径「保存（校验+写盘）」只落盘本行
+// 的编辑意图；成功关抽屉，被拒/网络未知保持打开（副本保留，现口径）。
+async function cfgDrawerSave(btn) {
+  cfgSaving = true;
+  let ok = false;
+  try { ok = await cfgSave(btn, '保存（校验+写盘）'); } finally { cfgSaving = false; }
+  if (ok || !S.authed) closeCfgDrawer(false); // 401 已回令牌门：抽屉随会话收起
+}
+function cfgDrawerView(a, i) {
+  return `<div class="row"><h2>编辑 agent · ${esc(a.name) || '（未命名）'}</h2>${button('×', 'cfg-close', 'close')}</div>
+    <div class="cfg-form-cols">
+      ${cfgField(i, 'name', '名称', a.name)}
+      ${cfgField(i, 'command', 'command（绝对路径）', a.command)}
+      ${cfgField(i, 'workdir', 'workdir（绝对路径）', a.workdir)}
+      ${cfgField(i, 'timeout_sec', 'timeout_sec（秒）', String(a.timeout_sec), 'number')}
+      ${cfgField(i, 'description', '描述', a.description)}
+      ${cfgField(i, 'config_home', 'config_home（可空）', a.config_home)}
+      ${cfgField(i, 'agent_args', 'agent_args（逗号分隔）', (a.agent_args || []).join(','))}
+      ${cfgField(i, 'allow_env', 'allow_env（逗号分隔或 *）', (a.allow_env || []).join(','))}
+      <label class="cfg-check"><input type="checkbox" data-cfg="${i}.allow_args" ${a.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
+      <label class="cfg-check"><input type="checkbox" data-cfg="${i}.stdin_to_arg" ${a.stdin_to_arg ? 'checked' : ''}> stdin_to_arg（args 型 CLI 兼底：任务描述转命令行尾参，如 zcode -p）</label>
+      <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> exposed（对网内暴露；本机派单不受限）</label>
+    </div>
+    <div class="cfg-drawer-foot">
+      ${button('取消', 'cfg-cancel', '')}
+      <span class="actions">${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}${button('保存（校验+写盘）', 'cfg-save-row', 'primary')}</span>
+    </div>`;
 }
 function svcCard(a) {
   const on = !!a.exposed;
@@ -543,7 +698,7 @@ function svcCard(a) {
       : a._synced === true
         ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录（经 hub）。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
-  return `<section class="card svc-card ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
+  return `<section class="card svc-card spaced ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
     <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span></h2>
       <small class="muted">${esc(a.description || '（无描述）')} · 权限模式 <code>${esc(a.permission_mode || '—')}</code> · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
     <div class="actions"><div class="toggle" role="group" aria-label="暴露开关">
@@ -630,9 +785,9 @@ function tasksPage() {
 }
 function myTasksCard() {
   const rows = S.tasks;
-  return `<section class="card"><div class="row"><h2>我的任务</h2><small>${rows.length} 条留痕 · 本机派出的全部任务</small></div>
+  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${rows.length} 条留痕 · 本机派出的全部任务</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>状态</th><th></th></tr></thead><tbody>
-    ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${t ? badge(t.status) : '<span class="badge offline">点击查询</span>'}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id), 'link')}</td></tr>`; }).join('')}
+    ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${t ? badge(t.status) : '<span class="badge offline">点击查询</span>'}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`; }).join('')}
   </tbody></table></div><p class="footer-note">状态实时补查自本机账本；终态保留 24h，过期任务号查询即 404。</p>`
     : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">上方表单派第一单。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
 }
@@ -893,6 +1048,12 @@ async function refreshDrawer(seq) {
   const t = r.data;
   S.drawer.task = t;
   S.live[t.id] = t;
+  $('#drawer').innerHTML = taskDrawerHtml(t);
+}
+
+// taskDrawerHtml 任务抽屉正文（refreshDrawer 渲染用；「查看原文」切换只重绘
+// #log-wrap 不走全量，见 logSectionHtml）。读 t 与全局 S（taskOrigin/S.agents）。
+function taskDrawerHtml(t) {
   const res = t.result;
   const errTxt = res?.error ? ERRORS[res.error.split(';')[0]] || res.error : '';
   // 双路径语义（功能性修复 7）：本机任务（origin=local，本机账本真相源）产物区
@@ -911,7 +1072,7 @@ async function refreshDrawer(seq) {
   const reviewNote = local
     ? `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对结论由本机主人在本控制台确认）。</div>`
     : `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对记录在 hub 控制台登记）。</div>`;
-  $('#drawer').innerHTML = `<div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2>${button('×', 'close-drawer', 'close')}</div>
+  return `<div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2>${button('×', 'close-drawer', 'close')}</div>
     <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 幂等键 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>
     <ul class="timeline" style="list-style:none;padding:0;margin:14px 0">
       <li>创建 ${esc(timeFull(t.created_at))} · 更新 ${esc(timeFull(t.updated_at))}</li>
@@ -920,11 +1081,29 @@ async function refreshDrawer(seq) {
     ${t.status === 'needs_review' ? reviewNote : ''}
     ${errTxt || res?.error ? `<div class="notice warn"><b>${esc(errTxt || res.error)}</b> · <code>${esc(res.error)}</code></div>` : ''}
     ${!res ? `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
-      : `<h3>最终答复 · FinalAnswer</h3><pre>${esc(res.final_answer || '（空）')}</pre>
+      : `<h3>最终答复 · FinalAnswer</h3>${mdAnswer(res.final_answer)}
          ${res.artifacts?.length ? `<h3>产物（${res.artifacts.length} 个，保留至确认后 24h）</h3>${res.artifacts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(a.sha256.slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('')}${artifactNote}` : ''}
-         <details><summary>诊断日志（stdout / stderr 尾部）</summary><pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre></details>`}
+         <details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${logSectionHtml(res)}</div></details>`}
     <div class="row spaced"><small class="muted">终态自带下一步：</small>
       <span class="actions">${t.status === 'completed' ? button('查看全部任务', 'close-drawer', 'link') : t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') + button('查看全部任务', 'close-drawer', 'link') : button('查看全部任务', 'close-drawer', 'link')}</span></div>`;
+}
+
+// mdAnswer 最终答复渲染态（t20261023-969e：agent 产出正文按 Markdown 渲染）；
+// mdToHtml 对空白输入返回空串，兜底「（空）」人话。
+function mdAnswer(text) {
+  return `<div class="md-body">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+}
+
+// logSectionHtml 诊断日志区（stdout / stderr 尾部）：默认 md 渲染 + 「查看原文」
+// 切换（df -h 类空格对齐的进程输出被 md 解析会散架，agent 的 md 结构化日志又常
+// 在——默认渲染满足主诉求，误渲染一键回原文）。切换态存 S.drawer.logRaw；切换
+// 只重绘 #log-wrap，details 开合态不被整抽屉重绘冲掉。原文视图沿用单 pre 双段。
+function logSectionHtml(res) {
+  const raw = !!S.drawer?.logRaw;
+  const toggle = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
+  if (raw) return `${toggle}<pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre>`;
+  const sec = (label, tail) => `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail || '') || '<p class="muted">（空）</p>'}</div>`;
+  return `${toggle}${sec('stdout', res.stdout_tail)}${sec('stderr', res.stderr_tail)}`;
 }
 
 /* ---------- 复制诊断信息 ---------- */
@@ -974,6 +1153,9 @@ document.addEventListener('click', e => {
       case 'copy-prime-declare': copyPrimeDeclare(); return;
       case 'copy-prime-mcp': copyPrimeMcp(); return;
       case 'cfg-load': loadCfg(); return;
+      case 'cfg-open': openCfgDrawer(parseInt(arg, 10)); return;
+      case 'cfg-close': case 'cfg-cancel': closeCfgDrawer(true); return; // 取消语义：还原快照
+      case 'cfg-save-row': cfgDrawerSave(btn); return;
       case 'cfg-add': {
         S.cfg.agents.push({ name: '', kind: 'cli', command: '', workdir: '', agent_args: [],
           timeout_sec: 600, allow_args: false, allow_env: [], config_home: '',
@@ -981,10 +1163,13 @@ document.addEventListener('click', e => {
         render(); return;
       }
       case 'cfg-del': {
+        if (cfgSaving) return; // 保存 PUT 在途禁删：splice 会让 cfgEdit.idx 错位，抽屉续改将写串行
         const di = parseInt(arg, 10);
         if (!Number.isNaN(di) && S.cfg.agents[di]) {
           if (confirm(`确定删除 agent「${S.cfg.agents[di].name}」？保存后写入 node.yaml（结构性变更需重启生效）。`)) {
-            S.cfg.agents.splice(di, 1); render();
+            S.cfg.agents.splice(di, 1);
+            if (cfgEdit) closeCfgDrawer(false); // 抽屉内删除：行已移除即关抽屉（closeCfgDrawer 内含 render）
+            else render();
           }
         }
         return;
@@ -1017,6 +1202,13 @@ document.addEventListener('click', e => {
       case 'open-task': openDrawer(arg); return;
       case 'reopen-form': closeDrawer(); route(); focusForm(); return;
       case 'close-drawer': closeDrawer(); return;
+      case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：只重绘 #log-wrap
+        if (!S.drawer?.task?.result) return;
+        S.drawer.logRaw = !S.drawer.logRaw;
+        const wrap = $('#log-wrap');
+        if (wrap) wrap.innerHTML = logSectionHtml(S.drawer.task.result);
+        return;
+      }
     }
   }
   if (tr && !e.target.closest('button')) openDrawer(tr.dataset.task);

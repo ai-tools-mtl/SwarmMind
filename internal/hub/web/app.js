@@ -8,6 +8,125 @@
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/* ===== md 渲染器 shared block begin（双端同步维护：本块在 node/hub 两端 app.js
+ * 逐字节一致，internal/node/localapi/web_md_render_test.go 抽块比对锁一致性——
+ * 改本块必须两端同改同验。规格见 docs/TASK-md-render.md。）
+ * 架构铁律：先全文 HTML escape，再在已转义文本上解析结构/行内标记——不存在任何
+ * HTML 直通路径，agent 输出 <script>/<img onerror> 必然显示为字面文本。 ===== */
+function mdToHtml(text) {
+  try {
+    const src = String(text ?? '');
+    if (!src.trim()) return '';
+    const escaped = src.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return mdBlocks(escaped.split('\n'), 0);
+  } catch (e) { return `<pre>${esc(text)}</pre>`; } // 审查 R1 纵深防御：任何渲染缺陷降级为原文展示，抽屉永不崩
+}
+function mdBlocks(lines, depth) {
+  const out = [];
+  let i = 0;
+  // 块级起始判定（段落收集据此断行）：围栏/标题/引用/分隔线/列表/表格候选行
+  const blockStart = s =>
+    /^```/.test(s) || /^#{1,6}\s/.test(s) || /^\s*&gt;/.test(s) ||
+    /^\s*(-{3,}|\*{3,})\s*$/.test(s) || /^\s*([-*]|\d{1,9}[.)])\s+/.test(s) || mdIsRow(s);
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+    // 围栏代码块 ```（可带语言标注 → 徽标；内部文本已转义，只直出不解析行内）
+    const fence = line.match(/^```([\w#+.-]*)\s*$/);
+    if (fence) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++;   // 跳过闭合 ```；未闭合到文末按已闭合处理
+      out.push(`<div class="md-code">${fence[1] ? `<span class="md-lang">${fence[1]}</span>` : ''}<pre><code>${buf.join('\n')}</code></pre></div>`);
+      continue;
+    }
+    // 标题 # ~ ######（h1-h6，抽屉内分级字号见 style.css .md-body h1-h6）
+    const h = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (h) { const n = h[1].length; out.push(`<h${n} class="md-h md-h${n}">${mdInline(h[2])}</h${n}>`); i++; continue; }
+    // 引用 >（escape-first 后行首 > 为 &gt;）：连续行收齐后递归按块解析；
+    // 深度封顶 32（审查 R1：单行数千个 > 的递归爆栈 DoS——超限直接平铺已转义文本）
+    if (/^\s*&gt;/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*&gt;/.test(lines[i])) buf.push(lines[i++].replace(/^\s*&gt; ?/, ''));
+      out.push(`<blockquote class="md-quote">${depth >= 32 ? esc(buf.join('\n')) : mdBlocks(buf, depth + 1)}</blockquote>`);
+      continue;
+    }
+    // 分隔线 --- / ***（单独成行）
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { out.push('<hr>'); i++; continue; }
+    // 列表（无序 -/*、有序 1./1)；两层缩进嵌套（行首 ≥2 空格为二级，更深并入二级）
+    const li = line.match(/^( *)([-*]|\d{1,9}[.)])\s+(.*)$/);
+    if (li) {
+      const items = [];
+      while (i < lines.length) {
+        const m = lines[i].match(/^( *)([-*]|\d{1,9}[.)])\s+(.*)$/);
+        if (!m) break;
+        items.push({ d: m[1].length >= 2 ? 1 : 0, mk: m[2], tx: m[3].trim() });
+        i++;
+      }
+      let p = 0;
+      // 同层标记类型（有序/无序）一致为一段列表；类型变化即另起列表（- a 后紧跟
+      // 1. b 不并入同一 ul，序号不丢）。嵌套层递归消费至遇到更浅缩进。
+      const build = depth => {
+        let html = '';
+        while (p < items.length && items[p].d === depth) {
+          const ordered = /^\d/.test(items[p].mk), tag = ordered ? 'ol' : 'ul';
+          let body = '';
+          while (p < items.length && items[p].d === depth && /^\d/.test(items[p].mk) === ordered) {
+            const it = items[p++];
+            let inner = mdInline(it.tx);
+            if (p < items.length && items[p].d > depth) inner += build(depth + 1);
+            body += `<li>${inner}</li>`;
+          }
+          html += `<${tag}>${body}</${tag}>`;
+        }
+        return html;
+      };
+      out.push(build(items[0].d));
+      continue;
+    }
+    // 表格：头行 + |---|---| 分隔行 + 数据行；头/分隔列数不匹配则整块按段落降级
+    if (mdIsRow(line) && i + 1 < lines.length && mdIsSep(lines[i + 1])) {
+      const head = mdCells(line), sep = mdCells(lines[i + 1]);
+      if (head.length >= 2 && head.length === sep.length) {
+        const rows = [];
+        i += 2;
+        while (i < lines.length && mdIsRow(lines[i])) rows.push(mdCells(lines[i++]));
+        out.push(`<div class="md-table"><table><thead><tr>${head.map(c => `<th>${mdInline(c)}</th>`).join('')}</tr></thead><tbody>${
+          rows.map(r => `<tr>${head.map((_, k) => `<td>${mdInline(r[k] || '')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+        continue;
+      }
+    }
+    // 普通段落：连续非空行合并，段内换行 <br>；块级起始行不并入
+    const buf = [];
+    while (i < lines.length && lines[i].trim() && !blockStart(lines[i])) buf.push(lines[i++].trim());
+    if (!buf.length) { out.push(`<p>${mdInline(lines[i++].trim())}</p>`); continue; }   // 表格降级等孤立行单独成段
+    out.push(`<p>${buf.map(mdInline).join('<br>')}</p>`);
+  }
+  return out.join('\n');
+}
+// mdInline 行内标记（输入为已转义文本）：`code` 占位保护 → **粗体** → *斜体*
+//（两端须紧贴非空白才配对，不配对字面保留）→ [文本](url)（url 白名单 http(s)://
+// 与 / 相对路径，其余如 javascript: 降级纯文本原样显示；外链 target=_blank +
+// noopener noreferrer）。不支持：图片、脚注、HTML 直通、删除线、强调嵌套。
+function mdInline(s) {
+  const codes = [];
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => `\x00${codes.push(c) - 1}\x00`);
+  s = s.replace(/\*\*([^*\s](?:[^*]*[^*\s])?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*\s](?:[^*]*[^*\s])?)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^()\s]+)\)/g, (m, label, url) =>
+    /^(https?:\/\/|\/(?!\/|\\))/i.test(url)
+      ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : m);
+  return s.replace(/\x00(\d+)\x00/g, (m, k) => { const c = codes[+k]; return c === undefined ? m : `<code>${c}</code>`; }); // 审查 R3：越界占位原样保留（NUL 伪造防复制错位）
+}
+// 表格行/分隔行/拆格：mdIsRow 要求首尾竖线全形式；mdIsSep 每格须为 :?-+:?（对齐
+// 冒号可带）；mdCells 去首尾竖线后按 | 拆格。
+function mdIsRow(s) { return /^\s*\|.*\|\s*$/.test(s); }
+function mdIsSep(s) { const c = mdCells(s); return c.length >= 1 && c.every(x => /^:?-+:?$/.test(x)); }
+function mdCells(s) { return s.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()); }
+/* ===== md 渲染器 shared block end ===== */
+
 /* ---------- PRIME 系统提示词（统筹模式派发用） ---------- */
 /* 与 deploy/prime/PRIME.md 同步维护——模板以 {{GOAL}} 结尾，拼接时替换为用户目标。
  * 2026-10-23 伦哥定案：UI 称呼「总理」改「统筹」（三方 zcode/codex/Hana 讨论收敛），
@@ -1226,12 +1345,12 @@ function drawerHtml(t) {
   <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
   <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 幂等键 <code>' + esc(t.idem) + '</code>' : ''}</p>
   ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半节点重启，无法确认实际进度。' : ''}</div>` : ''}
-  ${r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><pre style="white-space:pre-wrap">${esc(r.stderr_tail)}</pre>` : ''}
+  ${r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : ''}
   <h3 class="spaced">任务输入</h3>
   <pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre>
   <h3>最终答复</h3>
-  ${r && r.final_answer ? `<p style="white-space:pre-wrap">${esc(r.final_answer)}</p>` : (needs ? '<p class="muted">结果未确认，待人工核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
-  ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>运行日志</summary><pre>${esc(r.stdout_tail || '')}</pre>${r.stderr_tail ? `<pre>${esc(r.stderr_tail)}</pre>` : ''}<small>最多保留各 64KiB。</small></details>` : ''}
+  ${r && r.final_answer ? mdAnswer(r.final_answer) : (needs ? '<p class="muted">结果未确认，待人工核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
+  ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>运行日志</summary><div id="drawer-runlog">${runLogInner(t)}</div><small>最多保留各 64KiB。</small></details>` : ''}
   <h3>产物文件</h3>
   ${artifactsHtml(t)}
   <p class="footer-note">产物经中心端中继从执行节点取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
@@ -1240,6 +1359,28 @@ function drawerHtml(t) {
   ${reviewSection(t)}
   ${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
   <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`;
+}
+/* ---------- 任务结果 Markdown 渲染接入（t20261023-969e） ----------
+ * mdAnswer 最终答复渲染态（mdToHtml 空白输入返回空串，兜底「（空）」人话）；
+ * failInner/runLogInner 失败原因与运行日志的「默认 md 渲染 + 查看原文切换」
+ *（df -h 类空格对齐的进程输出被 md 解析会散架，agent 的 md 结构化日志又常在）。
+ * 切换态存 S.drawer.failRaw / logRaw；切换只重绘对应内层容器（#drawer-fail /
+ * #drawer-runlog），details 开合与阅读位置不被整抽屉重绘冲掉——5s 轮询全量重绘
+ * 时因状态存 S.drawer 而保持。原文视图沿用任务书前的 pre 形态。 */
+function mdAnswer(text) {
+  return `<div class="md-body">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+}
+function failInner(t) {
+  const raw = !!S.drawer?.failRaw;
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；进程原始输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'fail-raw', 'link')}</div>`;
+  return `${head}${raw ? `<pre>${esc(t.result.stderr_tail)}</pre>` : `<div class="md-body md-log">${mdToHtml(t.result.stderr_tail) || '<p class="muted">（空）</p>'}</div>`}`;
+}
+function runLogInner(t) {
+  const raw = !!S.drawer?.logRaw, r = t.result;
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
+  if (raw) return `${head}<pre>${esc(r.stdout_tail || '')}</pre>${r.stderr_tail ? `<pre>${esc(r.stderr_tail)}</pre>` : ''}`;
+  const sec = (label, tail) => tail ? `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail) || '<p class="muted">（空）</p>'}</div>` : '';
+  return head + sec('stdout', r.stdout_tail) + sec('stderr', r.stderr_tail);
 }
 function artifactsHtml(t) {
   const arts = t.result?.artifacts || [];
@@ -2164,6 +2305,20 @@ const ACT = {
       S.busy.delete(key);
       b.disabled = false; b.textContent = '确认取消任务';   // 失败路径按钮必须恢复（FE-09）
     }
+  },
+  // 诊断日志/失败原因 查看原文·渲染切换（t20261023-969e）：只重绘对应内层容器，
+  // details 开合与阅读位置不被整抽屉重绘冲掉；状态存 S.drawer（轮询全量重绘保持）。
+  'log-raw': () => {
+    if (!S.drawer) return;
+    S.drawer.logRaw = !S.drawer.logRaw;
+    const w = $('#drawer-runlog');
+    if (w) w.innerHTML = runLogInner(S.drawer.task);
+  },
+  'fail-raw': () => {
+    if (!S.drawer) return;
+    S.drawer.failRaw = !S.drawer.failRaw;
+    const w = $('#drawer-fail');
+    if (w) w.innerHTML = failInner(S.drawer.task);
   },
   'drawer-refresh': async b => {
     const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id)).catch(() => null);

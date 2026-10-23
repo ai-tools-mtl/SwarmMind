@@ -108,9 +108,64 @@ td strong{font-weight:600}
 td small{display:block;color:var(--ink-4);font-family:var(--mono);font-size:var(--fs-table)}
 .task-title{min-width:155px}
 .table-action{white-space:nowrap}.table-action button{font-size:12.5px;height:auto;padding:4px 10px}
+/* 能力配置编辑抽屉（t20261023-a4b1：行内 details 展开改右侧弹窗，与任务详情
+ * 抽屉同基建 .overlay/.drawer-overlay/.drawer 同视觉家族）。行内「编辑」pill 落
+ * 上方 .table-action button 默认档（不抢蓝），此处只管抽屉内表单排版：字段两列
+ * 栅格（700px 抽屉内可容纳；≤680px 窄抽屉回退单列，见媒体查询）；复选框说明长、
+ * 跨满两列；底部操作条 sticky 贴抽屉底（长表单滚动时取消/保存不消失），负 margin
+ * 抵抽屉左右 padding 让底色满宽，滚动内容不从操作条两侧漏出。 */
+.cfg-form-cols{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 18px}
+.cfg-form-cols .cfg-check{grid-column:1/-1}
+.cfg-drawer-foot{position:sticky;bottom:0;display:flex;align-items:center;justify-content:space-between;gap:14px;margin:24px -32px 0;padding:14px 32px 10px;background:var(--surface);border-top:1px solid var(--hairline)}
+/* 能力配置表专用：名称列带描述时两行贴行顶（与命令/超时首行对齐）。只落
+ * .cfg-table 命名空间，其余表格（最近任务/在线节点等）维持默认。 */
+.cfg-table td{vertical-align:top}
+/* 编辑表单复选框行（allow_args/stdin_to_arg/exposed）：全局 label 块级 + input
+ * {display:block;width:100%}（上方 93/94 行）会把 checkbox 撑成满宽块独占一行、
+ * 文字挤到下一行。此处恢复常规形态：checkbox 贴行首，与文字同行垂直居中；文字
+ * 排版沿用全局 label 档（fs-small/600/ink-2），只修布局不动字样。 */
+.cfg-check{display:flex;align-items:center;gap:8px}
+.cfg-check input{width:auto;flex:none;margin:0}
 code,pre{font-family:var(--mono);font-size:var(--fs-table);line-height:1.7}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);padding:15px}
 code{color:var(--ink-2)}
+/* ===== md 渲染样式 shared block begin（双端同步维护：与 app.js 的 mdToHtml 配套，
+ * 本块在 node/hub 两端 style.css 逐字节一致，internal/node/localapi/web_md_render_test.go
+ * 抽块比对锁一致性——改本块必须两端同改同验。t20261023-969e。）
+ * .md-body 管渲染态排版：h1-h6 抽屉内分级字号；md 表格收紧内边距并 auto 宽
+ * （不复用列表格 12.5px 大内边距与满宽，宽表横向滚动）；.md-code 围栏代码 +
+ * 语言徽标；.md-quote 引用；.md-log-head/label 日志区切换行与 stdout/stderr 流标签。 ===== */
+.md-body{line-height:1.7}
+.md-body>*:first-child{margin-top:0}
+.md-body h1,.md-body h2,.md-body h3,.md-body h4,.md-body h5,.md-body h6{margin:18px 0 8px;line-height:1.4}
+.md-body h1{font-size:17px;letter-spacing:-.01em}
+.md-body h2{font-size:15px}
+.md-body h3{font-size:14px}
+.md-body h4{font-size:13.5px}
+.md-body h5{font-size:13px}
+.md-body h6{font-size:12.5px;color:var(--ink-3)}
+.md-body p{margin:0 0 10px}
+.md-body ul,.md-body ol{margin:0 0 10px;padding-left:22px}
+.md-body li{margin:3px 0}
+.md-body li>ul,.md-body li>ol{margin:3px 0}
+.md-body a{overflow-wrap:anywhere}
+.md-quote{margin:0 0 10px;padding:8px 14px;border-left:3px solid var(--faint);color:var(--ink-2)}
+.md-quote>:last-child{margin-bottom:0}
+.md-code{position:relative;margin:0 0 10px}
+.md-code pre{margin:0}
+.md-lang{position:absolute;top:7px;right:9px;font-size:11px;line-height:1;color:var(--ink-4);background:rgba(0,0,0,.05);padding:4px 9px;border-radius:var(--r-pill);font-family:var(--mono)}
+.md-table{overflow:auto;margin:0 0 10px}
+.md-body table{width:auto;min-width:55%}
+.md-body th,.md-body td{padding:7px 12px;text-align:left}
+/* position:static：hub 全局 th 吸顶（position:sticky;top:84px）会泄进 md 表——
+ * .md-table{overflow:auto} 构成滚动容器，表头被吸到容器顶 +84px 处盖住数据行
+ * （2026-10-23 走查实测抓出）。md 表是抽屉内内容片段，吸顶无意义，显式关掉。 */
+.md-body th{position:static;font-weight:600;color:var(--ink-2);border-bottom:1px solid var(--faint)}
+.md-body td{font-variant-numeric:tabular-nums}
+.md-log-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.md-log-label{display:block;font-size:var(--fs-small);font-family:var(--mono);color:var(--ink-4);margin:10px 0 4px}
+.md-log pre{margin:0 0 10px}
+/* ===== md 渲染样式 shared block end ===== */
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
 .empty h2{font-size:var(--fs-h2);font-weight:600;letter-spacing:-.01em;color:var(--ink)}
@@ -125,7 +180,12 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .toast{position:fixed;bottom:25px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--white);padding:12px 22px;border-radius:var(--r-pill);z-index:100;box-shadow:var(--sh-lift);max-width:90vw}
 .footer-note{font-size:11px;color:var(--ink-3);margin-top:25px}
 .chip{font-size:11px;color:var(--ink-4);letter-spacing:1px}
-.mini-stat{display:flex;gap:18px}.mini-stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}.mini-stat small{color:var(--ink-3)}
+/* mini-stat 卡内节奏与 .metric 对齐（margin:9px 0，复用既有常量不新增）——总览
+ * 三卡内容起始一致（t20261023-f2da：执行账本原用 spaced 下推 22px 与另两卡 9px
+ * 重心不一致）。本条声明在 .spaced 之后，单类会盖过其 margin-top，故显式补
+ * .mini-stat.spaced 组合规则保住统筹卡 22px 下推；hub 端 mini-stat 无卡内节奏
+ * 需求暂不同步（其唯一用点不带 spaced）。 */
+.mini-stat{display:flex;gap:18px;margin:9px 0}.mini-stat.spaced{margin-top:22px}.mini-stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}.mini-stat small{color:var(--ink-3)}
 .step{display:flex;gap:13px;align-items:flex-start;margin-bottom:12px}.step>span{border-radius:50%;background:var(--accent-bg);color:var(--accent);width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
 .warn-text{color:var(--heat)}
 /* 开关（exposed toggle）：pill 形态，on=蓝 off=灰 */
@@ -138,4 +198,4 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .statusline{min-height:28px;margin:14px 0}
 [hidden]{display:none!important}
 @media(max-width:1050px){.deploy{display:none}main{padding:30px 24px}.shell{grid-template-columns:185px minmax(0,1fr)}.cols4,.cols3{grid-template-columns:repeat(2,minmax(0,1fr))}.cols2{grid-template-columns:1fr}.topbar{gap:15px;padding:12px 18px}}
-@media(max-width:680px){.shell{display:block}aside{border-right:0;padding:12px}.workspace,.aside-bottom{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:8px}.navnum{display:none}.topbar{flex-wrap:wrap;gap:10px}.brand{font-size:17px}.top-right{font-size:11px}main{padding:24px 16px}.page-head{align-items:flex-start;flex-direction:column}h1{font-size:25px}.cols3,.cols4{grid-template-columns:1fr 1fr}.card{padding:18px}.drawer{padding:22px}}
+@media(max-width:680px){.shell{display:block}aside{border-right:0;padding:12px}.workspace,.aside-bottom{display:none}nav{display:flex;overflow:auto}nav button{white-space:nowrap;padding:8px}.navnum{display:none}.topbar{flex-wrap:wrap;gap:10px}.brand{font-size:17px}.top-right{font-size:11px}main{padding:24px 16px}.page-head{align-items:flex-start;flex-direction:column}h1{font-size:25px}.cols3,.cols4{grid-template-columns:1fr 1fr}.card{padding:18px}.drawer{padding:22px}.cfg-form-cols{grid-template-columns:1fr}.cfg-drawer-foot{margin-left:-22px;margin-right:-22px;padding-left:22px;padding-right:22px}}
