@@ -7,6 +7,6 @@ nodes:                            # 每台节点一行：node_id → 接入令�
   win-box: token-for-win-box
 admin_token: ""                   # 管理台登录令牌（浏览器登录与 swarmmindctl --token 用）；留空则启动时自动生成存 data_dir/admin_token
 data_dir: data
-notify:                           # 任务终态 IM 通知（可选）：任务进入终态（完成/失败/拿不准/取消）时推送一条消息；异步发送失败重试 3 次后放弃，绝不影响任务本身
-  webhook_url: ""                 # webhook 地址（飞书自定义机器人：群设置→机器人→自定义机器人，复制 https://open.feishu.cn/open-apis/bot/v2/hook/xxx）；留空=禁用
-  format: raw                     # raw=结构化 JSON（event=task_final，机器可读）；feishu=飞书机器人文本消息（一行人话摘要，如「✅ 任务完成 t-abc123 · mac-mini/coder · 耗时 3m20s」）
+notify:                           # 【旧版兼容入口】任务终态 IM 通知——日常配置请用管理台「设置 → 通知」（可视化多渠道：飞书/邮件/webhook/站内，运行时可改，凭证存 data_dir/notify_channels.json）
+  webhook_url: ""                 # 本段仅在「启动时渠道存储为空」被一次性导入为一个通知渠道（幂等，只导一次）；导入后本段不再生效，改这里无效
+  format: raw                     # raw→导入为通用 webhook 渠道（结构化 JSON）；feishu→导入为飞书机器人渠道（一行人话摘要）

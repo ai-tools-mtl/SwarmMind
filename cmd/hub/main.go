@@ -41,9 +41,9 @@ type hubConfig struct {
 	AdminToken string            `yaml:"admin_token"` // 管理面登录令牌（空则生成存 data_dir/admin_token）
 	DataDir    string            `yaml:"data_dir"`    // 默认 data
 	Notify     struct {
-		WebhookURL string `yaml:"webhook_url"` // 任务终态 IM 通知 webhook（空=禁用）
-		Format     string `yaml:"format"`      // raw（默认）| feishu
-	} `yaml:"notify"` // 任务终态 IM 通知（P4③）：失败重试后放弃，绝不影响任务终态
+		WebhookURL string `yaml:"webhook_url"` // 旧版任务终态通知 webhook（兼容入口：启动时一次性导入为通知渠道）
+		Format     string `yaml:"format"`      // raw（默认）| feishu（导入时映射渠道类型）
+	} `yaml:"notify"` // 任务终态 IM 通知旧配置段（P4③ 控制台化后仅作一次性导入入口；日常配置改用管理台「设置 → 通知」）
 }
 
 func main() {
@@ -139,24 +139,28 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 			}
 		},
 	})
-	// 任务终态 IM 通知（P4③）：webhook 未配置=禁用（nil notifier）。格式启动即
-	// 校验——拼错尽快失败，不静默回落 raw。
-	var notifier core.TerminalNotifier
-	if cfg.Notify.WebhookURL != "" {
-		nc, err := notify.NewClient(notify.Config{
-			WebhookURL: cfg.Notify.WebhookURL,
-			Format:     cfg.Notify.Format,
-		})
-		if err != nil {
-			return fmt.Errorf("notify 配置非法: %w", err)
-		}
-		notifier = nc
-		format := cfg.Notify.Format
-		if format == "" {
-			format = notify.FormatRaw
-		}
-		log.Printf("[hub] 任务终态通知已启用 format=%s（失败重试 3 次后放弃，不影响任务）", format)
+	// 任务终态通知（P4③ 控制台化升级）：Dispatcher 路由到通知渠道
+	// （data_dir/notify_channels.json，管理台「设置 → 通知」运行时可改）。
+	// hub.yaml 旧 notify 段兼容：配置了 webhook_url 时启动一次性导入（幂等，
+	// 只导一次；此后该段不再生效，日常配置走管理台）。格式启动即校验——拼错
+	// 尽快失败，不静默回落。
+	channels, err := notify.OpenChannelStore(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("打开通知渠道存储失败: %w", err)
 	}
+	if cfg.Notify.WebhookURL != "" {
+		format := cfg.Notify.Format
+		switch format {
+		case "", notify.FormatRaw, notify.FormatFeishu:
+		default:
+			return fmt.Errorf("notify 配置非法: 未知格式 %q（可选 raw|feishu）", format)
+		}
+		if _, err := channels.ImportLegacy(cfg.Notify.WebhookURL, format, time.Now()); err != nil {
+			return fmt.Errorf("导入 hub.yaml notify 段失败: %w", err)
+		}
+	}
+	inbox := &notify.Inbox{}
+	notifier := notify.NewDispatcher(channels, inbox)
 	coreSvc, err = core.New(core.Config{
 		Store:     st,
 		Transport: mgr,
@@ -205,6 +209,7 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	}
 	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{
 		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
+		Notify:    notifier,
 		NodeEntry: &api.NodeEntryConfig{Scheme: nodeScheme, Listen: cfg.NodeListen},
 		Enroll: &api.EnrollConfig{
 			SourceDir: envDefault("SWARM_SOURCE_DIR", "/opt/swarmmind-src"),
@@ -248,18 +253,20 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	case err := <-serveErr:
 		// L3：监听异常返回路径同样先走会话清理，再关闭 core/store（defer 序）
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			shutdownHub(apiSrv, mgr, srv, closeBudget)
+			shutdownHub(apiSrv, mgr, srv, closeBudget, notifier)
 			return fmt.Errorf("hub 监听异常退出: %w", err)
 		}
-		shutdownHub(apiSrv, mgr, srv, closeBudget)
+		shutdownHub(apiSrv, mgr, srv, closeBudget, notifier)
 		return nil
 	}
-	shutdownHub(apiSrv, mgr, srv, closeBudget)
+	shutdownHub(apiSrv, mgr, srv, closeBudget, notifier)
 	return nil
 }
 
-// shutdownHub 统一关闭顺序：管理面 → 会话（Close 帧+预算等待）→ node 入口。
-func shutdownHub(apiSrv *http.Server, mgr *session.Manager, srv *http.Server, budget time.Duration) {
+// shutdownHub 统一关闭顺序：通知在途投递收尾（预算内尽力等待）→ 管理面 →
+// 会话（Close 帧+预算等待）→ node 入口。
+func shutdownHub(apiSrv *http.Server, mgr *session.Manager, srv *http.Server, budget time.Duration, disp *notify.Dispatcher) {
+	waitNotifyIdle(disp, budget)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	_ = apiSrv.Shutdown(ctx) // 管理面先停（不再受理新提交）
@@ -267,6 +274,25 @@ func shutdownHub(apiSrv *http.Server, mgr *session.Manager, srv *http.Server, bu
 		log.Printf("[hub] 会话关闭异常: %v", err)
 	}
 	_ = srv.Shutdown(ctx)
+}
+
+// waitNotifyIdle 通知在途投递收尾：预算内尽力等待（通知是出站 HTTP，独立于
+// 监听器生命周期）；超时放弃——通知本身非可靠投递机制（崩溃在发出前即漏发），
+// 关闭不被它拖住。
+func waitNotifyIdle(disp *notify.Dispatcher, budget time.Duration) {
+	if disp == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		disp.WaitIdle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(budget):
+		log.Printf("[hub] 通知在途投递等待超时（%s），放弃等待（不影响关闭）", budget)
+	}
 }
 
 // groupSweepInterval 群存储维护周期：24h 过期清理与补偿回流重试均非时敏，

@@ -235,6 +235,21 @@ const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记�
 /* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
 const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
 const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
+/* 通知渠道词典（P4③ 控制台化）：类型徽标文案 + 表单提示 + 事件订阅勾选。
+ * sms 在枚举中占位（option disabled 灰显「需接入服务商，暂未开放」）。 */
+const NOTIFY_TYPES = {
+  feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
+  email: { label: '邮件', form: 'SMTP 四件套：服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
+  webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
+  inbox: { label: '站内通知', form: '无需配置。终态事件进入顶栏铃铛（只存在内存里，重启后清空）。' },
+  sms: { label: '短信', form: '' },
+};
+const NOTIFY_EVENT_OPTS = [
+  ['task_final', '全部终态（完成 / 失败 / 等你确认 / 取消）'],
+  ['task_failed', '仅失败'],
+  ['task_needs_review', '仅等你确认（结果拿不准）'],
+];
+const INBOX_ICONS = { completed: '✅', failed: '❌', needs_review: '⚠️', cancelled: '🚫' };
 
 /* ---------- 全局状态 ---------- */
 const S = {
@@ -264,6 +279,12 @@ const S = {
   groupId: '',                 // hash 路由 #/groups/{id} 的群 ID；空为群列表视图
   groupView: null,             // 群详情消息缓存 {id, lastSeq, msgs[]}；lastSeq 是增量拉取锚点
   groupsOff: false,            // hub 未接线群存储（端点 503）
+  notifyChannels: [],          // 通知渠道列表（P4③ 控制台化；已脱敏形态）
+  notifyLoading: false,        // 设置页通知区块加载态（D2 模式：局部更新）
+  notifyError: '',             // 通知渠道加载失败信息（空=正常）
+  inboxItems: [],              // 站内通知（内存态，重启清空；顶栏铃铛数据源）
+  inboxUnread: 0,              // 站内未读数（badge）
+  bellOpen: false,             // 铃铛面板开合
 };
 function freshControl() {
   /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
@@ -315,6 +336,7 @@ function sessionExpired() {
   if (!S.authed) { S.authed = false; route(); return; }
   S.authed = false; S.loaded = false; S.drawer = null; S.C = freshControl(); S.groupView = null;
   S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
+  closeBellPanel();   // 铃铛面板随会话收起（S.bellOpen 不跨会话）
   render();
   location.hash = '#/login';
   toast('登录会话已失效 · 请重新登录');
@@ -472,6 +494,7 @@ async function pollTick() {
   S.pollBusy = true;
   try {
     let changed = await loadAll();
+    refreshInbox();   // 铃铛未读数（独立 DOM 通道，不经 render；失败静默下轮再试）
     if (S.C.view === 'result' && S.C.batch) {
       const r = await api('GET', '/api/v1/control-operations/' + encodeURIComponent(S.C.batch.batch_id));
       if (r.code === 200 && r.data) { S.C.batch = r.data; changed = true; }
@@ -498,7 +521,7 @@ function route() {
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
   S.groupId = S.page === 'groups' && arg ? arg : '';
   render();
-  if (S.authed && S.page === 'tokens') loadTokens();   // D2：完成后只局部更新两个子树，不整页重绘（表单保护）
+  if (S.authed && S.page === 'tokens') { loadTokens(); loadNotifyChannels(); }   // D2：完成后只局部更新子树，不整页重绘（表单保护）
   if (S.authed && S.page === 'groups') {
     loadGroups().then(() => { if (S.page === 'groups') { render(); if (S.groupId) scrollMsgToBottom(); } });
     if (S.groupId) enterGroupView();
@@ -531,6 +554,11 @@ function render() {
 function renderChrome() {
   $('#logout').hidden = !S.authed;
   $('#session-left').textContent = S.authed ? '会话剩余 ' + humanLeft() : '';
+  const bell = document.getElementById('notify-bell');
+  if (bell) {
+    bell.hidden = !S.authed;   // 铃铛只在登录态显示；面板随登出/会话失效收起
+    if (!S.authed) closeBellPanel();
+  }
   const fr = document.getElementById('freshness');
   if (fr) fr.hidden = !S.authed;   // 新鲜度小字只在登录态显示；文本由 updateFreshness 独立维护
 }
@@ -1368,7 +1396,7 @@ function drawerHtml(t) {
  * #drawer-runlog），details 开合与阅读位置不被整抽屉重绘冲掉——5s 轮询全量重绘
  * 时因状态存 S.drawer 而保持。原文视图沿用任务书前的 pre 形态。 */
 function mdAnswer(text) {
-  return `<div class="md-body">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
 }
 function failInner(t) {
   const raw = !!S.drawer?.failRaw;
@@ -1807,7 +1835,13 @@ function tokensPage() {
       <div class="actions" style="align-self:end"><button class="primary" type="submit">生成新令牌</button></div>
     </form>
     <div id="token-list" class="spaced">${tokenListHtml()}</div>
-    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
+    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`
+  /* 通知区块（P4③ 控制台化）：D2 模式——进页即渲染容器，loadNotifyChannels
+   * 只更新 #notify-section 子树，表单区与令牌区不被触碰（局部刷新纪律）。 */
+  + `<section class="card spaced"><div class="row"><h2>通知</h2>${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div>
+    <p class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时主动给你发消息：飞书、邮件、自建 webhook，或就在本控制台（顶栏铃铛）。</p>
+    <div id="notify-section" class="spaced">${notifySectionHtml()}</div>
+    <p class="footer-note">多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。</p></section>`;
 }
 async function submitToken(form) {
   const name = $('#token-name')?.value.trim();
@@ -1823,6 +1857,227 @@ async function submitToken(form) {
       toast('令牌已生成 · 请立即保存明文');
     } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
   } finally { S.busy.delete('token-create'); }
+}
+
+/* ---------- 通知中心（P4③ 控制台化升级） ----------
+ * 设置页「通知」区块（D2 局部刷新纪律：只 innerHTML 替换 #notify-section，
+ * 永不整页重建）+ 渠道编辑弹层 + 顶栏铃铛（独立 DOM 通道，不经 render()）。 */
+
+/* loadNotifyChannels 拉渠道列表（已脱敏形态），完成后只重绘通知区块。 */
+async function loadNotifyChannels() {
+  S.notifyLoading = true; S.notifyError = '';
+  paintNotifySection();
+  const r = await api('GET', '/api/v1/notify/channels').catch(() => null);
+  if (S.page !== 'tokens') return;   // 已切页：状态留下次进页用，不碰 DOM
+  if (r && r.code === 200 && Array.isArray(r.data?.channels)) {
+    S.notifyChannels = r.data.channels; S.notifyError = '';
+  } else {
+    S.notifyError = r ? errLine(r.data) : '网络异常 · 未收到服务器应答';
+  }
+  S.notifyLoading = false;
+  paintNotifySection();
+}
+function paintNotifySection() {
+  if (S.page !== 'tokens') return;
+  const el = $('#notify-section');
+  if (el) el.innerHTML = notifySectionHtml();
+}
+function notifySectionHtml() {
+  if (S.notifyLoading) return '<p class="muted">通知渠道加载中…</p>';
+  if (S.notifyError) return `<div class="notice warn"><b>通知渠道加载失败</b><br>${esc(S.notifyError)}</div><div class="actions spaced">${button('重试', 'notify-retry', '')}</div>`;
+  if (!S.notifyChannels.length) return `<div class="empty"><h2>还没有通知渠道</h2><p class="muted">添加一个渠道，任务完成、失败或等你确认时主动给你发消息——飞书群、邮件都行；不配置也完全不影响派活。</p>${button('＋ 添加第一个渠道', 'notify-add', 'primary')}</div>`;
+  return S.notifyChannels.map(notifyChannelCardHtml).join('');
+}
+function notifyChannelCardHtml(ch) {
+  const t = NOTIFY_TYPES[ch.type] || { label: ch.type };
+  const ev = (ch.events || []).map(e => (NOTIFY_EVENT_OPTS.find(([k]) => k === e) || ['', e])[1]).join('、') || '全部终态';
+  const secretKeys = Object.keys(ch.secrets || {}).filter(k => k !== 'password' && !k.startsWith('header.'));
+  const meta = secretKeys.length ? secretKeys.map(k => ch.secrets[k]).filter(Boolean).join(' · ') : (ch.type === 'inbox' ? '投递到顶栏铃铛' : '');
+  return `<div class="chan-card${ch.enabled ? '' : ' off'}">
+    <div class="chan-main">
+      <button type="button" class="switch${ch.enabled ? ' on' : ''}" data-act="notify-toggle" data-id="${esc(ch.id)}" data-enabled="${ch.enabled ? '1' : ''}" aria-label="${ch.enabled ? '停用' : '启用'} ${esc(ch.name)}" title="${ch.enabled ? '点击停用' : '点击启用'}"></button>
+      <span class="badge orch">${esc(t.label)}</span>
+      <span class="chan-name">${esc(ch.name)}</span>
+    </div>
+    <div class="chan-actions">
+      ${button('发测试', 'notify-test', '', `data-id="${esc(ch.id)}" data-name="${esc(ch.name)}"`)}
+      ${button('编辑', 'notify-edit', '', `data-id="${esc(ch.id)}"`)}
+      ${button('删除', 'notify-del', 'danger', `data-id="${esc(ch.id)}" data-name="${esc(ch.name)}"`)}
+    </div>
+    <div class="chan-meta">订阅：${esc(ev)}${meta ? ' · ' + esc(meta) : ''} · 创建于 ${esc(fmtTime(ch.created_at))}${ch.enabled ? '' : ' · 已停用'}</div>
+  </div>`;
+}
+
+/* notifyFormHtml 渠道编辑弹层（新建 ch=null）。类型切换只重绘凭证字段容器
+ * （#nf-type-fields），名称与事件勾选不被冲掉（局部刷新纪律）。 */
+function notifyFormHtml(ch) {
+  const type = ch?.type || 'feishu';
+  return `${modalHead(ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道')}
+  <form id="notify-form" class="fields" onsubmit="return false">
+    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
+    <label>渠道类型
+      <select id="nf-type">
+        ${Object.keys(NOTIFY_TYPES).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('')}
+      </select>
+    </label>
+    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
+    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, ch?.secrets || {})}</div>
+    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
+      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
+        const on = !ch || (ch.events || []).includes(k);
+        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
+      }).join('')}
+    </fieldset>
+    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'close', 'link')}</div>
+  </form>
+  <p class="footer-note">凭证只保存在 hub 本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
+}
+/* notifyTypeFieldsHtml 按类型渲染凭证表单。编辑回填：password 与自定义头的值
+ * 显示 ****** 占位（保存原样传回 = 不修改，GitHub 式语义）；内嵌登录凭证
+ * （user:pass@host）的地址整串显示 ******；其余地址类字段明文回填可核对。 */
+function notifyTypeFieldsHtml(type, sec) {
+  const v = k => esc(String(sec[k] ?? ''));
+  const hint = NOTIFY_TYPES[type]?.form;
+  let fields = '';
+  if (type === 'feishu') {
+    fields = `<label>Webhook 地址<input id="nf-webhook-url" value="${v('webhook_url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`;
+  } else if (type === 'webhook') {
+    const headers = Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n');
+    fields = `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
+      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${headers}</textarea></label>`;
+  } else if (type === 'email') {
+    fields = `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
+      <div class="form-grid">
+        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
+        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
+      <div class="form-grid">
+        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
+        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
+      </div>`;
+  } else if (type === 'inbox') {
+    fields = `<div class="notice">站内通知无需配置：任务终态会出现在页面顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
+  } else {
+    fields = `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
+  }
+  return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
+}
+/* collectNotifyForm 从弹层 DOM 收集请求体；headers 文本按行解析为 header.<名> 键。 */
+function collectNotifyForm() {
+  const id = $('#nf-id')?.value || '';
+  const type = $('#nf-type')?.value || '';
+  const name = $('#nf-name')?.value.trim() || '';
+  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
+  let secrets = {};
+  if (type === 'feishu') secrets = { webhook_url: $('#nf-webhook-url')?.value.trim() || '' };
+  else if (type === 'webhook') {
+    secrets = { url: $('#nf-url')?.value.trim() || '' };
+    for (const line of ($('#nf-headers')?.value || '').split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
+      if (hname) secrets['header.' + hname] = hval;
+    }
+  } else if (type === 'email') secrets = {
+    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
+    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
+    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
+  };
+  return { id, type, name, events, secrets };
+}
+async function saveNotifyChannel() {
+  const f = collectNotifyForm();
+  if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
+  const editing = !!f.id;
+  if (S.busy.has('notify-save')) return;
+  S.busy.add('notify-save');
+  const btn = document.querySelector('[data-act="notify-save"]');
+  if (btn) { btn.disabled = true; btn.textContent = editing ? '保存中…' : '创建中…'; }
+  try {
+    const r = editing
+      ? await api('PUT', '/api/v1/notify/channels/' + encodeURIComponent(f.id), f).catch(() => null)
+      : await api('POST', '/api/v1/notify/channels', f).catch(() => null);
+    if (r && (r.code === 201 || r.code === 200)) {
+      closeLayer();
+      await loadNotifyChannels();
+      paintNotifySection();
+      toast(editing ? '渠道已更新' : '渠道已创建 · 点「发测试」验证一下');
+    } else {
+      toast((editing ? '保存失败' : '创建失败') + '：' + (r ? errLine(r.data) : '网络异常'));
+      if (btn) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; }
+    }
+  } finally { S.busy.delete('notify-save'); }
+}
+
+/* ---------- 顶栏铃铛（站内通知中心） ----------
+ * 独立 DOM 通道：badge 与面板内容直接更新（不经 render()，整页重绘不冲面板）。
+ * 数据轻实现：inbox 渠道的终态事件写入 hub 内存，重启清空（如实标注）。 */
+async function refreshInbox() {
+  if (!S.authed || document.visibilityState !== 'visible') return;
+  const r = await api('GET', '/api/v1/notify/inbox').catch(() => null);
+  if (!r || r.code !== 200 || !r.data) return;
+  S.inboxItems = Array.isArray(r.data.notifications) ? r.data.notifications : [];
+  S.inboxUnread = Number(r.data.unread) || 0;
+  paintBell();
+}
+/* paintBell 铃铛唯一绘制入口：badge 数字 + 面板内容（开着才重绘，避免打断滚动）。 */
+function paintBell() {
+  const badge = document.getElementById('notify-badge');
+  if (badge) {
+    badge.hidden = S.inboxUnread === 0;
+    badge.textContent = S.inboxUnread > 99 ? '99+' : String(S.inboxUnread);
+  }
+  if (S.bellOpen) {
+    const panel = document.getElementById('notify-panel');
+    if (panel) panel.innerHTML = bellPanelHtml();
+  }
+}
+function bellPanelHtml() {
+  const items = S.inboxItems || [];
+  return `<div class="notify-panel-head"><h3>站内通知</h3>
+    ${items.length ? button(items.some(i => !i.read) ? '全部已读' : '已全部读过', 'inbox-read-all', 'link') : ''}</div>
+    ${items.length ? items.map(i => `
+      <div class="notify-item${i.read ? '' : ' unread'}" data-act="inbox-read" data-id="${esc(i.id)}" data-read="${i.read ? '1' : ''}" role="button" tabindex="0">
+        <span class="ni-icon" aria-hidden="true">${i.test ? '🔔' : (INBOX_ICONS[i.status] || '📄')}</span>
+        <span class="ni-body">
+          <span class="ni-title">${i.test ? '测试消息 · 通知渠道已就绪' : esc(inboxTitle(i))}</span>
+          <span class="ni-desc">${esc(inboxDesc(i))}</span>
+        </span>
+        <span class="ni-time">${esc(fmtTime(i.created_at))}</span>
+      </div>`).join('')
+    : `<div class="notify-empty">还没有站内通知。<br>在「设置 → 通知」添加一个「站内通知」渠道后，<br>任务终态就会出现在这里。</div>`}
+    <p class="footer-note">站内通知只保存在内存里，hub 重启后清空；想留档请配置飞书 / 邮件渠道。</p>`;
+}
+function inboxTitle(i) {
+  const st = STATES[i.status] || i.status;
+  return `${st} · ${i.task_id}`;
+}
+function inboxDesc(i) {
+  const where = [i.node_id, i.agent].filter(Boolean).join('/');
+  if (i.error) return `原因：${i.error}${where ? ' · ' + where : ''}`;
+  if (i.summary) return `${i.summary}${where ? ' · ' + where : ''}`;
+  return where || '（无摘要）';
+}
+function toggleBellPanel() {
+  S.bellOpen = !S.bellOpen;
+  const panel = document.getElementById('notify-panel');
+  if (!panel) return;
+  panel.hidden = !S.bellOpen;
+  if (S.bellOpen) { refreshInbox(); paintBell(); }
+}
+function closeBellPanel() {
+  S.bellOpen = false;
+  const panel = document.getElementById('notify-panel');
+  if (panel) panel.hidden = true;
+}
+async function markInboxRead(id) {
+  const r = await api('POST', '/api/v1/notify/inbox/read', { id }).catch(() => null);
+  if (r && r.code === 200) refreshInbox();
+}
+async function markAllInboxRead() {
+  const r = await api('POST', '/api/v1/notify/inbox/read', {}).catch(() => null);
+  if (r && r.code === 200) refreshInbox();
 }
 
 /* ---------- 群聊（GROUP-RFC 六 MVP）：列表 + 详情时间线 ---------- */
@@ -2087,6 +2342,67 @@ const ACT = {
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
   'tokens-retry': () => loadTokens(),   // 设置页加载失败重试（D2/FE-06）：只局部更新两个子树
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
+  /* ---------- 通知渠道（P4③ 控制台化） ---------- */
+  'notify-add': () => openLayerPlain(notifyFormHtml(null)),
+  'notify-retry': () => loadNotifyChannels(),
+  'notify-edit': b => {
+    const ch = S.notifyChannels.find(x => x.id === b.dataset.id);
+    if (!ch) { toast('渠道不存在或已被删除'); return; }
+    openLayerPlain(notifyFormHtml(ch));
+  },
+  'notify-save': () => saveNotifyChannel(),
+  'notify-toggle': async b => {
+    const id = b.dataset.id;
+    const ch = S.notifyChannels.find(x => x.id === id);
+    if (!ch) return;
+    b.disabled = true;   // 忙态就地锁（局部更新不整页重绘，重建窗口不存在）
+    const r = await api('PUT', '/api/v1/notify/channels/' + encodeURIComponent(id), { enabled: !ch.enabled }).catch(() => null);
+    if (r && r.code === 200) {
+      ch.enabled = !ch.enabled;
+      paintNotifySection();
+      toast(ch.enabled ? '渠道已启用' : '渠道已停用（配置保留）');
+    } else {
+      b.disabled = false;
+      toast('切换失败：' + (r ? errLine(r.data) : '网络异常'));
+    }
+  },
+  'notify-test': async b => {
+    if (S.busy.has('notify-test:' + b.dataset.id)) return;
+    S.busy.add('notify-test:' + b.dataset.id);
+    b.disabled = true; b.textContent = '发送中…';
+    try {
+      const r = await api('POST', '/api/v1/notify/channels/' + encodeURIComponent(b.dataset.id) + '/test', {}).catch(() => null);
+      if (r && r.code === 200 && r.data) {
+        if (r.data.ok) { toast(`测试消息已发出 · 「${b.dataset.name}」投递成功`); refreshInbox(); }
+        else toast(`投递失败：${r.data.error || '原因未知'}`);
+      } else toast('测试请求失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally {
+      S.busy.delete('notify-test:' + b.dataset.id);
+      b.disabled = false; b.textContent = '发测试';
+    }
+  },
+  'notify-del': b => openLayerPlain(`${modalHead('删除通知渠道 · ' + esc(b.dataset.name))}<div class="notice warn">删除后此渠道不再收到任何通知（不可恢复）。后续可在「设置 → 通知」重新添加。</div><div class="actions spaced">${button('确认删除', 'notify-del-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`, true),
+  'notify-del-confirm': async b => {
+    const key = 'notify-del:' + b.dataset.id;
+    if (S.busy.has(key)) return;
+    S.busy.add(key);
+    b.disabled = true; b.textContent = '删除中…';
+    try {
+      const r = await api('DELETE', '/api/v1/notify/channels/' + encodeURIComponent(b.dataset.id)).catch(() => null);
+      if (r && r.code === 200) {
+        closeLayer();
+        await loadNotifyChannels();
+        paintNotifySection();
+        toast('渠道已删除');
+      } else toast('删除失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally {
+      S.busy.delete(key);
+    }
+  },
+  /* ---------- 站内通知铃铛 ---------- */
+  'bell-toggle': () => toggleBellPanel(),
+  'inbox-read': b => { if (b.dataset.read !== '1') { markInboxRead(b.dataset.id); } },
+  'inbox-read-all': () => markAllInboxRead(),
   'switch-login': () => { loginMode = loginMode === 'password' ? 'token' : 'password'; loginPageRendered = null; route(); },
   'account-update': async () => {
     const cur = $('#acc-cur')?.value || '', nu = $('#acc-user')?.value.trim() || '', np = $('#acc-new')?.value || '';
@@ -2449,6 +2765,7 @@ function bindEvents() {
       closeLayer();
       S.authed = false; S.loaded = false; S.C = freshControl(); S.groupView = null;
       S.drafts = {}; S.busy.clear();   // 草稿不跨会话（FE-08）；在途操作随登出作废
+      closeBellPanel();
       location.hash = '#/login';
       route();
       toast('已退出登录 · 服务端会话仍有效至过期（V0 无撤销端点）');
@@ -2457,6 +2774,10 @@ function bindEvents() {
     const btn = e.target.closest('[data-act]');
     if (btn && !btn.disabled) { const fn = ACT[btn.dataset.act]; if (fn) { fn(btn); return; } }
     if (e.target.dataset?.backdrop) { closeLayer(true); return; }   // 遮罩点击=用户关闭：焦点返回
+    /* 铃铛面板外点收起：点击既不在面板内也不在铃铛按钮上时收起（面板内点击
+     * 可能是条目/按钮，交给各自 data-act 处理后再走 refreshInbox 重绘）。 */
+    const bellWrap = document.getElementById('notify-bell');
+    if (S.bellOpen && bellWrap && !bellWrap.contains(e.target)) closeBellPanel();
     const tr = e.target.closest('tr[data-task]');
     if (tr) openTask(tr.dataset.task);
   });
@@ -2498,6 +2819,13 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
+    /* 通知渠道弹层：类型切换只重绘凭证字段容器（#nf-type-fields），名称与
+     * 事件勾选不被冲掉（局部刷新纪律，弹层不整层重开）。 */
+    if (e.target.id === 'nf-type') {
+      const box = $('#nf-type-fields');
+      if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, {});
+      return;
+    }
     /* 派单页选中统筹载体时切换任务描述占位为复合目标提示；选普通智能体恢复。
      * 口径与徽标/提交一致：按 (当前 ctrl-node, 所选 agent) 查 S.directory 后走
      * isPrimeDir 判定（网页指定优先、名字约定回退），不按名字硬编码（P2-7）。 */
@@ -2547,6 +2875,13 @@ function bindEvents() {
     }
     const tr = e.target.closest?.('tr[data-task]');
     if (tr && e.target === tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(tr.dataset.task); }
+    /* 站内通知条目（role=button）键盘可达：Enter/Space 等价点击（标已读）。 */
+    const ni = e.target.closest?.('.notify-item[data-act]');
+    if (ni && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      const fn = ACT[ni.dataset.act];
+      if (fn) fn(ni);
+    }
   });
   setInterval(pollTick, 5000);
   setInterval(groupTick, 3000);   // 群详情消息增量轮询；非群详情页在 groupTick 内跳过
@@ -2581,6 +2916,7 @@ async function init() {
     await api('GET', '/api/v1/nodes');
     S.authed = true;
     await loadAll();
+    refreshInbox();   // 登录态恢复：立即拉一次站内未读（后续随 5s 轮询）
   } catch (e) { /* 未登录 / 网络故障：登录页兜底 */ }
   route();
 }

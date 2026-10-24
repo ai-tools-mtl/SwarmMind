@@ -10,7 +10,10 @@
 <header class="topbar">
 <div class="brand"><b>⌘</b>SwarmMind<span class="chip"> 中心端</span></div>
 <div class="deploy">登记与监管 · 任务在各个节点本机执行</div>
-<div class="top-right"><span id="session-left" class="muted small"></span><button id="logout" class="link" hidden>退出登录</button></div>
+<div class="top-right"><div id="notify-bell" hidden>
+<button id="notify-bell-btn" class="bell-btn" data-act="bell-toggle" aria-label="站内通知" title="站内通知（重启后清空）"><span aria-hidden="true">🔔</span><span id="notify-badge" class="bell-badge" hidden></span></button>
+<div id="notify-panel" class="notify-panel" hidden></div>
+</div><span id="session-left" class="muted small"></span><button id="logout" class="link" hidden>退出登录</button></div>
 </header>
 <div id="app"><main><div class="card login"><h1>SwarmMind</h1><p class="muted">正在连接管理面…</p></main></div></div>
 <div id="layer"></div>
