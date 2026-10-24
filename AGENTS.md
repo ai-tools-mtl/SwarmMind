@@ -13,6 +13,7 @@
 ## 通用工程
 
 - 禁止直接覆盖写状态文件 → 崩溃时留下半截 JSON → 原子写：temp + rename。自查：`grep -rn "os.WriteFile" internal/ | grep -v tmp`
+- 文件操作安全（agent 可及面路径，2026-10-24 产物挂载审查立）：不可信面（如 workdir 内）的目录创建/前置路径校验一律 Lstat 不跟随（符号链接=拒绝，防 MkdirAll/rename 经链接逃逸），盘上操作经 os.Root 定界、路径型操作（rename 等）每步重验路径组件；源文件以打开后 fd fstat 校验（校验对象=读取对象，消 Lstat→Open TOCTOU）；复制设字节上限并核对实得字节数==登记大小（防源检查后增长）；多步 rename 状态变更写 journal（原子写+目录 fsync）崩溃后按实物回放收敛，回滚失败保留材料聚合报告。自查：`grep -rn "MkdirAll\|os.Rename" internal/node/inputs/`（每处应有 verifyDirRel/重验/放大材料保留语义伴随）
 - exec 超时 kill 后必须 Wait → 否则僵尸进程堆积。自查：`grep -n "Process.Kill" internal/node/ | wc -l`（每处 kill 附近应有 Wait）
 - 时间序列化一律 UTC，勿格式化成本地字符串存盘
 - 禁止在 V0 引入 SPEC 第三节白名单之外的依赖；新增依赖必须在代码注释写理由

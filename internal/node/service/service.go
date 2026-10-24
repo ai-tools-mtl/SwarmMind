@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mtl802/swarmmind/internal/node/agentid"
+	"github.com/mtl802/swarmmind/internal/node/inputs"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
@@ -48,6 +49,9 @@ type Config struct {
 	ArtifactRoots map[string]string
 	// Concurrency 执行并发上限；0 = protocol.DefaultConcurrency。
 	Concurrency int
+	// InputPrepareTimeout 上游产物挂载的独立超时（P4 L2/SPEC 4.12，输入就绪前
+	// 不 spawn；独立于任务执行超时）；0 = inputs.DefaultTimeout。
+	InputPrepareTimeout time.Duration
 	// Notifier 任务终态通知钩子（standalone 通知补盲区，notify.go；可选依赖，
 	// nil=禁用——networked 模式通知归 hub，装配方在 standalone 之外不传）。
 	Notifier TerminalNotifier
@@ -87,6 +91,9 @@ type Service struct {
 func New(cfg Config, tr transport.Transport) *Service {
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = protocol.DefaultConcurrency
+	}
+	if cfg.InputPrepareTimeout <= 0 {
+		cfg.InputPrepareTimeout = inputs.DefaultTimeout
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	s := &Service{
@@ -310,6 +317,17 @@ func (s *Service) execute(task protocol.Task) {
 			}
 			s.notifyTerminal(task.ID) // 过期=终态，同走终态旁路（standalone 通知）
 			s.sendResult(task.ID, res)
+			return
+		}
+
+		// 产物挂载（P4 L2 第二子批/SPEC 4.12，inputs.go）：依赖门控放行的下游
+		// 任务在 started/spawn 前准备上游输入——输入就绪前不 started 不 spawn
+		//（独立超时，同机纯复制+SHA 校验+原子发布）。失败 → accepted 直达
+		// failed（error=input_prepare_failed+上游/文件定位，不产生执行副作用，
+		// 对齐上方过期的 pre-started 失败先例）；挂载期间管理面取消 → 走取消
+		// 收口，服务关闭打断 → 条目保持 accepted 由重启恢复再调度。无依赖任务
+		// 不进入此路径（红线：无 depends_on 零行为变化）。
+		if len(task.DependsOn) > 0 && s.prepareInputs(task, runCtx, ce) {
 			return
 		}
 

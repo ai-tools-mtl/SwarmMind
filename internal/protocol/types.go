@@ -104,7 +104,8 @@ type TaskResult struct {
 	// Artifacts 产物引用（路径+哈希，node 本地保留，按需拉取）。
 	Artifacts []Artifact `json:"artifacts"`
 	// Error 失败/复核/取消原因：timeout / policy_denied / expired / user_cancelled /
-	// node_restarted_midway 等（取值见 CodeXxx 常量）。
+	// node_restarted_midway / input_prepare_failed（上游产物挂载失败，P4 L2/
+	// SPEC 4.12）等（取值见 CodeXxx 常量）。
 	Error string `json:"error,omitempty"`
 	// StartedAt 执行开始时刻（UTC）。
 	StartedAt time.Time `json:"started_at,omitempty"`
