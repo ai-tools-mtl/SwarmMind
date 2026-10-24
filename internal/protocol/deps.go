@@ -43,7 +43,8 @@ const DepManifestMarker = "\n[swarmmind:depends_on]"
 // 独立哈希进指纹材料，标记文本可被提交方预置进 stdin，依赖不得只经本函数
 // 注入的清单间接进指纹。重试与落库双方仍过同一变换，清单注入不破坏重试；
 // 未声明依赖时输出与旧版逐字节一致（向后兼容）。产物挂载（workdir/inputs/
-// <上游id>/ 纯复制）为 FILE-COLLAB L2 第二子批能力，本批先以清单附 idem 过渡。
+// <上游id>/ 纯复制）已交付（FILE-COLLAB L2 第二子批第一子轮，SPEC 4.12）：
+// node 在 spawn 前自动挂载本机上游产物，清单同步告知挂载位置；跨机取回另行。
 func EffectiveInput(in TaskInput, deps []string) TaskInput {
 	out := in.Clone()
 	if len(deps) == 0 || strings.Contains(out.Stdin, DepManifestMarker) {
@@ -57,7 +58,7 @@ func EffectiveInput(in TaskInput, deps []string) TaskInput {
 		b.WriteString(k)
 		b.WriteString("\n")
 	}
-	b.WriteString("产物自动挂载尚未提供（FILE-COLLAB L2 第二子批）；请经管理面/MCP（swarmmind_artifact）按上游任务 task_id 自取产物。\n")
+	b.WriteString("上游产物已自动挂载至本任务 workdir 的 inputs/<上游task_id>/ 目录（目录名即上游任务 task_id；同机纯复制并经 SHA-256 校验，只读使用——改动不影响上游；跨机场景暂未提供自动取回，可经管理面/MCP（swarmmind_artifact）按上游 task_id 自取）。\n")
 	out.Stdin += b.String()
 	return out
 }

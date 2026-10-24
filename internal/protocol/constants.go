@@ -104,6 +104,10 @@ const (
 	// CodeInvalidDependency 依赖声明不合法（P4.3/SPEC 4.12：未知 idem/自引用/
 	// 重复依赖/超深度/超级联/依赖环，提交校验链拒绝；HTTP 400 同码）。
 	CodeInvalidDependency = "invalid_dependency"
+	// CodeInputPrepareFailed 上游产物挂载失败（P4 L2 第二子批/SPEC 4.12：下游
+	// 任务 spawn 前输入准备失败——上游产物缺失/SHA 不符/超限/准备超时；任务
+	// 不进入执行，accepted 直达 failed，error 文案注明上游任务与文件定位）。
+	CodeInputPrepareFailed = "input_prepare_failed"
 )
 
 // 管理面/本地 API 附加错误码：hub 侧中继与连接状态（非协议帧码，HTTP 错误体用）。
