@@ -10,8 +10,22 @@
 // 本包——触发点（core 终态旁路）只在非终态→终态首次转换时调用一次（重复
 // 结果/冲突/清扫重扫均不触发），Sweep/重放天然不产生重复通知。
 //
+// 装配位置（2026-10-24 自 internal/hub/notify 提升，channel/dispatch/store 为
+// hub/node 通用组件）：hub 组网模式由 core 终态旁路触发；node standalone 模式
+// （hub_url 为空，hub 不存在）由 node service 终态落账本触发补盲区——networked
+// 模式通知归 hub，node 不装配（零调用零重复）。inbox 仅 hub 控制台装配（铃铛
+// 专用，见 inbox.go）；node 侧 Dispatcher 以 nil inbox 装配，inbox 渠道类型在
+// node 管理面准入即拒绝。
+//
+// 可靠性边界（设计定稿）：发送在独立 goroutine 进行，不阻塞状态机持久化；
+// 单渠道单次 5s 超时；渠道级失败独立重试 3 次指数退避（1s/2s/4s），穷尽只记
+// 日志（凭证与 webhook URL query 脱敏），绝不影响任务终态与主流程。去重不在
+// 本包——触发点（core 终态旁路 / node service 落终态）只在非终态→终态首次
+// 转换时调用一次（重复结果/冲突/清扫重扫均不触发），重放天然不产生重复通知。
+//
 // 兼容性：hub.yaml 旧 notify 段（webhook_url+format）启动时一次性导入为一个
-// 渠道（幂等，见 store.go ImportLegacy）；旧 Format 常量保留用于导入口径。
+// 渠道（幂等，见 store.go ImportLegacy，hub 专用）；旧 Format 常量保留用于
+// 导入口径。
 package notify
 
 import (
@@ -132,7 +146,7 @@ func durationText(t protocol.Task) string {
 func mustJSON(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		log.Printf("[hub] 任务终态通知载荷序列化失败（跳过发送）: %v", err)
+		log.Printf("[notify] 任务终态通知载荷序列化失败（跳过发送）: %v", err)
 		return nil
 	}
 	return b

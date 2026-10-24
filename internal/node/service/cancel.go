@@ -211,6 +211,7 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
 		return
 	}
+	s.notifyTerminal(p.TaskID) // 首次落终态即通知（standalone 补盲区）
 	if rearmErr != nil {
 		return
 	}
@@ -247,6 +248,7 @@ func (s *Service) finishCancelledBeforeRun(taskID string, cancelFence int64) boo
 		log.Printf("[node] 取消落盘未生效（先到终态为准）task=%s: %v", taskID, err)
 		return false
 	}
+	s.notifyTerminal(taskID) // 首次落终态即通知（重臂竞争早退也不漏——终态已成立）
 	if cancelFence > 0 && cancelFence > s.fenceOf(taskID) {
 		return true // 重臂未生效（落盘失败竞争）：不按旧租约回发，留重发/对账闭合
 	}
@@ -278,6 +280,7 @@ func (s *Service) finishCancelledOffer(task protocol.Task, fence int64) {
 		_ = s.cfg.Ledger.ClearCancelTombstone(task.ID)
 		return
 	}
+	s.notifyTerminal(task.ID) // 首次落终态即通知（standalone 补盲区）
 	if err := s.cfg.Ledger.ClearCancelTombstone(task.ID); err != nil {
 		log.Printf("[node] 清取消墓碑失败 task=%s: %v", task.ID, err)
 	}

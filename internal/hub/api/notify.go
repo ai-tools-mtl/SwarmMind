@@ -16,7 +16,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/mtl802/swarmmind/internal/hub/notify"
+	"github.com/mtl802/swarmmind/internal/notify"
 )
 
 // channelWriteReq 渠道创建/更新请求体。enabled/events 用指针区分「未提供

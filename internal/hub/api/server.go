@@ -23,7 +23,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
-	"github.com/mtl802/swarmmind/internal/hub/notify"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/hub/web"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )

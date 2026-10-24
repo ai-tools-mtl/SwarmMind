@@ -15,6 +15,13 @@ type Recovery struct {
 	// 含恢复中降级产生的 failed/expired 与 needs_review/node_restarted_midway（SPEC 4.8「并回传」）。
 	// closed 条目不在内（SPEC 4.5：hub 拒收已停止重传，记录保留、不再回传）。
 	Resend []Entry
+	// Downgraded 本次恢复新降级产生的终态条目（accepted 过期 → failed/expired、
+	// started → needs_review/node_restarted_midway）：仅在降级单写事务内收集，
+	// 无降级为 nil。去重锚点（返工必修2）：降级是非终态→终态的一次性转换，重启
+	// 后条目已 finished 不再进降级分支，同一任务至多出现在一次 Recovery 里——
+	// standalone 终态通知据此恰发一次（service.NotifyRecoveredTerminal，cmd/node
+	// 装配处调用）。按任务 ID 排序，清单确定。
+	Downgraded []Entry
 }
 
 // recover 执行启动恢复（Open 内调用，SPEC 4.8）：
@@ -24,7 +31,8 @@ type Recovery struct {
 //   - finished 且未 acked → 进入重发队列。
 //
 // 降级写走单写先写后见事务，持久化成功后才返回；无降级需求则不发起事务
-// （避免每次启动都重写账本文件）。
+// （避免每次启动都重写账本文件）。新降级条目记入 Recovery.Downgraded（恢复
+// 终态通知的触发清单，去重锚点见该字段注释）。
 func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 	needDowngrade := false
 	for _, e := range l.View() {
@@ -37,6 +45,7 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 			needDowngrade = true
 		}
 	}
+	var downgraded []Entry
 	if needDowngrade {
 		err := l.updateOp("recover", func(m map[string]Entry) error {
 			for id, e := range m {
@@ -76,6 +85,7 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 						ne.ResultAcked = false
 					}
 					m[id] = ne
+					downgraded = append(downgraded, ne) // 新降级终态（ne 已深拷贝），通知触发清单
 				}
 			}
 			return nil
@@ -83,9 +93,11 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 		if err != nil {
 			return nil, err
 		}
+		// map 遍历无序：通知清单按任务 ID 排序保持确定。
+		sort.Slice(downgraded, func(i, j int) bool { return downgraded[i].Task.ID < downgraded[j].Task.ID })
 	}
 
-	rec := &Recovery{}
+	rec := &Recovery{Downgraded: downgraded}
 	for _, e := range l.View() {
 		switch e.State {
 		case StateAccepted:

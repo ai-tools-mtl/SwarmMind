@@ -245,3 +245,61 @@ func TestLedgerRecoveryMixed(t *testing.T) {
 		t.Error("已 acked 的 t-acked 不应出现在 Resend")
 	}
 }
+
+// TestLedgerRecoveryDowngradedListing Downgraded 清单（返工必修2，恢复终态通知的
+// 去重锚点）：started 崩溃重启与 accepted 过期两条降级路径各记一条（local 来源
+// 即自确认，hub 来源保持未 acked）；再次重启条目已 finished 不再进降级分支，
+// 清单为空——同一任务至多出现在一次 Recovery 里，通知据此恰发一次。
+func TestLedgerRecoveryDowngradedListing(t *testing.T) {
+	dir := t.TempDir()
+	seedLedger(t, dir, func(l *Ledger) {
+		if err := l.AcceptOrigin(sampleTask("t-mid", time.Time{}), OriginLocal); err != nil {
+			t.Fatalf("seed t-mid: %v", err)
+		}
+		if err := l.MarkStarted("t-mid"); err != nil {
+			t.Fatalf("seed t-mid started: %v", err)
+		}
+		if err := l.AcceptOrigin(sampleTask("t-exp", protocol.NowUTC().Add(-time.Minute)), OriginHub); err != nil {
+			t.Fatalf("seed t-exp: %v", err)
+		}
+	})
+
+	l, rec := mustOpen(t, dir)
+	if len(rec.Downgraded) != 2 {
+		t.Fatalf("两条降级都应进 Downgraded 清单: %+v", rec.Downgraded)
+	}
+	// 清单按任务 ID 排序（map 遍历无序，清单须确定）。
+	if rec.Downgraded[0].Task.ID != "t-exp" || rec.Downgraded[1].Task.ID != "t-mid" {
+		t.Errorf("清单应按任务 ID 排序: %s, %s", rec.Downgraded[0].Task.ID, rec.Downgraded[1].Task.ID)
+	}
+	eExp, eMid := rec.Downgraded[0], rec.Downgraded[1]
+	if eExp.State != StateFinished || eExp.Result == nil ||
+		eExp.Result.Status != protocol.ResultFailed || eExp.Result.Error != protocol.CodeExpired {
+		t.Errorf("t-exp 降级终态不符: %+v", eExp)
+	}
+	if eExp.ResultAcked {
+		t.Error("hub 来源的 t-exp 降级应保持未 acked（进重发链路）")
+	}
+	if eMid.State != StateFinished || eMid.Result == nil ||
+		eMid.Result.Status != protocol.ResultNeedsReview || eMid.Result.Error != protocol.CodeNodeRestartedMidway {
+		t.Errorf("t-mid 降级终态不符: %+v", eMid)
+	}
+	if !eMid.ResultAcked || eMid.FirstAckedAt.IsZero() {
+		t.Error("local 来源的 t-mid 降级应即自确认（本机消费即送达）")
+	}
+	if e, ok := l.Get("t-mid"); !ok || e.State != StateFinished {
+		t.Errorf("账本条目应已落终态: ok=%v %+v", ok, e)
+	}
+	// 再次重启：条目已 finished，不再降级（跨重启去重锚点）。
+	//（先关当前实例释放 flock；Close 幂等，cleanup 重复调用无害。）
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, rec2 := mustOpen(t, dir)
+	if len(rec2.Downgraded) != 0 {
+		t.Errorf("重启后已 finished 不应重复降级（通知会重复）: %+v", rec2.Downgraded)
+	}
+	if len(rec2.Resend) != 1 {
+		t.Errorf("重启后仅 hub 来源的 t-exp 应仍在重发队列: %+v", rec2.Resend)
+	}
+}
