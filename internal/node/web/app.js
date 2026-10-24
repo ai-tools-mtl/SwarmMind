@@ -1,10 +1,11 @@
 'use strict';
 /* SwarmMind Node 本地控制台（Loop 7，INTERACTION 客户端三旅程）。
  * 数据面：本机回环 /api/v1/*（Bearer local_token，令牌持于 localStorage）。
- * 页面：总览（旅程③运维）· 我的服务（旅程①服务提供者：exposed 开关三态）·
+ * 页面：总览（旅程③运维）· 我的服务（旅程①服务提供者：开放开关三态）·
  * 派任务·我的任务（旅程②消费者：本机服务派单 + 留痕跟踪；跨机协作经 hub，
  * node 控制台不含全网目录——方案 v2 边界）。与 hub 控制台同交互闭环
- * （INTERACTION 四：300ms 反馈、终态带下一步、结果未知锁表单、技术态配人话双语）。
+ * （INTERACTION 四：300ms 反馈、终态带下一步、结果未知锁表单；文案口径见
+ * PRODUCT-DIRECTION v2 术语翻译表：人话在前，技术态进详情/悬停）。
  * 无框架原生 JS，hash 路由 SPA。 */
 
 const $ = s => document.querySelector(s);
@@ -129,20 +130,20 @@ function mdIsSep(s) { const c = mdCells(s); return c.length >= 1 && c.every(x =>
 function mdCells(s) { return s.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()); }
 /* ===== md 渲染器 shared block end ===== */
 
-/* ---------- 展示词典：技术态永远配人话（INTERACTION 四.5） ---------- */
+/* ---------- 展示词典：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
-  running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '待人工核对',
+  running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '等你确认',
 };
 const ERRORS = {
   timeout: '执行超过本机配置的超时上限，进程组已整组终止',
   policy_denied: '参数或环境变量超出本机白名单，未执行',
   expired: '离线任务超过 7 天保留期，已判失败',
-  agent_not_found: '执行节点配置已变化，找不到该 agent',
-  agent_not_exposed: '目标未暴露该能力，任务未准入',
+  agent_not_found: '执行机器的配置已变化，找不到该 agent',
+  agent_not_exposed: '目标机器没有开放这个能力，任务没有接收',
   node_restarted_midway: '执行到一半机器重启，结果不确定',
   truncated: '结果超过编码预算，答复或诊断日志已截断',
-  mailbox_full: '目标信箱已满（条数或字节预算）',
+  mailbox_full: '目标机器的离线暂存已满（条数或字节预算）',
   storage_full: 'hub 存储全局预算已满',
   frame_too_large: '提交体超过单消息 1MiB 上限',
 };
@@ -153,7 +154,7 @@ const TERMINAL = new Set(['completed', 'failed', 'needs_review']);
  * 服务端准入同样拒绝）；sms 占位灰显未开放。 */
 const NOTIFY_TYPES = {
   feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
-  email: { label: '邮件', form: 'SMTP 四件套：服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
+  email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
   sms: { label: '短信', form: '' },
 };
@@ -311,9 +312,9 @@ async function tryToken(token) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务'], ['wizard', '接入']];
+const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务'], ['wizard', '连接']];
 // setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
-const SETUP_PAGES = [['wizard', '接入向导'], ['overview', '本机环境']];
+const SETUP_PAGES = [['wizard', '连接向导'], ['overview', '本机环境']];
 function route() {
   const h = (location.hash || '#/overview').replace(/^#\//, '');
   const allowed = S.authed && S.status?.mode === 'setup' ? SETUP_PAGES : PAGES;
@@ -389,8 +390,8 @@ function gateView() {
   <p class="footer-note">仅本机回环可达；令牌只存本浏览器（localStorage），不出本机。</p></div></main>`;
 }
 
-/* ---------- 接入向导（方案 3.3：粘贴接入串 → 预览 node.yaml → 保存落盘重启；
- * setup 模式的首启页，standalone/组网经「接入」页可重新接入/切换 hub） ---------- */
+/* ---------- 连接中心端（方案 3.3：粘贴连接串 → 预览 node.yaml → 保存落盘重启；
+ * setup 模式的首启页，standalone/组网经「连接」页可重新连接/切换 hub） ---------- */
 function wizardPage() {
   const w = S.wiz;
   const locked = w.stage === 'previewing' || w.stage === 'saving' || w.stage === 'done';
@@ -401,11 +402,11 @@ function wizardPage() {
     done: `<div class="notice ok"><b>已写入 <code>${esc(w.written)}</code></b>：node 将在数秒后自动重启进入组网模式（保活拉起）。若为裸前台运行，请手动重启进程后刷新本页。</div>`,
     failed: `<div class="notice warn"><b>保存失败</b>：${esc(w.msg)}</div>`,
   }[w.stage] || '';
-  const preview = w.preview ? `<label>预览：将写入的 node.yaml（agents 段留空，接入后在网页/手编添加）<textarea readonly rows="12" class="mono">${esc(w.preview.yaml_preview)}</textarea></label>` : '';
-  return `<div class="page-head"><div><h1>接入中心端</h1>
-    <p class="muted">从 hub 控制台「接入向导 → 复制接入串」拿到 <code>swarmmind://join?…</code>，粘贴到下面完成接入（写入前可反复预览）。</p></div></div>
+  const preview = w.preview ? `<label>预览：将写入的 node.yaml（agents 段留空，连接后在网页/手编添加）<textarea readonly rows="12" class="mono">${esc(w.preview.yaml_preview)}</textarea></label>` : '';
+  return `<div class="page-head"><div><h1>连接中心端</h1>
+    <p class="muted">从 hub 控制台「添加机器向导 → 复制连接串」拿到 <code>swarmmind://join?…</code>，粘贴到下面完成连接（写入前可反复预览）。</p></div></div>
   <section class="card">
-    <label>接入串<textarea id="wiz-join" rows="3" placeholder="swarmmind://join?hub=wss%3A%2F%2F…&node=…&token=…" ${locked ? 'disabled' : ''}>${esc(w.join)}</textarea></label>
+    <label>连接串<textarea id="wiz-join" rows="3" placeholder="swarmmind://join?hub=wss%3A%2F%2F…&node=…&token=…" ${locked ? 'disabled' : ''}>${esc(w.join)}</textarea></label>
     <div class="row">
       ${button(w.preview ? '重新预览' : '预览', 'wiz-preview', w.preview ? '' : 'primary', locked ? 'disabled' : '')}
       ${w.preview && w.stage !== 'done' ? button('保存并重启', 'wiz-apply', 'primary', locked ? 'disabled' : '') : ''}
@@ -424,53 +425,57 @@ function overviewPage() {
     <p class="muted">本机 node 状态与最近任务；下一步：<b>＋派单</b> 把工作交给本机服务。</p></div>
     <div class="actions">${button('复制诊断信息', 'copy-diag')}${button('＋ 派单', 'go-tasks', 'primary')}</div></div>`;
   if (!S.agents.length) {
-    return head + `<section class="card"><h2>三步把本机接入协作网</h2>
+    return head + `<section class="card"><h2>三步让本机加入协作网</h2>
       <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
       <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「我的服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
-      <div class="step"><span>3</span><div><b>钦定统筹并派单</b><div class="muted">在「本机统筹」区钦定一个 agent，随后即可在本机派单；需要网内调用时再开 exposed 开关。</div></div></div></section>`
+      <div class="step"><span>3</span><div><b>钦定管家并派单</b><div class="muted">在「本机管家」区钦定一个 agent 担任智行管家，随后即可在本机派单；需要开放给其他机器调用时再打开开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '');
   }
   return head + `
   <div class="grid cols3 spaced">
     <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线' : '离线'}</span></div>
-      <small class="muted">epoch ${esc(st?.epoch ?? 0)} · 掉线自动重连，重连后代次 +1</small></section>
-    <section class="card"><h3>执行账本（三态）</h3><div class="mini-stat"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div>
-      <small class="muted">重启恢复：started 未完 → needs_review，绝不自动重跑</small></section>
+      <small class="muted">掉线自动重连，任务不丢</small></section>
+    <section class="card"><h3>重启恢复</h3><small class="muted">执行到一半的任务重启后标成「等你确认」，绝不自动重跑；已完成的结果原样保留。</small>
+      <details><summary>诊断：账本计数</summary><div class="mini-stat"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div></details></section>
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
   </div>
   ${primeCard()}${recentTasksCard()}`;
 }
-/* 本机统筹 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换统筹走选择视图
+/* 本机管家 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换管家走选择视图
  * → declare → 钦定完成视图（一次性凭证 + MCP 配置片段）→ 已钦定常态（轮换 +
- * 换统筹入口）；setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
+ * 换管家入口）；setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
 function primeCard() {
   const st = S.status;
   const pa = st?.prime_agent || '';
-  const modeTxt = st?.mode === 'standalone' ? 'standalone（本机自治，不连 hub）'
-    : st?.mode === 'setup' ? 'setup（未接入）' : '组网在线';
-  const foot = `<p class="footer-note">断开组网后：hub 信箱内未收任务将待过期；本机历史任务不受影响，本机派单照常可用。</p>`;
+  const modeTxt = st?.mode === 'standalone' ? '本机自治，不连中心端'
+    : st?.mode === 'setup' ? '未连接中心端' : '组网在线';
+  // 技术态代号只进悬停（PRODUCT-DIRECTION-v2：人话在前，技术态进详情/悬停）
+  const modeTech = st?.mode === 'standalone' ? 'standalone'
+    : st?.mode === 'setup' ? 'setup' : st?.mode === 'networked' ? 'networked' : '';
+  const modeStat = `<span><b${modeTech ? ` title="形态代号：${modeTech}"` : ''}>${esc(modeTxt)}</b><small>当前形态</small></span>`;
+  const foot = `<p class="footer-note">断开组网后：还在 hub 离线暂存里、未送达的任务将留到过期；本机历史任务不受影响，本机派单照常可用。</p>`;
   if (st?.mode === 'setup') {
-    return `<section class="card spaced"><h2>本机统筹 · 形态</h2>
-    <div class="mini-stat spaced"><span><b>未钦定</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>
-    <small class="muted">先完成接入并配置能力后再钦定统筹。</small></section>`;
+    return `<section class="card spaced"><h2>本机管家 · 形态</h2>
+    <div class="mini-stat spaced"><span><b>未钦定</b><small>本机管家</small></span>${modeStat}</div>
+    <small class="muted">先完成连接并配置能力后再钦定管家。</small></section>`;
   }
-  const head = `<section class="card spaced"><div class="row"><h2>本机统筹 · 形态</h2>
+  const head = `<section class="card spaced"><div class="row"><h2>本机管家 · 形态</h2>
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
-  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机统筹</small></span><span><b>${esc(modeTxt)}</b><small>当前形态</small></span></div>`;
-  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入统筹的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个统筹」重新走钦定。` : '请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个统筹」重新走钦定。'}</small></div>` : '';
+  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机管家</small></span>${modeStat}</div>`;
+  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入管家的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个管家」重新走钦定。` : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个管家」重新走钦定。'}</small></div>` : '';
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
   if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
-  return head + `<small class="muted">统筹经 MCP 用 prime_token 本机派单；本机主人（local_token）在网页派单同样放行（2026-10-22 鉴权裁决）。declare/轮换/配置管理等管理面仅主人可操作。</small>
-  <div class="row spaced">${button('轮换统筹凭证', 'prime-rotate', 'link')}${button('换一个统筹', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
+  return head + `<small class="muted">智行管家经 MCP（prime_token）获得的是<b>本机管家权限</b>：只管本机派单；本机主人（local_token）在网页派单同样放行。钦定/轮换/配置管理等管理操作仅主人可用。</small>
+  <div class="row spaced">${button('轮换管家凭证', 'prime-rotate', 'link')}${button('换一个管家', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
 }
-/* 钦定选择视图（未钦定引导态与「换一个统筹」共用；数据源本机 agents 列表）。 */
+/* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前统筹将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 作为统筹，它将经 MCP（prime_token）获得本机编排权；本机主人网页派单不依赖统筹凭证。'}</small>
+  return `<small class="muted">${pa ? '当前管家将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
-  <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为统筹', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
+  <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
 }
 /* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段。wired=true（t20261023-62a2
@@ -478,16 +483,16 @@ function primePickView(pa) {
 function primeDoneView() {
   const d = S.primeDecl.done;
   if (!d) return '';
-  const mcpJSON = d.mcp ? JSON.stringify(d.mcp, null, 2) : '（应答未含 mcp_config，请点「换一个统筹」重新钦定）';
+  const mcpJSON = d.mcp ? JSON.stringify(d.mcp, null, 2) : '（应答未含 mcp_config，请点「换一个管家」重新钦定）';
   const wiredNote = d.wired
-    ? `<div class="notice ok spaced"><b>已自动接线</b>：统筹 MCP 连接已写入 <code>${esc(d.target)}</code>（mcpServers.swarmmind）——零手贴，agent 重连后即可本机派单；原配置备份在同目录 <code>setting.json.bak-prime</code>。</div>`
+    ? `<div class="notice ok spaced"><b>已自动接线</b>：管家 MCP 连接已写入 <code>${esc(d.target)}</code>（mcpServers.swarmmind）——零手贴，agent 重连后即可本机派单；原配置备份在同目录 <code>setting.json.bak-prime</code>。</div>`
     : '';
-  const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机统筹——已写入 node.yaml prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${wiredNote}
-  <div class="notice warn spaced"><b>统筹凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
-  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入统筹 agent 的 mcpServers 即完成授权——接入即统筹'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
-  <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个统筹', 'prime-pick', 'link')}</div>
-  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权）；轮换统筹凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段粘进统筹 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。'}</p>`;
+  const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${wiredNote}
+  <div class="notice warn spaced"><b>管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
+  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入管家 agent 的 mcpServers 即完成授权——贴入即生效'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
+  <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
+  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权）；轮换管家凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段粘进管家 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。'}</p>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -601,7 +606,7 @@ function normalizeProfile(p) {
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
   const head = `<div class="page-head"><div><h1>我的服务</h1>
-    <p class="muted">本机 agent 即服务：暴露开关主权在本机；关闭后<b>新任务</b>不再准入（404），已在执行/排队的任务照常跑到终态。</p></div></div>`;
+    <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p></div></div>`;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
   // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
   const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
@@ -635,7 +640,7 @@ function cfgSection() {
   return `<section class="card spaced"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>
     <small class="muted">配置文件：<code>${esc(c.config_path)}</code> · 保存时服务端强校验；yaml 注释与未知字段保留（round-trip）。普通字段保存即热重载；增删 agent / 改 command 需重启。</small></div></div>
     ${pending}${msg}
-    <div class="table-wrap"><table class="cfg-table"><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>暴露</th><th></th></tr></thead>
+    <div class="table-wrap"><table class="cfg-table"><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>开放</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
     <div class="row spaced">
       ${button('＋ 新增 agent', 'cfg-add', '')}
@@ -644,7 +649,7 @@ function cfgSection() {
     </div>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
-    exposed=false 仅关闭网内准入，本机统筹派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
+    关闭开放（exposed=false）只影响其他机器调用，本机派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
 }
 
 function cfgRow(a, i) {
@@ -712,7 +717,7 @@ function cfgDrawerView(a, i) {
       ${cfgField(i, 'allow_env', 'allow_env（逗号分隔或 *）', (a.allow_env || []).join(','))}
       <label class="cfg-check"><input type="checkbox" data-cfg="${i}.allow_args" ${a.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
       <label class="cfg-check"><input type="checkbox" data-cfg="${i}.stdin_to_arg" ${a.stdin_to_arg ? 'checked' : ''}> stdin_to_arg（args 型 CLI 兼底：任务描述转命令行尾参，如 zcode -p）</label>
-      <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> exposed（对网内暴露；本机派单不受限）</label>
+      <label class="cfg-check"><input type="checkbox" data-cfg="${i}.exposed" ${a.exposed ? 'checked' : ''}> 开放给其他机器调用（exposed；本机派单不受限）</label>
     </div>
     <div class="cfg-drawer-foot">
       ${button('取消', 'cfg-cancel', '')}
@@ -731,9 +736,9 @@ function svcCard(a) {
   return `<section class="card svc-card spaced ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
     <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span></h2>
       <small class="muted">${esc(a.description || '（无描述）')} · 权限模式 <code>${esc(a.permission_mode || '—')}</code> · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
-    <div class="actions"><div class="toggle" role="group" aria-label="暴露开关">
-      ${button('暴露', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
-      ${button('停止暴露', `expose-off:${esc(a.name)}`, 'off-btn' + (on ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
+    <div class="actions"><div class="toggle" role="group" aria-label="开放给其他机器调用" title="开放给其他机器调用：关闭后仅本机可派单">
+      ${button('开放', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
+      ${button('停止开放', `expose-off:${esc(a.name)}`, 'off-btn' + (on ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
     </div></div></div>${syncNote}
     <details><summary>配置详情（只读 · 来自本机 ExecProfile）</summary>
       <div class="table-wrap"><table><tbody>
@@ -758,7 +763,7 @@ async function setExposed(name, exposed, btn) {
     if (r.code === 200) {
       const a = S.agents.find(x => x.name === name);
       if (a) { a.exposed = r.data.exposed; a._synced = !!r.data.hub_synced; }
-      toast(exposed ? '已暴露 · 即时生效' : '已停止暴露 · 新任务不再准入');
+      toast(exposed ? '已开放 · 即时生效' : '已停止开放 · 其他机器的新任务不再接收');
     } else {
       toast('开关失败 · ' + errLine(r.data));
     }
@@ -985,39 +990,39 @@ function tasksPage() {
   const standalone = S.status?.mode === 'standalone';
   const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
     <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
-  /* 2026-10-23 同步 hub 端口径：下拉项只留名字（描述收进 title），统筹载体
+  /* 2026-10-23 同步 hub 端口径：下拉项只留名字（描述收进 title），智行管家
    * （zcode-dev）单独 optgroup 分组加前缀，与普通智能体视觉分区 */
   const isPrime = e => e.card.name.includes('zcode-dev');
   const optOf = e => {
     const v = e.node_id + '|' + e.card.name;
-    const off = standalone || e.online ? '' : ' · 离线（任务进信箱，重连后执行）';
-    const tip = `${e.card.name}${isPrime(e) ? ' · 统筹：拆解复合目标并派发汇总' : ''} — ${e.card.description || '（无描述）'} · 权限 ${e.card.permission_mode || '—'}${off}`;
-    const label = isPrime(e) ? `统筹 · ${e.card.name}` : e.card.name;
+    const off = standalone || e.online ? '' : ' · 离线（任务先存着，上线就送）';
+    const tip = `${e.card.name}${isPrime(e) ? ' · 智行管家：拆解复合目标并派发汇总' : ''} — ${e.card.description || '（无描述）'} · 权限 ${e.card.permission_mode || '—'}${off}`;
+    const label = isPrime(e) ? `智行管家 · ${e.card.name}` : e.card.name;
     return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''} title="${esc(tip)}">${esc(label)}${off}</option>`;
   };
   const primeOpts = S.catalog.filter(isPrime), restOpts = S.catalog.filter(e => !isPrime(e));
   const group = (label, arr) => arr.length ? `<optgroup label="${esc(label)}">${arr.map(optOf).join('')}</optgroup>` : '';
-  const opts = group('统筹 · 复合目标拆解派发汇总', primeOpts) + group('智能体与工具', restOpts);
+  const opts = group('智行管家 · 复合目标拆解派发汇总', primeOpts) + group('智能体与工具', restOpts);
   const target = S.catalog.find(e => e.node_id + '|' + e.card.name === c.target);
   const stageView = {
     idle: '',
     submitting: `<div class="statusline"><span class="badge offered">提交中…</span></div>`,
-    acked: `<div class="notice ok"><b>已确认 · acknowledged</b>：任务已持久化，任务号 <code>${esc(c.taskId || '')}</code>。${button('查看任务', 'open-submitted', 'link')}</div>`,
+    acked: `<div class="notice ok"><b>已确认</b>：任务已存好，任务号 <code>${esc(c.taskId || '')}</code>。${button('查看任务', 'open-submitted', 'link')}</div>`,
     failed: `<div class="notice warn"><b>提交被拒绝</b>：${c.message}${button('修正后重试', 'form-retry', 'link')}</div>`,
-    unknown: `<div class="notice warn"><b>结果未知 · 表单已锁定</b>：${esc(c.message)}<br>同一幂等键（<code>${esc(c.idem)}</code>）重试不会重复执行：${button('同键重试', 'form-resend', 'link')} · ${button('放弃这单', 'form-abandon', 'link')}</div>`,
+    unknown: `<div class="notice warn"><b>结果未知 · 表单已锁定</b>：${esc(c.message)}<br>同一恢复密钥（<code>${esc(c.idem)}</code>）重试不会重复执行：${button('同键重试', 'form-resend', 'link')} · ${button('放弃这单', 'form-abandon', 'link')}</div>`,
   }[c.stage] || '';
   const formLocked = c.stage === 'submitting' || c.stage === 'unknown' || c.stage === 'acked';
   const targetNote = target ? `<b>${esc(target.card.name)}</b> · ${esc(target.card.description || '（无描述）')} · 权限模式 <code>${esc(target.card.permission_mode || '—')}</code> · ${standalone ? '<span class="badge online">本机直执行</span>' : target.online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线 · 排队等它回来</span>'}` : '';
   return head + `
   <section class="card" id="task-form"><h2>派任务</h2>
     ${S.catalog.length ? `
-    <label>本机服务${standalone ? '（本机主权：未暴露的能力也可本机派单）' : '（已暴露；派单目标只能是本机）'}<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个本机服务…</option>${opts}</select></label>
+    <label>本机服务${standalone ? '（本机主权：未开放的能力也可本机派单）' : '（已开放给其他机器调用；派单目标只能是本机）'}<select id="f-target" ${formLocked ? 'disabled' : ''}><option value="" ${!c.target ? 'selected' : ''} disabled>选择一个本机服务…</option>${opts}</select></label>
     <div class="notice" ${target ? '' : 'hidden'}>${targetNote}</div>
     <label>任务描述（一段话讲清要做什么；以 prompt_text 交付给对方 agent）<textarea id="f-stdin" placeholder="例：审查这段代码的并发安全性，指出竞态并给出修复建议…" ${formLocked ? 'disabled' : ''}>${esc(c.stdin)}</textarea></label>
-    <div class="row"><small class="muted">幂等键 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
+    <div class="row"><small class="muted">恢复密钥 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记本机能力（standalone 下未暴露也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}`;
 }
@@ -1043,7 +1048,7 @@ async function submitForm() {
     });
     if (r.code === 202 || r.code === 200) {
       S.f.stage = 'acked'; S.f.taskId = r.data?.task_id || '';
-      toast(r.data?.dup ? '已确认（幂等命中原任务）' : '已确认 · acknowledged');
+      toast(r.data?.dup ? '已确认（恢复密钥命中原任务）' : '已确认');
       try { S.snap = ''; await loadAll(); } catch (e) { /* 刷新失败交给轮询 */ }
       render(); return;
     }
@@ -1058,17 +1063,17 @@ async function submitForm() {
   render();
 }
 
-/* ---------- 接入向导 / 统筹钦定与轮换 / 断开组网动作 ----------
+/* ---------- 连接向导 / 管家钦定与轮换 / 断开组网动作 ----------
  * 端点契约（localapi，均 Bearer local_token）：POST /api/v1/local/setup/parse|apply|
  * disconnect（setup.go）、POST /api/v1/local/prime/rotate|declare（prime.go）。
  * 全部走 api() 封装与 toast 通道；向导失败信息在页内 stageView 呈现（可反复重试）。 */
 
-/* parseJoin 接入串前端先验（即时人话反馈）；后端 ParseJoinString 同源白名单复核
+/* parseJoin 连接串前端先验（即时人话反馈）；后端 ParseJoinString 同源白名单复核
  * （protocol/validate.go：node_id 2-32 位小写、token 64hex、hub_url ws(s)://）。 */
 function parseJoin(raw) {
   const s = (raw || '').trim();
   const PFX = 'swarmmind://join?';
-  if (!s.startsWith(PFX)) throw new Error('格式须为 swarmmind://join?hub=…&node=…&token=…（从 hub 控制台接入向导复制）');
+  if (!s.startsWith(PFX)) throw new Error('格式须为 swarmmind://join?hub=…&node=…&token=…（从 hub 控制台「添加机器向导」复制）');
   const q = new URLSearchParams(s.slice(PFX.length));
   const hub = q.get('hub'), node = q.get('node'), token = q.get('token');
   if (!hub || !node || !token) throw new Error('hub / node / token 三个参数缺一不可');
@@ -1111,7 +1116,7 @@ async function wizApply() {
   }
   // 预览后接入串被改过 → 作废预览，防「所见非所存」（后端仍会复核，这里管体验）
   if (v.hub !== S.wiz.preview.hub_url || v.node !== S.wiz.preview.node_id) {
-    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = '接入串在预览后被修改，请重新预览'; render(); return;
+    S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = '连接串在预览后被修改，请重新预览'; render(); return;
   }
   if (!confirm('保存将写入 node.yaml 并重启 node 进入组网模式，确认保存？')) return;
   S.wiz.stage = 'saving'; render();
@@ -1136,7 +1141,7 @@ async function wizApply() {
 }
 
 async function primeRotate(btn) {
-  if (!confirm('轮换统筹凭证？旧凭证将立即失效；统筹宿主配置若可自动接线会随轮换刷新（重连生效），否则需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
+  if (!confirm('轮换管家凭证？旧凭证将立即失效；管家宿主配置若可自动接线会随轮换刷新（重连生效），否则需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
   if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
@@ -1145,7 +1150,7 @@ async function primeRotate(btn) {
     if (r.code === 200) {
       S.primeNew = r.data?.prime_token || '';
       S.primeNewWire = r.data?.wired ? { target: r.data?.wired_target || '' } : null;
-      toast(r.data?.wired ? '已轮换 · 新凭证已自动写入统筹宿主配置' : '已轮换 · 新凭证仅此一次展示，请立即复制');
+      toast(r.data?.wired ? '已轮换 · 新凭证已自动写入管家宿主配置' : '已轮换 · 新凭证仅此一次展示，请立即复制');
     } else {
       toast('轮换失败 · ' + errLine(r.data));
     }
@@ -1163,7 +1168,7 @@ async function primeRotate(btn) {
 async function primeDeclare(btn) {
   const name = $('#prime-select')?.value;
   if (!name) { toast('先选择一个本机 agent'); return; }
-  if (!confirm(`钦定「${name}」为本机统筹？旧统筹凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
+  if (!confirm(`钦定「${name}」为本机管家？旧管家凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
   S.primeDecl.busy = true;
   if (btn) { btn.disabled = true; btn.textContent = '钦定中…'; }
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
@@ -1176,7 +1181,7 @@ async function primeDeclare(btn) {
       S.primeDecl.picking = false;
       S.primeNew = ''; // 轮换提示与钦定完成视图不同时堆叠
       S.primeNewWire = null;
-      toast(r.data?.wired ? '钦定完成 · MCP 连接已自动写入统筹宿主配置' : '钦定完成 · 统筹凭证仅此一次展示，请立即复制');
+      toast(r.data?.wired ? '钦定完成 · MCP 连接已自动写入管家宿主配置' : '钦定完成 · 管家凭证仅此一次展示，请立即复制');
       S.snap = '';
       await loadAll().catch(() => {});
     } else {
@@ -1191,7 +1196,7 @@ async function primeDeclare(btn) {
 }
 
 async function netDisconnect(btn) {
-  if (!confirm('断开组网并重启进入 standalone（本机自治）？\n\nhub 信箱内未收任务将留在 hub 待过期；本机历史任务不受影响，本机派单照常可用。')) return;
+  if (!confirm('断开组网并重启进入 standalone（本机自治）？\n\nhub 离线暂存里未送达的任务将留在 hub 等过期；本机历史任务不受影响，本机派单照常可用。')) return;
   if (btn) btn.disabled = true;
   try {
     const r = await api('POST', '/api/v1/local/setup/disconnect');
@@ -1212,7 +1217,7 @@ async function netDisconnect(btn) {
 async function copyPrimeToken() {
   try {
     await navigator.clipboard.writeText(S.primeNew);
-    toast('新统筹凭证已复制 · 旧凭证已失效，请立即配给统筹的 MCP 连接');
+    toast('新管家凭证已复制 · 旧凭证已失效，请立即配给管家的 MCP 连接');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }
@@ -1222,7 +1227,7 @@ async function copyPrimeToken() {
 async function copyPrimeDeclare() {
   try {
     await navigator.clipboard.writeText(S.primeDecl.done?.token || '');
-    toast('统筹凭证已复制 · 请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）');
+    toast('管家凭证已复制 · 请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN）');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }
@@ -1232,7 +1237,7 @@ async function copyPrimeMcp() {
   if (!d?.mcp) { toast('没有可复制的 MCP 配置'); return; }
   try {
     await navigator.clipboard.writeText(JSON.stringify(d.mcp, null, 2));
-    toast('MCP 配置已复制 · 粘贴进统筹 agent 的 mcpServers 即完成授权');
+    toast('MCP 配置已复制 · 粘贴进管家 agent 的 mcpServers 即完成授权');
   } catch (e) {
     toast('复制失败——浏览器未授权剪贴板');
   }
@@ -1308,10 +1313,10 @@ function taskDrawerHtml(t) {
         res.artifacts.length > 1 ? `（共 ${res.artifacts.length} 个，均在本机 outputs 目录）` : '（workdir/outputs 下，本机直接打开即可，无需经 hub 取回）'}</p>`
     : `<p class="muted small">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>`;
   const reviewNote = local
-    ? `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对结论由本机主人在本控制台确认）。</div>`
-    : `<div class="notice warn"><b>执行到一半机器重启了，结果不确定——等待本机主人核对，请勿重新提交</b>（needs_review 是独立终态，不是失败；核对记录在 hub 控制台登记）。</div>`;
+    ? `<div class="notice warn"><b>这个任务结果拿不准，等你确认——执行到一半机器重启了，请勿重新提交</b>（这是单独的「等你确认」状态，不是失败；核对结论由本机主人在本控制台确认）。</div>`
+    : `<div class="notice warn"><b>这个任务结果拿不准，等你确认——执行到一半机器重启了，请勿重新提交</b>（这是单独的「等你确认」状态，不是失败；核对记录在 hub 控制台登记）。</div>`;
   return `<div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2>${button('×', 'close-drawer', 'close')}</div>
-    <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 幂等键 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>
+    <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>
     <ul class="timeline" style="list-style:none;padding:0;margin:14px 0">
       <li>创建 ${esc(timeFull(t.created_at))} · 更新 ${esc(timeFull(t.updated_at))}</li>
       ${res ? `<li>开始 ${esc(timeFull(res.started_at))} · 结束 ${esc(timeFull(res.finished_at))} · 退出码 ${esc(res.exit_code)}</li>` : ''}
@@ -1319,7 +1324,7 @@ function taskDrawerHtml(t) {
     ${t.status === 'needs_review' ? reviewNote : ''}
     ${errTxt || res?.error ? `<div class="notice warn"><b>${esc(errTxt || res.error)}</b> · <code>${esc(res.error)}</code></div>` : ''}
     ${!res ? `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
-      : `<h3>最终答复 · FinalAnswer</h3>${mdAnswer(res.final_answer)}
+      : `<h3>最终答复</h3>${mdAnswer(res.final_answer)}
          ${res.artifacts?.length ? `<h3>产物（${res.artifacts.length} 个，保留至确认后 24h）</h3>${res.artifacts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(a.sha256.slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('')}${artifactNote}` : ''}
          <details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${logSectionHtml(res)}</div></details>`}
     <div class="row spaced"><small class="muted">终态自带下一步：</small>
@@ -1430,7 +1435,7 @@ document.addEventListener('click', e => {
         cfgReload(btn); return;
       }
       case 'cfg-restart': {
-        if (!confirm('应用并重启 node？在途任务将被中断并进入「待人工核对」，确认继续？')) return;
+        if (!confirm('应用并重启 node？在途任务将被中断并进入「等你确认」，确认继续？')) return;
         cfgRestart(btn); return;
       }
       case 'logout':
@@ -1445,7 +1450,7 @@ document.addEventListener('click', e => {
       case 'form-resend': submitForm(); return; // 同键重试
       case 'form-abandon':
         S.f = { stage: 'idle', target: S.f.target, stdin: S.f.stdin, idem: newIdem(), message: '' };
-        toast('已放弃 · 幂等键作废，不会再提交这一单'); render(); return;
+        toast('已放弃 · 恢复密钥作废，不会再提交这一单'); render(); return;
       case 'open-submitted': {
         const id = S.f.taskId; if (id) openDrawer(id); return;
       }
