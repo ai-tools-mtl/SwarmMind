@@ -63,6 +63,13 @@ type ArtifactFetchPayload struct {
 	Index int `json:"index"`
 }
 
+// DepResolvePayload dep_resolve 载荷（P4④第二子轮/SPEC 4.12：{idem}，
+// node→hub 按依赖 idem 请求上游任务定位与产物清单）。
+type DepResolvePayload struct {
+	// Idem 依赖的上游任务 idem_key。
+	Idem string `json:"idem"`
+}
+
 // ArtifactDataPayload artifact_data 载荷（SPEC 4.2：{task_id, index, meta,
 // data_base64}，执行 node→请求方经 hub 中继；单文件原始 ≤640KiB，base64 后
 // 随帧 ≤1MiB，更大产物 V1 分块）。

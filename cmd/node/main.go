@@ -300,6 +300,12 @@ func run(cfgPath, dataDirOverride string) error {
 		Notifier: serviceNotifier(disp),
 	}
 	svc = service.New(svcCfg, tr)
+	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；
+	// standalone/setup 语义不成立）。帧通道借 Service 自身收发，New 后置位即
+	// 可，无装配序问题；未启用时组合解析器 Remote 位为空，与第一子轮行为一致。
+	if mode == localapi.ModeNetworked {
+		svc.EnableRemoteInputs(0, 0)
+	}
 
 	// 恢复终态通知（返工必修2）：启动恢复直接落账的终态（离线期间过期、started
 	// 崩溃重启转 needs_review）不经 MarkFinished，运行期 notifyTerminal 旁路接

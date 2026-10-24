@@ -56,6 +56,9 @@ type Config struct {
 	Transport transport.Transport
 	// Now 时钟源，nil = protocol.NowUTC（测试注入假时钟）。
 	Now func() time.Time
+	// RelayFetchTimeout node 发起的产物取回中继应答预算（P4④跨机取回；0 =
+	// relayFetchTimeout 30s。测试注入短预算）。
+	RelayFetchTimeout time.Duration
 	// SweepInterval 后台清扫周期；0 = 不启动后台清扫（Sweep 手动驱动，测试用）。
 	SweepInterval time.Duration
 	// OnTaskTerminal 任务终态旁路钩子（可选，nil 安全）：任务首次落定终态时
@@ -91,8 +94,16 @@ type Core struct {
 	totalSz int64
 
 	// 在途产物取回表（FetchArtifact 中继，Loop 4）：请求帧 mid → waiter。
-	muArt   sync.Mutex
-	fetches map[string]*fetchWaiter
+	// artClosed = Close 已收束本域（muArt 保护）：停 relay timer、清表、不再
+	// 受理新中继——防关闭后 timer 残留继续调 transport（2026-10-24 审查建议修6）。
+	// artWG 收敛已启动外发（2026-10-24 复审 R2）：凡锁内 artClosed=false 复核通过
+	// 的外发（在途初始 Send/超时回调/中继转发）先 Add 再锁外 Send，Close 置位后
+	// Wait——Add 与 Close 置位同锁序，置位后新增复核必见 closed，Wait 期间零新增。
+	muArt      sync.Mutex
+	fetches    map[string]*fetchWaiter
+	artClosed  bool
+	artWG      sync.WaitGroup
+	relayFetch time.Duration // node 发起的取回中继应答预算（0 = 默认 30s）
 
 	sweepStop chan struct{}
 	sweepDone chan struct{}
@@ -118,6 +129,7 @@ func New(cfg Config) (*Core, error) {
 		online:     make(map[string]bool),
 		sizes:      make(map[string]int64),
 		fetches:    make(map[string]*fetchWaiter),
+		relayFetch: cfg.RelayFetchTimeout,
 		sweepStop:  make(chan struct{}),
 		sweepDone:  make(chan struct{}),
 	}
@@ -134,13 +146,33 @@ func New(cfg Config) (*Core, error) {
 	return c, nil
 }
 
-// Close 停止后台清扫（若有）；幂等。Store/Transport 的关闭归装配方。
+// Close 停止后台清扫（若有），并收束在途产物取回域（承诺范围=已受理的 node
+// 中继生命周期，2026-10-25 三审 W4 收窄表述）：停存活 relay timer、清在途表、
+// 置 artClosed（此后 timer 回调与新中继请求不再受理/不再外发），随后等待已受
+// 理中继的已启动外发单元（在途初始 Send/超时回调/中继转发，复审 R2 统一收敛
+// 点）完成。不在承诺内的两处残余：① 无状态拒绝回帧（invalid/forbidden/
+// artifact_not_found/关闭后 node_offline）即发即弃、不占收敛组——Close 后仍可
+// 能发出，至多得 transport 已关的 ErrClosed（调用方忽略）；② hub 自身取回
+//（HTTP 数据面）的无 timer waiter 只清表、未纳入收敛组——其生命周期归调用方
+// 自身超时预算收敛。幂等。Store/Transport 的关闭归装配方。
 func (c *Core) Close() error {
 	c.closeOnce.Do(func() {
 		if c.sweepOn {
 			close(c.sweepStop)
 			<-c.sweepDone
 		}
+		c.muArt.Lock()
+		c.artClosed = true
+		for mid, w := range c.fetches {
+			if w.timer != nil {
+				w.timer.Stop()
+			}
+			delete(c.fetches, mid)
+		}
+		c.muArt.Unlock()
+		// 置位后外发复核必见 closed → Wait 期间零新增 Add（Add 与置位同锁序，
+		// 契约见 artWG 字段注释）；此处等在途外发完成后再返回。
+		c.artWG.Wait()
 	})
 	return nil
 }
@@ -224,6 +256,12 @@ func (c *Core) HandleFrame(env *protocol.Envelope) {
 		c.handleTaskSubmit(env)
 	case protocol.MsgTaskQuery:
 		c.handleTaskQuery(env)
+	case protocol.MsgDepResolve:
+		c.handleDepResolve(env)
+	case protocol.MsgArtifactFetch:
+		// node 发起的产物取回中继（P4④跨机取回/SPEC 4.12）：鉴权后按原 mid
+		// 中继执行 node，应答转发回请求 node。
+		c.handleNodeFetch(env)
 	case protocol.MsgArtifactData:
 		c.handleFetchReply(env)
 	case protocol.MsgErr:

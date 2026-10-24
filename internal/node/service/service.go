@@ -78,11 +78,42 @@ type Service struct {
 	muCancels sync.Mutex
 	cancels   map[string]*cancelEntry
 
+	// 在途远端请求表（P4④跨机取回，remotefetch.go）：请求帧 mid → 应答通道。
+	// prepareInputs 的取回链登记，HandleFrame 按 ReplyTo 回投（容量 1 非阻塞）。
+	muRemote    sync.Mutex
+	remoteWaits map[string]chan *protocol.Envelope
+
 	// runners/roots 执行器与产物根表（初值 = cfg.Runners/ArtifactRoots；热重载
 	// SwapExecutors 整表替换，muExec 与执行期读取互斥——方案 3.5 网页编辑）。
 	muExec  sync.RWMutex
 	runners map[string]Runner
 	roots   map[string]string
+
+	// remoteRes 跨机取回解析器（P4④/SPEC 4.12；nil = 禁用——standalone/setup
+	// 无 hub。EnableRemoteInputs 装配期一次性置位，与执行期读取同 muExec 互斥，
+	// 同 SwapExecutors 的「装配期写、执行期读」纪律）。
+	remoteRes *inputs.RemoteResolver
+}
+
+// EnableRemoteInputs 启用跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 模式
+// 装配方在 New 后调用（须有 hub 中继；standalone/setup 不调用——组合解析器
+// Remote 位为空，与第一子轮行为一致）。参数为重试轮询间隔与单次尝试预算，0 取
+// inputs 包默认值。幂等（最后一次生效）；须在任务派发前完成（装配期一次性）。
+func (s *Service) EnableRemoteInputs(retryInterval, attemptTimeout time.Duration) {
+	s.muExec.Lock()
+	defer s.muExec.Unlock()
+	s.remoteRes = &inputs.RemoteResolver{
+		Fetch:          remoteInputs{s: s},
+		RetryInterval:  retryInterval,
+		AttemptTimeout: attemptTimeout,
+	}
+}
+
+// remoteRes 跨机取回解析器读侧（nil = 未启用）。
+func (s *Service) remoteResolver() *inputs.RemoteResolver {
+	s.muExec.RLock()
+	defer s.muExec.RUnlock()
+	return s.remoteRes
 }
 
 // New 构造服务并订阅入站帧；启动补传 worker 与周期兜底循环；从账本重建 workdir
@@ -97,17 +128,18 @@ func New(cfg Config, tr transport.Transport) *Service {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	s := &Service{
-		cfg:        cfg,
-		tr:         tr,
-		sem:        make(chan struct{}, cfg.Concurrency),
-		ctx:        ctx,
-		stop:       stop,
-		resendKick: make(chan struct{}, 1),
-		cancels:    make(map[string]*cancelEntry),
-		wsByAgent:  make(map[string]string, len(cfg.ArtifactRoots)),
-		wsLocks:    newWsMutex(),
-		runners:    cfg.Runners,
-		roots:      cfg.ArtifactRoots,
+		cfg:         cfg,
+		tr:          tr,
+		sem:         make(chan struct{}, cfg.Concurrency),
+		ctx:         ctx,
+		stop:        stop,
+		resendKick:  make(chan struct{}, 1),
+		cancels:     make(map[string]*cancelEntry),
+		remoteWaits: make(map[string]chan *protocol.Envelope),
+		wsByAgent:   make(map[string]string, len(cfg.ArtifactRoots)),
+		wsLocks:     newWsMutex(),
+		runners:     cfg.Runners,
+		roots:       cfg.ArtifactRoots,
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -164,17 +196,32 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 	case protocol.MsgResultAck:
 		s.handleResultAck(env)
 	case protocol.MsgErr:
+		// 先过跨机取回应答关联（P4④：源 node 的 err 应答 ReplyTo 命中在途取回
+		// 则消费），未命中走既有 result_conflict/记录处理
+		if s.deliverRemoteReply(env) {
+			return
+		}
 		s.handleErr(env)
-	case protocol.MsgSubmitAck, protocol.MsgTaskStatus:
-		// 双路径后 node 不再发起 task_submit/task_query（本地直执行 + 账本视图
-		// 直出，方案 3.2）：应答帧只可能来自旧版对端或异常，记录忽略
-		log.Printf("[node] 忽略帧 type=%s（本地直执行路径不产生此应答）", env.Type)
 	case protocol.MsgArtifactFetch:
 		s.handleArtifactFetch(env)
-	case protocol.MsgResultEvent, protocol.MsgRegisterAck, protocol.MsgArtifactData:
+	case protocol.MsgSubmitAck, protocol.MsgTaskStatus:
+		// task_status 先过跨机取回应答关联（dep_resolve 的应答载体）；未命中的
+		// 应答帧只可能来自旧版对端或异常，记录忽略（双路径后 node 不发起
+		// task_submit/task_query，方案 3.2）
+		if s.deliverRemoteReply(env) {
+			return
+		}
+		log.Printf("[node] 忽略帧 type=%s（本地直执行路径不产生此应答）", env.Type)
+	case protocol.MsgArtifactData:
+		// 跨机取回应答（P4④：hub 中继回源 node 的 artifact_data，ReplyTo=本
+		// node 请求 mid）；未命中的帧仅应 hub 侧在途取回遗留，记录忽略
+		if s.deliverRemoteReply(env) {
+			return
+		}
+		log.Printf("[node] 记录帧 type=%s", env.Type)
+	case protocol.MsgResultEvent, protocol.MsgRegisterAck:
 		// result_event：提交方终态推送（本地查询走 task_query 补查，已知限制：
-		// 在线错过即弃）；register_ack 由 conn 握手内联消费；artifact_data 仅
-		// 应 hub 侧在途取回（node 不发起取回）
+		// 在线错过即弃）；register_ack 由 conn 握手内联消费
 		log.Printf("[node] 记录帧 type=%s", env.Type)
 	default:
 		log.Printf("[node] 忽略帧 type=%s", env.Type)

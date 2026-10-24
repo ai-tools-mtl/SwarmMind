@@ -9,9 +9,10 @@
 //   - 文件操作安全：输入区基目录 Lstat 校验（符号链接/非常规目录一律拒绝，防
 //     MkdirAll 跟随 inputs 符号链接逃逸 workdir），inputs 域内全部盘上操作经
 //     os.Root 定界（openat 风格，越界路径不可达）；上游源文件整条路径逐段 Lstat
-//     （符号链接不跟随）+ 打开后 fd fstat 确认 regular file——校验的对象与读取
-//     的对象是同一 fd（消除 Lstat→Open 替换竞态）；复制以登记大小+1 为字节上限
-//     （防源在检查后增长），复制后核对实得字节数==登记大小；
+//     （符号链接不跟随）+ 末段 O_NOFOLLOW|O_NONBLOCK 打开（内核在 open 原语上
+//     强制不跟随、不阻塞，消 Lstat→Open 换入链接/FIFO 的窗口）+ 打开后 fd fstat
+//     确认 regular file——校验的对象与读取的对象是同一 fd；复制以登记大小+1 为
+//     字节上限（防源在检查后增长），复制后核对实得字节数==登记大小；
 //   - 输入就绪前不 spawn：准备阶段独立超时（DefaultTimeout，调用方经 ctx 注入，
 //     独立于任务执行超时）；ctx 贯穿复制/校验/发布全程，末次发布后再查一次——
 //     超时/取消后 Prepare 必返回失败，调用方不得 MarkStarted；
@@ -24,11 +25,13 @@
 //   - 同 idem 多上游版本解析为账本内最早 completed（与 hub resolveIDem 口径
 //     一致）；同任务命中多个 idem 时去重只挂一次。
 //
-// 跨机取回（artifact_fetch 方向扩展）不在本子轮：InputResolver 预留 Remote
-// 实现位，本机场景上游产物就在本机 outputs 目录，LocalResolver 直接读。
+// 跨机取回（P4④第二子轮，2026-10-24）：RemoteResolver 经 dep_resolve/artifact_fetch
+// 帧通道（hub 中继回源 node）取回产物字节流，进入与本机路径完全相同的挂载事务；
+// Resolver 组合解析器本机优先、账本无 completed 上游时转远端（remote.go）。
 package inputs
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -73,20 +76,27 @@ const (
 type UpstreamInputs struct {
 	// TaskID 满足依赖 idem 的上游任务 ID（挂载目录名 inputs/<TaskID>/）。
 	TaskID string
-	// Workdir 上游任务 workdir（本机绝对路径；产物 Path 的解析基准）。
+	// Workdir 上游任务 workdir（本机绝对路径；产物 Path 的解析基准）。远端形态
+	//（字节流取回）为空——产物内容经 Fetch 供给，不走本机 outputs 目录。
 	Workdir string
 	// Artifacts 上游结果登记的产物清单（Path 相对上游 workdir，outputs/ 口径）。
 	// 空 = 上游 completed 但无产物登记（答案型上游）：不建目录、不算失败。
 	Artifacts []protocol.Artifact
+	// Fetch 远端产物字节源（P4④第二子轮跨机取回；nil = 本机 outputs 目录读取，
+	// Local 路径零变化）。实现须在返回前对照登记完成 SHA-256 与大小校验，字节
+	// 数恰为登记 Size 且 ≤ ArtifactLimit；失败返回 *Error（文案带 input_prepare_failed
+	// 前缀）。取回在挂载事务的暂存阶段逐件调用——源离线在准备阶段内重试轮询
+	//（RemoteResolver），事务原子性/回滚语义与本地路径完全一致。
+	Fetch func(ctx context.Context, art protocol.Artifact) ([]byte, error)
 }
 
 // InputResolver 上游产物解析抽象（FILE-COLLAB L2 跨机取回的扩展缝）：按依赖
-// idem 解析上游任务产物在本机的位置。本子轮仅 LocalResolver（node 账本 + 本机
-// outputs 目录）；跨机取回（artifact_fetch 方向扩展）另行实现 Remote 变体，
-// 装配方替换、挂载与失败语义不变。实现应返回 *Error（文案以
+// idem 解析上游任务产物位置与内容来源。实现：LocalResolver（node 账本 + 本机
+// outputs 目录）、RemoteResolver（dep_resolve/artifact_fetch 经 hub 中继取回）、
+// Resolver（本机优先组合，装配方使用）。实现应返回 *Error（文案以
 // protocol.CodeInputPrepareFailed 开头，供 TaskResult.Error 直接使用）。
 type InputResolver interface {
-	ResolveUpstream(idem string) (*UpstreamInputs, error)
+	ResolveUpstream(ctx context.Context, idem string) (*UpstreamInputs, error)
 }
 
 // Error 输入准备失败（TaskResult.Error 载体）：文案恒以
@@ -97,6 +107,10 @@ type Error struct {
 	Upstream string // 上游任务 ID（解析成功后填充）
 	Path     string // 相关产物相对路径（文件级失败时填充）
 	Reason   string // 具体原因（缺失/SHA 不符/超限/发布失败/回滚未完全/超时）
+	// RemoteCandidate 本机无该 idem 的 completed 上游（账本无条目/条目均未
+	// completed），可尝试远端取回——Resolver 组合解析器据此决定是否转交
+	// RemoteResolver（本机 agent 配置漂移等本地性失败不置位，错误文案即真相）。
+	RemoteCandidate bool
 }
 
 // Error 实现 error。
@@ -126,7 +140,7 @@ func Prepare(ctx context.Context, resolver InputResolver, downstreamWorkdir, tas
 	ups := make([]*UpstreamInputs, 0, len(deps))
 	seen := make(map[string]bool, len(deps))
 	for _, idem := range deps {
-		up, err := resolver.ResolveUpstream(idem)
+		up, err := resolver.ResolveUpstream(ctx, idem)
 		if err != nil {
 			var e *Error
 			if !errors.As(err, &e) {
@@ -561,35 +575,33 @@ func mount(ctx context.Context, workdir, taskID string, ups []*UpstreamInputs) e
 // ---------- 暂存复制（ctx 贯穿 + 字节上限 + fd 级校验） ----------
 
 // stageUpstream 单个上游的暂存复制+校验：清单件数先过限（对登记重检，防御超
-// 清单），逐文件纯复制后复读 SHA-256 对照登记。上游产物根以 os.Root 打开（源
-// 侧定界：产物路径不可能逃出上游 workdir）。
+// 清单），逐文件纯复制后复读 SHA-256 对照登记。内容源二态：本机上游产物根
+//（up.Workdir，配置管理路径与 runner exec 同源可信）以 OpenSourceFile 打开源文
+// 件（源侧定界：产物路径不可能逃出上游 workdir）；远端上游经 Fetch 字节源取回
+//（SHA/大小校验在取回链完成，见 UpstreamInputs.Fetch）。
 func stageUpstream(ctx context.Context, wroot *os.Root, stageRel string, up *UpstreamInputs) error {
 	if len(up.Artifacts) > protocol.MaxArtifacts {
 		return &Error{Upstream: up.TaskID,
 			Reason: fmt.Sprintf("产物件数超上限（登记 %d 件 > %d）", len(up.Artifacts), protocol.MaxArtifacts)}
 	}
-	upRoot, err := os.OpenRoot(up.Workdir)
-	if err != nil {
-		return &Error{Upstream: up.TaskID, Reason: fmt.Sprintf("上游产物根不可打开: %v", err)}
-	}
-	defer upRoot.Close()
 	upStageRel := stageRel + "/" + up.TaskID // 暂存内容按上游 ID 分层（发布 rename 单位）
 	for _, art := range up.Artifacts {
 		if err := ctx.Err(); err != nil {
 			return timeoutErr(err)
 		}
-		if err := stageOne(ctx, wroot, upStageRel, up, upRoot, art); err != nil {
+		if err := stageOne(ctx, wroot, upStageRel, up, art); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// stageOne 复制单个产物文件到暂存区并校验：源整条路径逐段 Lstat（符号链接不
-// 跟随）+ 打开后 fd fstat 确认常规文件（校验对象=读取对象，消 Lstat→Open 竞
-// 态）；复制以登记大小+1 为字节上限，复制后核对实得字节数==登记大小（防源检
-// 查后增长/缩短）；复读盘上暂存件核对尺寸与 SHA-256 对照登记。
-func stageOne(ctx context.Context, wroot *os.Root, stageRel string, up *UpstreamInputs, upRoot *os.Root, art protocol.Artifact) error {
+// stageOne 复制单个产物文件到暂存区并校验：本机源经 OpenSourceFile 打开（整条
+// 路径内核强制不跟随+不阻塞，见 sourceopen_*.go；打开后 fd fstat 确认常规文
+// 件），远端源经 Fetch 取回（已按登记校验）；复制以登记大小+1 为字节上限，复
+// 制后核对实得字节数==登记大小（防源检查后增长/缩短）；复读盘上暂存件核对尺
+// 寸与 SHA-256 对照登记。
+func stageOne(ctx context.Context, wroot *os.Root, stageRel string, up *UpstreamInputs, art protocol.Artifact) error {
 	e := func(reason string) *Error { return &Error{Upstream: up.TaskID, Path: art.Path, Reason: reason} }
 	timeout := func() *Error {
 		te := timeoutErr(ctx.Err())
@@ -606,22 +618,34 @@ func stageOne(ctx context.Context, wroot *os.Root, stageRel string, up *Upstream
 	if err != nil {
 		return err
 	}
-	src, sfi, err := openVerifiedFile(upRoot, "outputs/"+up.TaskID+"/"+rel)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return e("上游产物缺失或不可读（上游 completed ≠ 目录仍在，保留期语义见 SPEC 4.12）")
+	var src io.Reader
+	var srcPerm fs.FileMode = 0o644 // 远端字节流无源 mode：固定 0644（内容完整性由 SHA 校验承担）
+	switch {
+	case up.Fetch != nil: // 远端字节流：取回链已校验 SHA/大小（失败返回 *Error）
+		data, ferr := up.Fetch(ctx, art)
+		if ferr != nil {
+			return ferr
 		}
-		return e(fmt.Sprintf("上游产物不可读: %v", err))
-	}
-	defer src.Close()
-	if sfi.Size() != art.Size {
-		return e(fmt.Sprintf("与登记大小不一致（登记 %d，实得 %d）", art.Size, sfi.Size()))
+		src = bytes.NewReader(data)
+	default: // 本机磁盘源：内核强制不跟随+不阻塞的 rooted 打开 + fd fstat 校验
+		f, sfi, err := OpenSourceFile(up.Workdir, "outputs/"+up.TaskID+"/"+rel)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return e("上游产物缺失或不可读（上游 completed ≠ 目录仍在，保留期语义见 SPEC 4.12）")
+			}
+			return e(fmt.Sprintf("上游产物不可读: %v", err))
+		}
+		defer f.Close()
+		if sfi.Size() != art.Size {
+			return e(fmt.Sprintf("与登记大小不一致（登记 %d，实得 %d）", art.Size, sfi.Size()))
+		}
+		src, srcPerm = f, sfi.Mode().Perm()
 	}
 	dstRel := stageRel + "/" + rel
 	if err := rootMkdirAll(wroot, path.Dir(dstRel)); err != nil {
 		return e(fmt.Sprintf("创建暂存子目录失败: %v", err))
 	}
-	out, err := wroot.OpenFile(dstRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, sfi.Mode().Perm())
+	out, err := wroot.OpenFile(dstRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, srcPerm)
 	if err != nil {
 		return e(fmt.Sprintf("创建暂存件失败: %v", err))
 	}
@@ -663,39 +687,25 @@ func stageOne(ctx context.Context, wroot *os.Root, stageRel string, up *Upstream
 	return nil
 }
 
-// openVerifiedFile 打开上游产物源文件并核验为常规文件：整条路径逐段 Lstat（不
-// 跟随，符号链接/非常规目录拒绝），最终以打开后的 fd fstat 确认 regular file
-// ——校验的对象与后续读取的对象是同一 fd，消除 Lstat→Open 替换竞态；路径越界
-// 由 os.Root 定界兜底（openat 语义，越界不可达）。
-func openVerifiedFile(r *os.Root, rel string) (*os.File, fs.FileInfo, error) {
-	parts := strings.Split(rel, "/")
-	for i := 1; i < len(parts); i++ {
-		cur := strings.Join(parts[:i], "/")
-		fi, err := r.Lstat(cur)
-		if err != nil {
-			return nil, nil, err
-		}
-		if fi.Mode()&fs.ModeSymlink != 0 {
-			return nil, nil, fmt.Errorf("路径中间段 %s 为符号链接（拒绝跟随）", cur)
-		}
-		if !fi.IsDir() {
-			return nil, nil, fmt.Errorf("路径中间段 %s 非目录", cur)
-		}
+// OpenSourceFile 打开产物源文件并核验为常规文件（源读取统一安全口径：Local 挂
+// 载与 service/Remote 源读取共用同一实现，2026-10-24 复审 R1）。整条路径由内核
+// 在 open 原语上强制不跟随（平台实现见 sourceopen_*.go：Unix 为逐段 openat 游
+// 走，O_DIRECTORY|O_NOFOLLOW 中间段 + O_NOFOLLOW|O_NONBLOCK 末段——每段解析锚
+// 定上一段目录 fd，检查即打开、无 Lstat→Open 换入链接/FIFO 的窗口；Windows 为
+// 逐段 NtCreateFile 游走，每段 OBJ_DONT_REPARSE 打开时约束 reparse/link 解析
+// ——os.Root 在 Windows 遇 reparse point 会读链跟随根内链接，不能承担该契约，
+// 见 sourceopen_windows.go；Windows 无 FIFO open 阻塞语义，无需 O_NONBLOCK 对
+// 应物）。打开后 fd fstat 确认 regular file——校验的对象与后续读取的对象是同
+// 一 fd；越界路径（绝对/..）入口即拒。纵深说明：游走每段相对锚定已打开目录句
+// 柄，根外不可达，最坏情形只是打开根内另一常规文件，其内容过不了调用方对照登
+// 记的 SHA-256 终检，读不出登记外内容。
+func OpenSourceFile(root, rel string) (*os.File, fs.FileInfo, error) {
+	p := path.Clean(filepath.ToSlash(rel))
+	if p == "." || path.IsAbs(p) || p == ".." || strings.HasPrefix(p, "../") {
+		return nil, nil, errors.New("源路径越界（拒绝）")
 	}
-	lfi, err := r.Lstat(rel)
+	f, fi, err := openSourceFile(root, p)
 	if err != nil {
-		return nil, nil, err
-	}
-	if lfi.Mode()&fs.ModeSymlink != 0 {
-		return nil, nil, errors.New("末段为符号链接（非常规文件，拒绝跟随）")
-	}
-	f, err := r.Open(rel)
-	if err != nil {
-		return nil, nil, err
-	}
-	fi, err := f.Stat() // fstat：实际打开对象的元数据
-	if err != nil {
-		_ = f.Close()
 		return nil, nil, err
 	}
 	if !fi.Mode().IsRegular() {

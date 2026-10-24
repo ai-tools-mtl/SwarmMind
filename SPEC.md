@@ -60,7 +60,7 @@ repo/
 |---|---|---|
 | github.com/coder/websocket | node→hub WSS 长会话 | 标准库无 WebSocket 实现 |
 | gopkg.in/yaml.v3 | hub/node 配置解析 | 标准库无 yaml |
-| golang.org/x/sys | Windows 服务化（svc/svc/mgr）+ Job Object 进程治理（P4②） | 半标准库（Go 官方扩展库）：Windows SCM 服务编程唯一正道，无更轻替代；仅 `//go:build windows` 路径引入，非 Windows 平台编译产物不含相关代码，行为零变化 |
+| golang.org/x/sys | Windows 服务化（svc/svc/mgr）+ Job Object 进程治理（P4②）；unix 源文件逐段 openat 游走（inputs/sourceopen_unix.go，2026-10-24 复审 R1）；windows 源文件逐段 NtCreateFile+OBJ_DONT_REPARSE 游走（inputs/sourceopen_windows.go，2026-10-25 三审 W2） | 半标准库（Go 官方扩展库）：Windows SCM 服务编程唯一正道，无更轻替代；源打开需在 open 原语上强制不跟随——unix 侧标准库 syscall 在 darwin 不导出 openat、os.Root 会跟随根内末段链接；windows 侧 os.Root 遇 reparse point 读链后跟随根内链接、OBJ_DONT_REPARSE 等价旗标封装在 internal/syscall 不可导入。仅 Windows 服务化/Job Object + windows/unix 源打开引入，同模块零新增 |
 
 ## 四、协议（internal/protocol）
 
@@ -108,8 +108,9 @@ type ErrInfo struct {
 | result_event | hub→提交方（node 会话时） | `{task_id, status, result}` | 终态推送给提交方，闭合「调用方拿回结果」；HTTP 提交方靠 GET /tasks/{id} 轮询。已知限制：提交方离线错过即弃，靠主动查询补 |
 | task_query | 提交方→hub | `{task_id}` | 查询任务状态（node 会话仅限本机任务：Task.TargetNode == env.From，他节点任务拒绝；result_event 离线错过的补查路径） |
 | task_status | hub→提交方 | Task | 查询响应（完整 Task 可能接近 1MiB 上限，超大任务以摘要+artifact 引用返回） |
-| artifact_fetch | 提交方→hub | `{task_id, index}` | 请求取回第 index 个产物（hub 中继到执行 node） |
-| artifact_data | 执行 node→请求方（经 hub 中继） | `{task_id, index, meta, data_base64}` | 产物内容（单文件原始 ≤640KiB，base64 后随帧 ≤1MiB；更大产物 V1 分块） |
+| artifact_fetch | 提交方→hub | `{task_id, index}` | 请求取回第 index 个产物（hub 中继到执行 node）。提交方含 node 侧产物挂载准备阶段（P4④跨机取回）：hub 依赖归属鉴权（请求方名下须有依赖该任务 idem 的任务）后按原 mid 中继，应答转发回请求 node；源 node 不应答时中继超时 30s 回 err(fetch_timeout)，离线快回 err(node_offline) |
+| artifact_data | 执行 node→请求方（经 hub 中继） | `{task_id, index, meta, data_base64}` | 产物内容（单文件原始 ≤640KiB，base64 后随帧 ≤1MiB；更大产物 V1 分块）；hub 中继对照登记复检 SHA-256 后原样转发（中继链双保险） |
+| dep_resolve | node→hub | `{idem}` | 依赖解析（P4④跨机取回）：下游 node 按依赖 idem 请求上游任务定位与产物清单；hub 按 resolveIDem 同口径（最早 completed）解析并做依赖归属鉴权（请求方名下无依赖该 idem 的任务 → err(forbidden)；无 completed 上游/已清理 → err(task_not_found)）；应答 task_status 携**脱敏 Task**（ID/TargetNode/TargetAgent/IdemKey/Status/时间 + Result{Status, Artifacts}；Input/SubmittedBy 等内容隐私不出 hub，node 会话边界同 task_query 的 D10 锁） |
 | task_cancel | hub→node | `{task_id, reason?}` | 管理面取消（管理面 POST /tasks/{id}/cancel 触发）：node 整组终止在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；至少一次+幂等，重复 cancel 安全；信封携 hub 当前任务落库租约（cancel_fence，P4/P1-2）：node 取消回写前对账本租约与 cancel_fence 取大者重臂，回执按宽校验（cancel_fence ≥ 落库租约）接受，见 4.11 |
 | task_cancelled | node→hub | `{task_id}` | 取消确认 ack：任务已终态或不在账本（无可取消对象）；执行中断路径不走本帧（回 task_result 走三段确认） |
 | err | 双向 | ErrInfo | 错误帧；协议级错误（版本/epoch 残余/格式）另按规则断开 |
@@ -336,9 +337,9 @@ type TaskSubmitRequest struct {
 
 **MCP 同步检查**：本变更为协议内防写机制 + 审计字段，结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更（任务查询工具返回体透传 `lease` 展示字段，不构成工具面变更）。
 
-### 4.12 任务依赖（P4.3 第一子批，2026-10-23；FILE-COLLAB L2 依赖门控+调度。产物挂载：L2 第二子批第一子轮，2026-10-24 交付同机骨架）
+### 4.12 任务依赖（P4.3 第一子批，2026-10-23；FILE-COLLAB L2 依赖门控+调度。产物挂载：L2 第二子批第一子轮 2026-10-24 交付同机骨架；第二子轮 2026-10-24 交付跨机取回）
 
-**范围声明**：第一子批做依赖门控与调度；第二子批第一子轮交付**同机产物挂载骨架**（本节「产物挂载」段）；跨机取回（artifact_fetch 方向扩展 + hub 中继回上游 node）为第二子轮，另行交付。
+**范围声明**：第一子批做依赖门控与调度；第二子批第一子轮交付**同机产物挂载骨架**（本节「产物挂载」段）；第二子轮交付**跨机取回**（artifact_fetch 方向扩展 + dep_resolve + hub 中继，本节「跨机取回」段）。
 
 **寻址（FILE-COLLAB 终审口径）**：`depends_on` 使用 **idem_key**（跨重跑稳定）而非 task_id；声明后不可变（提交即定，无改边路径）。
 
@@ -359,7 +360,7 @@ type TaskSubmitRequest struct {
 6. 级联超限：上溯可达的去重上游任务总数 > 8；
 7. 依赖环：边只指向已存在任务天然无环；防御 idem 跨终态清理期被复用构环——上溯链解析回自身 idem 即拒绝。
 
-**幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。**清单文案一次性变更声明（2026-10-24，挂载交付）**：清单尾注由「产物自动挂载尚未提供」更新为挂载位置说明（`inputs/<上游task_id>/`）——指纹含生效 stdin 全文，跨本次升级重试「升级前提交的携依赖+idem 任务」将 409 conflict 而非 dup 命中（属一次性声明的不兼容；绝对稳定的重试请换新 idem_key）。
+**幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。**清单文案一次性变更声明（2026-10-24，挂载交付）**：清单尾注由「产物自动挂载尚未提供」更新为挂载位置说明（`inputs/<上游task_id>/`）——指纹含生效 stdin 全文，跨本次升级重试「升级前提交的携依赖+idem 任务」将 409 conflict 而非 dup 命中（属一次性声明的不兼容；绝对稳定的重试请换新 idem_key）。**第二次一次性变更声明（2026-10-24，跨机取回交付）**：清单尾注「跨机场景暂未提供自动取回」更新为跨机自动取回说明（同前例：升级窗口内携依赖任务的幂等重试 409 conflict，换新 idem_key 可绝对稳定重试）。
 
 **门控与调度**：
 - **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；七态状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用）。
@@ -372,22 +373,32 @@ type TaskSubmitRequest struct {
 
 **依赖解析口径**：依赖 idem 解析当前快照——有 completed 任务即满足（任一版本；多活同键（group_ref 装饰边，SPEC 4.5）宽松口径取最早 completed）；否则有非终态任务为等待中；否则（仅 failed/needs_review/cancelled）为上游失败；快照无该 idem 保持等待（`blocked_by:<idem>`，7d expire 兜底）。
 
-**产物挂载（L2 第二子批第一子轮，2026-10-24 交付同机骨架；实现 `internal/node/inputs`）**：依赖门控放行的下游任务，node 在 **started/spawn 之前**把全部上游任务的产物**纯复制**（禁硬链接——下游改动不得污染上游产物 SHA）到消费者专属输入区 `<下游workdir>/inputs/<上游task_id>/`：
+**产物挂载（L2 第二子批第一子轮交付同机骨架，第二子轮补跨机取回；实现 `internal/node/inputs`）**：依赖门控放行的下游任务，node 在 **started/spawn 之前**把全部上游任务的产物**纯复制**（禁硬链接——下游改动不得污染上游产物 SHA）到消费者专属输入区 `<下游workdir>/inputs/<上游task_id>/`：
 
 - **时序**：node 执行链 N4 过期重检之后、MarkStarted 之前（输入就绪前不 started 不 spawn，FILE-COLLAB L2）；挂载发生在下游 agent 的 workdir 互斥持有期内，同 agent 任务的输入区写入天然串行；挂载耗时落在 hub 视角 acknowledged→started 之间，无 hub 侧计时依赖。
-- **解析**：node 从本机账本解析依赖 idem → 上游任务（口径=**最早 completed**，与 hub resolveIDem 一致；账本 24h 清理后取现存最早，若与 hub 所选版本不一致，SHA 校验仍保证挂载内容与登记一致），产物登记（Path/SHA-256/Size）随上游 result 回流时落账本（SPEC 4.8）。协议帧零新增：offer 载荷本就全量携带 `depends_on`。
+- **解析**：node 解析依赖 idem → 上游任务（口径=**最早 completed**，与 hub resolveIDem 一致）：先扫本机账本（产物登记（Path/SHA-256/Size）随上游 result 回流时落账本，SPEC 4.8）；本机无 completed 上游（`InputResolver` 组合解析器 `Resolver`，Local 优先 / Remote 兜底）→ 转跨机取回（见下段「跨机取回」）。协议帧零新增于 offer 侧：offer 载荷本就全量携带 `depends_on`。
 - **路径口径**：上游产物 `outputs/<上游task_id>/<rel>` → `inputs/<上游task_id>/<rel>`（保留 outputs/<task_id>/ 内部相对结构）；拒绝口径外/穿越/绝对路径；源文件必须常规文件（符号链接不跟随）。
 - **文件操作安全（os.Root 定界）**：`inputs` 基目录存在性以 Lstat 校验（符号链接/非常规目录一律拒绝，防跟随链接逃逸 workdir，创建后复验防竞态）；inputs 域内全部盘上操作经 `os.Root`（openat 语义）定界，越界路径不可达；上游源文件整条路径逐段 Lstat（中间段符号链接不跟随），最终以打开后的 fd fstat 确认常规文件——校验对象=读取对象（消除 Lstat→Open 替换竞态）；复制以登记大小+1 为字节上限（防源在检查后增长），复制后核对实得字节数==登记大小。
 - **校验与原子发布（journal 事务，per-上游原子）**：先写 `inputs/.staging-<task_id>-<rand>/` 暂存目录，逐文件复制（O_EXCL+刷盘+ctx 贯穿）后复读校验 SHA-256 对照登记；发布前先落 journal（`inputs/.staging-…/journal.json` 发布意图+步骤状态，临时文件+rename 原子写），随后逐上游按依赖声明序紧凑执行「旧目录移入暂存 trash → 整目录 rename 发布 → journal 状态推进」，rename 后目录 fsync——**单上游自身原子**（移开旧+发布新两条 rename 由 journal+fsync 保护，崩溃后重挂先按 journal+盘上实物回放收敛：完成未竟发布或旧目录归位），多上游整体跨上游非原子（如实声明，部分发布由下一上游失败回滚或崩溃恢复收敛）；同上游目录已存在则幂等替换（恢复重挂/同 agent 后续任务同依赖）；任一校验/发布失败 → 尽力回滚（撤销已发布项、旧目录归位、清理暂存），输入区保持挂载前原状；回滚自身失败则保留 trash/暂存/journal 材料不删，错误聚合报告哪个上游旧目录需人工恢复。末次发布后复查超时/取消——超时后输入区不得视为就绪（调用方不得 MarkStarted）。
 - **限制（对登记重检，防御超清单）**：每上游 ≤8 件（MaxArtifacts）、单件 ≤640KiB（ArtifactLimit），与既有产物扫描口径一致。
 - **失败语义**：上游产物缺失/SHA 不符/超限/解析失败/发布失败 → 下游任务 **accepted 直达 failed**（不 started 不执行，对齐 expired/policy_denied 的 pre-started 失败先例），`error=input_prepare_failed` + 上游任务 ID + 文件定位；该失败即上游失败语义，继续向下游的下游传播 `upstream_failed` 标注。挂载期间管理面取消 → cancelled 收口；服务关闭打断 → 条目保持 accepted 由重启恢复再调度（重挂幂等：先按 journal 回放收敛崩溃残留再挂载）。
 - **独立超时**：输入准备独立于任务执行超时（service 装配参数 `InputPrepareTimeout`，默认 60s；本子轮不进 node.yaml），超时按上述失败语义收敛。
-- **边界（如实声明）**：同机（同 node）上游直接读本机 outputs 目录；上游在异机 node → 账本无条目 → `input_prepare_failed`（跨机取回 artifact_fetch 方向扩展为第二子轮，`InputResolver` 接口已留 Remote 实现位）；上游 agent 配置漂移（workdir 不可定位）同失败；上游 completed 零产物登记（答案型）→ 不建目录不失败；同一上游任务满足多个 idem → 去重只挂一次。
+- **边界（如实声明）**：同机（同 node）上游直接读本机 outputs 目录；上游在异机 node → 自动跨机取回（见下段）；上游 agent 配置漂移（workdir 不可定位，本机性失败）同失败不转远端（文案即真相）；上游 completed 零产物登记（答案型）→ 不建目录不失败（本地/远端口径一致）；同一上游任务满足多个 idem → 去重只挂一次。
 - **无依赖红线**：无 `depends_on` 的任务不进入挂载路径，行为零变化。
+
+**跨机取回（P4④第二子轮，2026-10-24 交付；FILE-COLLAB L2「跨机交接」的 V0 形态，分块传输 V1 不做）**：下游 node 本机账本无依赖 idem 的 completed 上游时（源在异机 node，或本机账本条目已随保留期清理而 hub 尚存），经 hub 中继自动取回上游产物字节流，进入与同机路径**完全相同**的挂载事务（`UpstreamInputs.Fetch` 字节源缝：SHA 校验/暂存/原子发布/回滚零分叉；standalone/setup 不装配跨机取回，行为与第一子轮一致）。
+
+- **帧流向**：① `dep_resolve`（node→hub，`{idem}`）——hub 按 resolveIDem 同口径解析 + 依赖归属鉴权，脱敏 `task_status` 应答（上游任务 ID/产物清单；Input 等内容隐私不出 hub，node 会话边界同 task_query 的 D10 锁）；② `artifact_fetch`（node→hub，`{task_id, index}`，方向扩展）——hub 鉴权后按 **hub 分配的中继编号** 中继执行 node（在途表以中继编号为键并保存原请求方/原 mid，回传时以原 mid 恢复端到端 ReplyTo 关联——请求帧 mid 由调用方提供可冲突，不作表键，防同 mid 二次请求覆盖在途 waiter，2026-10-24 审查必修），执行 node 回 `artifact_data` → hub 校验应答来源为执行 node（来源不符的帧不消费在途表、不停超时——伪应答不得挤掉合法应答与超时兜底）→ 对照登记复检 SHA-256（中继链双保险，与 HTTP 数据面同口径）→ 原样转发请求 node；源侧 err 帧原样透传。
+- **依赖归属鉴权（dep_resolve 与 artifact_fetch 同源）**：请求方 node 名下必须存在 `DependsOn` 含该上游 idem 的任务，否则 err(forbidden)——产物挂载取回是依赖的衍生权限，防 node 会话借道刺探任意任务/产物。artifact_fetch 的无权限场景**统一响应**（探测无效化，2026-10-24 审查建议修）：任务不存在（含已过保留期清理）与无依赖归属不做区分，一律同一 forbidden（同码同文案）——未授权方无法借 task_not_found/artifact_not_found 差异判断任务存在性或探测产物下标；精确错误只授予已通过鉴权的请求方。
+- **超时与重试轮询（三层）**：单次尝试——hub 中继应答预算 30s（源不应答回 err(fetch_timeout)，源离线发送失败快回 err(node_offline)）；取回侧单尝试预算与 hub 对齐（30s，兜底帧丢失）；准备阶段总预算=既有独立超时 `InputPrepareTimeout`（默认 60s 不变——失败路径均有确定应答不悬垂，暂无放宽实证）。可重试失败（node_offline/fetch_timeout/传输失败）按 5s 间隔轮询直至准备预算穷尽（源恢复即同一次准备内继续挂载——DoD「node 回来」路径）；穷尽 → `input_prepare_failed`（注明暂不可取，不 spawn）。
+- **离线 vs 已清理（严格分类，不静默跳过）**：可重试类（离线/中继超时）=「暂不可取」；`artifact_not_found`/`task_not_found`/`forbidden` = 永久（上游产物已过保留期清理/无 completed 上游/越权），立即失败，文案注明上游任务与文件定位；`artifact_mismatch` = 永久完整性失败（node 侧、hub 中继、取回侧三重校验任一拦截）。
+- **限额不变**：≤8 件/上游、单件 ≤640KiB（协议帧 1MiB 上限内），对登记重检口径与同机一致；分块传输 V1 明确不做。
+- **一致性口径**：跨机解析同样取 hub 当前快照最早 completed（与门控放行版本可能因上游重跑而不同，与同机「账本清理后取现存最早」同一声明——SHA 校验保证挂载内容与登记一致）；上游重跑后同 idem 新版本 completed 不影响已放行下游的既有语义（superseded 审计见前文）。
+- **边界（如实声明）**：hub 是跨机取回的单点中继（hub 不可达 → 准备阶段内重试，穷尽 input_prepare_failed，standalone 无此能力）；中继链完整建立在 SHA-256 端到端校验上（hub 不产出内容只转发+复检）；版本偏斜（新 node + 旧 hub）dep_resolve 未知帧被忽略 → 准备超时失败，如实暴露。
 
 **边界声明**：依赖门控仅 hub 提交链生效（HTTP 管理面 + node 会话 task_submit 帧）；node 本地直执行链（node localapi POST /tasks，origin=local）不经过 hub 状态机，不支持依赖声明。node 收到的 task_offer 载荷可能携带 `depends_on`/`blocked_reason` 字段（Task 全量透传）：node 侧**不做依赖门控**（门控判定只在 hub，node 不复算 blocked）、`blocked_reason` 不感知不入状态机，但网络下发任务携带的 `depends_on` 由产物挂载消费（见上文「产物挂载」段：按依赖 idem 解析上游产物挂载至输入区）。
 
-**MCP 同步**：`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（见六.六规则 7）；REST 提交请求体透传（handleSubmit 平铺解码 TaskSubmitRequest）、任务查询返回体携带三字段——均为 optional 字段，既有 API 兼容性不变。
+**MCP 同步**：`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（见六.六规则 7）；REST 提交请求体透传（handleSubmit 平铺解码 TaskSubmitRequest）、任务查询返回体携带三字段——均为 optional 字段，既有 API 兼容性不变。跨机取回（第二子轮）无 REST/MCP 变更（见六.六规则 9）。
 
 ## 五、node 配置（configs/node.example.yaml）
 
@@ -571,6 +582,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 6. **P4 任务租约同步检查声明（2026-10-23）**：任务租约（4.11）为协议内防写机制（Envelope fence_epoch 门禁 + Task.Lease 审计），结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更——豁免映射表补行；任务查询工具返回体透传新增 `lease` 展示字段，不构成工具面变更。
 7. **P4.3 任务依赖同步声明（2026-10-23，第一子批）**：任务依赖（4.12）为既有 REST 能力的参数扩展——`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（上游 idem_key 列表；node 本机直执行模式不经过 hub 状态机，不支持该参数），本表 `swarmmind_submit` 行已同步；`swarmmind_status`/`swarmmind_wait` 返回体透传 `depends_on`/`blocked_reason`/`superseded_by` 展示字段（含 blocked/upstream_failed/superseded 的人话提示），不构成新工具。依赖声明不合法经 submit 工具以 `invalid_dependency` 人话文本返回。
 8. **P4 L2 产物挂载同步声明（2026-10-24，第二子批第一子轮）**：产物挂载（4.12「产物挂载」段）为 node 执行准备阶段的内部行为（spawn 前纯复制+SHA 校验+原子发布），无新增/变更 REST 管理面能力，MCP 工具面零变更——`swarmmind_artifact` 保留（跨机场景与逐件自取仍经它），不因自动挂载删除。任务 stdin 的依赖清单文案同步为告知挂载位置（`inputs/<上游task_id>/`），属 EffectiveInput 文本更新，不构成工具面变更。
+9. **P4④ 跨机取回同步声明（2026-10-24，第二子轮）**：跨机取回（4.12「跨机取回」段）为 node→hub 协议帧扩展（dep_resolve 新增 + artifact_fetch 方向扩展 + hub 中继），无新增/变更 REST 管理面能力（hub HTTP 面零变更），MCP 工具面零变更、映射表不补行；`swarmmind_artifact` 保留（跨机自动取回是挂载准备阶段的内部行为，人工逐件自取仍走它）。任务 stdin 依赖清单尾注随能力更新为跨机自动取回说明（EffectiveInput 文本一次性变更，见 4.12 指纹口径第二次声明），不构成工具面变更。
 
 ## 七、验证标准（DoD 十一条）
 
