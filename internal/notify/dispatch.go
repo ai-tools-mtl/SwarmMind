@@ -27,7 +27,8 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// Dispatcher 任务终态通知分发器。实现 core.TerminalNotifier（TaskFinal）。
+// Dispatcher 任务终态通知分发器。结构化实现 hub core.TerminalNotifier 与
+// node service.TerminalNotifier（同一 TaskFinal 形状，两侧接口各自声明）。
 type Dispatcher struct {
 	store *ChannelStore
 	inbox *Inbox
@@ -141,7 +142,7 @@ func (d *Dispatcher) Inbox() *Inbox { return d.inbox }
 func (d *Dispatcher) deliver(ch Channel, t protocol.Task) {
 	defer func() {
 		if r := recover(); r != nil { // 单渠道 panic 不拖垮其余渠道（防御）
-			log.Printf("[hub] 通知渠道 %s(%s) 投递异常（已跳过）: %v", ch.Name, ch.ID, r)
+			log.Printf("[notify] 通知渠道 %s(%s) 投递异常（已跳过）: %v", ch.Name, ch.ID, r)
 		}
 	}()
 	switch ch.Type {
@@ -157,7 +158,7 @@ func (d *Dispatcher) deliver(ch Channel, t protocol.Task) {
 		headers := headerMap(ch.Secrets)
 		d.retry(ch, func() error { return d.postHTTP(ch, ch.Secrets["url"], body, headers) })
 	default:
-		log.Printf("[hub] 通知渠道 %s(%s) 类型 %q 无投递实现（跳过）", ch.Name, ch.ID, ch.Type)
+		log.Printf("[notify] 通知渠道 %s(%s) 类型 %q 无投递实现（跳过）", ch.Name, ch.ID, ch.Type)
 	}
 }
 
@@ -178,7 +179,7 @@ func (d *Dispatcher) retry(ch Channel, attempt func() error) {
 			break
 		}
 	}
-	log.Printf("[hub] 通知渠道 %s(%s) 投递最终失败（已重试 %d 次，放弃；不影响任务）: %s",
+	log.Printf("[notify] 通知渠道 %s(%s) 投递最终失败（已重试 %d 次，放弃；不影响任务）: %s",
 		ch.Name, ch.ID, len(d.backoff), sanitizeErrMsg(lastErr))
 }
 

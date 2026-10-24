@@ -1,11 +1,13 @@
 // 渠道存储：data_dir/notify_channels.json，经 settings.Store 原子读写（temp+
 // rename），运行时可改——Dispatcher 每次终态事件都取最新快照，控制台增删改即
-// 时生效，无需重启。
+// 时生效，无需重启。hub 与 node（standalone）共用同一存储形态（各自 data_dir
+// 下同名文件，互不相干）。
 //
-// hub.yaml 旧 notify 段向后兼容：启动时若配置了 webhook_url 且尚未导入 →
-// 渠道存储为空则导入为一个 feishu/raw 渠道，已有手工渠道则让位；两种结局都写
-// legacy_imported 标记（含让位——否则删光渠道+重启会复活旧 YAML 渠道），此后
-// 无论渠道被改成什么样（含全部删除）都不再重导——「只导入一次」。
+// hub.yaml 旧 notify 段向后兼容（hub 专用，node 无此配置源不调用）：启动时若
+// 配置了 webhook_url 且尚未导入 → 渠道存储为空则导入为一个 feishu/raw 渠道，
+// 已有手工渠道则让位；两种结局都写 legacy_imported 标记（含让位——否则删光
+// 渠道+重启会复活旧 YAML 渠道），此后无论渠道被改成什么样（含全部删除）都不
+// 再重导——「只导入一次」。
 package notify
 
 import (
@@ -15,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mtl802/swarmmind/internal/hub/settings"
+	"github.com/mtl802/swarmmind/internal/settings"
 )
 
 // ErrInvalid 渠道配置非法（HTTP 400）；ErrNotFound 渠道不存在（HTTP 404）。
@@ -150,12 +152,13 @@ func (s *ChannelStore) Delete(id string) (bool, error) {
 	return deleted, err
 }
 
-// ImportLegacy hub.yaml 旧 notify 段一次性导入（幂等）：仅当「配置了
-// webhook_url」且「尚未导入（标记未写）」时执行——渠道存储为空 → 导入为一个
-// 渠道；已有手工渠道 → 让位不覆盖。两种结局都写 legacy_imported 标记（同事务
-// 落盘）：让位不写标记的话，用户日后删光手工渠道+重启，旧 YAML 渠道会复活。
-// 返回本次是否实际导入。format 取 feishu → 渠道类型 feishu；其余（raw/空）→
-// 通用 webhook 渠道（载荷同 raw）。任何一步失败不写标记，下次启动重试。
+// ImportLegacy hub.yaml 旧 notify 段一次性导入（幂等；hub 专用——node 侧无
+// hub.yaml 配置源，从不调用）：仅当「配置了 webhook_url」且「尚未导入（标记
+// 未写）」时执行——渠道存储为空 → 导入为一个渠道；已有手工渠道 → 让位不覆盖。
+// 两种结局都写 legacy_imported 标记（同事务落盘）：让位不写标记的话，用户日后
+// 删光手工渠道+重启，旧 YAML 渠道会复活。返回本次是否实际导入。format 取
+// feishu → 渠道类型 feishu；其余（raw/空）→ 通用 webhook 渠道（载荷同 raw）。
+// 任何一步失败不写标记，下次启动重试。
 func (s *ChannelStore) ImportLegacy(webhookURL, format string, now time.Time) (bool, error) {
 	if strings.TrimSpace(webhookURL) == "" {
 		return false, nil

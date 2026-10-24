@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mtl802/swarmmind/internal/hub/notify"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
 )

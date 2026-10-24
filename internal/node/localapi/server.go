@@ -34,6 +34,7 @@ import (
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/service"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
@@ -88,6 +89,11 @@ type Config struct {
 	// RotatePrime 总理凭证轮换回调（重生成 + 原子写盘，返回新凭证；装配方接线，
 	// 见 cmd/node）。nil = 轮换端点 503。
 	RotatePrime func() (string, error)
+	// Notify 通知渠道管理面（standalone 通知补盲区，2026-10-24）：装配方接
+	// internal/notify.Dispatcher（cmd/node 仅 standalone 模式构造，networked
+	// 通知归 hub 不装配、setup 无 agents 不装配）。nil = notify 端点组 503 降级
+	//（与 hub api notifyReady 同口径）。
+	Notify *notify.Dispatcher
 	// SetupOps setup 向导装配方（写盘路径与落盘回调；nil = setup 端点 503）。
 	SetupOps *SetupOps
 	// ArtifactFetch 本机产物取回回调（GET /api/v1/tasks/{id}/artifacts/{index}
@@ -235,6 +241,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
 	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handlePrimeRotate))
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
+	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
+	mux.HandleFunc("POST /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelCreate))
+	mux.HandleFunc("PUT /api/v1/local/notify/channels/{id}", s.authLocal(s.handleNotifyChannelUpdate))
+	mux.HandleFunc("DELETE /api/v1/local/notify/channels/{id}", s.authLocal(s.handleNotifyChannelDelete))
+	mux.HandleFunc("POST /api/v1/local/notify/channels/{id}/test", s.authLocal(s.handleNotifyChannelTest))
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
 	mux.HandleFunc("POST /api/v1/local/setup/disconnect", s.authLocal(s.handleSetupDisconnect))

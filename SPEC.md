@@ -39,6 +39,8 @@ repo/
 ├── cmd/swarmmindctl/main.go       # 人工操作 CLI：submit/query/agents/nodes/review，薄包装管理面 API
 ├── internal/
 │   ├── protocol/               # 信封、消息类型、状态机、常量（hub/node 共享）
+│   ├── settings/               # 管理面配置通用 JSON 存储（原子写；2026-10-24 自 hub/ 提升，hub/node 共享）
+│   ├── notify/                 # 任务终态通知（渠道/分发/存储；2026-10-24 自 hub/notify 提升——hub 组网与 node standalone 共用）
 │   ├── hub/
 │   │   ├── session/            # 会话表、epoch、心跳、投递窗口、写串行化
 │   │   ├── mailbox/            # 信箱：配额、去重、补推
@@ -458,6 +460,8 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：`POST /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`，语义与 hub 管理面一致，内部经 WSS 会话转发为 task_submit/task_query 帧。任意本机进程（脚本/agent）都能对本机派单与查询，但**只限本机**：`target_node` 非本机 node_id 即 400 拒绝（不发帧、不留提交日志），hub 侧 D9/D10 双保险兜底——node 无全网派发与全网视图，跨机协作统一经 hub（MCP/A2A）发起。**已知限制**：提交方若非 node 本机而是 hub 侧回环调用方，取结果靠 hub 管理面轮询；node 提交方的终态经 result_event 推送。
 
+**通知渠道管理（standalone 通知补盲区，2026-10-24）**：standalone 模式（hub_url 为空）hub 不存在，任务终态无任何 IM 通知——node 自己发通知补盲区；**networked 模式通知归 hub 统一发送，node 不装配（零调用零重复），setup 亦不装配**。触发挂钩在 node service 终态落账本点（`MarkFinished` 成功 = 首次落终态，账本先到为准天然去重；覆盖正常完成/过期/取消/关闭中断/墓碑收口全部路径，`internal/node/service/notify.go`）。渠道配置存 `data_dir/notify_channels.json`（与 hub 同一 JSON 存储形态：internal/notify.ChannelStore + internal/settings.Store 原子写），**node.yaml 不设 notify 段**——控制台 CRUD 要求运行时可改即时生效（node.yaml 编辑走「应用并重启」流程），node 为全新能力无存量配置需兼容（hub 的 YAML legacy 导入是为存量用户付的兼容成本，node 不重复背），凭证放 data_dir（0600，与 local_token/prime_token 同域）也更符合本仓安全纪律。端点组：`GET|POST /api/v1/local/notify/channels`、`PUT|DELETE /api/v1/local/notify/channels/{id}`、`POST /api/v1/local/notify/channels/{id}/test`（列表脱敏/创建/更新占位保留/删除/发测试），全部仅 local_token 可调（主人管理面，六.六豁免⑧）；inbox 类型 node 侧准入即拒绝（站内通知为 hub 控制台铃铛专属，node 控制台无铃铛动线）；非 standalone 模式端点组 503 降级。安全红线同 hub：读响应脱敏（Channel.Masked）、占位保留更新、投递/展示分离（原始 URL 投递、错误路径剥 path/query/userinfo）、日志不泄凭证、SMTP 全链路 deadline。控制台入口「我的服务 → 通知」（status.notify_available 门控）。
+
 **统筹凭证与钦定·自动接线（docs/archive/PLAN-node-standalone.md §3.2.1 + 任务 t20261023-62a2）**：`POST /api/v1/local/prime/rotate`（轮换 prime_token：重生成→原子写盘→即时重载，旧凭证下一请求失效）与 `POST /api/v1/local/prime/declare`（网页钦定统筹载体：校验 agent 存在→钦定即换凭证→yaml round-trip 写 node.yaml `prime_agent`→即时生效）均仅 local_token 可调（主人人工操作，六.六豁免③④）。**钦定即自动接线**：declare/rotate 成功后，node 自动把 swarmmind MCP 配置片段（含最新 prime_token）合并写入被钦定 agent 影子 home（`ExecProfile.ConfigHome`，空则 `data_dir/home`，与 runner HOME 同口径）内的宿主配置文件——布局探测只认 zcode 一种（`<home>/.zcode/cli/setting.json`，注意文件名单数）：存在且为合法 JSON 才命中（合法 = 全文恰一个 JSON 对象：`null`、尾部多余内容均不命中）；命中即合并顶层 `mcpServers.swarmmind`（幂等覆盖同键、不动其他键），写前备份 `<file>.bak-prime`（直接覆盖旧备份不堆积），临时文件+rename 原子写、0600（文件内含凭证）。应答带 `wired: true|false` 与 `wired_target`（命中时的绝对路径），declare/rotate 两口径一致、应答均带 `mcp_config` 片段（降级时主人拿得到手贴内容）；**降级口径**：文件/目录不存在、JSON 非法（含 `null` 与尾部多余内容）、顶层或 mcpServers 非对象、写失败、或 swarmmind-mcp 探测未命中（command 为占位符——占位配置落盘无用，一律不写）→ `wired:false`，绝不硬写、绝不创建宿主目录，应答保留 `mcp_config` 片段与手动指引由主人粘贴（宁可手贴，不猜布局乱写）。rotate 同步刷新影子 home 内的 `SWARM_NODE_PRIME_TOKEN`（否则旧 token 残留，统筹载体下一请求 401）；撤销统筹不清理已写入配置（token 已即时失效，残留无害）。全部接线动作发生在 declare/rotate 这个主人人工操作的事务内，prime_token 仍不经 agent 面分发（豁免③口径不变）。
 
 ## 六.五、P3 增补契约（Web 控制台，按 INTERACTION.md 分级清单落地）
@@ -549,6 +553,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    ⑤ `GET /api/v1/nodes/enroll-info`（节点接入入口地址查询，2026-10-23 第六轮修复 2）：接入向导人工装机流程的配套元数据端点（与豁免 ② 同一人工流程）——返回 hub 自身节点接入入口地址（node_listen 推导，无凭据），供控制台向导预填 hub_url；agent 面无使用场景，豁免 MCP 映射。
    ⑥ `GET /api/v1/prime`、`PUT /api/v1/prime`（hub 网页指定统筹载体，2026-10-23）：管理员管理面操作（hub 控制台指定/撤销全网唯一统筹载体），统筹智能体自身无需读写该状态，豁免 MCP 映射。
    ⑦ `/api/v1/notify/*` 全组（通知渠道管理，2026-10-24 P4③ 控制台化升级）：人工专属管理面配置（凭据授予类）——渠道配置体内含明文凭证（飞书 webhook 地址、SMTP 口令、自定义头 token），agent 读写该面即等于可自行获取/篡改主人的通知出口与凭据（改渠道=把任务结果重定向到任意地址，属信息外带通道）；通知是「系统主动找人」的人工动线，agent 对通知配置无合法使用场景（agent 感知任务结果走 swarmmind_wait，与通知解耦）。管理台「设置 → 通知」为唯一配置入口；hub.yaml 旧 notify 段仅作一次性兼容导入。
+   ⑧ `/api/v1/local/notify/*` 全组（node 本机通知渠道管理，standalone 补盲区，2026-10-24）：③④⑦ 三重口径叠加——本机主人人工操作专属（仅 local_token 可调，prime_token 编排凭证不放行）+ 凭据授予类（渠道配置体内含明文凭证，改渠道=把本机任务结果重定向到任意地址的信息外带通道）+ 通知是「系统主动找人」的人工动线，agent 感知任务结果走 node 模式 swarmmind_status/wait，与通知配置解耦。node 控制台「我的服务 → 通知」为唯一配置入口（networked 模式端点组 503——通知归 hub，见 hub 侧 ⑦）。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。

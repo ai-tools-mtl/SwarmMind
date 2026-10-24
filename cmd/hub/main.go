@@ -24,7 +24,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/api"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
-	"github.com/mtl802/swarmmind/internal/hub/notify"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/hub/session"
 	"github.com/mtl802/swarmmind/internal/hub/store"
 	"github.com/mtl802/swarmmind/internal/protocol"

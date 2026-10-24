@@ -48,6 +48,9 @@ type Config struct {
 	ArtifactRoots map[string]string
 	// Concurrency 执行并发上限；0 = protocol.DefaultConcurrency。
 	Concurrency int
+	// Notifier 任务终态通知钩子（standalone 通知补盲区，notify.go；可选依赖，
+	// nil=禁用——networked 模式通知归 hub，装配方在 standalone 之外不传）。
+	Notifier TerminalNotifier
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -305,6 +308,7 @@ func (s *Service) execute(task protocol.Task) {
 				log.Printf("[node] 写入过期终态失败 task=%s: %v", task.ID, err)
 				return
 			}
+			s.notifyTerminal(task.ID) // 过期=终态，同走终态旁路（standalone 通知）
 			s.sendResult(task.ID, res)
 			return
 		}
@@ -346,6 +350,7 @@ func (s *Service) execute(task protocol.Task) {
 			log.Printf("[node] 写入终态失败 task=%s: %v", task.ID, err)
 			return
 		}
+		s.notifyTerminal(task.ID) // 首次落终态即通知（重臂失败早退也不漏——终态已成立）
 		// P1-2 取消回写对账：确以 cancelled 收尾时，账本租约与本帧 cancel_fence
 		// 取大者重臂后再回带——重派租约已推进而 node 未及重臂（如 ack 丢后重派
 		// 的 offer 送达失败）时，回执按 hub 落库租约宽校验（cancel_fence ≥ 租约）

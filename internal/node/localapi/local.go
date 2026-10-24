@@ -108,6 +108,9 @@ type localStatus struct {
 	Epoch      int64          `json:"epoch"`
 	// LastSyncAt 最近一次注册成功时刻（最近同步）；从未注册为 null。
 	LastSyncAt *time.Time `json:"last_sync_at"`
+	// NotifyAvailable 通知渠道管理面可用（standalone 装配 Dispatcher 后为 true；
+	// networked 通知归 hub、setup 不装配——控制台据此决定是否渲染「通知」区块）。
+	NotifyAvailable bool `json:"notify_available"`
 	// Ledger 账本三态计数（accepted/started/finished，SPEC 4.8）。
 	Ledger map[string]int `json:"ledger"`
 }
@@ -115,12 +118,13 @@ type localStatus struct {
 // handleLocalStatus GET /api/v1/local/status：本机运维视图。
 func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	st := localStatus{
-		NodeID:     s.cfg.NodeID,
-		Mode:       s.mode(),
-		PrimeAgent: s.primeAgent(),
-		Online:     s.online(),
-		Epoch:      s.epoch(),
-		Ledger:     s.ledgerCounts(),
+		NodeID:          s.cfg.NodeID,
+		Mode:            s.mode(),
+		PrimeAgent:      s.primeAgent(),
+		Online:          s.online(),
+		Epoch:           s.epoch(),
+		NotifyAvailable: s.cfg.Notify != nil,
+		Ledger:          s.ledgerCounts(),
 	}
 	if s.cfg.LastRegisteredAt != nil {
 		if at, ok := s.cfg.LastRegisteredAt(); ok {

@@ -1,6 +1,8 @@
 // Package settings 实现管理面配置项的通用 JSON 存储（P4③ 通知渠道可配置化的
-// 起步抽象）：data_dir 下一个 JSON 文件对应一个 Store，原子写（临时文件+rename，
-// 对齐仓库纪律与 SPEC 4.7 先写后见思想），互斥锁串行化，运行时可改。
+// 起步抽象；2026-10-24 随 notify 包一同自 internal/hub/settings 提升——hub/node
+// 通用组件不住 hub 名下）：data_dir 下一个 JSON 文件对应一个 Store，原子写
+//（临时文件+rename，对齐仓库纪律与 SPEC 4.7 先写后见思想），互斥锁串行化，
+// 运行时可改。
 //
 // 抽象边界：只管「读写 + 原子落盘 + 调用方隔离副本」，不含校验与业务语义——
 // 校验归各配置项自己的领域包（notify_channels 是第一个用户）。副本隔离经 JSON

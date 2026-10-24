@@ -148,6 +148,21 @@ const ERRORS = {
 };
 const TERMINAL = new Set(['completed', 'failed', 'needs_review']);
 
+/* 通知渠道类型与事件订阅（standalone 通知补盲区，2026-10-24）：口径与 hub 控制台
+ * 「设置 → 通知」一致，唯 node 不提供 inbox（站内通知为 hub 控制台铃铛专属，
+ * 服务端准入同样拒绝）；sms 占位灰显未开放。 */
+const NOTIFY_TYPES = {
+  feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
+  email: { label: '邮件', form: 'SMTP 四件套：服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
+  webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
+  sms: { label: '短信', form: '' },
+};
+const NOTIFY_EVENT_OPTS = [
+  ['task_final', '全部终态（完成 / 失败 / 等你确认 / 取消）'],
+  ['task_failed', '仅失败'],
+  ['task_needs_review', '仅等你确认（结果拿不准）'],
+];
+
 /* ---------- 全局状态 ---------- */
 const TOKEN_KEY = 'swarmmind_node_token';
 const S = {
@@ -172,19 +187,29 @@ const S = {
          restart_cmd: '', config_path: '', structural: [], msg: '' },  // 能力配置编辑（方案 3.5）；编辑会话在模块级 cfgEdit（t20261023-a4b1 抽屉化）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
                            // 在途请求发起时捕获，应答返回时代次不一致 = 迟到应答，丢弃不写状态
+  notifyChannels: [],      // 通知渠道列表（已脱敏形态；standalone 专属，status.notify_available 门控）
+  notifyLoading: false,    // 通知区块加载态（D2 模式：局部更新）
+  notifyError: '',         // 通知渠道加载失败信息（空=正常）
+  notifyLoaded: false,     // 本会话已拉取过渠道列表（进 services 页拉一次，变更后重拉）
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
 }
-/* 一次性统筹凭证内存清理（安全审查修复 5）：登出/401/换令牌时清空——退出登录后
-   prime_token 不得残留在 JS 内存（下个会话重新进页可见）。同时递增会话代次
-  （第五轮收敛 3）：清理前已发出的在途请求，其迟到应答凭代次不一致被丢弃，
-   不得把已清理的一次性凭证写回 S.primeNew / S.primeDecl.done。 */
+/* 会话边界统一清理（安全审查修复 5）：登出/401/换令牌/再登录时清空一次性凭证
+   与上个会话的页面状态。同时递增会话代次（第五轮收敛 3）：清理前已发出的在途
+   请求，其迟到应答凭代次不一致被丢弃，不得把已清理的一次性凭证写回 S.primeNew /
+   S.primeDecl.done。通知渠道状态同属会话（返工建议修 3）：notifyLoaded 不随会话
+   重置的话，重新登录后进 services 页不再重拉，展示上个会话的残留列表（或空列
+   表）；loading 一并复位，边界前在途的渠道请求迟到应答直接丢弃、不遗留加载态。 */
 function resetPrimeState() {
   S.sessionEpoch++;
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
+  S.notifyChannels = [];
+  S.notifyLoaded = false;
+  S.notifyLoading = false;
+  S.notifyError = '';
 }
 
 /* ---------- API 访问（Bearer 本机管理令牌） ---------- */
@@ -296,6 +321,11 @@ function route() {
   if (S.page === 'services' && S.authed && S.status?.mode !== 'setup' && !S.cfg.loaded && !S.cfg._loading) {
     S.cfg._loading = true;
     loadCfg().finally(() => { S.cfg._loading = false; });
+  }
+  // 通知区块（standalone 专属）：status.notify_available 由装配决定（networked
+  // 归 hub、setup 不装配，两端口径一致）；进页拉一次，变更动作各自重拉。
+  if (S.page === 'services' && S.authed && S.status?.notify_available && !S.notifyLoaded && !S.notifyLoading) {
+    loadNotifyChannels();
   }
   render();
 }
@@ -578,7 +608,7 @@ function servicesPage() {
     <p class="muted">在下方「能力配置」点「＋ 新增 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p></div></section>`;
   return head + empty + S.agents.map(a => svcCard(a)).join('') +
     (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
-    cfgSection();
+    cfgSection() + notifyCard();
 }
 
 /* ---------- 能力配置编辑区（方案 3.5：yaml.Node round-trip + 热重载分类） ---------- */
@@ -737,6 +767,214 @@ async function setExposed(name, exposed, btn) {
   }
   render();
   pollTick();
+}
+
+/* ---------- 通知渠道管理（standalone 补盲区，与 hub 控制台同家族） ----------
+ * D2 局部刷新纪律：进页渲染容器（notifyCard），loadNotifyChannels 只 innerHTML
+ * 替换 #notify-section，能力配置区与 agent 卡不被触碰；编辑走右侧抽屉家族
+ *（#layer，与能力配置/任务详情同基建），抽屉期间 pollTick 重绘不碰 #layer。 */
+function notifyCard() {
+  if (!S.status?.notify_available) return '';
+  return `<section class="card spaced"><div class="row"><div><h2>通知</h2>
+    <small class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时本机主动给你发消息：飞书、邮件、自建 webhook。</small></div>
+    <div class="actions">${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div></div>
+    <div id="notify-section" class="spaced">${notifySectionHtml()}</div>
+    <p class="footer-note">standalone 模式由本机直接发送（组网模式任务通知统一由 hub 发送，届时本区块不再出现）。多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。</p></section>`;
+}
+/* loadNotifyChannels 拉渠道列表（已脱敏形态），完成后只重绘通知区块。
+   会话代次防护（返工建议修 4）：登出/再登录后迟到的应答不写回状态——加载态已随
+   会话边界复位，新会话进 services 页由 route() 重拉。 */
+async function loadNotifyChannels() {
+  const epochAtReq = S.sessionEpoch;
+  S.notifyLoading = true; S.notifyError = '';
+  paintNotifySection();
+  const r = await api('GET', '/api/v1/local/notify/channels').catch(() => null);
+  if (S.sessionEpoch !== epochAtReq) return; // 迟到应答：会话已换代，状态归新会话重拉
+  S.notifyLoading = false;
+  if (r && r.code === 200 && Array.isArray(r.data?.channels)) {
+    S.notifyChannels = r.data.channels; S.notifyError = '';
+    S.notifyLoaded = true;
+  } else {
+    S.notifyError = r ? errLine(r.data) : '网络异常 · 未收到服务器应答';
+  }
+  paintNotifySection();
+}
+function paintNotifySection() {
+  if (S.page !== 'services') return;
+  const el = $('#notify-section');
+  if (el) el.innerHTML = notifySectionHtml();
+}
+function notifySectionHtml() {
+  if (S.notifyLoading) return '<p class="muted">通知渠道加载中…</p>';
+  if (S.notifyError) return `<div class="notice warn"><b>通知渠道加载失败</b><br>${esc(S.notifyError)}</div><div class="actions spaced">${button('重试', 'notify-retry', '')}</div>`;
+  if (!S.notifyChannels.length) return `<div class="empty"><h2>还没有通知渠道</h2><p class="muted">添加一个渠道，本机任务完成、失败或等你确认时主动给你发消息——飞书群、邮件都行；不配置也完全不影响派活。</p>${button('＋ 添加第一个渠道', 'notify-add', 'primary')}</div>`;
+  return S.notifyChannels.map(notifyChannelCardHtml).join('');
+}
+function notifyChannelCardHtml(ch) {
+  const t = NOTIFY_TYPES[ch.type] || { label: ch.type };
+  const ev = (ch.events || []).map(e => (NOTIFY_EVENT_OPTS.find(([k]) => k === e) || ['', e])[1]).join('、') || '全部终态';
+  const secretKeys = Object.keys(ch.secrets || {}).filter(k => k !== 'password' && !k.startsWith('header.'));
+  const meta = secretKeys.length ? secretKeys.map(k => ch.secrets[k]).filter(Boolean).join(' · ') : '';
+  return `<div class="chan-card${ch.enabled ? '' : ' off'}">
+    <div class="chan-main">
+      <button type="button" class="switch${ch.enabled ? ' on' : ''}" data-act="notify-toggle:${esc(ch.id)}" aria-label="${ch.enabled ? '停用' : '启用'} ${esc(ch.name)}" title="${ch.enabled ? '点击停用' : '点击启用'}"></button>
+      <span class="badge">${esc(t.label)}</span>
+      <span class="chan-name">${esc(ch.name)}</span>
+    </div>
+    <div class="chan-actions">
+      ${button('发测试', 'notify-test:' + esc(ch.id), '', '', `data-name="${esc(ch.name)}"`)}
+      ${button('编辑', 'notify-edit:' + esc(ch.id), '')}
+      ${button('删除', 'notify-del:' + esc(ch.id), 'off-btn', '', `data-name="${esc(ch.name)}"`)}
+    </div>
+    <div class="chan-meta">订阅：${esc(ev)}${meta ? ' · ' + esc(meta) : ''} · 创建于 ${esc(timeFull(ch.created_at))}${ch.enabled ? '' : ' · 已停用'}</div>
+  </div>`;
+}
+
+/* notifyFormHtml 渠道编辑抽屉（新建 ch=null）。类型切换只重绘凭证字段容器
+ *（#nf-type-fields），名称与事件勾选不被冲掉（局部刷新纪律）。 */
+function notifyFormHtml(ch) {
+  const type = ch?.type || 'feishu';
+  return `<div class="row"><h2>${ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道'}</h2>${button('×', 'nf-close', 'close')}</div>
+  <form id="notify-form" class="fields" onsubmit="return false">
+    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
+    <label>渠道类型
+      <select id="nf-type">
+        ${Object.keys(NOTIFY_TYPES).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('')}
+      </select>
+    </label>
+    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
+    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, ch?.secrets || {})}</div>
+    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
+      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
+        const on = !ch || (ch.events || []).includes(k);
+        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
+      }).join('')}
+    </fieldset>
+    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'nf-close', 'link')}</div>
+  </form>
+  <p class="footer-note">凭证只保存在本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
+}
+/* notifyTypeFieldsHtml 按类型渲染凭证表单。编辑回填：password 与自定义头的值
+ * 显示 ****** 占位（保存原样传回 = 不修改，GitHub 式语义）；内嵌登录凭证
+ *（user:pass@host）的地址整串显示 ******；其余地址类字段明文回填可核对。 */
+function notifyTypeFieldsHtml(type, sec) {
+  const v = k => esc(String(sec[k] ?? ''));
+  const hint = NOTIFY_TYPES[type]?.form;
+  let fields = '';
+  if (type === 'feishu') {
+    fields = `<label>Webhook 地址<input id="nf-webhook-url" value="${v('webhook_url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`;
+  } else if (type === 'webhook') {
+    const headers = Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n');
+    fields = `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
+      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${headers}</textarea></label>`;
+  } else if (type === 'email') {
+    fields = `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
+      <div class="form-grid">
+        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
+        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
+      <div class="form-grid">
+        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
+        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
+      </div>`;
+  } else {
+    fields = `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
+  }
+  return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
+}
+/* collectNotifyForm 从抽屉 DOM 收集请求体；headers 文本按行解析为 header.<名> 键。 */
+function collectNotifyForm() {
+  const id = $('#nf-id')?.value || '';
+  const type = $('#nf-type')?.value || '';
+  const name = $('#nf-name')?.value.trim() || '';
+  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
+  let secrets = {};
+  if (type === 'feishu') secrets = { webhook_url: $('#nf-webhook-url')?.value.trim() || '' };
+  else if (type === 'webhook') {
+    secrets = { url: $('#nf-url')?.value.trim() || '' };
+    for (const line of ($('#nf-headers')?.value || '').split('\n')) {
+      const idx = line.indexOf(':');
+      if (idx <= 0) continue;
+      const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
+      if (hname) secrets['header.' + hname] = hval;
+    }
+  } else if (type === 'email') secrets = {
+    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
+    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
+    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
+  };
+  return { id, type, name, events, secrets };
+}
+async function saveNotifyChannel() {
+  const f = collectNotifyForm();
+  if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
+  const editing = !!f.id;
+  const btn = document.querySelector('[data-act="notify-save"]');
+  if (btn) { btn.disabled = true; btn.textContent = editing ? '保存中…' : '创建中…'; }
+  try {
+    const r = editing
+      ? await api('PUT', '/api/v1/local/notify/channels/' + encodeURIComponent(f.id), f).catch(() => null)
+      : await api('POST', '/api/v1/local/notify/channels', f).catch(() => null);
+    if (r && (r.code === 201 || r.code === 200)) {
+      closeNotifyForm();
+      await loadNotifyChannels();
+      paintNotifySection();
+      toast(editing ? '渠道已更新' : '渠道已创建 · 点「发测试」验证一下');
+    } else {
+      toast((editing ? '保存失败' : '创建失败') + '：' + (r ? errLine(r.data) : '网络异常'));
+      if (btn) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; }
+    }
+  } finally { if (btn && $('#notify-form')) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; } }
+}
+/* 通知渠道编辑抽屉基建（与能力配置抽屉同 #layer 家族；遮罩关闭=取消语义）。 */
+function openNotifyForm(ch) {
+  if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
+  if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
+  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="notify-drawer">${notifyFormHtml(ch)}</div></div>`;
+  $('#layer').addEventListener('click', nfMaskClose); // 具名引用重复注册幂等去重
+}
+function nfMaskClose(e) {
+  if (!$('#notify-drawer')) return; // 抽屉已关后残留监听不动作（与 cfgMaskClose 同机制）
+  if (e.target.classList.contains('overlay')) closeNotifyForm();
+}
+function closeNotifyForm() {
+  $('#layer').innerHTML = '';
+}
+async function toggleNotifyChannel(id, btn) {
+  const ch = S.notifyChannels.find(x => x.id === id);
+  if (!ch) return;
+  btn.disabled = true;
+  const r = await api('PUT', '/api/v1/local/notify/channels/' + encodeURIComponent(id), { enabled: !ch.enabled }).catch(() => null);
+  if (r && r.code === 200) {
+    ch.enabled = r.data.enabled;
+    toast(ch.enabled ? '渠道已启用' : '渠道已停用');
+  } else {
+    toast('开关失败 · ' + (r ? errLine(r.data) : '网络异常'));
+  }
+  paintNotifySection();
+}
+async function testNotifyChannel(id, btn) {
+  btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/v1/local/notify/channels/' + encodeURIComponent(id) + '/test').catch(() => null);
+    if (r && r.code === 200) {
+      toast(r.data?.ok ? '测试消息已发出 · 请查收' : '发送失败：' + (r.data?.error || '未知原因'));
+    } else {
+      toast('测试请求失败 · ' + (r ? errLine(r.data) : '网络异常'));
+    }
+  } finally { btn.disabled = false; }
+}
+async function deleteNotifyChannel(id, name) {
+  if (!confirm(`确定删除通知渠道「${name}」？删除后不再收到该渠道的通知。`)) return;
+  const r = await api('DELETE', '/api/v1/local/notify/channels/' + encodeURIComponent(id)).catch(() => null);
+  if (r && r.code === 200) {
+    await loadNotifyChannels();
+    paintNotifySection();
+    toast('渠道已删除');
+  } else {
+    toast('删除失败 · ' + (r ? errLine(r.data) : '网络异常'));
+  }
 }
 
 /* ---------- 页面③：派任务·我的任务（旅程②消费者） ---------- */
@@ -1175,6 +1413,18 @@ document.addEventListener('click', e => {
         return;
       }
       case 'cfg-save': cfgSave(btn); return;
+      case 'notify-add': openNotifyForm(null); return;
+      case 'notify-retry': loadNotifyChannels(); return;
+      case 'notify-edit': {
+        const ch = S.notifyChannels.find(x => x.id === arg);
+        if (ch) openNotifyForm(ch);
+        return;
+      }
+      case 'notify-save': saveNotifyChannel(); return;
+      case 'nf-close': closeNotifyForm(); return;
+      case 'notify-toggle': toggleNotifyChannel(arg, btn); return;
+      case 'notify-test': testNotifyChannel(arg, btn); return;
+      case 'notify-del': deleteNotifyChannel(arg, btn.dataset.name || arg); return;
       case 'cfg-reload': {
         if (!confirm('放弃当前编辑，从 node.yaml 文件重新读取？（未保存的修改将丢失）')) return;
         cfgReload(btn); return;
@@ -1234,6 +1484,14 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());
+});
+/* 通知渠道抽屉：类型切换只重绘凭证字段容器（#nf-type-fields），名称与事件
+ * 勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）。 */
+document.addEventListener('change', e => {
+  if (e.target.id === 'nf-type') {
+    const box = $('#nf-type-fields');
+    if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, {});
+  }
 });
 $('#logout').addEventListener('click', () => {
   localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = '';
