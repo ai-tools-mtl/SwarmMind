@@ -2,8 +2,9 @@
 /* SwarmMind Hub 中心端控制台（真实 API 版，Loop 6）。
  * 数据面：/api/v1/*（SPEC 六/六.五）；会话 cookie（swarmmind_session）鉴权，
  * 任何 401 自动回登录页。无框架原生 JS，hash 路由 SPA，Apple 灰阶工具视觉
- * （token 化见 style.css :root，FE-PLAN v3）与同交互闭环（INTERACTION 四：300ms
- * 反馈、终态带下一步、结果未知锁表单、技术态配人话双语）。 */
+ * （token 化见 style.css :root，FE-PLAN v3）与同交互闭环（INTERACTION 四：
+ * 300ms 反馈、终态带下一步、结果未知锁表单；文案口径见 PRODUCT-DIRECTION v2
+ * 术语翻译表：人话在前，技术态进详情/悬停）。 */
 
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -205,10 +206,10 @@ const PRIME_PROMPT = `# SwarmMind 统筹智能体（Prime）
 {{GOAL}}
 `;
 
-/* ---------- 展示词典：技术态永远配人话（INTERACTION 四.5） ---------- */
+/* ---------- 展示词典：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
-  running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '待人工核对',
+  running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '等你确认',
   cancelled: '已取消',
 };
 /* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
@@ -216,21 +217,21 @@ const ERRORS = {
   timeout: '执行超过本机配置的超时上限，进程组已整组终止',
   policy_denied: '参数或环境变量超出本机白名单，未执行',
   expired: '离线任务超过 7 天保留期，已判失败',
-  agent_not_found: '执行节点配置已变化，找不到该 agent',
-  agent_not_exposed: '目标未暴露该能力，任务未准入',
+  agent_not_found: '执行机器的配置已变化，找不到该 agent',
+  agent_not_exposed: '目标机器没有开放这个能力，任务没有接收',
   node_restarted_midway: '执行到一半机器重启，结果不确定',
   user_cancelled: '管理员手动取消了此任务，进程已整组终止',
   truncated: '结果超过编码预算，答复或诊断日志已截断',
-  mailbox_full: '目标信箱已满（条数或字节预算）',
+  mailbox_full: '目标机器的离线暂存已满（条数或字节预算）',
   storage_full: 'hub 存储全局预算已满',
   frame_too_large: '提交体超过单消息 1MiB 上限',
 };
 const SKIPS = {
   offline: '离线或未注册',
-  not_exposed: '在线但该 agent 未暴露 · not_exposed',
-  interrupted: 'hub 创建中断，未及提交 · interrupted',
+  not_exposed: '在线，但没有开放这个能力',
+  interrupted: '中心端创建中断，未及提交',
 };
-const BATCH_STATES = { creating: '收尾中 · creating', complete: '已完成 · complete' };
+const BATCH_STATES = { creating: '收尾中', complete: '已完成' };
 const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
 /* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
 const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
@@ -239,7 +240,7 @@ const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
  * sms 在枚举中占位（option disabled 灰显「需接入服务商，暂未开放」）。 */
 const NOTIFY_TYPES = {
   feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
-  email: { label: '邮件', form: 'SMTP 四件套：服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
+  email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
   inbox: { label: '站内通知', form: '无需配置。终态事件进入顶栏铃铛（只存在内存里，重启后清空）。' },
   sms: { label: '短信', form: '' },
@@ -570,13 +571,13 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '节点接入'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
+  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
     `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
-  <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各个节点本机</div>
+  <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各台机器本机</div>
   </aside><main id="main">${inner}</main></div>`;
 }
 
@@ -710,7 +711,7 @@ async function doLogin(form) {
       return;
     }
     fb.innerHTML = r.code === 401
-      ? warnNotice('管理令牌错误 · auth_failed', '请核对 hub 配置的 admin_token（或 data_dir/admin_token 文件内容）后重试。')
+      ? warnNotice('管理令牌错误', '错误码 auth_failed：请核对 hub 配置的 admin_token（或 data_dir/admin_token 文件内容）后重试。')
       : warnNotice('登录失败 · ' + esc(r.data?.error || r.code), esc(r.data?.message || ''));
   } catch (e) {
     fb.innerHTML = e.network
@@ -727,18 +728,18 @@ function overviewPage() {
   const nr = c.needs_review || 0;
   const offline = sortNodesStable(S.nodes.filter(n => !n.online));
   // 状态分布 chips = 下钻入口：点某个状态直达任务监管页对应筛选（总览无列表，就地筛选无意义）
-  // 计数为 0 时 badge 不上彩色（橙描边/蓝点脉冲只给有量的状态），避免「待人工核对 0」像告警（2026-10-23 伦哥实测抓出）
+  // 计数为 0 时 badge 不上彩色（橙描边/蓝点脉冲只给有量的状态），避免「等你确认 0」像告警（2026-10-23 伦哥实测抓出）
   const drillChips = Object.keys(STATES).map(s => {
     const n = c[s] || 0;
     const bd = n ? badge(s) : `<span class="badge">${esc(STATES[s] || s)}</span>`;
     return `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link${n ? '' : ' zero'}">${bd} ${n} →</button>`;
   }).join('');
-  return head('总览', `${online} / ${S.nodes.length} 台节点在线 · ${S.directory.length} 项网内能力`, button('＋ 接入节点', 'go', 'primary', 'data-page="nodes"'))
+  return head('总览', `${online} / ${S.nodes.length} 台机器在线 · ${S.directory.length} 项网内能力`, button('＋ 添加机器', 'go', 'primary', 'data-page="nodes"'))
     + `<section class="panel"><div class="stat-grid">
     ${metric('全网任务', S.tasks.length, '查看全部 →', '', 'data-act="go" data-page="tasks"')}
     ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
     ${metric('已完成', c.completed || 0, c.completed ? '查看已完成 →' : '暂无完成任务', '', `data-act="go" data-page="tasks" data-status="completed"`)}
-    ${metric('等待核对', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'heat' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
+    ${metric('等你确认', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'heat' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
     </div></section>`
     + `<div class="grid cols2 spaced">
     <section class="card"><div class="row"><h2>中心端状态</h2><span class="badge online">在线</span></div>
@@ -747,12 +748,12 @@ function overviewPage() {
         <div class="row"><span>登录剩余时间</span><b>${esc(humanLeft())}</b></div>
         <div class="row"><span>网内开放能力</span><b>${S.directory.length} 项</b></div>
       </div>
-      <small class="muted">中心端负责登记与监管；所有任务都在各节点本机执行。</small>
+      <small class="muted">中心端负责登记与监管；所有任务都在各机器本机执行。</small>
     </section>
     <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
-      ${nr ? `<div class="notice warn"><b>${nr} 条执行结果不确定</b><p>执行中断等待人工核对，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
+      ${nr ? `<div class="notice warn"><b>${nr} 个任务结果拿不准，等你确认</b><p>执行中断，结果是否完整系统无法确认；请核对后登记结论，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
     : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务监管」页下钻原因。</div>`}
-      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务会暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看节点 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
+      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务先放进离线暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
     </div>`
     + `<section class="card spaced"><div class="row"><h2>任务状态分布</h2>${button('全部任务 →', 'go', 'link', 'data-page="tasks"')}</div>
@@ -761,23 +762,23 @@ function overviewPage() {
     ${S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
 }
 
-/* ---------- 节点接入 ---------- */
+/* ---------- 机器（添加机器 / 已登记机器列表） ---------- */
 function nodesPage() {
-  return head('节点接入', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('生成接入配置', 'enroll', 'primary'))
-    + `<section class="card"><div class="row"><h2>已登记节点</h2><small>${S.nodes.length} 台</small></div>
-    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>节点</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
+  return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
+    + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
+    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
     ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
       return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(d => {
       const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
       return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
-    }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台节点（只读说明）"`)}</td></tr>`;
+    }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台机器（只读说明）"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
-    : `<div class="empty"><h2>还没有节点接入</h2><p class="muted">在中心端配置里登记节点身份与令牌并重启，节点连接成功后出现在这里。</p>${button('生成接入配置', 'enroll', 'primary')}</div>`}
-    <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否对外开放由各机器 exposed 开关决定。每台节点最多同时进行 8 笔任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
+    : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`}
+    <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定。每台机器最多同时进行 8 个任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
 }
-/* ---------- 节点接入向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
+/* ---------- 添加机器向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
  * Step1 节点身份（实时校验）→ Step2 hub 侧登记（本地生成 64 位随机令牌 + 可复制
  * hub.yaml 片段）→ Step3 安装配置（三方式卡：一键部署包/Docker 构建包 POST
  * /api/v1/nodes/enroll-bundle 现场编译下载 zip，手动复制 node.yaml 降为折叠区）
@@ -828,7 +829,7 @@ function enrollGo(step) {
 function enrollStopWait() {
   if (ENROLL?.timer) { clearInterval(ENROLL.timer); ENROLL.timer = null; }
 }
-const ENROLL_STEPS = ['节点身份', 'hub 侧登记', '安装配置', '等待上线'];
+const ENROLL_STEPS = ['机器身份', 'hub 侧登记', '安装配置', '等待上线'];
 function enrollHtml() {
   const bar = ENROLL_STEPS.map((name, i) => {
     const n = i + 1, cls = n === ENROLL.step ? 'on' : n < ENROLL.step ? 'done' : 'todo';
@@ -838,16 +839,16 @@ function enrollHtml() {
       : `<div class="wiz-step ${cls}">${inner}</div>`;
   }).join('');
   const body = [enrollStep1, enrollStep2, enrollStep3, enrollStep4][ENROLL.step - 1]();
-  return `${modalHead('生成接入配置 · 分步向导')}
+  return `${modalHead('添加一台新机器 · 分步向导')}
   <div class="wiz-steps">${bar}</div>
   ${body}
-  <p class="footer-note">node 连接成功后出现在节点列表；接入成功以列表在线状态为准。控制类身份须经管理员批准，禁止节点自报提权。</p>`;
+  <p class="footer-note">机器连接成功后出现在机器列表；添加是否成功以列表在线状态为准。控制类身份须经管理员批准，禁止机器自报提权。</p>`;
 }
-/* ---- Step 1 节点身份：输入 + 实时校验（小写字母/数字/连字符），通过才可下一步 ---- */
+/* ---- Step 1 机器身份：输入 + 实时校验（小写字母/数字/连字符），通过才可下一步 ---- */
 function enrollStep1() {
   return `<div class="notice">先给这台机器定个身份：后面三步的配置都会自动带上这个名字。</div>
-  <label class="spaced">节点 ID（node_id）<input id="enroll-id" value="${esc(ENROLL.id)}" placeholder="例如 build-linux、mac-mini" autocomplete="off" spellcheck="false">
-  <small id="enroll-id-hint" class="muted">给这台机器起个名字，会显示在节点列表，如 build-linux、mac-mini</small></label>
+  <label class="spaced">机器 ID（node_id）<input id="enroll-id" value="${esc(ENROLL.id)}" placeholder="例如 build-linux、mac-mini" autocomplete="off" spellcheck="false">
+  <small id="enroll-id-hint" class="muted">给这台机器起个名字，会显示在机器列表，如 build-linux、mac-mini</small></label>
   <div class="actions spaced">${button('下一步', 'enroll-next1', 'primary', 'disabled')}</div>`;
 }
 function enrollValidId(id) {
@@ -865,15 +866,15 @@ function enrollValidateId() {
   ENROLL.id = id;
   if (!btn) return;
   hint.classList.remove('warn-text');
-  if (!id) { hint.textContent = '给这台机器起个名字，会显示在节点列表，如 build-linux、mac-mini'; btn.disabled = true; return; }
+  if (!id) { hint.textContent = '给这台机器起个名字，会显示在机器列表，如 build-linux、mac-mini'; btn.disabled = true; return; }
   if (!enrollValidId(id)) {
     hint.textContent = '只能用 2-32 位小写字母、数字和连字符（-），且不能以连字符开头或结尾';
     hint.classList.add('warn-text'); btn.disabled = true; return;
   }
   if (S.nodes.some(n => n.node_id === id)) {
-    hint.textContent = '该 ID 已在节点列表：继续登记会替换 hub.yaml 里的旧令牌行';
+    hint.textContent = '该 ID 已在机器列表：继续登记会替换 hub.yaml 里的旧令牌行';
     hint.classList.add('warn-text');
-  } else hint.textContent = '可用 ✓ 下一步将生成这台机器的接入令牌';
+  } else hint.textContent = '可用 ✓ 下一步将生成这台机器的令牌';
   btn.disabled = false;
 }
 /* ---- Step 2 hub 侧登记：本地生成令牌（只显示一次）+ 真实值 hub.yaml 片段 ---- */
@@ -885,13 +886,13 @@ function newNodeToken() {
 }
 function enrollStep2() {
   if (!ENROLL.token) ENROLL.token = newNodeToken();
-  return `<div class="notice warn">这台机器的接入令牌已在本页<b>本地生成</b>（不经过网络，安全性等同手动 <code>openssl rand -hex 32</code>）——<b>只显示这一次</b>，请立即复制保存。</div>
+  return `<div class="notice warn">这台机器的令牌已在本页<b>本地生成</b>（不经过网络，安全性等同手动 <code>openssl rand -hex 32</code>）——<b>只显示这一次</b>，请立即复制保存。</div>
   <div class="enroll-token-row spaced"><code>${esc(ENROLL.token)}</code>${button('复制令牌', 'enroll-copy-token')}</div>
   <small class="muted">64 位随机令牌 · 关闭弹层后无法再查看，只能重新生成重贴。</small>
   <h3 class="spaced">把这两行加进服务器上的 hub.yaml（一分钟）</h3>
   <div class="enroll-rows">
   <div class="enroll-row"><code>nodes:</code><small>hub.yaml 已有 nodes: 段时跳过本行，只粘贴下一行到段内</small></div>
-  <div class="enroll-row"><code>  ${esc(ENROLL.id)}: ${esc(ENROLL.token)}</code><small>新节点一行登记，令牌是这台机器的接入凭证</small></div>
+  <div class="enroll-row"><code>  ${esc(ENROLL.id)}: ${esc(ENROLL.token)}</code><small>新机器一行登记，令牌就是这台机器的准入凭证</small></div>
   </div>
   <div class="row"><small class="muted">编辑服务器上的 hub.yaml → 粘贴上面两行 → 重启：<code>sudo systemctl restart swarmmind-hub</code></small>${button('复制 hub.yaml 片段', 'enroll-copy-hub')}</div>
   <div class="actions spaced">${button('已粘贴并重启 hub，下一步', 'enroll-pasted', 'primary')}</div>`;
@@ -969,7 +970,7 @@ function enrollNextHtml() {
   return `<h3 class="spaced">接下来（3 步）</h3><div class="enroll-rows">
   <div class="enroll-row"><code>解压 ${esc(zipName)}</code><small>得到 swarmmind-node 二进制、node.yaml（已填好真实值）与安装脚本</small></div>
   <div class="enroll-row"><code>${esc(second.code)}</code><small>${second.note}</small></div>
-  <div class="enroll-row"><code>回本向导第 4 步</code><small>点下方「下一步」等待节点上线（3 秒一查，最多 60 秒）</small></div>
+  <div class="enroll-row"><code>回本向导第 4 步</code><small>点下方「下一步」等待机器上线（3 秒一查，最多 60 秒）</small></div>
   </div><small class="muted">包内 README.txt 有同样的三步与看状态命令。</small>`;
 }
 function enrollBundlePane() {
@@ -987,9 +988,9 @@ function enrollDockerPane() {
 function enrollManualPane() {
   const os = ENROLL.os in ENROLL_OS ? ENROLL.os : 'linux';
   const rows = [
-    [`node_id: ${ENROLL.id}`, '第一步起的节点身份，会显示在节点列表'],
-    [`hub_url: ${enrollUrlOrDefault()}`, 'hub 的连接地址（内网用 ws://，公网建议配证书后用 wss://）· 已按节点接入入口自动填好，可在上方面板手改'],
-    [`register_token: ${ENROLL.token}`, '第二步生成的令牌，证明这台机器被允许接入'],
+    [`node_id: ${ENROLL.id}`, '第一步起的机器身份，会显示在机器列表'],
+    [`hub_url: ${enrollUrlOrDefault()}`, 'hub 的连接地址（内网用 ws://，公网建议配证书后用 wss://）· 已按「添加机器」入口自动填好，可在上方面板手改'],
+    [`register_token: ${ENROLL.token}`, '第二步生成的令牌，证明这台机器被允许连入'],
     ['hub_pubkey_fp: ""', 'hub 证书指纹，留空则首次连接自动记录（防中间人劫持）'],
     ['local_listen: 127.0.0.1:8445', '本机管理端口，只给本机工具用，默认即可'],
     ['data_dir: data', '任务文件与执行记录的存放位置'],
@@ -1006,8 +1007,8 @@ function enrollManualPane() {
   <h3 class="spaced">启动命令（<span id="enroll-start-os">${ENROLL_OS[os]}</span>）</h3>
   <pre id="enroll-start-pre">${esc(ENROLL_START[os])}</pre></details>`;
 }
-/* 接入串（功能性修复 6，2026-10-22：网页化接入路径，与部署包下载并列）——目标
- * 机器已装 node 时，复制接入串到其本机控制台「接入中心端」粘贴即可完成接入，
+/* 连接串（功能性修复 6，2026-10-22：网页化接入路径，与部署包下载并列）——目标
+ * 机器已装 node 时，复制连接串到其本机控制台「连接中心端」粘贴即可完成接入，
  * 免下载部署包。格式 swarmmind://join?hub=<wss>&node=<id>&token=<64hex>：hub/node
  * 值 encodeURIComponent（node 侧 URLSearchParams 解码，protocol.ParseJoinString
  * 同源校验）；token 64 位 hex 天然 URL 安全，无需编码。 */
@@ -1016,10 +1017,10 @@ function enrollJoinString() {
 }
 function enrollStep3() {
   const pane = ENROLL.mode === 'docker' ? enrollDockerPane() : ENROLL.mode === 'manual' ? enrollManualPane() : enrollBundlePane();
-  return `<div class="notice">目标机器已装 SwarmMind node？复制接入串，到它的本机控制台（<code>http://127.0.0.1:8445</code>）「接入中心端」粘贴、预览、保存即完成接入——无需下载部署包。</div>
-  <label class="spaced">hub 接入地址（node.yaml 的 hub_url；已按 hub 节点接入入口自动填好，跨机访问或改过端口时可手改，接入串 / node.yaml / 部署包同步使用此值）
+  return `<div class="notice">目标机器已装 SwarmMind node？复制连接串，到它的本机控制台（<code>http://127.0.0.1:8445</code>）「连接中心端」粘贴、预览、保存即完成——无需下载部署包。</div>
+  <label class="spaced">hub 连接地址（node.yaml 的 hub_url；已按「添加机器」入口自动填好，跨机访问或改过端口时可手改，连接串 / node.yaml / 部署包同步使用此值）
   <input id="enroll-hub-url" value="${esc(enrollUrlOrDefault())}" autocomplete="off" spellcheck="false"></label>
-  <div class="row spaced">${button('复制接入串', 'enroll-copy-join', 'primary')}<small class="muted">网页化接入（推荐先试）；串内含这台机器的接入令牌，请勿外传。</small></div>
+  <div class="row spaced">${button('复制连接串', 'enroll-copy-join', 'primary')}<small class="muted">免下载部署包（推荐先试）；串内含这台机器的令牌，请勿外传。</small></div>
   <div id="enroll-pane">${enrollModeCards()}${pane}</div>
   <div class="actions spaced">${button('下一步', 'enroll-next3', 'primary')}</div>`;
 }
@@ -1036,7 +1037,7 @@ function enrollSetDlBtn(label, busy) {
 }
 async function enrollBundleDownload() {
   if (!ENROLL || enrollBundleBusy) return;
-  if (!enrollValidId(ENROLL.id)) { toast('节点 ID 需为 2-32 位小写字母/数字/连字符才能生成部署包'); return; }
+  if (!enrollValidId(ENROLL.id)) { toast('机器 ID 需为 2-32 位小写字母/数字/连字符才能生成部署包'); return; }
   const [os, arch] = ENROLL.plat.split('-');
   const mode = ENROLL.mode === 'docker' ? 'docker' : 'native';
   enrollBundleBusy = true;
@@ -1108,14 +1109,14 @@ async function enrollBundleDownload() {
 }
 /* ---- Step 4 等待上线：3s 轮询节点列表，60s 未上线给排查提示 ---- */
 function enrollStep4() {
-  return `<div class="notice">hub 侧与机器侧都已配置。节点进程一连上 hub 就会出现在节点列表——下面自动等待，不用盯着刷新。</div>
+  return `<div class="notice">hub 侧与机器侧都已配置。机器一连上 hub 就会出现在机器列表——下面自动等待，不用盯着刷新。</div>
   <div id="enroll-wait" class="spaced">${enrollWaitHtml('wait', 0)}</div>
-  <div class="actions spaced">${button('先关闭，稍后在节点列表查看', 'enroll-later', 'link')}</div>`;
+  <div class="actions spaced">${button('先关闭，稍后在机器列表查看', 'enroll-later', 'link')}</div>`;
 }
 function enrollWaitHtml(state, secs) {
-  if (state === 'ok') return `<div class="enroll-ok"><b>✓ 已上线</b><p>节点 <b>${esc(ENROLL.id)}</b> 已连上 hub，出现在节点列表里。</p><div class="actions">${button('查看节点', 'go', 'primary', 'data-page="nodes"')}</div></div>`;
+  if (state === 'ok') return `<div class="enroll-ok"><b>✓ 已上线</b><p>机器 <b>${esc(ENROLL.id)}</b> 已连上 hub，出现在机器列表里。</p><div class="actions">${button('查看机器', 'go', 'primary', 'data-page="nodes"')}</div></div>`;
   if (state === 'timeout') return `<div class="notice warn"><b>已等待 60 秒仍未上线</b><br>按顺序排查：<br>1. 两边令牌是否完全一致（hub.yaml 与 node.yaml 的 register_token）<br>2. 目标机器能否访问 hub（hub_url 的地址与端口、防火墙）<br>3. 节点服务是否真的启动了（<code>systemctl status swarmmind-node</code> 或前台命令的报错输出）</div>`;
-  return `<div class="row"><span class="badge running">等待上线…</span><small class="muted">正在等 ${esc(ENROLL.id)} 连接 · 已等待 ${secs} 秒 · 每 3 秒查询一次节点列表（上限 60 秒）</small></div>`;
+  return `<div class="row"><span class="badge running">等待上线…</span><small class="muted">正在等 ${esc(ENROLL.id)} 连接 · 已等待 ${secs} 秒 · 每 3 秒查询一次机器列表（上限 60 秒）</small></div>`;
 }
 function enrollStartWait() {
   ENROLL.t0 = Date.now();
@@ -1133,7 +1134,7 @@ async function enrollWaitTick() {
   if (n?.online) {
     enrollStopWait();
     box.innerHTML = enrollWaitHtml('ok', secs);
-    toast(`节点 ${ENROLL.id} 已上线 —— 下一步：查看节点与它开放的能力`);
+    toast(`机器 ${ENROLL.id} 已上线 —— 下一步：查看机器与它开放的能力`);
   } else if (secs >= 60) {
     enrollStopWait();
     box.innerHTML = enrollWaitHtml('timeout', secs);
@@ -1182,11 +1183,11 @@ function tasksPage() {
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 已完成的任务保留 24 小时，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
-  return `<div class="table-wrap"><table><thead><tr><th>任务 / trace_id</th><th>目标节点</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
+  return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>目标机器</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
   ${list.map(t => `<tr data-task="${esc(t.id)}" tabindex="0" aria-label="查看任务 ${esc(t.id)}">
     <td class="task-title"><strong>${esc(t.target_agent)}</strong><small>${esc(t.id)}</small></td>
     <td>${esc(t.target_node)}</td>
-    <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，需人工核对')}">ⓘ</small>` : ''}${t.review ? '<small>已核对</small>' : ''}</td>
+    <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，等你确认')}">ⓘ</small>` : ''}${t.review ? '<small>已核对</small>' : ''}</td>
     <td>${esc(t.submitted_by)}</td>
     <td><small>${esc(fmtTime(t.created_at))}</small></td>
     <td class="table-action">${t.status === 'needs_review' && !t.review ? button('去核对', 'detail', 'link', `data-id="${esc(t.id)}"`) : button('查看 →', 'detail', 'link', `data-id="${esc(t.id)}"`)}</td>
@@ -1362,7 +1363,7 @@ function drawerHtml(t) {
   const needs = t.status === 'needs_review';
   const r = t.result;
   const intro = needs
-    ? '任务执行到一半节点重启了，结果不确定——请核对后登记结论，不要重新提交同一任务。'
+    ? '这个任务结果拿不准，等你确认：执行到一半机器重启了，请核对后登记结论，不要重新提交同一任务。'
     : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
     : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
     : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
@@ -1371,17 +1372,17 @@ function drawerHtml(t) {
   <p class="${needs ? 'notice warn' : 'notice'}">${intro}</p>
   <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)}</h2></div>
   <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
-  <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 幂等键 <code>' + esc(t.idem) + '</code>' : ''}</p>
-  ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半节点重启，无法确认实际进度。' : ''}</div>` : ''}
+  <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>
+  ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半机器重启，无法确认实际进度。' : ''}</div>` : ''}
   ${r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : ''}
   <h3 class="spaced">任务输入</h3>
   <pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre>
   <h3>最终答复</h3>
-  ${r && r.final_answer ? mdAnswer(r.final_answer) : (needs ? '<p class="muted">结果未确认，待人工核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
+  ${r && r.final_answer ? mdAnswer(r.final_answer) : (needs ? '<p class="muted">结果还没确认——这个任务结果拿不准，等你核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
   ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>运行日志</summary><div id="drawer-runlog">${runLogInner(t)}</div><small>最多保留各 64KiB。</small></details>` : ''}
   <h3>产物文件</h3>
   ${artifactsHtml(t)}
-  <p class="footer-note">产物经中心端中继从执行节点取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
+  <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
   <h3 class="spaced">时间线</h3>
   <ol class="timeline">${timeline(t).map(([e, time, hl]) => `<li${hl ? ' class="hl"' : ''}>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
   ${reviewSection(t)}
@@ -1439,8 +1440,8 @@ function reviewSection(t) {
    * 后 textarea 从草稿恢复，填写内容不因重绘丢失。 */
   const draft = S.drafts[t.id]?.note || '';
   return `<section class="card spaced"><h3>人工核对</h3>
-  <p class="muted">核对只是登记人工结论：任务保持「待人工核对」状态，不会自动重跑，也不会改写执行结果。</p>
-  <div class="notice warn"><b>请勿重新提交同一任务：</b>重复提交会在节点上再次执行。</div>
+  <p class="muted">核对只是登记人工结论：任务保持「等你确认」状态，不会自动重跑，也不会改写执行结果。</p>
+  <div class="notice warn"><b>请勿重新提交同一任务：</b>重复提交会在机器上再次执行。</div>
   <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。">${esc(draft)}</textarea></label>
   <div class="actions">
     <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}">确认结果有效</button>
@@ -1449,11 +1450,11 @@ function reviewSection(t) {
 }
 
 /* ---------- 运维控制 ---------- */
-/* 任务描述占位文案：普通/统筹两态共用常量——选中统筹载体切 STDIN_PH_PRIME，选普通恢复。 */
+/* 任务描述占位文案：普通/管家两态共用常量——选中智行管家切 STDIN_PH_PRIME，选普通恢复。 */
 const STDIN_PH = '用自然语言描述要做什么。编码智能体会读取这段描述并执行；工具脚本则把它作为附加说明。\n例如：在 demo 目录创建一个 Python 脚本，输出当前时间。';
-const STDIN_PH_PRIME = '描述复合目标：统筹会把目标拆解为多个子任务，派发网内其他智能体并行执行，收集结果并汇总报告；自身不执行具体子任务。例如：检查两台机器的磁盘占用并汇总对比报告';
+const STDIN_PH_PRIME = '描述复合目标：智行管家会把目标拆解为多个子任务，派发网内其他智能体并行执行，收集结果并汇总报告；它本身不执行具体子任务。例如：检查两台机器的磁盘占用并汇总对比报告';
 const PRIME_AGENT_KEY = 'zcode-dev';   // 回退约定：未指定时按能力名含此串识别统筹（向后兼容）
-/* isPrimeDir 统筹载体判定（2026-10-23 伦哥定案：网页指定取代硬编码）：
+/* isPrimeDir 智行管家判定（2026-10-23 伦哥定案：网页指定取代硬编码）：
  * 有指定 → 目录条目精确匹配 (node_id, agent_name)；未指定 → 回退名字约定。
  * 所有统筹展示/提交判定统一走此函数。 */
 function isPrimeDir(d) {
@@ -1472,12 +1473,12 @@ function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
   const locked = C.stage === 'submitting' || C.stage === 'unknown';
-  return head('任务派发', '把任务派给网内任意节点上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
+  return head('任务派发', '把任务派给网内任意机器上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
-    <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在节点本机执行</span></div>
-    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：提交端点对离线节点直接跳过、不排队暂存，等其上线后再派发。' })}
+    <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在机器本机执行</span></div>
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存，等其上线后再派发。' })}
     ${orchLineHtml()}
-    ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在节点配置里开放能力（exposed: true）。</div>'}
+    ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在机器的 node.yaml 里把能力开放出去（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(stdinPlaceholder(C.node, C.agent))}">${esc(C.stdin)}</textarea></label>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
@@ -1490,8 +1491,8 @@ function controlPage() {
     ${C.message ? `<section class="card spaced">${C.message}</section>` : ''}
     <section class="card spaced"><h3>运行规则</h3>
     <div class="step"><span>1</span><p>单目标派发：任务只提交给你选定的机器上的选定智能体；离线机器暂不可选（提交端点不排队，上线后再派）。</p></div>
-    <div class="step"><span>2</span><p>提交后返回批次报告；任务在节点本机执行，「任务监管」页全程可追踪。</p></div>
-    <div class="step"><span>3</span><p>统筹智能体（zcode-dev）由各节点在能力目录中开放后出现在智能体列表顶部；选中它即统筹模式：目标由它拆解并调度网内多节点执行，产出汇总报告。</p></div></section>`;
+    <div class="step"><span>2</span><p>提交后返回批次报告；任务在机器本机执行，「任务监管」页全程可追踪。</p></div>
+    <div class="step"><span>3</span><p>智行管家（默认按能力名含 zcode-dev 识别）由各机器在能力目录中开放后出现在智能体列表顶部；选中它即管家模式：复合目标由它拆解并调度网内多台机器执行，产出汇总报告。</p></div></section>`;
 }
 
 /* ---------- 智能体选择公共组件（2026-10-22 抽取：派单 / 建群 / 转任务三处共用） ----------
@@ -1516,7 +1517,7 @@ function pickerNodeOptions(selected) {
     const hasCaps = S.directory.some(d => d.node_id === n.node_id);
     const dead = !n.online || !hasCaps;
     const why = !n.online ? '（离线）' : hasCaps ? '' : '（无开放能力）';
-    const tip = !n.online ? '离线：提交会被跳过，暂不支持排队暂存' : hasCaps ? `在线 · epoch ${n.epoch} · 进行中 ${n.inflight} 笔` : '该机器尚未开放任何能力（node.yaml exposed）';
+    const tip = !n.online ? '离线：提交会被跳过，暂不支持排队暂存' : hasCaps ? `在线 · 正在执行 ${n.inflight} 个任务` : '这台机器还没有开放任何能力（node.yaml 的 exposed）';
     return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
@@ -1525,18 +1526,18 @@ function pickerNodeOptions(selected) {
 function orchLineHtml() {
   const btn = S.prime
     ? `<button type="button" data-act="prime-manage" class="link">更改 / 撤销</button>`
-    : `<button type="button" data-act="prime-manage" class="primary">指定统筹</button>`;
+    : `<button type="button" data-act="prime-manage" class="primary">指定智行管家</button>`;
   const body = S.prime
     ? `<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)} · 复合目标交给它拆解派发并汇总`
-    : `未指定（默认识别能力名含 <code>zcode-dev</code> 的智能体）；复合目标建议先指定统筹载体`;
-  return `<div class="orch-line">${S.prime ? '<span class="badge orch">统筹</span>' : '<span class="badge">统筹</span>'} <span>${body}</span> ${btn}</div>`;
+    : `未指定（默认识别能力名含 <code>zcode-dev</code> 的智能体）；复合目标建议先指定智行管家`;
+  return `<div class="orch-line">${S.prime ? '<span class="badge orch">智行管家</span>' : '<span class="badge">智行管家</span>'} <span>${body}</span> ${btn}</div>`;
 }
 /* pickerHelpText 派发页机器选择的补充说明（已精简：统筹信息移至 orchLineHtml 独立状态条）。 */
 function pickerHelpText() {
   const src = S.prime
-    ? `已由网页指定统筹载体：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
-    : `未指定统筹载体（默认按能力名 <code>zcode-dev</code> 识别）`;
-  return `离线机器暂不可选：提交端点对离线节点直接跳过、不排队暂存。统筹智能体：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src} <button type="button" data-act="prime-manage" class="link">${S.prime ? '更换 / 撤销' : '指定统筹'}</button>`;
+    ? `已由网页指定智行管家：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
+    : `未指定智行管家（默认按能力名 <code>zcode-dev</code> 识别）`;
+  return `离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src} <button type="button" data-act="prime-manage" class="link">${S.prime ? '更换 / 撤销' : '指定智行管家'}</button>`;
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
@@ -1550,13 +1551,13 @@ function pickerAgentOptions(nodeId, selected) {
   const isPrime = isPrimeDir;   // 统筹判定统一走网页指定+回退约定（isPrimeDir）
   const prime = list.filter(isPrime), rest = list.filter(d => !isPrime(d));
   const opt = d => {
-    const tip = `${d.card.name}${isPrime(d) ? ' · 统筹：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : ''}）`;
-    const label = isPrime(d) ? `统筹 · ${d.card.name}` : d.card.name;
+    const tip = `${d.card.name}${isPrime(d) ? ' · 智行管家：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : ''}）`;
+    const label = isPrime(d) ? `智行管家 · ${d.card.name}` : d.card.name;
     return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(label)}</option>`;
   };
   const group = (label, arr) => arr.length ? `<optgroup label="${esc(label)}">${arr.map(opt).join('')}</optgroup>` : '';
   return '<option value="">请选择智能体</option>'
-    + group('统筹 · 复合目标拆解派发汇总（选中即统筹模式）', prime)
+    + group('智行管家 · 复合目标拆解派发汇总（选中即管家模式）', prime)
     + group('智能体与工具', rest);
 }
 /* pickerSummaryHtml / updatePickerSummary 摘要行（提交前一句话确认）：机器与智能体
@@ -1565,7 +1566,7 @@ function pickerAgentOptions(nodeId, selected) {
 function pickerSummaryHtml(node, agent) {
   if (node && agent) {
     const d = S.directory.find(x => x.node_id === node && x.card.name === agent);
-    const flag = isPrimeDir(d) ? ' <span class="badge orch">统筹模式 · 自动拆解派发汇总</span>' : '';
+    const flag = isPrimeDir(d) ? ' <span class="badge orch">智行管家 · 自动拆解派发汇总</span>' : '';
     return `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行${flag}</small>`;
   }
   return '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
@@ -1661,7 +1662,7 @@ function ctrlFeedback() {
   const C = S.C;
   if (C.stage === 'unknown') return warnNotice('结果未知 · 未收到服务器确认', '这次提交可能已经生效：表单与恢复密钥已冻结。「同键重试」命中原批次不会重复执行；「放弃等待」保留密钥稍后再试。');
   if (C.stage === 'submitting') return '<span class="muted">正在提交…</span>';
-  return '<span class="muted">就绪 · 提交后逐个节点返回结果</span>';
+  return '<span class="muted">就绪 · 提交后逐台机器返回结果</span>';
 }
 function controlResult() {
   const b = S.C.batch;
@@ -1669,18 +1670,18 @@ function controlResult() {
   const ok = items.filter(i => i.task_id).length;
   const skip = items.filter(i => i.skipped).length;
   const err = items.filter(i => i.error).length;
-  return head('批次报告 · ' + esc(b.batch_id), '本次派发在每个节点上的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
+  return head('批次报告 · ' + esc(b.batch_id), '本次派发在每台机器上的结果与去向。', button('再运行一次', 'ctrl-new', 'primary'))
     + `<section class="card">
     <div class="row"><h2>汇总</h2><span class="badge ${b.status === 'complete' ? 'completed' : 'running'}">${esc(BATCH_STATES[b.status] || b.status)}</span></div>
     <div class="mini-stat"><div><b>${ok}</b><small>已提交</small></div><div><b>${skip}</b><small>已跳过</small></div><div><b>${err}</b><small>提交失败</small></div></div>
-    <div class="table-wrap spaced"><table><thead><tr><th>目标节点</th><th>结果</th><th>去向</th></tr></thead><tbody>
+    <div class="table-wrap spaced"><table><thead><tr><th>目标机器</th><th>结果</th><th>去向</th></tr></thead><tbody>
     ${items.map(it => `<tr><td><b>${esc(it.target)}</b></td>
       <td>${it.task_id ? badge(it.status || 'submitted') : it.skipped ? `<span class="badge offline" title="${esc(it.skipped)}">已跳过（${it.skipped === 'offline' ? '离线' : '能力未开放'}）</span>` : `<span class="badge failed">失败</span>`}</td>
-      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${it.skipped === 'offline' ? '节点离线，未提交' : it.skipped === 'not_exposed' ? '该节点未开放此能力' : esc(ERRORS[it.error] || it.error || '')}</small>`}</td>
+      <td>${it.task_id ? `${button('查看任务 →', 'detail', 'link', `data-id="${esc(it.task_id)}"`)}<small>${esc(it.task_id)}</small>` : `<small>${it.skipped === 'offline' ? '机器离线，未提交' : it.skipped === 'not_exposed' ? '该机器未开放此能力' : esc(ERRORS[it.error] || it.error || '')}</small>`}</td>
     </tr>`).join('')}
     </tbody></table></div>
     <p class="footer-note">批次创建于 ${esc(fmtFull(b.created_at))} · 各任务状态随页面自动刷新。</p>
-    <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看节点 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
+    <div class="actions spaced">${button('刷新状态', 'ctrl-refresh')}${button('下一步：查看任务监管 →', 'go-tasks', 'link')}${skip ? button('查看机器 →', 'go', 'link', 'data-page="nodes"') : ''}</div>
     </section>`;
 }
 /* primeArgs 统筹模式任务入参：PRIME 系统提示词 + 本次目标。模板含 {{GOAL}}
@@ -1723,7 +1724,7 @@ async function submitControl() {
        * 否则批次报告页「查看任务」在下一轮 5s 轮询前点击必然 404。 */
       try { await loadAll(); } catch { }
       const n = (r.data.items || []).length, ok = (r.data.items || []).filter(i => i.task_id).length;
-      toast(`批次已受理${r.code === 200 ? '（幂等命中 dup）' : ''} · ${ok}/${n} 目标已提交 —— 下一步：查看批次报告`);
+      toast(`批次已受理${r.code === 200 ? '（恢复密钥命中，未重复执行）' : ''} · ${ok}/${n} 目标已提交 —— 下一步：查看批次报告`);
       render(); return;
     }
     C.stage = 'idle';
@@ -1732,8 +1733,8 @@ async function submitControl() {
   } catch (e) {
     if (e.network) {
       C.stage = 'unknown'; C.unknownPending = true;
-      C.message = warnNotice('上次提交结果未知', '幂等键已保留：需要确认时点「同键重试上次未决提交」，同键同内容命中原批次，不会重复执行。');
-      render(); toast('结果未知：表单与幂等键已冻结');
+      C.message = warnNotice('上次提交结果未知', '恢复密钥已保留：需要确认时点「同键重试上次未决提交」，同一单不会重复执行。');
+      render(); toast('结果未知：表单已锁定');
     } else if (!e.unauthorized) {
       C.stage = 'idle';
       C.message = warnNotice('请求失败', '请稍后重试。');
@@ -1745,11 +1746,11 @@ async function submitControl() {
 /* ---------- 策略容量（只读） ---------- */
 function policyPage() {
   const rows = [
-    ['信箱条数', '100 条 / node', 'submitted 计数，出队即释放'],
-    ['信箱字节预算', '8 MiB / node', '超额拒收：503 mailbox_full'],
+    ['离线暂存条数', '100 条 / node', '已提交（submitted）计数，投递即释放'],
+    ['离线暂存字节预算', '8 MiB / node', '超额拒收：503 mailbox_full'],
     ['Hub 任务存储', '256 MiB 全局', '含终态 24h 保留；超则 503 storage_full'],
     ['单消息', '1 MiB', '完整 JSON 信封编码后计量'],
-    ['投递窗口', '8 / node', 'offered + acknowledged 计数'],
+    ['投递窗口', '8 / node', '已投递+已接收（offered+acknowledged）的计数'],
     ['任务离线保留', '7 天', '到期未终态 → failed / expired'],
     ['终态 / 产物保留', '24h', '产物自结果确认起计时'],
     ['执行并发', '默认 2 / node', '由 node 本机配置'],
@@ -2302,7 +2303,7 @@ const ACT = {
   'enroll-step': b => enrollGo(Number(b.dataset.step)),
   'enroll-next1': () => {
     const id = $('#enroll-id')?.value.trim() || '';
-    if (!enrollValidId(id)) { toast('请先填写合法的节点 ID（2-32 位小写字母/数字/连字符）'); $('#enroll-id')?.focus(); return; }
+    if (!enrollValidId(id)) { toast('请先填写合法的机器 ID（2-32 位小写字母/数字/连字符）'); $('#enroll-id')?.focus(); return; }
     if (ENROLL.tokenFor !== id) { ENROLL.token = ''; ENROLL.tokenFor = id; }   // 身份变了令牌重生成；回看不改名则保留已生成令牌
     enrollGo(2);
   },
@@ -2334,11 +2335,11 @@ const ACT = {
     if (pre) pre.textContent = ENROLL_START[ENROLL.os] || ENROLL_START.linux;
   },
   'enroll-next3': () => { enrollGo(4); enrollStartWait(); },
-  'enroll-copy-token': () => copyText(ENROLL?.token || '', '接入令牌'),
+  'enroll-copy-token': () => copyText(ENROLL?.token || '', '机器令牌'),
   'enroll-copy-hub': () => copyText(ENROLL ? `nodes:\n  ${ENROLL.id}: ${ENROLL.token}\n` : '', 'hub.yaml 片段'),
-  'enroll-copy-join': () => copyText(ENROLL ? enrollJoinString() : '', '接入串'),
+  'enroll-copy-join': () => copyText(ENROLL ? enrollJoinString() : '', '连接串'),
   'enroll-copy-node': () => copyText(ENROLL ? enrollNodeYaml() : '', 'node.yaml'),
-  'enroll-later': () => { closeLayer(); toast('已关闭 · 节点上线后可在节点列表查看'); },
+  'enroll-later': () => { closeLayer(); toast('已关闭 · 机器上线后可在机器列表查看'); },
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
   'tokens-retry': () => loadTokens(),   // 设置页加载失败重试（D2/FE-06）：只局部更新两个子树
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
@@ -2522,16 +2523,16 @@ const ACT = {
     } finally { S.busy.delete(key); }
   },
   /* 撤下说明（P0.4）：原「吊销」为假按钮，改为只读弹层讲清撤下路径，不再暗示有撤销能力 */
-  revoke: b => openLayerPlain(`${modalHead('如何撤下节点 · ' + esc(b.dataset.node))}<div class="notice">当前版本没有在线撤下节点的能力；要让 <b>${esc(b.dataset.node)}</b> 退出协作网，请由管理员直接修改 hub 配置文件后重启 hub。</div><div class="enroll-rows spaced">
-  <div class="enroll-row"><code>编辑 hub.yaml → 删除 nodes: 段中 ${esc(b.dataset.node)} 那一行</code><small>该节点的身份与接入令牌随之失效</small></div>
-  <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后节点列表不再出现该机器</small></div>
-  </div><div class="notice warn">撤下前该节点在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态 24 小时）继续可查。</div><div class="actions spaced">${button('我知道了，返回节点列表', 'close', 'link')}</div>`, true),
+  revoke: b => openLayerPlain(`${modalHead('如何撤下机器 · ' + esc(b.dataset.node))}<div class="notice">当前版本没有在线撤下机器的能力；要让 <b>${esc(b.dataset.node)}</b> 退出协作网，请由管理员直接修改 hub 配置文件后重启 hub。</div><div class="enroll-rows spaced">
+  <div class="enroll-row"><code>编辑 hub.yaml → 删除 nodes: 段中 ${esc(b.dataset.node)} 那一行</code><small>该机器的身份与令牌随之失效</small></div>
+  <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后机器列表不再出现该机器</small></div>
+  </div><div class="notice warn">撤下前该机器在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态 24 小时）继续可查。</div><div class="actions spaced">${button('我知道了，返回机器列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
   'prime-manage': () => {
-    /* 指定统筹载体弹层（2026-10-23 伦哥定案：网页配置取代改配置文件）：
+    /* 指定智行管家弹层（2026-10-23 伦哥定案：网页配置取代改配置文件）：
      * 两级选择复用 agentPickerHtml（ids='pm'），保存/撤销走 PUT /api/v1/prime。 */
-    const body = `${modalHead('指定统筹载体')}
-    <div class="notice">统筹智能体接收复合目标后拆解、派发网内能力、汇总产出报告；全网同一时刻至多一个。指定前请确认该智能体已接 SwarmMind MCP（否则收了统筹提示词也没有派发工具）。</div>
+    const body = `${modalHead('指定智行管家')}
+    <div class="notice">智行管家是某个智能体扮演的角色（不是常驻的新服务）：接收复合目标后拆解、派发网内能力、汇总产出报告，持有全网管家权限——本机派单不受它影响，全网同一时刻至多一个。指定前请确认该智能体已接 SwarmMind MCP（否则收了管家提示词也没有派发工具）。</div>
     ${agentPickerHtml({ ids: 'pm', node: S.prime?.node_id || '', agent: S.prime?.agent_name || '' })}
     <div class="actions spaced">${button('保存指定', 'prime-save', 'primary')}${S.prime ? button('撤销指定（回退默认识别）', 'prime-clear', 'danger') : ''}${button('再想想', 'close', 'link')}</div>`;
     openLayerPlain(body, false, true);
@@ -2554,7 +2555,7 @@ const ACT = {
       }
       if (r.code === 200) {
         S.prime = r.data.designation;
-        toast('已指定统筹载体：' + agent + ' @ ' + node);
+        toast('已指定智行管家：' + agent + ' @ ' + node);
         closeLayer();
         await loadAll();
         render();
@@ -2583,7 +2584,7 @@ const ACT = {
       }
       if (r.code === 200) {
         S.prime = null;
-        toast('已撤销统筹指定，回退默认识别（能力名含 zcode-dev）');
+        toast('已撤销智行管家指定，回退默认识别（能力名含 zcode-dev）');
         closeLayer();
         await loadAll();
         render();
@@ -2599,7 +2600,7 @@ const ACT = {
     } finally { primeBusy = false; }
   },
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
-    <div class="notice warn">取消会立即整组终止执行节点上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
+    <div class="notice warn">取消会立即整组终止执行机器上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
     <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),
   'task-cancel-confirm': async b => {
     const key = 'cancel:' + b.dataset.id;
@@ -2612,7 +2613,7 @@ const ACT = {
         const i = S.tasks.findIndex(t => t.id === r.data.id);
         if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
         closeLayer(); render();
-        toast('已发送取消指令 · 任务进入「已取消」，节点侧执行数据回传后自动补充');
+        toast('已发送取消指令 · 任务进入「已取消」，机器侧执行数据回传后自动补充');
       } else if (r && r.code === 409) {
         closeLayer(); render();
         toast('任务已终态，无需取消');
@@ -2704,7 +2705,7 @@ const ACT = {
         const d = S.drafts[id] || (S.drafts[id] = { note: '', checked: false });
         d.checked = true; d.note = note;
         render(); syncDrawer(true);
-        toast(`核对已登记（${REVIEW_ACTIONS[action]}）· 任务保持 needs_review —— 下一步：回到待办列表`);
+        toast(`核对已登记（${REVIEW_ACTIONS[action]}）· 任务保持「等你确认」—— 下一步：回到待办列表`);
       } else {
         toast('登记失败：' + errLine(r.data));
         document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = false; });
@@ -2719,12 +2720,12 @@ const ACT = {
     } finally { S.busy.delete(key); }
   },
   'ctrl-retry': () => { S.C.stage = 'idle'; submitControl(); },
-  'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与幂等键将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">V0 不支持取消。请勿换用新幂等键重复提交同一巡检。</div><div class="actions">${button('保留幂等键，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),
+  'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与恢复密钥将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">当前版本不支持撤回。请勿另开新单重复提交同一件事。</div><div class="actions">${button('保留恢复密钥，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),
   'ctrl-abandon-confirm': () => {
     S.C.stage = 'idle'; closeLayer(); render();
-    toast('已保留幂等键与表单 · 可稍后同键重试');
+    toast('已保留恢复密钥与表单 · 可稍后同键重试');
   },
-  'ctrl-new': () => { S.C = freshControl(); render(); toast('新巡检表单已就绪（新幂等键）'); },
+  'ctrl-new': () => { S.C = freshControl(); render(); toast('新表单已就绪'); },
   'ctrl-refresh': async () => {
     const b = S.C.batch;
     if (!b) return;
