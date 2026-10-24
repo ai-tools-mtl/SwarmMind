@@ -9,12 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
-	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
+	"github.com/mtl802/swarmmind/internal/node/inputs"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
@@ -96,29 +98,39 @@ func (s *Service) handleArtifactFetch(env *protocol.Envelope) {
 	})
 }
 
-// readArtifactFile 解析路径（防穿越）→ 读取 → 校验 SHA-256 与登记一致（SPEC 4.8）。
+// readArtifactFile 解析路径 → 读取 → 校验 SHA-256 与登记一致（SPEC 4.8）。
+// 源打开统一经 inputs.OpenSourceFile（2026-10-24 复审 R1：与 Local 挂载同一实现
+// ——Remote 自动挂载的源读取两路安全语义必须字面同源）：整条路径由内核在 open
+// 原语上强制不跟随（Unix 逐段 openat 游走，中间段 O_DIRECTORY|O_NOFOLLOW、末段
+// O_NOFOLLOW|O_NONBLOCK——检查即打开，无 Lstat→Open 换入链接/FIFO 的窗口，打
+// 开不返回则 fd 校验无从执行，hub 超时解不开本 node 的串行帧阻塞；Windows 逐
+// 段 NtCreateFile 游走，每段 OBJ_DONT_REPARSE 打开时约束 reparse/link 解析，
+// 见 inputs/sourceopen_windows.go）+ 打开后 fd fstat 确认常规文件（校验对象=
+// 读取对象）+ 越界路径入口即拒。
 func readArtifactFile(root string, meta protocol.Artifact) ([]byte, error) {
-	cleanRoot := filepath.Clean(root)
-	abs := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(meta.Path)))
-	if abs != cleanRoot && !strings.HasPrefix(abs, cleanRoot+string(os.PathSeparator)) {
-		return nil, &artifactError{protocol.CodeArtifactMismatch, "产物路径越界（拒绝）"}
+	notFound := func(format string, a ...any) error {
+		return &artifactError{code: protocol.CodeArtifactNotFound, msg: fmt.Sprintf(format, a...)}
 	}
 	if meta.Size > protocol.ArtifactLimit {
-		return nil, &artifactError{protocol.CodeArtifactNotFound, "登记产物超过单文件上限"}
+		return nil, notFound("登记产物超过单文件上限")
 	}
-	f, err := os.Open(abs)
+	rel := path.Clean(filepath.ToSlash(meta.Path))
+	if rel == "." || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../") {
+		return nil, &artifactError{code: protocol.CodeArtifactMismatch, msg: "产物路径越界（拒绝）"}
+	}
+	f, _, err := inputs.OpenSourceFile(root, rel)
 	if err != nil {
-		return nil, &artifactError{protocol.CodeArtifactNotFound, "产物文件不存在或不可读"}
+		return nil, notFound("产物源不可读（%v）", err)
 	}
 	defer f.Close()
 	// 读取上限登记大小 + 1：文件被追加时在此暴露（哈希校验必然失败，防读爆内存）
 	data, err := io.ReadAll(io.LimitReader(f, meta.Size+1))
 	if err != nil {
-		return nil, &artifactError{protocol.CodeArtifactNotFound, "产物读取失败"}
+		return nil, notFound("产物读取失败")
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != meta.Sha256 || int64(len(data)) != meta.Size {
-		return nil, &artifactError{protocol.CodeArtifactMismatch, "产物内容与登记不一致（SHA-256/大小）"}
+		return nil, &artifactError{code: protocol.CodeArtifactMismatch, msg: "产物内容与登记不一致（SHA-256/大小）"}
 	}
 	return data, nil
 }

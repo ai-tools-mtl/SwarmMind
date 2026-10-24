@@ -1,6 +1,6 @@
-// 上游产物挂载（P4 L2 第二子批第一子轮，FILE-COLLAB L2 / SPEC 4.12）：依赖
-// 门控放行的下游任务在 started/spawn 前的输入准备。解析（inputs.LocalResolver，
-// node 账本口径=最早 completed，同 hub resolveIDem）、纯复制、逐文件 SHA-256
+// 上游产物挂载（P4 L2 第二子批 + P4④第二子轮跨机取回，FILE-COLLAB L2 / SPEC
+// 4.12）：依赖门控放行的下游任务在 started/spawn 前的输入准备。解析（本机账本
+// 优先，跨机经 dep_resolve/artifact_fetch 中继取回）、纯复制、逐文件 SHA-256
 // 校验、原子发布全部在 internal/node/inputs；本文件只做 service 装配与失败
 // 语义收口。
 //
@@ -45,7 +45,16 @@ func (s *Service) prepareInputs(task protocol.Task, runCtx context.Context, ce *
 	}
 	ctx, cancel := context.WithTimeout(runCtx, s.cfg.InputPrepareTimeout)
 	defer cancel()
-	resolver := &inputs.LocalResolver{Ledger: s.cfg.Ledger, RootOf: s.artifactRootFor}
+	// 组合解析器（P4④第二子轮/SPEC 4.12）：本机优先（账本有 completed 上游走
+	// 本地复制，行为零变化）；本机无 completed 且启用了跨机取回（EnableRemoteInputs，
+	// networked 模式）→ 经 hub 中继取回异机产物（dep_resolve/artifact_fetch，
+	// 重试轮询与失败分类在 inputs.Resolver/RemoteResolver）。
+	resolver := &inputs.Resolver{
+		Local: &inputs.LocalResolver{Ledger: s.cfg.Ledger, RootOf: s.artifactRootFor},
+	}
+	if rr := s.remoteResolver(); rr != nil {
+		resolver.Remote = rr
+	}
 	if err := inputs.Prepare(ctx, resolver, workdir, task.ID, task.DependsOn); err != nil {
 		log.Printf("[node] 输入准备失败 task=%s: %v", task.ID, err)
 		// 竞态收口先于失败语义：取消与关闭的 ctx 中断不落 input_prepare_failed

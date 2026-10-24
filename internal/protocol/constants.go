@@ -98,6 +98,9 @@ const (
 	CodeTaskNotFound = "task_not_found"
 	// CodeArtifactNotFound 任务无终态结果、产物下标越界或文件已不存在（err 帧码）。
 	CodeArtifactNotFound = "artifact_not_found"
+	// CodeForbidden 会话越权（err 帧码）：node 会话查询非本机任务、产物挂载跨机
+	// 取回无依赖归属（请求方名下无依赖该 idem 的任务）等越权访问拒绝。
+	CodeForbidden = "forbidden"
 	// CodeWorkdirBusyTimeout workdir 互斥排队超时（P1.5/SPEC 4.10：排队超
 	// WorkdirQueueWait 未获得派发，hub 置 failed）。
 	CodeWorkdirBusyTimeout = "workdir_busy_timeout"

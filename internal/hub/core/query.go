@@ -28,7 +28,7 @@ func (c *Core) handleTaskQuery(env *protocol.Envelope) {
 	}
 	if t.TargetNode != env.From {
 		_ = c.sendFrame(env.From, protocol.MsgErr, env.MessageID, nil,
-			&protocol.ErrInfo{Code: "forbidden", Msg: "仅可查询本机任务（跨机任务状态经 hub 发起查询）"})
+			&protocol.ErrInfo{Code: protocol.CodeForbidden, Msg: "仅可查询本机任务（跨机任务状态经 hub 发起查询）"})
 		return
 	}
 	_ = c.sendFrame(env.From, protocol.MsgTaskStatus, env.MessageID, t, nil)

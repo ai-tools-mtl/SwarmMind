@@ -46,9 +46,16 @@ const (
 	// MsgTaskStatus hub→提交方查询响应（完整 Task）。
 	MsgTaskStatus = "task_status"
 	// MsgArtifactFetch 提交方→hub 请求取回第 index 个产物（hub 中继到执行 node）。
+	// 提交方含 node 侧产物挂载的准备阶段（P4④第二子轮/SPEC 4.12 跨机取回）。
 	MsgArtifactFetch = "artifact_fetch"
-	// MsgArtifactData 执行 node→请求方（经 hub 中继）产物内容。
+	// MsgArtifactData 执行 node→请求方（经 hub 中继）产物内容；请求方含 node
+	// 侧产物挂载的准备阶段（hub 原样转发，ReplyTo=请求 mid 端到端关联）。
 	MsgArtifactData = "artifact_data"
+	// MsgDepResolve node→hub 依赖解析（P4④第二子轮/SPEC 4.12 跨机取回）：
+	// 下游 node 按依赖 idem 请求上游任务定位与产物清单（hub 按 resolveIDem 同
+	// 口径解析并做依赖归属鉴权，脱敏 Task 应答）。本机账本无 completed 上游时
+	// 的远端取回前置步。
+	MsgDepResolve = "dep_resolve"
 	// MsgTaskCancel hub→node 取消任务（管理面 task_cancel 生命周期）：node 整组终止
 	// 在途执行，账本落 finished(cancelled/user_cancelled) 后回 task_result(cancelled)；
 	// 任务已终态或不在账本则回 task_cancelled 幂等 ack（至少一次+幂等，重复 cancel 安全）。

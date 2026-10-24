@@ -71,7 +71,7 @@ func noStaging(t *testing.T, workdir string) {
 // fakeResolver idem → 上游解析结果（桩实现，隔离账本）。
 type fakeResolver map[string]*UpstreamInputs
 
-func (f fakeResolver) ResolveUpstream(idem string) (*UpstreamInputs, error) {
+func (f fakeResolver) ResolveUpstream(_ context.Context, idem string) (*UpstreamInputs, error) {
 	if up, ok := f[idem]; ok {
 		return up, nil
 	}
@@ -278,7 +278,9 @@ func TestPrepareSymlinkRejected(t *testing.T) {
 		Path: "outputs/t-up/a.txt", Sha256: strings.Repeat("0", 64), Size: 6,
 	}}}
 	err := Prepare(context.Background(), fakeResolver{"d": up}, downW, "t-down", []string{"d"})
-	mustErr(t, err, "t-up", "非常规文件")
+	// 2026-10-24 复审 R1：末段链接改为内核 open 时拒绝（O_NOFOLLOW，ELOOP），
+	// 早于 fd fstat——文案随之从「非常规文件」更新为「拒绝跟随」。
+	mustErr(t, err, "t-up", "拒绝跟随")
 	noStaging(t, downW)
 }
 
@@ -345,7 +347,7 @@ func TestPrepareTimeout(t *testing.T) {
 // errResolver 解析器恒返回非 *Error 的裸错误（验证 Prepare 的包装防御）。
 type errResolver struct{}
 
-func (errResolver) ResolveUpstream(string) (*UpstreamInputs, error) {
+func (errResolver) ResolveUpstream(context.Context, string) (*UpstreamInputs, error) {
 	return nil, errors.New("boom")
 }
 
@@ -405,7 +407,7 @@ func TestLocalResolverEarliestCompleted(t *testing.T) {
 	ledgerTask(t, led, "t-v1", "dep", "agent-a", base.Add(-time.Minute), protocol.ResultCompleted, arts1)
 
 	r := &LocalResolver{Ledger: led, RootOf: func(string) (string, bool) { return upW, true }}
-	up, err := r.ResolveUpstream("dep")
+	up, err := r.ResolveUpstream(context.Background(), "dep")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,13 +437,13 @@ func TestLocalResolverFailures(t *testing.T) {
 		{"dep-failed", "completed 上游版本"},
 		{"dep-live", "尚未完成"},
 	} {
-		_, err := r.ResolveUpstream(c.idem)
+		_, err := r.ResolveUpstream(context.Background(), c.idem)
 		mustErr(t, err, c.idem, c.want)
 	}
 
 	// completed 零产物：返回空清单不失败
 	ledgerTask(t, led, "t-noart", "dep-noart", "agent-a", base, protocol.ResultCompleted, nil)
-	up, err := r.ResolveUpstream("dep-noart")
+	up, err := r.ResolveUpstream(context.Background(), "dep-noart")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,7 +455,7 @@ func TestLocalResolverFailures(t *testing.T) {
 	r2 := &LocalResolver{Ledger: led, RootOf: func(string) (string, bool) { return "", false }}
 	ledgerTask(t, led, "t-v1b", "dep-root", "agent-a", base, protocol.ResultCompleted,
 		artifactsOf(t, upW, "t-v1b", map[string]string{"a.txt": "x"}))
-	_, err = r2.ResolveUpstream("dep-root")
+	_, err = r2.ResolveUpstream(context.Background(), "dep-root")
 	mustErr(t, err, "t-v1b", "产物根不可定位")
 }
 
