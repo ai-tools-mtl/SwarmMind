@@ -208,6 +208,10 @@ func TestE2ETLS(t *testing.T) {
 // serveTLS 以自签证书重启 hub 监听（wss）。
 func (h *hubStack) serveTLS(cert tls.Certificate) {
 	h.t.Helper()
+	// 先停旧明文 Serve 并等待退出（旧 listener 关闭、端口释放）——缺这一步时
+	// 同地址 rebind 会 address already in use（旧 listener 未关，CI macos 首跑
+	// 实测竞态，2026-10-24）；且新旧两个 Serve 瓜分连接会把 TLS 握手当明文撕毁。
+	h.waitOldServe()
 	ln, err := net.Listen("tcp", h.ln.addr().String())
 	if err != nil {
 		h.t.Fatalf("TLS 监听失败: %v", err)
