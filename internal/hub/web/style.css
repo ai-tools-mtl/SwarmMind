@@ -166,14 +166,16 @@ code{color:var(--ink-2)}
  * 抽块比对锁一致性——改本块必须两端同改同验。t20261023-969e。）
  * .md-body 管渲染态排版：容器化有界表面——浅灰底（.025，比全局 pre 的 .04 浅
  * 一档）+ hairline 描边 + r-thumb 圆角 + 内边距，md 内容与抽屉内 muted/notice
- * 文本流明确分层；.md-answer 最终答复 accent 左竖线（焦点语义），核心产出在
- * 抽屉内容层级中站出来；.md-log 日志容器底色对齐 pre 的 .04——渲染/原文切换
+ * 文本流明确分层；.md-answer 最终答复反转为白底浮起表面（surface + --sh-card
+ * 柔和阴影）——材质深度语法：机器数据沉底（灰底块），核心产出浮起（白卡），
+ * 层级靠表面深度而非彩色饰条（colored left-bar 是 AI slop 反模式，2026-10-24
+ * 伦哥裁决废除）；.md-log 日志容器底色对齐 pre 的 .04——渲染/原文切换
  * 不跳变。h1-h6 抽屉内分级字号；md 表格收紧内边距并 auto 宽（不复用列表格
- * 12.5px 大内边距与满宽，宽表横向滚动）；容器内 .md-code 围栏代码改白底描边
- * （灰底容器上灰上灰无层次）+ 语言徽标；.md-quote 引用；.md-log-head/label
+ * 12.5px 大内边距与满宽，宽表横向滚动）；容器内代码块底色与容器反向（白卡内
+ * 灰底、灰底内白底描边）防同色失效 + 语言徽标；.md-quote 引用；.md-log-head/label
  * 日志区切换行与 stdout/stderr 流标签（pill 徽标化）。 ===== */
 .md-body{line-height:1.7;background:rgba(0,0,0,.025);border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:14px 18px}
-.md-answer{border-left:3px solid var(--accent)}
+.md-answer{background:var(--surface);box-shadow:var(--sh-card);padding:16px 20px}
 .md-body.md-log{background:rgba(0,0,0,.04)}
 .md-body>*:first-child{margin-top:0}
 .md-body h1,.md-body h2,.md-body h3,.md-body h4,.md-body h5,.md-body h6{margin:18px 0 8px;line-height:1.4}
@@ -192,7 +194,8 @@ code{color:var(--ink-2)}
 .md-quote>:last-child{margin-bottom:0}
 .md-code{position:relative;margin:0 0 10px}
 .md-code pre{margin:0}
-.md-body .md-code pre{background:var(--surface);border:1px solid var(--hairline)}
+.md-answer .md-code pre{background:rgba(0,0,0,.04)}
+.md-log .md-code pre{background:var(--surface);border:1px solid var(--hairline)}
 .md-lang{position:absolute;top:7px;right:9px;font-size:11px;line-height:1;color:var(--ink-4);background:rgba(0,0,0,.05);padding:4px 9px;border-radius:var(--r-pill);font-family:var(--mono)}
 .md-table{overflow:auto;margin:0 0 10px}
 .md-body table{width:auto;min-width:55%}
