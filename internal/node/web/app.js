@@ -1091,7 +1091,7 @@ function taskDrawerHtml(t) {
 // mdAnswer 最终答复渲染态（t20261023-969e：agent 产出正文按 Markdown 渲染）；
 // mdToHtml 对空白输入返回空串，兜底「（空）」人话。
 function mdAnswer(text) {
-  return `<div class="md-body">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
 }
 
 // logSectionHtml 诊断日志区（stdout / stderr 尾部）：默认 md 渲染 + 「查看原文」

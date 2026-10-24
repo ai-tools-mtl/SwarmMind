@@ -113,13 +113,19 @@ func TestWebMdRender(t *testing.T) {
 	for _, want := range []string{
 		`.md-body h1{font-size:17px;letter-spacing:-.01em}`,
 		`.md-body table{width:auto;min-width:55%}`,
+		// 容器化有界表面：md 内容与抽屉文本流分层；最终答复 accent 焦点竖线；
+		// 日志容器底色对齐 pre 的 .04（渲染/原文切换不跳变）；容器内代码块白底描边
+		`.md-body{line-height:1.7;background:rgba(0,0,0,.025);border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:14px 18px}`,
+		`.md-answer{border-left:3px solid var(--accent)}`,
+		`.md-body.md-log{background:rgba(0,0,0,.04)}`,
+		`.md-body .md-code pre{background:var(--surface);border:1px solid var(--hairline)}`,
 		// th 显式 static：hub 全局 th 吸顶（sticky;top:84px）泄进 md 表会把表头
 		// 钉在 .md-table 滚动容器顶 +84px 处盖住数据行（走查实测），此行回移即回归
 		`.md-body th{position:static;font-weight:600;color:var(--ink-2);border-bottom:1px solid var(--faint)}`,
 		`.md-lang{position:absolute;top:7px;right:9px;`,
 		`.md-quote{margin:0 0 10px;padding:8px 14px;border-left:3px solid var(--faint);color:var(--ink-2)}`,
 		`.md-log-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}`,
-		`.md-log-label{display:block;font-size:var(--fs-small);font-family:var(--mono);color:var(--ink-4);margin:10px 0 4px}`,
+		`.md-log-label{display:inline-block;font-size:11px;font-family:var(--mono);color:var(--ink-3);background:rgba(0,0,0,.05);border-radius:var(--r-chip);padding:3px 10px;margin:12px 0 8px}`,
 	} {
 		if !strings.Contains(cssBlock, want) {
 			t.Errorf("md 渲染样式 shared block 应含 %q", want)
