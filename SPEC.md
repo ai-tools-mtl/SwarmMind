@@ -548,6 +548,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接统筹凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
    ⑤ `GET /api/v1/nodes/enroll-info`（节点接入入口地址查询，2026-10-23 第六轮修复 2）：接入向导人工装机流程的配套元数据端点（与豁免 ② 同一人工流程）——返回 hub 自身节点接入入口地址（node_listen 推导，无凭据），供控制台向导预填 hub_url；agent 面无使用场景，豁免 MCP 映射。
    ⑥ `GET /api/v1/prime`、`PUT /api/v1/prime`（hub 网页指定统筹载体，2026-10-23）：管理员管理面操作（hub 控制台指定/撤销全网唯一统筹载体），统筹智能体自身无需读写该状态，豁免 MCP 映射。
+   ⑦ `/api/v1/notify/*` 全组（通知渠道管理，2026-10-24 P4③ 控制台化升级）：人工专属管理面配置（凭据授予类）——渠道配置体内含明文凭证（飞书 webhook 地址、SMTP 口令、自定义头 token），agent 读写该面即等于可自行获取/篡改主人的通知出口与凭据（改渠道=把任务结果重定向到任意地址，属信息外带通道）；通知是「系统主动找人」的人工动线，agent 对通知配置无合法使用场景（agent 感知任务结果走 swarmmind_wait，与通知解耦）。管理台「设置 → 通知」为唯一配置入口；hub.yaml 旧 notify 段仅作一次性兼容导入。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。

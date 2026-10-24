@@ -23,6 +23,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
+	"github.com/mtl802/swarmmind/internal/hub/notify"
 	"github.com/mtl802/swarmmind/internal/hub/web"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
@@ -56,6 +57,9 @@ type Config struct {
 	// 是两个端口，前端按控制台地址推导接入地址必错（接入串按串连不上 hub）。
 	// nil 时该端点 503，前端回落本地推导（旧构造方不感知）。
 	NodeEntry *NodeEntryConfig
+	// Notify 通知分发器（P4③ 控制台化升级：渠道 CRUD/发测试/站内通知端点）；
+	// nil 时通知端点统一 503 降级（旧构造方不感知）。
+	Notify *notify.Dispatcher
 }
 
 // NodeEntryConfig 节点接入入口描述（cmd/hub 从 hub 配置推导：协议 + node_listen）。
@@ -126,6 +130,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages)) // 增量拉取
 	mux.HandleFunc("POST /api/v1/groups/{id}/messages", s.auth(s.handleGroupSay))     // 发言
 	mux.HandleFunc("POST /api/v1/groups/{id}/close", s.auth(s.handleGroupClose))      // 结束（终态）
+	mux.HandleFunc("GET /api/v1/notify/channels", s.auth(s.handleNotifyChannelList))             // 通知渠道（P4③ 控制台化）
+	mux.HandleFunc("POST /api/v1/notify/channels", s.auth(s.handleNotifyChannelCreate))          // 创建（body 含明文凭证）
+	mux.HandleFunc("PUT /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelUpdate))      // 更新（****** 占位保留原值）
+	mux.HandleFunc("DELETE /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelDelete))   // 删除
+	mux.HandleFunc("POST /api/v1/notify/channels/{id}/test", s.auth(s.handleNotifyChannelTest))  // 发测试消息
+	mux.HandleFunc("GET /api/v1/notify/inbox", s.auth(s.handleNotifyInbox))                      // 站内通知（内存态，重启清空）
+	mux.HandleFunc("POST /api/v1/notify/inbox/read", s.auth(s.handleNotifyInboxRead))            // 标已读（id 缺省=全部）
 	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)                  // A2A 发现卡（免鉴权，SPEC 六.五）
 	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))                           // A2A JSON-RPC（与现有同一令牌体系）
 	console := web.Handler()

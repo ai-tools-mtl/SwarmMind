@@ -69,13 +69,19 @@ func newHubWithNotifier(t *testing.T, n TerminalNotifier) *hubFixture {
 	return f
 }
 
-func newNotifyClient(t *testing.T, url string) *notify.Client {
+// newNotifyClient core 终态旁路测试的通知器：临时渠道存储 + 单个 webhook 渠道
+// 的 Dispatcher（P4③ 控制台化后 Client 已由 Dispatcher 替代）。
+func newNotifyClient(t *testing.T, url string) *notify.Dispatcher {
 	t.Helper()
-	c, err := notify.NewClient(notify.Config{WebhookURL: url, Backoff: notifyBackoff})
+	channels, err := notify.OpenChannelStore(t.TempDir())
 	if err != nil {
-		t.Fatalf("构造 notify client: %v", err)
+		t.Fatalf("打开渠道存储: %v", err)
 	}
-	return c
+	if _, err := channels.Create(notify.TypeWebhook, "测试渠道", nil,
+		map[string]string{"url": url}, time.Now()); err != nil {
+		t.Fatalf("创建测试渠道: %v", err)
+	}
+	return notify.NewDispatcher(channels, nil, notify.WithBackoff(notifyBackoff))
 }
 
 // TestNotifyTerminalOncePerTask 终态只发一次：首次接受触发；重复结果（重发）
