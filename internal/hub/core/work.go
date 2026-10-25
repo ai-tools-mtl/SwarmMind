@@ -1,5 +1,6 @@
 // Work 工作单（P5 W1 / RFC-work-resume 五 W1 行）：模型+事务+账本+创建幂等+
-// 只读查询。派发绑定/接管/收集随 W2/W3 交付；本文件只覆盖建单与读取。
+// 只读查询。绑定派发/接管/终态回写/恢复扫描见 work_dispatch.go（W2）；收集/
+// 关闭随 W3 交付；本文件只覆盖建单与读取。
 //
 // 持久化形态（对齐 ControlBatch 模板，W1 裁剪）：建单为**单事务原子**——工作单
 // 全量（步骤全 pending）与 work_created 事件在同一 store.Update 内落盘，无
@@ -315,6 +316,10 @@ func (c *Core) CreateWork(req WorkCreateRequest, actor string) (*WorkView, bool,
 			Status:    store.WorkStatusPlanning,
 			Steps:     make([]store.WorkStep, len(steps)),
 			CreatedAt: now,
+		}
+		if w.PrimeTerm != "" {
+			// 建单任期播种历史使用集（接管复用拒绝的基线，见 TakeoverWork）
+			w.TermsUsed = []string{w.PrimeTerm}
 		}
 		for i, s := range steps {
 			deps := s.DependsOn

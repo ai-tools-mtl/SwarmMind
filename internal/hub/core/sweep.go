@@ -59,6 +59,7 @@ func (c *Core) Sweep() {
 					nt := c.expireCopy(t, now)
 					st.Tasks[nt.ID] = nt
 					releaseWorkdirLock(st, nt.TargetNode, nt.ID)
+					writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
 					mailbox.Remove(st, nt.TargetNode, nt.ID)
 					terminalized = append(terminalized, &nt)
 					reDispatch[nt.TargetNode] = true
@@ -76,6 +77,7 @@ func (c *Core) Sweep() {
 				nt := c.expireCopy(t, now)
 				st.Tasks[nt.ID] = nt
 				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
+				writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
 				mailbox.Remove(st, nt.TargetNode, nt.ID)
 				terminalized = append(terminalized, &nt)
 				reDispatch[nt.TargetNode] = true
@@ -91,6 +93,7 @@ func (c *Core) Sweep() {
 				nt := c.busyTimeoutCopy(t, now)
 				st.Tasks[nt.ID] = nt
 				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
+				writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
 				mailbox.Remove(st, nt.TargetNode, nt.ID)
 				terminalized = append(terminalized, &nt)
 				reDispatch[nt.TargetNode] = true

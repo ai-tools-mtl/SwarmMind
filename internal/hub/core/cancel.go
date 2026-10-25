@@ -53,6 +53,7 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 		// 收敛表 cancelled 分支合并（见 handleTaskResult）。
 		st.Tasks[nt.ID] = nt
 		releaseWorkdirLock(st, nt.TargetNode, nt.ID) // 终态释放 workdir 互斥（P1.5）
+		writebackWorkTerminal(st, &nt, nt.UpdatedAt) // 工作单终态回写（P5 W2：cancelled 同事务落账）
 		if t.Status == protocol.StatusSubmitted {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 未投递直接撤回，释放信箱配额
 		}

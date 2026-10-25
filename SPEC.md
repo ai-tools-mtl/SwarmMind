@@ -505,9 +505,13 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - `POST /api/v1/control-operations {"agent":"inspector","targets":["n1","n2","n3"],"input":{...}}` → 202 `{"batch_id","items":[{"target","task_id"}|{"target","skipped":"offline"}]}`
 - 实现即批量 Submit：快照时点逐目标走现有校验链，离线/未暴露目标标 skipped 不阻塞其余；批次记录入快照；GET /api/v1/control-operations/{batch_id} 查询逐项状态
 
-### 工作单（P5 W1，RFC-work-resume；端点为 MCP 传输载体与 W3 管理台只读数据源）
+### 工作单（P5 W1-W2，RFC-work-resume；端点为 MCP 传输载体与 W3 管理台只读数据源）
 
-- `POST /api/v1/works {"goal","steps":[{desc,target_node,target_agent,depends_on?}],"prime_term?","created_by?"}` → 201 `{"work":{...},"pruned_before_events":0}`；同 goal+steps 内容指纹幂等命中 200 + `dup:true` 返同单（响应丢失重试安全；指纹即寻址键，无 409 冲突路径）。步骤计划不合法（引用越界/自引用/重复依赖/环/深度>4/级联>8/步骤数>64/字段缺失）400 `invalid_work_steps`；goal 缺失 400 `invalid_request`。created_by 缺省 mcp（建单入口 v1 仅 Prime/MCP，六.六裁决 1）；步骤 seq 由 hub 按声明序赋 1..N。建单单事务原子（事实+work_created 事件同事务），W1 无派发/接管/收集写端点（随 W2/W3），无泛化 PUT/DELETE
+- `POST /api/v1/works {"goal","steps":[{desc,target_node,target_agent,depends_on?}],"prime_term?","created_by?"}` → 201 `{"work":{...},"pruned_before_events":0}`；同 goal+steps 内容指纹幂等命中 200 + `dup:true` 返同单（响应丢失重试安全；指纹即寻址键，无 409 冲突路径）。步骤计划不合法（引用越界/自引用/重复依赖/环/深度>4/级联>8/步骤数>64/字段缺失）400 `invalid_work_steps`；goal 缺失 400 `invalid_request`。created_by 缺省 mcp（建单入口 v1 仅 Prime/MCP，六.六裁决 1）；步骤 seq 由 hub 按声明序赋 1..N。建单单事务原子（事实+work_created 事件同事务），无泛化 PUT/DELETE
+- `POST /api/v1/works/{id}/takeover {"expected_term","new_term"}` → 200 `{"work":{...},"dup"?}`（P5 W2 原子接管，CAS 单事务）：expected_term 与落库任期不符 409 `work_term_conflict`（同刻仅一方接管成功）；相同操作重放（expected==current==new）200+`dup:true` 返现状零事件；终态单 409 `work_closed`；new_term 缺失 400。接管后旧任期绑定派发被拒、其在途任务结果回流照收（事实不拒）
+- 绑定派发（P5 W2，走 `POST /api/v1/tasks` 携 `work_ref`+`step_seq`+`prime_term` 三参）：任务落库+尝试登记+步骤回写+work 状态推进+attempt_recorded 事件**单事务原子**（绑定校验失败整体拒绝零发布；盖章后按盖章体重检体积与容量——绑定字段计入口径，任何失败 mutate 错误整体回滚）；响应附 `work:{work_id,step_seq,attempt_seq,attempt_ref,outcome,task_gone?}`（活任务 dup 重放同形附原尝试定位）。三参成组（缺 `work_ref` 只带其余两参 → 400 `invalid_request`，core 入口统一把关，不静默落为普通任务）。错误码：404 `work_not_found`、409 `work_term_conflict`（旧任期写入拒绝）、409 `work_no_term`（未建立任期须先接管）、409 `work_step_locked`（done/skipped 步骤再派）、409 `conflict`（同键不同内容/绑定）。幂等语义：同键同内容重放 dup 命中原任务不新增尝试；换 work/换步骤/换内容同键 409（绑定与内容入指纹，区别于群引用「换群=新任务」）；prime_term 不入指纹（换任期同键重放命中 dup）；任务终态保留期清理后同键重放命中**工作单去重证据**（尝试登记落盘的提交内容指纹 ContentHash/BaseContentHash，含提交主体=身份边界——知 work+键+步骤的他方不得冒领原 task_id；跨 Work 键复用由证据指纹兜底 409）不重新执行，响应 `task_gone:true`；回执补拉先于依赖准入与容量检查（依赖已清理/信箱与全局预算满不挡回执）
+- 终态回写（P5 W2）：任务首落终态（result/cancel/sweep 三路径）同事务回写 `attempt.outcome`+`step.status`（映射：completed→done/done；failed→failed/failed；needs_review→needs_review/needs_review；cancelled→cancelled/failed），非 done 终局 work.status=blocked；枚举在 RFC 二.1 基础上扩展 needs_review/cancelled（SPEC 4.8 不折叠+任务清理后可解释终局），superseded 预留 W3。「任务已终态而尝试未回填」窗口由启动恢复扫描补记（hub 重启自愈，恢复事件可查）
+- 接管语义：接管为 CAS（expected_term 代校验）+ takeover 事件入账（by=新任期自报、principal=服务端验证主体分开存储）；原请求重放（expected=旧任期、new=当前任期且账本最近一条接管事件同源同主体）→ 200+`dup:true` 成功回执零写入，他方同参写入按 409 不误认 dup；任期标签为调用方自选字符串，**历史使用过的标签不得复用**（409，防 ABA 旧任期重新放行——接管须换新标签）；绑定派发须带 prime_term 且与落库任期严格相等（事件 by=自报任期、principal=提交链服务端已验证主体——REST 提交=鉴权中间件解析主体（admin 会话/`pat:<令牌名>`）、node 帧=会话 node_id）；恢复扫描按任务终态落盘顺序补写（同步骤多尝试以最后事实为准，与活路径 last-writer-wins 同序）
 - `GET /api/v1/works` → 200 `{works:[{id,goal,prime_term?,status,steps,attempts,created_at,closed_at?}]}`（摘要，新建在前）
 - `GET /api/v1/works/{id}?since_events=N` → 200 `{"work":{含 steps/attempts/events},"pruned_before_events"}`：事件只返 seq>N 升序增量，`pruned_before_events` 为滚动裁剪已丢事件最大 seq（现存最旧 Seq-1，同群消息 `pruned_before_seq` 口径；事件滚动保留最新 200 条，EventSeq 单调不回退）；未知 id 404 `work_not_found`
 - 事件主体双字段（RFC-work-resume 六.2 裁决）：事件条目 `by` 为**请求自报**审计标签（created_by，缺省 mcp，逻辑归属非身份证明）；`principal` 为**服务端验证鉴权主体**（鉴权中间件取得：admin 会话 → `admin`、Bearer PAT → `pat:<令牌名>`），两字段分开存储——请求自报身份不作数，不得覆盖 principal；主体随事件同事务持久化
@@ -585,7 +589,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 |---|---|---|
 | swarmmind_nodes | GET /api/v1/nodes | 在线节点与负载 |
 | swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面） |
-| swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id/depends_on 透传，幂等重派、任期追踪与任务依赖 P4.3） |
+| swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id/depends_on 透传，幂等重派、任期追踪与任务依赖 P4.3；work_ref/step_seq/prime_term 三参成组绑定工作单步骤，P5 W2——同键重试不新增尝试，任务清理后同键重放命中去重证据不重新执行） |
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
@@ -599,6 +603,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_work_create | POST /api/v1/works | 创建工作单：把多步工作落成可断点接管的正式执行记录（P5 W1，RFC-work-resume）；步骤计划建单定死，同 goal+steps 指纹重复调用返回同单（响应丢失重试安全，201 新建/200 幂等命中） |
 | swarmmind_work_get | GET /api/v1/works/{id}?since_events=N | 查看工作单详情：目标/步骤状态表/执行尝试/事件时间线（since_events 游标增量；事件滚动保留最新 200 条，`pruned_before_events` 标注已裁区间上界）。接管未完成工作前先读档 |
 | swarmmind_work_list | GET /api/v1/works | 列出全部工作单：ID/目标/状态/步骤与尝试数（发现历史未完成工作） |
+| swarmmind_work_takeover | POST /api/v1/works/{id}/takeover | 接管工作单（P5 W2 断点续管，CAS 单事务）：expected_term 代校验（同刻仅一方接管成功，后来者 409 work_term_conflict）；相同操作重放幂等返回现状不新增事件；旧任期派发即被拒、其在途任务结果照常回流。接管成功后经 swarmmind_submit 携 work_ref/step_seq/prime_term 续派 |
 
 ### 语义约定
 
@@ -632,6 +637,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 8. **P4 L2 产物挂载同步声明（2026-10-24，第二子批第一子轮）**：产物挂载（4.12「产物挂载」段）为 node 执行准备阶段的内部行为（spawn 前纯复制+SHA 校验+原子发布），无新增/变更 REST 管理面能力，MCP 工具面零变更——`swarmmind_artifact` 保留（跨机场景与逐件自取仍经它），不因自动挂载删除。任务 stdin 的依赖清单文案同步为告知挂载位置（`inputs/<上游task_id>/`），属 EffectiveInput 文本更新，不构成工具面变更。
 9. **P4④ 跨机取回同步声明（2026-10-24，第二子轮）**：跨机取回（4.12「跨机取回」段）为 node→hub 协议帧扩展（dep_resolve 新增 + artifact_fetch 方向扩展 + hub 中继），无新增/变更 REST 管理面能力（hub HTTP 面零变更），MCP 工具面零变更、映射表不补行；`swarmmind_artifact` 保留（跨机自动取回是挂载准备阶段的内部行为，人工逐件自取仍走它）。任务 stdin 依赖清单尾注随能力更新为跨机自动取回说明（EffectiveInput 文本一次性变更，见 4.12 指纹口径第二次声明），不构成工具面变更。
 10. **P5 Work 工作单同步声明（2026-10-25，W1 批）**：工作单（RFC-work-resume，执行事实与断点接管）W1 交付模型+建单幂等+只读查询，本表补 `swarmmind_work_create/get/list` 三行；REST `/api/v1/works*` 组为 MCP 传输载体与 W3 管理台只读视图的数据源，建单入口 v1 仅 Prime/MCP（开放问题裁决 1：管理台无手工建单）。三工具 hub 模式专属，node 模式不装配（不静默降级）。`swarmmind_work_collect/takeover`（收集/接管续派）随 W2/W3 交付同批补行，不预占工具名。Work 无泛化 PUT/DELETE（状态只由生命周期动作推进，RFC 四.8），不设 update/delete 工具。
+11. **P5 Work W2 绑定派发与接管同步声明（2026-10-25，W2 批）**：原子接管+绑定提交+多次尝试+终态回写（RFC-work-resume W2 行）。本表补 `swarmmind_work_takeover` 一行；`swarmmind_submit` 行更新（work_ref/step_seq/prime_term 三参成组绑定派发，援引规则 7 参数扩展；step_seq 运行时严格校验 ≥1 整数不截断；node 本机直执行模式三参显式拒绝不静默）。绑定派发同键重试短路于幂等查重不新增尝试（任务 24h 清理后同键重放命中工作单去重证据，响应 task_gone 标注、不重新执行）；接管成功前/旧任期的绑定派发 409 work_term_conflict、未建立任期 409 work_no_term、完成步骤再派 409 work_step_locked。`swarmmind_status/wait` 返回体透传工作单绑定展示行（work_ref/work_step_seq/attempt_ref），不构成新工具。`swarmmind_work_collect`（收集/关闭）仍随 W3 同批补行。
 
 ## 七、验证标准（DoD 十一条）
 

@@ -1,10 +1,10 @@
 package api
 
-// Work 工作单端点（P5 W1 / RFC-work-resume 三、五 W1 行）：创建（幂等）+ 列表 +
-// 详情（含事件游标）。建单入口 v1 仅 Prime/MCP（RFC 六.六裁决 1）——本组端点是
-// MCP 工具的传输载体与 W3 管理台只读视图的数据源，控制台 v1 不设建单表单；
-// 无泛化 PUT/DELETE（Work 无 update/delete，状态只由生命周期动作推进，RFC 四.8）。
-// W1 范围内无写动作端点（接管/续派/处置随 W2/W3 同批交付）。
+// Work 工作单端点（P5 / RFC-work-resume 三、五 W1-W2 行）：创建（幂等）+ 列表 +
+// 详情（含事件游标）+ 原子接管（W2，CAS）。建单入口 v1 仅 Prime/MCP（RFC 六.六
+// 裁决 1）——本组端点是 MCP 工具的传输载体与 W3 管理台只读视图的数据源，控制台
+// v1 不设建单表单；无泛化 PUT/DELETE（Work 无 update/delete，状态只由生命周期
+// 动作推进，RFC 四.8）。W3 交付收集/关闭与处置端点。
 
 import (
 	"encoding/json"
@@ -58,6 +58,48 @@ func (s *Server) handleWorkCreate(w http.ResponseWriter, r *http.Request) {
 // handleWorkList GET /api/v1/works：工作单列表摘要（新建在前）。
 func (s *Server) handleWorkList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"works": s.cfg.Core.ListWorks()})
+}
+
+// workTakeoverRequest POST /api/v1/works/{id}/takeover 请求体：expected_term 为
+// 调用方读档时看到的任期（代校验，未设任期为空串）；new_term 为接管方任期声明。
+type workTakeoverRequest struct {
+	ExpectedTerm string `json:"expected_term"`
+	NewTerm      string `json:"new_term"`
+}
+
+// handleWorkTakeover POST /api/v1/works/{id}/takeover：原子接管（P5 W2，CAS 单
+// 事务）。200 成功（相同操作重放 200 + dup:true 返现状，零事件）/
+// 404 work_not_found / 409 work_term_conflict（同刻仅一方接管成功）/
+// 409 work_closed（终态单）/ 400 invalid_request / 500。事件以独立字段落
+// 服务端验证主体（auth 中间件取得，同建单口径）。
+func (s *Server) handleWorkTakeover(w http.ResponseWriter, r *http.Request) {
+	var req workTakeoverRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {expected_term,new_term} JSON: "+err.Error())
+		return
+	}
+	wv, dup, err := s.cfg.Core.TakeoverWork(core.WorkTakeoverRequest{
+		WorkID:       r.PathValue("id"),
+		ExpectedTerm: req.ExpectedTerm,
+		NewTerm:      req.NewTerm,
+	}, authPrincipal(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrWorkNotFound):
+			writeErr(w, http.StatusNotFound, "work_not_found", err.Error())
+		case errors.Is(err, core.ErrWorkClosed):
+			writeErr(w, http.StatusConflict, "work_closed", err.Error())
+		case errors.Is(err, core.ErrWorkTermConflict):
+			writeErr(w, http.StatusConflict, "work_term_conflict", err.Error())
+		case errors.Is(err, core.ErrInvalid):
+			writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		default:
+			log.Printf("[hub] 工作单接管持久化失败: %v", err)
+			writeErr(w, http.StatusInternalServerError, "internal", "工作单接管失败")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, workViewBody(wv, dup))
 }
 
 // handleWorkGet GET /api/v1/works/{id}?since_events=N：工作单详情（步骤/尝试

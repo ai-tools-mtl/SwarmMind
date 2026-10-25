@@ -46,6 +46,10 @@ type SubmitAck struct {
 	TraceID string
 	// Dup 幂等命中。
 	Dup bool
+	// Work 绑定派发结果（P5 W2/RFC-work-resume；未绑定为 nil）。HTTP 返回体
+	// 展开为 work 对象；node 会话 submit_ack 帧不携带（SubmitAckPayload 不变，
+	// 绑定信息经工作单查询面读取）。
+	Work *WorkBindInfo
 }
 
 // Config Core 构造参数。
@@ -139,6 +143,7 @@ func New(cfg Config) (*Core, error) {
 	}
 	c.rebuildWorkdirLocks() // workdir 互斥表快照恢复 + 按任务集自愈（P1.5/SPEC 4.10）
 	c.recoverBatches()      // creating 批次创建中断收尾（见 control.go）
+	c.recoverWorks()        // 工作单终态回写窗口收尾（P5 W2，见 work_dispatch.go）
 	if cfg.SweepInterval > 0 {
 		c.sweepOn = true
 		go c.sweepLoop(cfg.SweepInterval)

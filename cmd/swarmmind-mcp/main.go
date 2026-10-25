@@ -271,15 +271,18 @@ func tools() []toolDef {
 	return []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: toolObj(map[string]any{})},
-		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群", InputSchema: toolObj(map[string]any{
-			"node_id":   toolStr("目标节点 ID（swarmmind_nodes 可查）"),
-			"agent":     toolStr("目标 agent 名（swarmmind_agents 可查）"),
-			"args":      toolArr("命令行参数（可选）"),
-			"stdin":     toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id":  toolStr("追踪号（可选，便于关联；统筹任期建议 prime-<任期号>-<序号>）"),
-			"idem_key":  toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键）"),
-			"group_ref": toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
+		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群。传 work_ref+step_seq+prime_term 三参可把任务绑定到工作单步骤（断点接管的正式执行记录；同键重试不新增尝试）", InputSchema: toolObj(map[string]any{
+			"node_id":    toolStr("目标节点 ID（swarmmind_nodes 可查）"),
+			"agent":      toolStr("目标 agent 名（swarmmind_agents 可查）"),
+			"args":       toolArr("命令行参数（可选）"),
+			"stdin":      toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
+			"trace_id":   toolStr("追踪号（可选，便于关联；统筹任期建议 prime-<任期号>-<序号>）"),
+			"idem_key":   toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键。绑定派发时建议必传：同键重放命中原尝试，换新键=新执行尝试）"),
+			"group_ref":  toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
 			"depends_on": toolArr("上游任务幂等键列表（可选，P4.3 任务依赖）：全部上游 completed 后本任务才投递；上游 failed/needs_review/cancelled 则保持阻塞（blocked_reason=upstream_failed）。请传上游 idem_key（跨重跑稳定），勿传 task_id"),
+			"work_ref":   toolStr("工作单 ID（可选，w- 开头；与 step_seq、prime_term 三参成组使用，断点接管绑定派发）"),
+			"step_seq":   toolNum("绑定的工作单步骤序号（绑定派发必填，1 起整数；须为整数否则拒绝，不做截断）"),
+			"prime_term": toolStr("任期声明（绑定派发必填）：须与工作单当前任期一致（swarmmind_work_get 读档或 swarmmind_work_takeover 接管后取得）；旧任期派发会被拒绝"),
 		}, "node_id", "agent")},
 		{Name: "swarmmind_status", Description: "查询任务当前状态与结果（不等待）", InputSchema: toolObj(map[string]any{
 			"task_id": toolStr("任务 ID"),
@@ -332,6 +335,11 @@ func tools() []toolDef {
 			"since_events": toolNum("已见最大事件 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
 		}, "work_id")},
 		{Name: "swarmmind_work_list", Description: "列出全部工作单：ID、目标、状态（planning 计划中 / executing 执行中 / blocked 受阻 / collecting 收集中 / done 完成 / abandoned 已放弃）、步骤与尝试数。用于发现历史未完成工作", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_work_takeover", Description: "接管工作单（断点续管）：取得续派权，旧任期的派发即被拒绝（其在途任务结果照常回流不受影响）。expected_term 传读档时看到的当前任期（同刻仅一方接管成功，后来者被拒）；相同操作重放幂等返回现状不新增事件。接管成功后用 swarmmind_submit 携 work_ref/step_seq/prime_term 续派", InputSchema: toolObj(map[string]any{
+			"work_id":       toolStr("工作单 ID（swarmmind_work_list 可查）"),
+			"expected_term": toolStr("读档时看到的当前任期（swarmmind_work_get 的 prime_term；从未设任期传空串）——代校验，不符即拒绝"),
+			"new_term":      toolStr("你的新任期标识（如 prime-7）"),
+		}, "work_id", "new_term")},
 	}
 }
 
@@ -739,6 +747,39 @@ func toolSubmit(args map[string]any) (string, error) {
 	if len(deps) > 0 {
 		body["depends_on"] = deps
 	}
+	// 工作单绑定派发（P5 W2，六.六规则 7 参数扩展）：work_ref/step_seq/prime_term
+	// 三参成组。严格校验零改写（同 W1 depends_on 口径——schema 是劝导，运行时
+	// 校验是权威）：step_seq 须为 ≥1 整数（2.5 拒绝不截断）；任一参缺失即拒绝、
+	// 请求不发出。
+	wr, _ := args["work_ref"].(string)
+	wr = strings.TrimSpace(wr)
+	ssArg, ssPresent := args["step_seq"]
+	ptArg, ptPresent := args["prime_term"]
+	pt := strings.TrimSpace(argString(ptArg, ptPresent))
+	switch {
+	case wr == "" && !ssPresent && !ptPresent:
+		// 未绑定：常规派发
+	case wr != "" && ssPresent && ptPresent:
+		sv, ok := ssArg.(float64)
+		switch {
+		case !ok:
+			return "", fmt.Errorf("step_seq 须为步骤序号数字（1 起），收到的是%s", jsonArgType(ssArg))
+		case sv != math.Trunc(sv):
+			return "", fmt.Errorf("step_seq 含非整数序号 %v，须为 1 起整数（不做截断）", sv)
+		case sv < 1:
+			return "", fmt.Errorf("step_seq 序号 %d 越界（有效从 1 起）", int64(sv))
+		}
+		if pt == "" {
+			return "", fmt.Errorf("prime_term 必填（任期声明；swarmmind_work_get 读档或 swarmmind_work_takeover 接管后取得）")
+		}
+		body["work_ref"] = wr
+		body["step_seq"] = int64(sv)
+		body["prime_term"] = pt
+	case wr == "":
+		return "", fmt.Errorf("绑定派发三参成组：给出了 step_seq/prime_term 则 work_ref 必填（工作单 ID，swarmmind_work_list 可查）")
+	default:
+		return "", fmt.Errorf("绑定派发三参成组：work_ref 须同时给出 step_seq（步骤序号）与 prime_term（任期声明）")
+	}
 	code, data, err := hubAPI("POST", "/api/v1/tasks", body)
 	if err != nil {
 		return "", err
@@ -748,9 +789,42 @@ func toolSubmit(args map[string]any) (string, error) {
 	}
 	var out struct {
 		TaskID string `json:"task_id"`
+		Dup    bool   `json:"dup"`
+		Work   *struct {
+			WorkID     string `json:"work_id"`
+			StepSeq    int64  `json:"step_seq"`
+			AttemptSeq int64  `json:"attempt_seq"`
+			Outcome    string `json:"outcome"`
+			TaskGone   bool   `json:"task_gone"`
+		} `json:"work"`
 	}
 	_ = json.Unmarshal(data, &out)
+	if out.Work != nil && out.Work.TaskGone {
+		return fmt.Sprintf("该尝试此前已执行（幂等键命中工作单去重证据，原任务已过保留期清理）——不重复执行。\n工作单 %s 步骤 #%d 尝试 #%d 终局：%s\n用 swarmmind_work_get 读档查看执行事实，勿盲目重派。",
+			out.Work.WorkID, out.Work.StepSeq, out.Work.AttemptSeq, out.Work.Outcome), nil
+	}
+	if out.Work != nil {
+		tail := "用 swarmmind_status 或 swarmmind_wait 查询任务结果；swarmmind_work_get 查看工作单进度。"
+		if out.Dup {
+			return fmt.Sprintf("任务已提交：%s（目标 %s @ %s，绑定工作单 %s 步骤 #%d 尝试 #%d；同键重放幂等命中，未新增尝试）\n%s",
+				out.TaskID, agent, node, out.Work.WorkID, out.Work.StepSeq, out.Work.AttemptSeq, tail), nil
+		}
+		return fmt.Sprintf("任务已提交：%s（目标 %s @ %s，绑定工作单 %s 步骤 #%d 尝试 #%d）\n%s",
+			out.TaskID, agent, node, out.Work.WorkID, out.Work.StepSeq, out.Work.AttemptSeq, tail), nil
+	}
+	if out.Dup {
+		return fmt.Sprintf("任务此前已提交（幂等命中，未重复执行）：%s（目标 %s @ %s）\n用 swarmmind_status 或 swarmmind_wait 查询结果。", out.TaskID, agent, node), nil
+	}
 	return fmt.Sprintf("任务已提交：%s（目标 %s @ %s）\n用 swarmmind_status 或 swarmmind_wait 查询结果。", out.TaskID, agent, node), nil
+}
+
+// argString 参数取字符串（nil/缺失返回空串）。
+func argString(v any, ok bool) string {
+	if !ok || v == nil {
+		return ""
+	}
+	s, _ := v.(string)
+	return s
 }
 
 // taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。行为保持不变
@@ -782,6 +856,9 @@ func renderTaskOK(taskID string, data []byte) (string, bool) {
 		DependsOn     []string `json:"depends_on"`
 		BlockedReason string   `json:"blocked_reason"`
 		SupersededBy  string   `json:"superseded_by"`
+		WorkRef       string   `json:"work_ref"`
+		WorkStep      int64    `json:"work_step_seq"`
+		AttemptRef    string   `json:"attempt_ref"`
 		Result        *struct {
 			Status      string `json:"status"`
 			Error       string `json:"error"`
@@ -799,6 +876,10 @@ func renderTaskOK(taskID string, data []byte) (string, bool) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "任务 %s（%s @ %s）\n状态：%s\n", taskID, t.TargetAgent, t.TargetNode, statusCN(t.Status))
+	// 工作单绑定展示（P5 W2：绑定派发任务回读定位工作单/步骤/尝试）
+	if t.WorkRef != "" {
+		fmt.Fprintf(&b, "工作单绑定：%s 步骤 #%d（尝试 %s）；进度用 swarmmind_work_get 查看。\n", t.WorkRef, t.WorkStep, t.AttemptRef)
+	}
 	// 依赖门控展示字段（P4.3/SPEC 六.六规则 7：blocked/superseded 人话提示；
 	// blocked 不进状态机，任务仍 submitted——wait 继续轮询至放行或超时）
 	if len(t.DependsOn) > 0 {
@@ -1014,15 +1095,15 @@ func (b nodeBackend) toolAgents() (string, error) {
 	var out struct {
 		NodeID string `json:"node_id"`
 		Agents []struct {
-			Name       string `json:"name"`
-			Kind       string `json:"kind"`
-			Command    string `json:"command"`
-			TimeoutSec int    `json:"timeout_sec"`
-			AllowArgs  bool   `json:"allow_args"`
+			Name       string   `json:"name"`
+			Kind       string   `json:"kind"`
+			Command    string   `json:"command"`
+			TimeoutSec int      `json:"timeout_sec"`
+			AllowArgs  bool     `json:"allow_args"`
 			AllowEnv   []string `json:"allow_env"`
-			Desc       string `json:"description"`
-			Exposed    bool   `json:"exposed"`
-			TodayTasks int    `json:"today_tasks"`
+			Desc       string   `json:"description"`
+			Exposed    bool     `json:"exposed"`
+			TodayTasks int      `json:"today_tasks"`
 		} `json:"agents"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -1051,6 +1132,13 @@ func (b nodeBackend) toolAgents() (string, error) {
 // toolNodeSubmit 本机派单（POST /api/v1/tasks，prime_token 编排门）：target_node
 // 自动补齐本机 node_id（node 本地 API 边界锁只收本机目标，调用方无需知道节点名）。
 func (b nodeBackend) toolSubmit(args map[string]any) (string, error) {
+	// 工作单绑定参数显式拒绝（P5 W2 六.六 同批口径：hub-only 能力 node 模式
+	// 明确不可用，不静默忽略——静默丢弃=调用方以为绑定生效而实际没有）。
+	for _, k := range []string{"work_ref", "step_seq", "prime_term"} {
+		if _, ok := args[k]; ok {
+			return "", fmt.Errorf("工作单绑定参数 %s 仅 hub 模式可用：本机直执行模式不经过 hub 工作单账本（swarmmind_work_* 工具亦仅在 hub 模式装配）", k)
+		}
+	}
 	agent, _ := args["agent"].(string)
 	if strings.TrimSpace(agent) == "" {
 		return "", fmt.Errorf("agent 必填（目标只能是本机 agent）")
@@ -1832,6 +1920,10 @@ func workErrHint(code int, data []byte) error {
 		"work_not_found":     "工作单不存在（swarmmind_work_list 可查现有工作单）",
 		"invalid_work_steps": "步骤计划不合法：" + e.Message,
 		"invalid_request":    e.Message,
+		"work_term_conflict": "任期不符（同刻仅一方接管成功；旧任期派发被拒）：" + e.Message + "。先 swarmmind_work_get 读档取当前任期，再接管或以其续派",
+		"work_no_term":       "工作单尚未建立任期：" + e.Message,
+		"work_step_locked":   "步骤已完成或已跳过，不再接受派发：" + e.Message,
+		"work_closed":        "工作单已终态（done/abandoned），不可再接管或派发",
 	}[e.Error]
 	if hint == "" {
 		hint = truncate(data)
@@ -2083,6 +2175,47 @@ func toolWorkList() (string, error) {
 	return b.String(), nil
 }
 
+// toolWorkTakeover 接管工作单（P5 W2 断点续管）：CAS 单事务——expected_term 与
+// 落库任期不符即被拒（同刻仅一方接管成功）；相同操作重放幂等返回现状（dup）。
+func toolWorkTakeover(args map[string]any) (string, error) {
+	wid, _ := args["work_id"].(string)
+	if strings.TrimSpace(wid) == "" {
+		return "", fmt.Errorf("work_id 必填（swarmmind_work_list 可查）")
+	}
+	newTerm := strings.TrimSpace(argString(args["new_term"], args["new_term"] != nil))
+	if newTerm == "" {
+		return "", fmt.Errorf("new_term 必填（你的任期标识，如 prime-7）")
+	}
+	expected := strings.TrimSpace(argString(args["expected_term"], args["expected_term"] != nil))
+	body := map[string]any{"expected_term": expected, "new_term": newTerm}
+	code, data, err := hubAPI("POST", "/api/v1/works/"+wid+"/takeover", body)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", workErrHint(code, data)
+	}
+	var out struct {
+		Work struct {
+			ID        string `json:"id"`
+			Goal      string `json:"goal"`
+			Status    string `json:"status"`
+			PrimeTerm string `json:"prime_term"`
+		} `json:"work"`
+		Dup bool `json:"dup"`
+	}
+	_ = json.Unmarshal(data, &out)
+	w := out.Work
+	st := map[string]string{
+		"planning": "计划中", "executing": "执行中", "blocked": "受阻",
+		"collecting": "收集中", "done": "已完成", "abandoned": "已放弃",
+	}
+	if out.Dup {
+		return fmt.Sprintf("任期未变（相同接管重放幂等命中，未新增事件）：工作单 %s（%s）当前任期 %s、状态 %s。\n续派用 swarmmind_submit 携 work_ref/step_seq/prime_term（同键重试不新增尝试）。", w.ID, w.Goal, w.PrimeTerm, st[w.Status]), nil
+	}
+	return fmt.Sprintf("已接管工作单 %s（%s）：当前任期 %s、状态 %s。\n续派用 swarmmind_submit 携 work_ref/step_seq/prime_term（同键重试不新增尝试）；旧任期的派发将被拒绝，其在途任务结果照常回流不受影响。", w.ID, w.Goal, w.PrimeTerm, st[w.Status]), nil
+}
+
 /* ---------- 工具路由 ---------- */
 
 func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
@@ -2130,6 +2263,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolWorkGet(args)
 	case "swarmmind_work_list":
 		text, err = toolWorkList()
+	case "swarmmind_work_takeover":
+		text, err = toolWorkTakeover(args)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}
