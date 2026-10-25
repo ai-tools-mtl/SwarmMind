@@ -31,7 +31,8 @@ func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrTaskNotFound):
-			writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已过保留期（终态保留 24h，离线任务 7 天）")
+			// 保留窗口具体时长不写进文案（D2：审计保留策略待产品裁决，清理未接线）。
+			writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已不在本机账本保留窗口内")
 		case errors.Is(err, service.ErrArtifactMismatch):
 			writeErr(w, http.StatusConflict, protocol.CodeArtifactMismatch, "产物内容与登记不一致（SHA-256/大小），已禁止交付")
 		default: // ErrArtifactNotFound

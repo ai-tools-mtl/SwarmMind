@@ -6,13 +6,17 @@
 //     持久化 + card_update 上报），已排队任务继续执行至终态；
 //   - GET   /api/v1/local/status                   旅程③运维：连接/epoch/账本三态/
 //     最近同步（信箱余量是 hub 侧事实，node 不代理展示）；
-//   - GET   /api/v1/local/tasks                    旅程②消费者：本机提交任务留痕。
+//   - GET   /api/v1/local/tasks                    旅程②消费者：本机执行任务全量
+//     清单（账本全量驱动：hub 下发+本机派单一律在列，逐条标来源，2026-10-26
+//     全量审计裁决）。
 package localapi
 
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -175,36 +179,158 @@ func (s *Server) ledgerCounts() map[string]int {
 	return counts
 }
 
-// handleLocalTasks GET /api/v1/local/tasks：本机提交任务留痕（新→旧）。任务
-// 当前状态由前端按 task_id 走 GET /api/v1/tasks/{id}（本地账本视图）补查；
-// 日志不缓存状态，避免两处真相。
-//
-// origin（功能性修复 7，2026-10-22）：逐条从本地账本补任务来源（local=本机派单、
-// hub=hub 下发）——控制台任务详情按双路径语义呈现（local 任务产物/核对全在本机，
-// 不指向 hub）。留痕仅由本机派单（handleSubmit）写入，账本条目已过期（终态保留
-// 24h）时按 local 呈现——历史留痕全部是本机派单，语义无例外。
-func (s *Server) handleLocalTasks(w http.ResponseWriter, r *http.Request) {
-	entries := []TaskLogEntry{}
-	if s.cfg.TaskLog != nil {
-		entries = s.cfg.TaskLog.List()
-	}
-	views := make([]taskLogView, 0, len(entries))
-	for _, e := range entries {
-		v := taskLogView{TaskLogEntry: e, Origin: ledger.OriginLocal}
-		if s.cfg.Ledger != nil {
-			if o := s.cfg.Ledger.OriginOf(e.TaskID); o != "" {
-				v.Origin = o
-			}
+// 分页参数默认与上限（codex 审查④容量边界）：账本清理未接线（D2，审计保留
+// 策略待产品裁决）规模只增不减，全量单响应在万行级已达百毫秒级——列表首屏与
+// 轮询取首页（默认 200、上限 1000），更早历史经 offset 翻页；响应携 total（合并
+// 去重后总行数）供前端「已载 X / 共 Y 条」与「加载更早」。
+const (
+	tasksPageDefault = 200
+	tasksPageMax     = 1000
+)
+
+// parseTasksPage 解析 limit/offset 查询参数：缺省 200/0；非法值报 400；limit 超
+// 上限收敛到 tasksPageMax（宽容——上限是保护而非契约边界）。
+func parseTasksPage(r *http.Request) (limit, offset int, err error) {
+	q := r.URL.Query()
+	limit, offset = tasksPageDefault, 0
+	if v := q.Get("limit"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n <= 0 {
+			return 0, 0, errors.New("limit 须为正整数")
 		}
-		views = append(views, v)
+		limit = n
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": views})
+	if v := q.Get("offset"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 0 {
+			return 0, 0, errors.New("offset 须为非负整数")
+		}
+		offset = n
+	}
+	if limit > tasksPageMax {
+		limit = tasksPageMax
+	}
+	return limit, offset, nil
 }
 
-// taskLogView 留痕条目 + 任务来源（功能性修复 7）：origin 供前端区分双路径
-//（local=产物/核对在本机；hub=经 hub 链路）。
-type taskLogView struct {
-	TaskLogEntry
+// handleLocalTasks GET /api/v1/local/tasks：本机执行任务全量清单（新→旧，
+// limit/offset 分页 + total 总数）。
+// 全量审计裁决（2026-10-26）：机器主人对这台机器执行过什么有全量审计权——数据源
+// 从「本机派单留痕 TaskLog」改为「本机账本 Ledger 全量驱动」，hub 下发任务不再
+// 不可见：
+//   - 账本行：本机执行过的一切任务（local=本机派单、hub=hub 下发）逐条在列，
+//     origin 取条目 Origin（空归 hub，旧版账本文件兼容），status 按 ledger.TaskView
+//     同源映射出视角状态（轻量投影不取整单深拷贝，codex 审查④）——列表行自带
+//     状态，前端不再逐条补查；
+//   - 留痕补尾：TaskLog 中账本已不存在的条目（本机派单历史留痕；账本保留策略
+//     接线清理后出现，清理当前未接线——D2 待产品裁决）补在列表尾——origin=local、
+//     无 status（历史留痕全部是本机派单，语义无例外；详情查询 404 = 任务不在账本）；
+//   - 合并按 created_at 新→旧排序（同刻按 task_id 稳定序），账本行优先（同 id
+//     不重），排序在分页切片前完成（跨页次序一致）。Ledger 未装配时退化为纯留痕行。
+//
+// 快照顺序（codex 审查①）：先 TaskLog 后 Ledger。提交路径序为「先入账、后留痕」
+// （handleSubmit → SubmitLocalDirect → TaskLog.Record）——若先读 Ledger 后读
+// TaskLog，两次快照之间落地的新提交命中「留痕有、账本无」，被误判为已清理的
+// 留痕行（无状态=已过保留期）；调换后任一交错下该任务至多出列一次且必为带状态
+// 的账本行：留痕快照含它 ⇒ 入账必已发生 ⇒ 账本快照必含它（账本行优先去重）；
+// 留痕快照不含它而账本快照含 ⇒ 账本行；两者皆不含 ⇒ 本响应不出现（下轮轮询可见）。
+func (s *Server) handleLocalTasks(w http.ResponseWriter, r *http.Request) {
+	limit, offset, err := parseTasksPage(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	traces := s.taskLogSnapshot()
+	if s.tasksRaceHook != nil {
+		s.tasksRaceHook() // 同包测试专用：在两次快照之间确定性注入一次提交
+	}
+	views := []taskListItem{}
+	inLedger := map[string]bool{}
+	if s.cfg.Ledger != nil {
+		for _, e := range s.cfg.Ledger.View() {
+			inLedger[e.Task.ID] = true
+			origin := e.Origin
+			if origin == "" {
+				origin = ledger.OriginHub // 防御：未归一条目按 hub 处理（同账本 normalized 口径）
+			}
+			views = append(views, taskListItem{
+				TaskID: e.Task.ID, TraceID: e.Task.TraceID,
+				TargetNode: e.Task.TargetNode, TargetAgent: e.Task.TargetAgent,
+				IdemKey:  e.Task.IdemKey,
+				CreatedAt: e.Task.CreatedAt,
+				Origin:    origin,
+				Status:    ledgerListStatus(e),
+			})
+		}
+	}
+	for _, e := range traces {
+		if inLedger[e.TaskID] {
+			continue // 账本行已覆盖：不重复出列
+		}
+		views = append(views, taskListItem{
+			TaskID: e.TaskID, TraceID: e.TraceID,
+			TargetNode: e.TargetNode, TargetAgent: e.TargetAgent,
+			IdemKey:  e.IdemKey,
+			CreatedAt: e.CreatedAt,
+			Origin:    ledger.OriginLocal,
+		})
+	}
+	total := len(views)
+	sort.Slice(views, func(i, j int) bool {
+		if !views[i].CreatedAt.Equal(views[j].CreatedAt) {
+			return views[i].CreatedAt.After(views[j].CreatedAt)
+		}
+		return views[i].TaskID < views[j].TaskID
+	})
+	if offset >= len(views) {
+		views = []taskListItem{}
+	} else if end := offset + limit; end < len(views) {
+		views = views[offset:end]
+	} else {
+		views = views[offset:]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": views, "total": total})
+}
+
+// taskLogSnapshot 留痕全量快照（TaskLog 未装配为空表）。
+func (s *Server) taskLogSnapshot() []TaskLogEntry {
+	if s.cfg.TaskLog == nil {
+		return nil
+	}
+	return s.cfg.TaskLog.List()
+}
+
+// ledgerListStatus 列表行状态投影——与 ledger.TaskView 的状态映射同源：
+// accepted→acknowledged、started→running、finished→result.status（缺 result 防御
+// 为 failed）。列表不取 TaskView（按行深拷贝整单），只投影状态一个字段。
+func ledgerListStatus(e ledger.Entry) string {
+	switch e.State {
+	case ledger.StateStarted:
+		return string(protocol.StatusRunning)
+	case ledger.StateFinished:
+		if e.Result != nil {
+			return string(e.Result.Status)
+		}
+		return string(protocol.StatusFailed)
+	default:
+		return string(protocol.StatusAcknowledged)
+	}
+}
+
+// taskListItem 「我的任务」列表行（轻量投影：列表所需最小字段，codex 审查④；
+// submitted_by 等详情字段经 GET /api/v1/tasks/{id} 取）：账本全量行（带 status）
+// ∪ 留痕补尾行（账本中已不存在，status 为空）。origin 供前端区分双路径
+//（local=产物/核对在本机；hub=经 hub 链路）与来源列展示。
+type taskListItem struct {
+	TaskID      string `json:"task_id"`
+	TraceID     string `json:"trace_id"`
+	TargetNode  string `json:"target_node"`
+	TargetAgent string `json:"target_agent"`
+	IdemKey     string `json:"idem_key,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 	// Origin 任务来源（local|hub；ledger.Origin）。
 	Origin ledger.Origin `json:"origin"`
+	// Status 视角状态（账本行：acknowledged|running|completed|failed|
+	// needs_review|cancelled）；留痕补尾行（账本中已不存在）为空。
+	Status string `json:"status,omitempty"`
 }

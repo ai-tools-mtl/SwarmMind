@@ -54,7 +54,7 @@ func TestWebOverviewSpacing(t *testing.T) {
 		`<div class="grid cols3 spaced">`,
 		`<section class="card spaced"><h2>本机管家 · 形态</h2>`,                    // setup 分支
 		`<section class="card spaced"><div class="row"><h2>本机管家 · 形态</h2>`,   // 常态 head
-		`<section class="card spaced"><div class="row"><h2>最近任务（本机派出的）</h2>`, // recentTasksCard
+		`<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2>`, // recentTasksCard（2026-10-26 账本全量驱动随批改词）
 		// 三卡内部节奏统一：恢复卡诊断折叠内 mini-stat 保持卡内 9px 节奏（与 .metric 同）；
 		// 账本三态默认隐藏进诊断折叠（契约：账本恢复态诊断可查，主面留人话恢复说明）
 		`<h3>重启恢复</h3>`,

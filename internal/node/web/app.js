@@ -285,6 +285,9 @@ const NOTIFY_EVENT_OPTS = [
 
 /* ---------- 全局状态 ---------- */
 const TOKEN_KEY = 'swarmmind_node_token';
+// 列表分页（codex 审查④容量边界）：每页条数与后端 tasksPageDefault 同值，显式
+// 传递——后端默认变更不影响前端契约；更早历史经 offset 翻页（加载更早）。
+const TASKS_PAGE = 200;
 const S = {
   token: localStorage.getItem(TOKEN_KEY) || '',
   authed: false,
@@ -292,8 +295,10 @@ const S = {
   nodeID: '',
   status: null,            // GET /api/v1/local/status
   agents: [],              // GET /api/v1/local/agents（本机 ExecProfile 视图）
-  tasks: [],               // GET /api/v1/local/tasks（我的任务留痕）
-  live: {},                // task_id → 最近一次实况状态（详情/列表徽章）
+  tasks: [],               // GET /api/v1/local/tasks 当前已载入的列表（首页+「加载更早」历史页；账本行自带 status+origin，留痕补尾行无 status）。轮询只刷新首页、历史保序并入，不整列表覆盖（复审②-1）
+  tasksTotal: 0,           // 列表合并总行数（后端 total）：「已载 X / 共 Y 条」与翻页依据
+  tasksMoreBusy: false,    // 「加载更早」在途标志（防双击重复翻页；只由翻页流程自身解除，轮询不得提前复位——复审②-2）
+  tasksGen: 0,             // 列表代次：loadAll 每次写入列表态 +1；翻页应答按发起时代次校验，轮询刷新后旧应答作废（复审②-2）
   catalog: [],             // 派单目录（本机 exposed 能力；node 无全网视图）
   snap: '',                // 轮询数据指纹：未变化不重绘
   drawer: null,            // 打开的任务详情 {id, timer}
@@ -372,26 +377,59 @@ async function loadAll() {
   const [st, ag, tk, dir] = await Promise.all([
     api('GET', '/api/v1/local/status'),
     api('GET', '/api/v1/local/agents'),
-    api('GET', '/api/v1/local/tasks'),
+    api('GET', '/api/v1/local/tasks?limit=' + TASKS_PAGE),
     api('GET', '/api/v1/agents'),
   ]);
   S.nodeID = st.data?.node_id || '';
   S.status = st.data || null;
   S.agents = ag.data?.agents || [];
-  S.tasks = tk.data?.tasks || [];
+  // 列表刷新（复审②-1）：取新首页（TASKS_PAGE 条），已载历史保序并入而非整列表
+  // 覆盖——轮询清历史页会让「加载更早」翻到的内容 5s 内消失（207/207→200/207）。
+  // 合并正确性：提交路径新任务插队首部、旧行相对序不变，新首页含旧载行前段（有
+  // 重叠），其后旧载行按原相对序接尾，覆盖无缺口（间隔新任务 < 一页时恒成立）；
+  // total 以后端为准。
+  S.tasks = mergeTaskPages(tk.data?.tasks || [], S.tasks);
+  S.tasksTotal = tk.data?.total || 0;
+  S.tasksGen++; // 作废在途翻页应答（复审②-2）：其 offset 基线随本次刷新失效
   // 派单目录只含本机 agent（/api/v1/agents 无 network 键——node 无全网视图）。
   // 建议修 10（2026-10-22）：standalone 本机主权——private（未暴露）能力也可本机
   // 派单（exposed 只约束 hub 准入），目录不过滤；组网模式维持只列 exposed。
   S.catalog = (dir.data?.local || []).filter(e => e.card?.exposed || S.status?.mode === 'standalone');
-  // 列表徽章用实况：最近 8 条留痕并发补查（hub 是状态真相源，日志不缓存状态）
-  const top = S.tasks.slice(0, 8);
-  const live = await Promise.all(top.map(e =>
-    api('GET', '/api/v1/tasks/' + encodeURIComponent(e.task_id)).then(r => r.data).catch(() => null)));
-  top.forEach((e, i) => { if (live[i]) S.live[e.task_id] = live[i]; });
-  const snap = JSON.stringify([S.status, S.agents, S.tasks, S.catalog, Object.keys(S.live).length]);
+  // 列表行自带 status（账本全量驱动，2026-10-26 全量审计裁决）——无需逐条补查，
+  // 状态真相即本机账本，列表快照内联。
+  const snap = JSON.stringify([S.status, S.agents, S.tasks, S.tasksTotal, S.catalog]);
   const changed = snap !== S.snap;
   S.snap = snap;
   return changed;
+}
+/* 轮询刷新合并（复审②-1）：新首页在前、旧载历史保序并入，按 task_id 去重。
+   零重叠 = 两次刷新间隔新任务超过一整页，新首页与旧历史之间必有缺口，保序拼接
+   不可得——整段弃用退回纯首页（按钮仍在，用户可重新展开）。 */
+function mergeTaskPages(fresh, old) {
+  if (!fresh.length || !old.length) return fresh;
+  const ids = new Set(fresh.map(t => t.task_id));
+  if (!old.some(t => ids.has(t.task_id))) return fresh;
+  return fresh.concat(old.filter(t => !ids.has(t.task_id)));
+}
+// loadMoreTasks 追加下一页（offset=已载行数；与后端「排序在切片前」契约配合，
+// 追加序即全序）。失败提示后可重试；在途防重入（双击），busy 只由本函数解除——
+// 轮询刷新不得提前复位（复审②-2）；应答按发起时代次校验，期间发生过轮询刷新
+// （offset 基线已失效）则整体丢弃，防旧尾页拼上新列表出漏行/重复。
+async function loadMoreTasks() {
+  if (S.tasksMoreBusy || S.tasks.length >= S.tasksTotal) return;
+  const loaded = S.tasks.length, genAtReq = S.tasksGen;
+  S.tasksMoreBusy = true; render();
+  try {
+    const r = await api('GET', '/api/v1/local/tasks?limit=' + TASKS_PAGE + '&offset=' + loaded);
+    if (S.tasksGen === genAtReq) {
+      S.tasks = S.tasks.concat(r.data?.tasks || []);
+      S.tasksTotal = r.data?.total ?? S.tasksTotal;
+    }
+  } catch (e) {
+    if (!e.unauthorized) toast('加载更早任务失败');
+  }
+  S.tasksMoreBusy = false;
+  S.snap = ''; render();
 }
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
@@ -615,11 +653,11 @@ function primeDoneView() {
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
-  return `<section class="card spaced"><div class="row"><h2>最近任务（本机派出的）</h2><small>${S.tasks.length} 条留痕</small></div>
+  return `<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2><small>${S.tasksTotal} 条 · 含 hub 下发</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
-    ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${t ? badge(t.status) : '<span class="badge offline">状态待查</span>'}</td></tr>`; }).join('')}
-  </tbody></table></div><p class="footer-note">点击行查看详情；任务真相在本机账本（本页实时补查），终态保留 24h。</p>`
-    : `<div class="empty"><h2>还没有派过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
+    ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${listStatusBadge(e)}</td></tr>`).join('')}
+  </tbody></table></div><p class="footer-note">点击行查看详情；列表即本机账本全量（含 hub 下发任务），完整清单见「派任务 · 我的任务」。</p>`
+    : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
 /* ---------- 能力配置加载（方案 3.5；不进轮询——编辑中状态不被覆盖） ---------- */
@@ -1157,13 +1195,27 @@ function tasksPage() {
   </section>
   ${myTasksCard()}`;
 }
+// listStatusBadge 列表状态徽章：行内 status 直出（账本全量驱动，2026-10-26 全量
+// 审计裁决——无需点击补查）；留痕补尾行（账本中已不存在的本机派单历史）无 status，
+// 按「仅存留痕」呈现（详情查询即 404。具体保留窗口待产品裁决，D2——文案不写时长）。
+function listStatusBadge(e) {
+  return e.status ? badge(e.status) : '<span class="badge offline" title="账本中已不存在（本机派单历史留痕）">仅存留痕</span>';
+}
+// originBadge 任务来源徽标：本机派单 | hub 下发（词与抽屉头部来源同源）。
+function originBadge(origin) {
+  return `<span class="badge" title="${origin === 'hub' ? 'hub 下发' : '本机派单'}">${origin === 'hub' ? 'hub 下发' : '本机派单'}</span>`;
+}
 function myTasksCard() {
   const rows = S.tasks;
-  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${rows.length} 条留痕 · 本机派出的全部任务</small></div>
-  ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>状态</th><th></th></tr></thead><tbody>
-    ${rows.map(e => { const t = S.live[e.task_id]; return `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${t ? badge(t.status) : '<span class="badge offline">点击查询</span>'}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`; }).join('')}
-  </tbody></table></div><p class="footer-note">状态实时补查自本机账本；终态保留 24h，过期任务号查询即 404。</p>`
-    : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">上方表单派第一单。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
+  const more = rows.length < S.tasksTotal;
+  const count = more ? `已载 ${rows.length} / 共 ${S.tasksTotal} 条` : `${S.tasksTotal} 条`;
+  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${count} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>
+    ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${originBadge(e.origin)}</td><td>${listStatusBadge(e)}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`).join('')}
+  </tbody></table></div>
+  ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - rows.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
+  <p class="footer-note">列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>`
+    : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
 }
 
 /* ---------- 派单表单动作 ---------- */
@@ -1391,7 +1443,11 @@ async function openDrawer(taskID) {
   $('#drawer').focus();
   playDrawerOpen();   // 入场动画只随壳播放一次；分区刷新不重放（D22）
   $('#layer').addEventListener('click', drawerMaskClose); // 具名引用重复注册幂等去重（与 cfg 抽屉遮罩关闭同机制）
-  S.drawer = { id: taskID, timer: null, seq, zones: {}, returnFocus: back };
+  // 来源随抽屉持久化（codex 审查⑤）：开抽屉时刻从列表行捕获并存入 S.drawer.origin
+  // ——之后轮询/翻页使该行离开当前列表态也不再丢来源（列表缺失行缺省 local 会把
+  // hub 任务误标成本机派单、给出错误产物指引）。open-submitted 直开（本机派单）
+  // 与列表暂无该行的兜底为空串，taskOrigin 再逐级回退。
+  S.drawer = { id: taskID, origin: S.tasks.find(x => x.task_id === taskID)?.origin || '', timer: null, seq, zones: {}, returnFocus: back };
   await refreshDrawer(seq);
   // 迟到守卫：首刷返回前抽屉被关闭（S.drawer=null）或被更快的新抽屉替换（seq 不符）
   if (!S.drawer || S.drawer.seq !== seq) return;
@@ -1419,10 +1475,14 @@ function closeDrawer() {
   $('#layer').innerHTML = '';
   if (back && back.isConnected) back.focus();   // 失存（轮询重建使行消失等）不强求
 }
-// taskOrigin 任务来源判定（功能性修复 7，2026-10-22）：以「我的任务」留痕的
-// origin 字段为准（后端自本地账本补）；留痕仅由本机派单写入，无 origin 的旧
-// 缓存/无账本条目按 local 处理——本机控制台列表里的任务默认走本机语义。
+// taskOrigin 任务来源判定（功能性修复 7，2026-10-22；2026-10-26 随列表账本全量
+// 驱动校准；codex 审查⑤改为抽屉持久化优先）：① 开抽屉时捕获并保存在
+// S.drawer.origin 的来源——列表分页/刷新后行可能不在当前列表态，缺失行不再默认
+// local（hub 任务误标本机派单会给出错误的产物指引）；② 回退当前列表行 origin；
+// ③ 仍无信息（open-submitted 直开 = 本机派单 by construction，或列表暂无该行）
+// 缺省 local——本机控制台默认本机语义。
 function taskOrigin(taskID) {
+  if (S.drawer && S.drawer.id === taskID && S.drawer.origin) return S.drawer.origin;
   const e = S.tasks.find(x => x.task_id === taskID);
   return e && e.origin === 'hub' ? 'hub' : 'local';
 }
@@ -1440,14 +1500,13 @@ async function refreshDrawer(seq) {
     S.drawer.zones = {};
     drawerZonesApply(root, {
       head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(drawer.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>`,
-      intro: `<div class="notice warn">任务查询失败${r ? ' · ' + errLine(r.data) : '（网络）'}。可能已过保留期（终态 24h / 离线 7 天）。</div>
+      intro: `<div class="notice warn">任务查询失败${r ? ' · ' + errLine(r.data) : '（网络）'}。任务可能不在本机账本（未在本机执行或已超出账本保留窗口）。</div>
       <p class="footer-note">下一步：回到${button('我的任务', 'close-drawer', 'link')}列表。</p>`,
     }, S.drawer.zones);
     return;
   }
   const t = r.data;
   S.drawer.task = t;
-  S.live[t.id] = t;
   const root = $('#drawer');
   if (root) drawerZonesApply(root, taskDrawerZones(t), S.drawer.zones);
 }
@@ -1624,6 +1683,7 @@ document.addEventListener('click', e => {
         const id = S.f.taskId; if (id) openDrawer(id); return;
       }
       case 'open-task': openDrawer(arg); return;
+      case 'tasks-more': loadMoreTasks(); return;
       case 'reopen-form': closeDrawer(); route(); focusForm(); return;
       case 'close-drawer': closeDrawer(); return;
       case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：状态落 S.drawer 后分区重算
