@@ -206,13 +206,17 @@ const PRIME_PROMPT = `# SwarmMind 统筹智能体（Prime）
 {{GOAL}}
 `;
 
-/* ---------- 展示词典：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
+/* ===== 抽屉展示词典 shared block begin ===== */
+/* 双端任务抽屉共用词典（SPEC 六.五「双端 Web 展示一致性契约」第一条，2026-10-25
+ * 抽屉统一立）：状态/错误/终态/核对动作四件套两端逐字节同文；node 页面其他区块
+ * （列表徽标/总览卡）亦从此取词；hub 群聊/批次等非任务词典（GROUP_STATES 等）留
+ * 块外。cancelled 系双端必备：node 本地列表虽只有本机派单留痕，路由一旦打通
+ * hub 取消形态立即可达（TASK-drawer-sync 潜伏漂移项）。 */
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
   running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '等你确认',
   cancelled: '已取消',
 };
-/* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
 const ERRORS = {
   timeout: '执行超过本机配置的超时上限，进程组已整组终止',
   policy_denied: '参数或环境变量超出本机白名单，未执行',
@@ -226,13 +230,126 @@ const ERRORS = {
   storage_full: 'hub 存储全局预算已满',
   frame_too_large: '提交体超过单消息 1MiB 上限',
 };
+const TERMINAL = new Set(['completed', 'failed', 'needs_review', 'cancelled']);
+const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
+/* ===== 抽屉展示词典 shared block end ===== */
+
+/* ===== 抽屉时间工具 shared block begin ===== */
+/* 双端抽屉时间口径（D17 裁决：UTC + 显式标注；SPEC 六.五 第四条）：完整时间
+ * YYYY-MM-DD HH:mm:ss UTC，经 Date 解析转 UTC 格式化（禁 ISO 串切片后硬贴 UTC
+ * 后缀）；realTime 有效时刻判定（D16）：空/Go 零值 0001-01-01/非法串一律「无
+ * 证据」。表格/总览等非抽屉面的全站迁移另批（C4），页面旧函数暂留本块外。 */
+function realTime(s) {
+  if (!s) return false;
+  return !String(s).startsWith('0001-01-01') && !Number.isNaN(new Date(s).getTime());
+}
+function fmtUTC(s) {
+  if (!realTime(s)) return '';
+  const d = new Date(s), p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+/* ===== 抽屉时间工具 shared block end ===== */
+
+/* ===== 抽屉事件与错误 shared block begin ===== */
+/* 双端任务时间线（D15/D16/D20 统一，node 对齐 hub ol.timeline 事件流）：受理/
+ * 开始执行/终态/人工核对完成；零值与非法时刻无证据、不生成事件（D16 乱码根因：
+ * Go time.Time 零值序列化 0001-01-01T00:00:00Z 穿透，omitempty 对结构体不生效；
+ * 阶段 D 终审补全：受理/终态/核对三处一律先过 realTime 完整有效判定，无证据
+ * 时刻连事件骨架一起不生成，不留空 <small> 行）；needs_review 终态点为灰点流中
+ * 唯一 heat 热点。node 账本无 review 字段，末条自然不出现，两端同源。
+ * taskErrorNotice 错误通知条（D5 口径统一）：组合错误码按首段查词典——hub 旧全码
+ * 直查遇 `timeout;artifacts_skipped=1` 类组合码落空即误报「执行中断」；人话在前，
+ * 原码与退出码（存在时）同行技术态，needs_review 追加一行语境说明。 */
+function drawerTimelineHtml(t) {
+  const ev = [];
+  if (realTime(t.created_at)) ev.push(['任务已受理', fmtUTC(t.created_at), false]);
+  if (realTime(t.result?.started_at)) ev.push(['开始执行', fmtUTC(t.result.started_at), false]);
+  if (TERMINAL.has(t.status)) {
+    const fin = [t.result?.finished_at, t.updated_at].find(realTime);
+    if (fin) ev.push([`${STATES[t.status]}`, fmtUTC(fin), t.status === 'needs_review']);
+  }
+  if (t.review && realTime(t.review.at)) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtUTC(t.review.at), false]);
+  return `<ol class="timeline">${ev.map(([e, time, hl]) => `<li${hl ? ' class="hl"' : ''}>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>`;
+}
+function taskErrorNotice(r, needs) {
+  if (!r?.error) return '';
+  const human = ERRORS[String(r.error).split(';')[0]] || '执行中断';
+  const exit = typeof r.exit_code === 'number' ? ` · 退出码 ${r.exit_code}` : '';
+  return `<div class="notice warn"><b>${esc(human)}</b> · <code>${esc(r.error)}</code>${exit}${needs ? '<br>任务执行到一半机器重启，无法确认实际进度。' : ''}</div>`;
+}
+/* ===== 抽屉事件与错误 shared block end ===== */
+
+/* ===== 抽屉答复与日志 shared block begin ===== */
+/* 双端抽屉最终答复与诊断日志渲染（D8/D10/D11/D12 统一，材质基准 e821bf8）：
+ * mdAnswer 白底浮起主角，空白输入兜底「（空）」——「无内容」不得做成全抽屉视觉
+ * 最重的主体，空答复兜底由分区模板按状态给人话（D8/D9）；drawerLogInner 诊断日志
+ * 区（标题「诊断日志（stdout / stderr 尾部）」由分区模板携带）：默认 md 渲染、
+ * 恒显 stdout/stderr 两段、空段兜底「（空）」（hub 旧跳过空段形态废除，D11）；
+ * 原文视图统一单 pre 双段（stdout:/stderr: 行前缀）。切换态由调用方经参数传入
+ * （存各自 S.drawer.logRaw）。诊断日志渲染条件（stdout_tail||stderr_tail）与
+ * 「最多保留各 64KiB。」保留期说明由分区模板携带，双端同文。
+ * drawerAnswerHtml 最终答复区（阶段 D 必须修 4，D9 状态优先）：终态判定先行——
+ * cancelled + result=null 是后端合法态（cancel.go Result 留空），不得落「尚未到
+ * 终态」误导兜底，按无答复人话兜底；仅非终态且无结果才显示「尚未到终态」。 */
+function mdAnswer(text) {
+  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+}
+function drawerAnswerHtml(t, res, needs) {
+  return `<h3>最终答复</h3>${!res
+    ? TERMINAL.has(t.status)
+      ? '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>'
+      : `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
+    : res.final_answer ? mdAnswer(res.final_answer)
+    : needs ? '<p class="muted">结果还没确认——这个任务结果拿不准，等你核对。</p>'
+    : res.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>'
+    : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>'}`;
+}
+function drawerLogInner(res, raw) {
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
+  if (raw) return `${head}<pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre>`;
+  const sec = (label, tail) => `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail || '') || '<p class="muted">（空）</p>'}</div>`;
+  return head + sec('stdout', res.stdout_tail) + sec('stderr', res.stderr_tail);
+}
+/* ===== 抽屉答复与日志 shared block end ===== */
+
+/* ===== 抽屉分区更新 shared block begin ===== */
+/* 双端抽屉稳定 DOM 机制（D22 硬验收，SPEC 六.五 第三条局部更新铁律）：首次打开
+ * 建壳（drawerShellHtml 稳定分区容器），刷新一律 drawerZonesApply 分区 diff——
+ * 分区 HTML 与缓存一致即跳过（数据无变化不碰 DOM：details 开合、原文模式、输入
+ * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
+ * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
+ * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
+ * 动画只随壳播放一次，分区更新不重放。 */
+const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
+function drawerZoneSwap(el, html) {
+  const open = [...el.querySelectorAll('details')].map(d => d.open);
+  el.innerHTML = html;
+  [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
+}
+function drawerZonesApply(root, zones, cache) {
+  let touched = false;
+  for (const name of DRAWER_ZONES) {
+    const html = zones[name] || '';
+    if (cache[name] === html) continue;
+    const el = root.querySelector(`[data-zone="${name}"]`);
+    if (!el) continue;
+    cache[name] = html;
+    drawerZoneSwap(el, html);
+    touched = true;
+  }
+  return touched;
+}
+/* ===== 抽屉分区更新 shared block end ===== */
+
+/* ---------- 展示词典（非任务类）：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
+/* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
 const SKIPS = {
   offline: '离线或未注册',
   not_exposed: '在线，但没有开放这个能力',
   interrupted: '中心端创建中断，未及提交',
 };
 const BATCH_STATES = { creating: '收尾中', complete: '已完成' };
-const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
 /* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
 const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
 const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
@@ -265,6 +382,12 @@ const S = {
   pollBusy: false,             // 轮询 single-flight：上轮在途跳过本轮
   f: { status: '', trace: '', by: '', error: '', from: '', to: '' },   // 任务筛选
   drawer: null,                // 打开的任务详情 {id, task}
+  drawerQuerySeq: 0,           // 单查请求序号（复审 P1）：openTask 悬空补查/drawer-refresh
+                               // 共用单调计数——任一新单查发出即作废更早在途单查（含快照），
+                               // 同任务连点乱序、补查期间又查他任务时仅最新应答可落地
+  taskVer: {},                 // taskId → 本地回写版本（阶段 D 必须修 1/2）：review/cancel
+                               // 成功即 +1；在途列表/单查应答凭发起时快照判定过期——
+                               // 版本已变的任务在本批必为回写前旧快照，不得覆盖本地新态
   drafts: {},                  // taskId → {note, checked}：抽屉核对草稿（P0.3），重绘回填、登出清空
   busy: new Set(),             // 进行中操作键（P0.5）：'cancel:<id>' 等，防重建窗口重复提交
   layerGen: 0,                 // 层世代（D3）：开/关层递增，延迟回调执行前校验，不符即放弃
@@ -383,6 +506,7 @@ async function loadResource(name, path, validate) {
   return { __seq: seq, value, ok: true };
 }
 async function loadAll() {
+  const taskVerAtReq = { ...S.taskVer };   // 数据版本快照（阶段 D 必须修 1/2）：任务列表提交时判定过期
   const [nodes, tasks, directory, prime] = await Promise.all([
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
@@ -394,7 +518,16 @@ async function loadAll() {
     if (!wrapped || wrapped.value === null) return;
     // 提交点二次 seq 校验（Round 5 终审 #1）：批内旧响应在 await 尾声才到时不得回滚新批
     if (wrapped.__seq !== undefined && wrapped.__seq !== S.seq[name]) return;
-    const value = wrapped.value;
+    let value = wrapped.value;
+    if (name === 'tasks') {
+      /* 列表提交的数据版本判定（阶段 D 必须修 2 乱序竞态，已复现：核对 POST 先成功、
+       * 核对前发起的旧列表后提交，记录卡被退回表单）：请求发起后发生过本地回写
+       * （review/cancel，S.taskVer 已 bump）的任务，本批必为回写前旧快照——以本地
+       * 权威态（回写应答）原位替换，其余任务照常提交；列表提交永不使任务回退到
+       * 本地回写之前。 */
+      value = value.map(t => (S.taskVer[t.id] || 0) !== (taskVerAtReq[t.id] || 0)
+        ? (S.tasks.find(x => x.id === t.id) || t) : t);
+    }
     S.fresh[name] = { ok: true, at: Date.now() };   // 成功提交才记新鲜（与 seq 校验同点）
     const fp = JSON.stringify(value);
     if (fp === S.resSnap[name]) return;     // 该资源无变化：不触发重绘
@@ -609,7 +742,7 @@ function toast(msg) {
   t.classList.add('show');
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.classList.remove('show'); }, 3400);
 }
-function terminal(st) { return ['completed', 'failed', 'needs_review', 'cancelled'].includes(st); }
+function terminal(st) { return TERMINAL.has(st); }   // 终态集来自抽屉展示词典 shared block
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
 function preserveFocus(fn) {
   const a = document.activeElement;
@@ -1200,17 +1333,34 @@ function openTask(id) {
   if (!t) {
     /* 防悬空引用：批次/核对记录可能引用已归档任务；先强刷一次快照再试。 */
     toast('正在查询任务最新状态…');
+    const verAtReq = S.taskVer[id] || 0;   // 数据版本快照（阶段 D 必须修 1）：本地回写使在途补查失效
+    const seqAtReq = ++S.drawerQuerySeq;   // 单查请求序号（复审 P1）：期间又发起任一新单查，本应答整单作废
+    const genAtReq = S.layerGen;           // 抽屉会话归属（复审 P1）：发起时的层世代，关层/开过新层即失效
     api('GET', '/api/v1/tasks/' + encodeURIComponent(id)).then(r => {
+      if (seqAtReq !== S.drawerQuerySeq) return;   // 已有更新的单查：旧应答不落快照（防旧盖新）更不得开层
+      if ((S.taskVer[id] || 0) !== verAtReq) return;   // 迟到旧快照：不得覆盖本地回写新态
+      /* D23 守卫（复审 P1 加固为会话归属）：!S.drawer 判不了「关闭/换任务后在途应答」
+       * ——补查期间用户开过任意层（世代已变）或旧应答在关闭后迟到，一律只落快照不抢开层 */
+      const alive = !S.drawer && S.layerGen === genAtReq;
       if (r.code === 200 && r.data) {
         const i = S.tasks.findIndex(x => x.id === id);
         if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
-        S.drawer = { id, task: r.data };
-        syncDrawer(true);
-      } else {
+        if (alive) { S.drawer = { id, task: r.data }; syncDrawer(true); }
+      } else if (alive) {
         toast('该任务已归档（终态保留 24 小时），无法查看详情');
       }
-    }).catch(() => toast('查询失败：网络异常，请稍后重试'));
+    }).catch(() => { if (seqAtReq === S.drawerQuerySeq && !S.drawer && S.layerGen === genAtReq) toast('查询失败：网络异常，请稍后重试'); });
     return;
+  }
+  if (S.drawer && S.drawer.id !== id) {
+    /* 换任务=新抽屉会话（codex 三轮必须修）：递增层世代使旧会话在途单查
+     * （drawer-refresh/悬空补查）按会话归属作废——A→B→A 切回后旧 A 的 404
+     * 不得再弹归档 toast。同任务重开不换代（会话延续，乱序仍归序号守卫管）。
+     * 换代会使首开入场 rAF 作废（gen 校验拦下）：同帧内换任务时在此补点亮。 */
+    S.layerGen++;
+    const layer = $('#layer');
+    const ov = layer.querySelector('.overlay');
+    if (layerState === 'open' && ov && !ov.classList.contains('open')) playLayerOpen(layer);
   }
   modalOpen = false;
   S.drawer = { id, task: t };
@@ -1317,20 +1467,32 @@ function syncDrawer(force = false) {
   if (!S.drawer) return;               // 无 drawer 不碰层（D3）：清层只经 closeLayer 生命周期
   const t = S.tasks.find(x => x.id === S.drawer.id);
   if (t) S.drawer.task = t;
+  if (!S.drawer.zones) S.drawer.zones = {};   // 分区缓存随抽屉会话建（openTask 各创建点不必逐一记得）
   const a = document.activeElement;
   const typing = !force && a && layer.contains(a) && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName);
   const present = layerState === 'open' && !!layer.querySelector('.drawer');
   if (present && typing) return;
   applyInert(true);
   if (present) {
-    const dr = layer.querySelector('.drawer');
-    if (dr) dr.innerHTML = drawerHtml(S.drawer.task);   // 新节点首个计算样式即 open 终态，无过渡可放
+    syncDrawerZones();   // 分区 diff：数据无变化不碰 DOM（D22），不再整抽屉 innerHTML 重建
     return;
   }
   layerOpenBegin();
-  layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${drawerHtml(S.drawer.task)}</section></div>`;
+  layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${drawerShellHtml()}</section></div>`;
+  syncDrawerZones();
   playLayerOpen(layer);
   layer.querySelector('.drawer')?.focus();   // 焦点入层仅首次打开（P0.6）
+}
+/* syncDrawerZones 以 S.drawer.task 重算分区并 diff 写入（轮询同步与 log-raw/fail-raw
+ * 切换共用；仅内容变化的分区重写，details 开合经 drawerZoneSwap 回放保持）。
+ * 分区应用后必跑 applyDrawerFormState：核对表单区节点恒定（阶段 D 必须修 3），
+ * 草稿/busy 属状态驱动属性写入，不在分区模板里。 */
+function syncDrawerZones() {
+  const dr = $('#layer .drawer');
+  if (dr && S.drawer?.task && S.drawer.zones) {
+    drawerZonesApply(dr, drawerZones(S.drawer.task), S.drawer.zones);
+    applyDrawerFormState();
+  }
 }
 /* closeLayer 关闭入口（全入口统一走这里：Esc/遮罩/关闭按钮/go 导航/登出/会话失效）。
  * 世代先递增（在途层回调一律作废），随后进入 closing：加 .closing 类（出场动画 +
@@ -1359,7 +1521,13 @@ function closeLayer(restoreFocus = false) {
 function modalHead(title) {
   return `<div class="row"><h2 id="layer-title">${title}</h2>${button('×', 'close', 'close', 'aria-label="关闭弹层"')}</div>`;
 }
-function drawerHtml(t) {
+/* drawerZones 任务抽屉分区内容（D22 稳定 DOM：壳由 drawerShellHtml 建一次，本函数
+ * 只产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
+ * 层级（e821bf8，SPEC 六.五 第二条）：介绍条 → 失败原因（hub 独有白名单）→ 最终
+ * 答复（白底浮起主角）→ 诊断日志（折叠配角）→ 产物 → 任务输入（details 折叠沉底，
+ * hub 独有白名单）→ 时间线 → 人工核对（hub 独有白名单）→ 归档/下一步。头部/文案/
+ * 时间口径与 node 同构（D2/D3/D17/D21）。 */
+function drawerZones(t) {
   const needs = t.status === 'needs_review';
   const r = t.result;
   const intro = needs
@@ -1367,86 +1535,83 @@ function drawerHtml(t) {
     : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
     : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
     : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
-    : '任务仍在进行，列表每 5 秒自动刷新。';
-  return `${modalHead('任务详情 · ' + esc(t.id))}
-  <p class="${needs ? 'notice warn' : 'notice'}">${intro}</p>
-  <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)}</h2></div>
-  <div class="row">${badge(t.status)}<small>${esc(t.trace_id)}</small></div>
-  <p class="muted spaced">${esc(t.submitted_by)} 提交 · 创建于 ${esc(fmtFull(t.created_at))}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>
-  ${r?.error ? `<div class="notice warn"><b>${esc(ERRORS[r.error] || '执行中断')}</b><br>内部标记：${esc(r.error)} · 退出码 ${r.exit_code}${needs ? '<br>任务执行到一半机器重启，无法确认实际进度。' : ''}</div>` : ''}
-  ${r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : ''}
-  <h3 class="spaced">任务输入</h3>
-  <pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre>
-  <h3>最终答复</h3>
-  ${r && r.final_answer ? mdAnswer(r.final_answer) : (needs ? '<p class="muted">结果还没确认——这个任务结果拿不准，等你核对。</p>' : r && r.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>' : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>')}
-  ${r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>运行日志</summary><div id="drawer-runlog">${runLogInner(t)}</div><small>最多保留各 64KiB。</small></details>` : ''}
-  <h3>产物文件</h3>
-  ${artifactsHtml(t)}
-  <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>
-  <h3 class="spaced">时间线</h3>
-  <ol class="timeline">${timeline(t).map(([e, time, hl]) => `<li${hl ? ' class="hl"' : ''}>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>
-  ${reviewSection(t)}
-  ${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('返回任务列表 →', 'go-tasks', 'link')}</div>` : ''}
-  <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`;
+    : '任务仍在进行，抽屉每 5 秒自动刷新。';
+  return {
+    head: `${modalHead('任务详情 · ' + esc(t.id))}
+    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>`,
+    intro: `<div class="${needs ? 'notice warn' : 'notice'}">${intro}</div>
+    ${taskErrorNotice(r, needs)}`,
+    fail: r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : '',
+    answer: drawerAnswerHtml(t, r, needs),
+    logs: r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
+    artifacts: `<h3>产物文件</h3>
+    ${artifactsHtml(t)}
+    <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>`,
+    input: `<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre></details>`,
+    timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
+    review: reviewSection(t),
+    next: `${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
+    <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`,
+  };
 }
 /* ---------- 任务结果 Markdown 渲染接入（t20261023-969e） ----------
- * mdAnswer 最终答复渲染态（mdToHtml 空白输入返回空串，兜底「（空）」人话）；
- * failInner/runLogInner 失败原因与运行日志的「默认 md 渲染 + 查看原文切换」
- *（df -h 类空格对齐的进程输出被 md 解析会散架，agent 的 md 结构化日志又常在）。
- * 切换态存 S.drawer.failRaw / logRaw；切换只重绘对应内层容器（#drawer-fail /
- * #drawer-runlog），details 开合与阅读位置不被整抽屉重绘冲掉——5s 轮询全量重绘
- * 时因状态存 S.drawer 而保持。原文视图沿用任务书前的 pre 形态。 */
-function mdAnswer(text) {
-  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
-}
+ * mdAnswer/drawerLogInner 收进「抽屉答复与日志 shared block」双端同文（2026-10-25
+ * 抽屉统一，D8/D10/D11/D12）；failInner 失败原因的「默认 md 渲染 + 查看原文切换」
+ * 为 hub 独有分区（白名单）：切换态存 S.drawer.failRaw，切换经 syncDrawerZones 只
+ * 重写 fail 分区，details 开合与阅读位置不被冲掉。原文视图沿用任务书前的 pre 形态。 */
 function failInner(t) {
   const raw = !!S.drawer?.failRaw;
   const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；进程原始输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'fail-raw', 'link')}</div>`;
   return `${head}${raw ? `<pre>${esc(t.result.stderr_tail)}</pre>` : `<div class="md-body md-log">${mdToHtml(t.result.stderr_tail) || '<p class="muted">（空）</p>'}</div>`}`;
-}
-function runLogInner(t) {
-  const raw = !!S.drawer?.logRaw, r = t.result;
-  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
-  if (raw) return `${head}<pre>${esc(r.stdout_tail || '')}</pre>${r.stderr_tail ? `<pre>${esc(r.stderr_tail)}</pre>` : ''}`;
-  const sec = (label, tail) => tail ? `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail) || '<p class="muted">（空）</p>'}</div>` : '';
-  return head + sec('stdout', r.stdout_tail) + sec('stderr', r.stderr_tail);
 }
 function artifactsHtml(t) {
   const arts = t.result?.artifacts || [];
   if (!arts.length) return '<p class="muted">暂无已登记产物。中断任务不推断存在可交付产物。</p>';
   return arts.map((a, i) => `<div class="artifact row"><div><b>${esc(a.path)}</b><br><small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…</small></div>${button('取回', 'artifact', '', `data-id="${esc(t.id)}" data-index="${i}"`)}</div>`).join('');
 }
-function timeline(t) {
-  const ev = [['任务已受理', fmtFull(t.created_at), false]];
-  // Go time.Time 零值序列化为 0001-01-01T00:00:00Z（omitempty 对结构体不生效）：
-  // 仅非零时刻才算有证据。第三位标记 needs_review 终态事件点（timeline 灰点中唯一 heat）。
-  const real = s => s && !String(s).startsWith('0001-01-01');
-  if (real(t.result?.started_at)) ev.push(['开始执行', fmtFull(t.result.started_at), false]);
-  if (terminal(t.status)) {
-    const fin = [t.result?.finished_at, t.updated_at].find(real);
-    ev.push([`${STATES[t.status]}`, fmtFull(fin), t.status === 'needs_review']);
-  }
-  if (t.review) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtFull(t.review.at), false]);
-  return ev;
-}
 function reviewSection(t) {
   if (t.status !== 'needs_review') return '';
   if (t.review) {
     return `<section class="card spaced"><h3>人工核对记录</h3>
-    <div class="notice">已核对完成<br>结论：${esc(REVIEW_ACTIONS[t.review.action] || t.review.action)}<br>依据：${esc(t.review.note || '（未填写）')}<br><small>${esc(fmtFull(t.review.at))} · ${esc(t.review.by)}</small></div>
+    <div class="notice">已核对完成<br>结论：${esc(REVIEW_ACTIONS[t.review.action] || t.review.action)}<br>依据：${esc(t.review.note || '（未填写）')}<br><small>${esc(fmtUTC(t.review.at) || '—')} · ${esc(t.review.by)}</small></div>
     <div class="actions spaced">${button('下一步：回到待办列表 →', 'go-review-queue', 'link')}</div></section>`;
   }
-  /* 草稿回填（P0.3/FE-07）：input 事件即写 S.drafts，抽屉重绘（轮询刷新、非输入态）
-   * 后 textarea 从草稿恢复，填写内容不因重绘丢失。 */
-  const draft = S.drafts[t.id]?.note || '';
+  /* 阶段 D 必须修 3：表单形态一律无动态值——草稿/busy 不进模板串。草稿进串会使
+   * 「输入 → 分区缓存与重算模板分叉 → 下轮刷新整区重建」，textarea/按钮节点身份
+   * 与 busy disabled 全丢（codex 浏览器已复现）；表单结构仅在首建/记录卡切换时
+   * 写入，草稿回填与 disabled 由 applyDrawerFormState 按状态驱动。核对时间口径
+   * 同步 fmtUTC（必须修 5，解析转 UTC，弃 fmtFull 切片）。 */
   return `<section class="card spaced"><h3>人工核对</h3>
   <p class="muted">核对只是登记人工结论：任务保持「等你确认」状态，不会自动重跑，也不会改写执行结果。</p>
   <div class="notice warn"><b>请勿重新提交同一任务：</b>重复提交会在机器上再次执行。</div>
-  <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。">${esc(draft)}</textarea></label>
+  <label class="spaced">核对依据（记录检查过的证据：文件变化 / 数据状态 / 实际产物）<textarea id="review-note" rows="4" placeholder="例如：检查迁移记录已写入、数据一致，确认执行实际完成。"></textarea></label>
   <div class="actions">
-    <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}">确认结果有效</button>
-    <button class="warning" data-act="review" data-review-action="mark_failed" data-id="${esc(t.id)}">标记为失败</button>
+    <button class="primary" data-act="review" data-review-action="ack_review" data-id="${esc(t.id)}" data-label="确认结果有效">确认结果有效</button>
+    <button class="warning" data-act="review" data-review-action="mark_failed" data-id="${esc(t.id)}" data-label="标记为失败">标记为失败</button>
   </div></section>`;
+}
+/* applyDrawerFormState 核对表单的状态驱动更新（阶段 D 必须修 3）：表单区节点一次
+ * 创建恒定，本函数只写属性——草稿回填（未聚焦且值不同才写，不打断输入）、busy 由
+ * 状态驱动 disabled 与「登记中…」标签（syncDrawerZones 每次分区应用后调用，轮询
+ * 重建窗口不存在，在途登记期间按钮不会 disabled 回退）。属性写入一律先比后写
+ * （复审 P2）：textContent 同值覆写也产生 childList 变更（MutationObserver 实测
+ * 状态不变每轮 2 次），长驻层内无变化不碰 DOM。无表单态静默短路。 */
+function applyDrawerFormState() {
+  const dr = $('#layer .drawer');
+  const t = S.drawer?.task;
+  if (!dr || !t || t.status !== 'needs_review' || t.review) return;
+  const ta = dr.querySelector('#review-note');
+  if (ta) {
+    const draft = S.drafts[t.id]?.note || '';
+    if (document.activeElement !== ta && ta.value !== draft) ta.value = draft;
+  }
+  const busy = S.busy.has('review:' + t.id);
+  dr.querySelectorAll('button[data-act="review"]').forEach(b => {
+    const label = busy && S.drawer?.reviewPending === b.dataset.reviewAction ? '登记中…' : (b.dataset.label || b.textContent);
+    if (b.disabled !== busy) b.disabled = busy;         // 先比后写（复审 P2）：无变化不碰
+    if (b.textContent !== label) b.textContent = label;
+  });
 }
 
 /* ---------- 运维控制 ---------- */
@@ -2610,6 +2775,7 @@ const ACT = {
     try {
       const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
       if (r && (r.code === 202 || r.code === 200)) {
+        S.taskVer[r.data.id] = (S.taskVer[r.data.id] || 0) + 1;   // 数据版本 +1（必须修 1）：在途旧列表不得把已取消任务带回运行态
         const i = S.tasks.findIndex(t => t.id === r.data.id);
         if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
         closeLayer(); render();
@@ -2623,28 +2789,36 @@ const ACT = {
       b.disabled = false; b.textContent = '确认取消任务';   // 失败路径按钮必须恢复（FE-09）
     }
   },
-  // 诊断日志/失败原因 查看原文·渲染切换（t20261023-969e）：只重绘对应内层容器，
-  // details 开合与阅读位置不被整抽屉重绘冲掉；状态存 S.drawer（轮询全量重绘保持）。
+  // 诊断日志/失败原因 查看原文·渲染切换（t20261023-969e）：状态落 S.drawer 后走
+  // 分区重算（D22）——缓存 diff 下仅对应分区重写，details 开合经 drawerZoneSwap
+  // 回放保持，切换与 5s 轮询共用同一「缓存对不上才写」入口。
   'log-raw': () => {
     if (!S.drawer) return;
     S.drawer.logRaw = !S.drawer.logRaw;
-    const w = $('#drawer-runlog');
-    if (w) w.innerHTML = runLogInner(S.drawer.task);
+    syncDrawerZones();
   },
   'fail-raw': () => {
     if (!S.drawer) return;
     S.drawer.failRaw = !S.drawer.failRaw;
-    const w = $('#drawer-fail');
-    if (w) w.innerHTML = failInner(S.drawer.task);
+    syncDrawerZones();
   },
   'drawer-refresh': async b => {
-    const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id)).catch(() => null);
+    const id = b.dataset.id;
+    const verAtReq = S.taskVer[id] || 0;   // 数据版本快照（阶段 D 必须修 1）：本地回写使在途刷新失效
+    const seqAtReq = ++S.drawerQuerySeq;   // 单查请求序号（复审 P1）：同任务连点仅最新应答可落（乱序旧应答不得回退新数据）
+    const genAtReq = S.layerGen;           // 抽屉会话归属（复审 P1）：应答返回前关闭/换任务（世代已变）即作废
+    const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(id)).catch(() => null);
+    if (seqAtReq !== S.drawerQuerySeq) return;   // 已有更新的单查：旧应答整单作废（不落快照不碰层）
+    if ((S.taskVer[id] || 0) !== verAtReq) return;   // 迟到旧快照：不得覆盖本地回写新态
     if (r && r.code === 200) {
       const i = S.tasks.findIndex(t => t.id === r.data.id);
       if (i >= 0) S.tasks[i] = r.data;
-      S.drawer = { id: r.data.id, task: r.data };
-      syncDrawer(true); toast('详情已刷新');
-    } else toast(r && r.code === 404 ? '该任务已归档（终态保留 24 小时）' : '刷新失败：' + (r ? errLine(r.data) : '网络异常'));
+      /* D23 守卫（复审 P1 加固为会话归属）：!S.drawer 判不了「关闭后旧应答抢开」——
+       * 以层世代判定归属，世代已变（关/换任务）只落快照，不重开层不顶替现会话 */
+      if (S.drawer && S.drawer.id === r.data.id && S.layerGen === genAtReq) { S.drawer.task = r.data; syncDrawer(true); toast('详情已刷新'); }
+    } else if (S.drawer?.id === id && S.layerGen === genAtReq) {
+      toast(r && r.code === 404 ? '该任务已归档（终态保留 24 小时）' : '刷新失败：' + (r ? errLine(r.data) : '网络异常'));
+    }
   },
   export: () => {
     const list = filteredTasks();
@@ -2692,32 +2866,36 @@ const ACT = {
     const note = $('#review-note')?.value.trim();
     if (!note) { toast('请先填写核对依据（记录检查过的证据）'); $('#review-note')?.focus(); return; }
     S.busy.add(key);
-    const orig = b.textContent;
-    document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = true; });
-    b.textContent = '登记中…';
+    if (S.drawer?.id === id) S.drawer.reviewPending = action;
+    applyDrawerFormState();   // busy 状态驱动 disabled/标签（必须修 3：不靠重建）
     try {
       const r = await api('POST', `/api/v1/tasks/${encodeURIComponent(id)}/review`, { action, note });
       if (r.code === 200) {
+        S.taskVer[id] = (S.taskVer[id] || 0) + 1;   // 数据版本 +1：使在途列表/单查的核对前旧快照失效（必须修 1/2）
         const i = S.tasks.findIndex(t => t.id === id);
         if (i >= 0) S.tasks[i] = r.data;
-        S.drawer = { id, task: r.data };
+        /* D23 竞态守卫：登记应答返回前抽屉已被关/换任务时只落快照，不顶替当前抽屉；
+         * 分区缓存随 S.drawer 会话存活，改 task 不换对象以保 diff 基线。 */
+        if (S.drawer?.id === id) S.drawer.task = r.data;
         /* 草稿置已核对态（D6 草稿闭环）：登记完成后草稿被「已提交记录」取代 */
         const d = S.drafts[id] || (S.drafts[id] = { note: '', checked: false });
         d.checked = true; d.note = note;
-        render(); syncDrawer(true);
+        render();
+        if (S.drawer?.id === id) syncDrawer(true);
         toast(`核对已登记（${REVIEW_ACTIONS[action]}）· 任务保持「等你确认」—— 下一步：回到待办列表`);
       } else {
         toast('登记失败：' + errLine(r.data));
-        document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = false; });
-        b.textContent = orig;
+        applyDrawerFormState();   // busy 解除：状态驱动恢复 disabled/标签
       }
     } catch (e) {
       if (!e.unauthorized) {
         toast(e.network ? '结果未知 · 网络中断：核对可能未登记，请点「刷新」确认后重试' : '请求失败，请重试');
-        document.querySelectorAll('[data-act="review"]').forEach(x => { x.disabled = false; });
-        b.textContent = orig;
+        applyDrawerFormState();
       }
-    } finally { S.busy.delete(key); }
+    } finally {
+      S.busy.delete(key);
+      if (S.drawer?.id === id) { S.drawer.reviewPending = ''; applyDrawerFormState(); }
+    }
   },
   'ctrl-retry': () => { S.C.stage = 'idle'; submitControl(); },
   'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与恢复密钥将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">当前版本不支持撤回。请勿另开新单重复提交同一件事。</div><div class="actions">${button('保留恢复密钥，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),

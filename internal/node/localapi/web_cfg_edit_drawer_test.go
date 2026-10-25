@@ -127,7 +127,10 @@ func TestWebCfgEditDrawer(t *testing.T) {
 		`.table-action{white-space:nowrap}.table-action button{font-size:12.5px;height:auto;padding:4px 10px}`,
 		// 抽屉基建不动（任务详情抽屉同家族：右贴边 700px 白面板）
 		`.drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}`,
-		`.drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay)}`,
+		// 2026-10-25 抽屉统一（D1）：node 抽屉壳对齐 hub 入场动效（opacity/transform
+		// 过渡 + .open 终态；cfg 编辑抽屉同壳同动效家族），断言随样式演进同步更新
+		`.drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay);opacity:0;transform:translateX(48px);transition:transform var(--dur-enter) var(--ease-spring),opacity var(--dur-enter) var(--ease-spring)}`,
+		`.overlay.open .drawer{transform:none;opacity:1}`,
 		// 复选框行常规形态保留（抽屉表单沿用）
 		`.cfg-check{display:flex;align-items:center;gap:8px}`,
 		`.cfg-check input{width:auto;flex:none;margin:0}`,

@@ -184,7 +184,20 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--accent);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
 .overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
-.drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay)}
+.drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay);opacity:0;transform:translateX(48px);transition:transform var(--dur-enter) var(--ease-spring),opacity var(--dur-enter) var(--ease-spring)}
+.overlay.open .drawer{transform:none;opacity:1}
+/* 入场动画只随壳播放一次（openDrawer 下一帧加 .open）；分区刷新不重放（D22）。
+ * 减弱动效降级与 hub 同口径（transform 归零、保留透明度过渡）。 */
+@media (prefers-reduced-motion:reduce){
+  .overlay,.drawer{transform:none!important;transition:opacity 200ms ease!important}
+}
+/* 时间线事件流与产物行分隔线：双端同文规则（D14/D15 node 补齐，2026-10-25 抽屉
+ * 统一；锁测试 TestWebDrawerComponentStyles 抽行比对，任一端私改即红）。 */
+.timeline{list-style:none;padding:0;margin:14px 0}
+.timeline li{padding:0 0 18px 22px;border-left:1px solid var(--hairline);position:relative}
+.timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}
+.timeline li.hl:before{background:var(--heat)}
+.artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
 .close{font-size:20px;height:auto;padding:2px 10px;background:transparent;color:var(--ink-3)}
 .close:hover{background:rgba(0,0,0,.05);color:var(--ink)}
 /* toast：node 侧保留底部黑条与 hidden 切换机制（hub B.6 玻璃胶囊不涉及本侧 JS） */

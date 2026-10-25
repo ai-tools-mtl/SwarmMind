@@ -19,6 +19,8 @@
 - exec 超时 kill 后必须 Wait → 否则僵尸进程堆积。自查：`grep -n "Process.Kill" internal/node/ | wc -l`（每处 kill 附近应有 Wait）
 - 时间序列化一律 UTC，勿格式化成本地字符串存盘
 - 禁止在 V0 引入 SPEC 第三节白名单之外的依赖；新增依赖必须在代码注释写理由
+- 长驻交互层局部刷新禁止整层 innerHTML 重建（2026-10-25 抽屉 D22 立）：抽屉/弹层/表单视图的轮询刷新必须分区局部更新——首次打开建壳（稳定分区 data-zone），刷新按分区内容 diff 局部写入，数据无变化不碰 DOM（details 开合/原文模式/草稿/焦点/滚动随未动分区保持），分区替换时回放 details 开合态，迟到应答按层会话序号丢弃，入场动画只随壳播放一次；「重建后恢复状态」「终态停轮询」不算合格终解。已按此改造：hub syncDrawerZones / node drawerZonesApply（shared block，机制见 SPEC 六.五「双端 Web 展示一致性契约」第三条）。自查：`grep -n "innerHTML" internal/hub/web/app.js internal/node/web/app.js`（#layer/.drawer/#drawer 层容器级整体重建只允许出现在首次打开建壳、关闭清理、整层错误壳三处）
+- 禁止双端展示漂移（2026-10-25 抽屉统一立）：hub/node 控制台共用展示层（md 渲染器、抽屉状态/错误词典、时间工具、事件流、答复与日志区渲染、分区更新机制、组件样式）改动必须双端同改同验，shared block 逐字节锁（internal/node/localapi/web_md_render_test.go、web_drawer_sync_test.go）即真相，单端独改=漂移回潮；跨端同义动作同词（标准词「查看全部任务」）、能力文案不得承诺端上不存在的能力（node 无核对端点只如实指路 hub）；合理差异以 SPEC 六.五白名单为准，白名单外差异按漂移处理。自查：`go test ./internal/node/localapi/ -run 'TestWebMdRender|TestWebDrawer'` 双绿 + diff 双端 app.js 的 `===== … shared block =====` 标记块
 - 工人不执行 git commit；提交按钮在伦哥手里。改完跑 `go build ./... && go test ./...` 并在最终输出列出改动文件清单与每条 DoD 的验证结果
 
 ## 测试循环制度（2026-10-21 立，强制）

@@ -130,10 +130,16 @@ function mdIsSep(s) { const c = mdCells(s); return c.length >= 1 && c.every(x =>
 function mdCells(s) { return s.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim()); }
 /* ===== md 渲染器 shared block end ===== */
 
-/* ---------- 展示词典：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
+/* ===== 抽屉展示词典 shared block begin ===== */
+/* 双端任务抽屉共用词典（SPEC 六.五「双端 Web 展示一致性契约」第一条，2026-10-25
+ * 抽屉统一立）：状态/错误/终态/核对动作四件套两端逐字节同文；node 页面其他区块
+ * （列表徽标/总览卡）亦从此取词；hub 群聊/批次等非任务词典（GROUP_STATES 等）留
+ * 块外。cancelled 系双端必备：node 本地列表虽只有本机派单留痕，路由一旦打通
+ * hub 取消形态立即可达（TASK-drawer-sync 潜伏漂移项）。 */
 const STATES = {
   submitted: '已提交', offered: '已投递', acknowledged: '已接收',
   running: '执行中', completed: '已完成', failed: '执行失败', needs_review: '等你确认',
+  cancelled: '已取消',
 };
 const ERRORS = {
   timeout: '执行超过本机配置的超时上限，进程组已整组终止',
@@ -142,12 +148,123 @@ const ERRORS = {
   agent_not_found: '执行机器的配置已变化，找不到该 agent',
   agent_not_exposed: '目标机器没有开放这个能力，任务没有接收',
   node_restarted_midway: '执行到一半机器重启，结果不确定',
+  user_cancelled: '管理员手动取消了此任务，进程已整组终止',
   truncated: '结果超过编码预算，答复或诊断日志已截断',
   mailbox_full: '目标机器的离线暂存已满（条数或字节预算）',
   storage_full: 'hub 存储全局预算已满',
   frame_too_large: '提交体超过单消息 1MiB 上限',
 };
-const TERMINAL = new Set(['completed', 'failed', 'needs_review']);
+const TERMINAL = new Set(['completed', 'failed', 'needs_review', 'cancelled']);
+const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
+/* ===== 抽屉展示词典 shared block end ===== */
+
+/* ===== 抽屉时间工具 shared block begin ===== */
+/* 双端抽屉时间口径（D17 裁决：UTC + 显式标注；SPEC 六.五 第四条）：完整时间
+ * YYYY-MM-DD HH:mm:ss UTC，经 Date 解析转 UTC 格式化（禁 ISO 串切片后硬贴 UTC
+ * 后缀）；realTime 有效时刻判定（D16）：空/Go 零值 0001-01-01/非法串一律「无
+ * 证据」。表格/总览等非抽屉面的全站迁移另批（C4），页面旧函数暂留本块外。 */
+function realTime(s) {
+  if (!s) return false;
+  return !String(s).startsWith('0001-01-01') && !Number.isNaN(new Date(s).getTime());
+}
+function fmtUTC(s) {
+  if (!realTime(s)) return '';
+  const d = new Date(s), p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())} UTC`;
+}
+/* ===== 抽屉时间工具 shared block end ===== */
+
+/* ===== 抽屉事件与错误 shared block begin ===== */
+/* 双端任务时间线（D15/D16/D20 统一，node 对齐 hub ol.timeline 事件流）：受理/
+ * 开始执行/终态/人工核对完成；零值与非法时刻无证据、不生成事件（D16 乱码根因：
+ * Go time.Time 零值序列化 0001-01-01T00:00:00Z 穿透，omitempty 对结构体不生效；
+ * 阶段 D 终审补全：受理/终态/核对三处一律先过 realTime 完整有效判定，无证据
+ * 时刻连事件骨架一起不生成，不留空 <small> 行）；needs_review 终态点为灰点流中
+ * 唯一 heat 热点。node 账本无 review 字段，末条自然不出现，两端同源。
+ * taskErrorNotice 错误通知条（D5 口径统一）：组合错误码按首段查词典——hub 旧全码
+ * 直查遇 `timeout;artifacts_skipped=1` 类组合码落空即误报「执行中断」；人话在前，
+ * 原码与退出码（存在时）同行技术态，needs_review 追加一行语境说明。 */
+function drawerTimelineHtml(t) {
+  const ev = [];
+  if (realTime(t.created_at)) ev.push(['任务已受理', fmtUTC(t.created_at), false]);
+  if (realTime(t.result?.started_at)) ev.push(['开始执行', fmtUTC(t.result.started_at), false]);
+  if (TERMINAL.has(t.status)) {
+    const fin = [t.result?.finished_at, t.updated_at].find(realTime);
+    if (fin) ev.push([`${STATES[t.status]}`, fmtUTC(fin), t.status === 'needs_review']);
+  }
+  if (t.review && realTime(t.review.at)) ev.push([`人工核对完成（${REVIEW_ACTIONS[t.review.action] || t.review.action}，${t.review.by}）`, fmtUTC(t.review.at), false]);
+  return `<ol class="timeline">${ev.map(([e, time, hl]) => `<li${hl ? ' class="hl"' : ''}>${esc(e)}<br><small>${esc(time)}</small></li>`).join('')}</ol>`;
+}
+function taskErrorNotice(r, needs) {
+  if (!r?.error) return '';
+  const human = ERRORS[String(r.error).split(';')[0]] || '执行中断';
+  const exit = typeof r.exit_code === 'number' ? ` · 退出码 ${r.exit_code}` : '';
+  return `<div class="notice warn"><b>${esc(human)}</b> · <code>${esc(r.error)}</code>${exit}${needs ? '<br>任务执行到一半机器重启，无法确认实际进度。' : ''}</div>`;
+}
+/* ===== 抽屉事件与错误 shared block end ===== */
+
+/* ===== 抽屉答复与日志 shared block begin ===== */
+/* 双端抽屉最终答复与诊断日志渲染（D8/D10/D11/D12 统一，材质基准 e821bf8）：
+ * mdAnswer 白底浮起主角，空白输入兜底「（空）」——「无内容」不得做成全抽屉视觉
+ * 最重的主体，空答复兜底由分区模板按状态给人话（D8/D9）；drawerLogInner 诊断日志
+ * 区（标题「诊断日志（stdout / stderr 尾部）」由分区模板携带）：默认 md 渲染、
+ * 恒显 stdout/stderr 两段、空段兜底「（空）」（hub 旧跳过空段形态废除，D11）；
+ * 原文视图统一单 pre 双段（stdout:/stderr: 行前缀）。切换态由调用方经参数传入
+ * （存各自 S.drawer.logRaw）。诊断日志渲染条件（stdout_tail||stderr_tail）与
+ * 「最多保留各 64KiB。」保留期说明由分区模板携带，双端同文。
+ * drawerAnswerHtml 最终答复区（阶段 D 必须修 4，D9 状态优先）：终态判定先行——
+ * cancelled + result=null 是后端合法态（cancel.go Result 留空），不得落「尚未到
+ * 终态」误导兜底，按无答复人话兜底；仅非终态且无结果才显示「尚未到终态」。 */
+function mdAnswer(text) {
+  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
+}
+function drawerAnswerHtml(t, res, needs) {
+  return `<h3>最终答复</h3>${!res
+    ? TERMINAL.has(t.status)
+      ? '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>'
+      : `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
+    : res.final_answer ? mdAnswer(res.final_answer)
+    : needs ? '<p class="muted">结果还没确认——这个任务结果拿不准，等你核对。</p>'
+    : res.stdout_tail ? '<p class="muted">该任务没有单独的文本答复，输出内容见下方诊断日志与产物。</p>'
+    : '<p class="muted">该任务没有文本答复（例如等待类任务）；如有文件输出，见下方产物列表。</p>'}`;
+}
+function drawerLogInner(res, raw) {
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
+  if (raw) return `${head}<pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre>`;
+  const sec = (label, tail) => `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail || '') || '<p class="muted">（空）</p>'}</div>`;
+  return head + sec('stdout', res.stdout_tail) + sec('stderr', res.stderr_tail);
+}
+/* ===== 抽屉答复与日志 shared block end ===== */
+
+/* ===== 抽屉分区更新 shared block begin ===== */
+/* 双端抽屉稳定 DOM 机制（D22 硬验收，SPEC 六.五 第三条局部更新铁律）：首次打开
+ * 建壳（drawerShellHtml 稳定分区容器），刷新一律 drawerZonesApply 分区 diff——
+ * 分区 HTML 与缓存一致即跳过（数据无变化不碰 DOM：details 开合、原文模式、输入
+ * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
+ * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
+ * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
+ * 动画只随壳播放一次，分区更新不重放。 */
+const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
+function drawerZoneSwap(el, html) {
+  const open = [...el.querySelectorAll('details')].map(d => d.open);
+  el.innerHTML = html;
+  [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
+}
+function drawerZonesApply(root, zones, cache) {
+  let touched = false;
+  for (const name of DRAWER_ZONES) {
+    const html = zones[name] || '';
+    if (cache[name] === html) continue;
+    const el = root.querySelector(`[data-zone="${name}"]`);
+    if (!el) continue;
+    cache[name] = html;
+    drawerZoneSwap(el, html);
+    touched = true;
+  }
+  return touched;
+}
+/* ===== 抽屉分区更新 shared block end ===== */
 
 /* 通知渠道类型与事件订阅（standalone 通知补盲区，2026-10-24）：口径与 hub 控制台
  * 「设置 → 通知」一致，唯 node 不提供 inbox（站内通知为 hub 控制台铃铛专属，
@@ -674,6 +791,16 @@ function cfgField(idx, field, label, value, type = 'text') {
  * 数据照常拉，表格 DOM 不重绘，抽屉内输入不丢）。 */
 let cfgEdit = null;    // {idx, snap} 打开中的编辑抽屉；null=无编辑会话
 let cfgSaving = false; // 抽屉保存在途：收抽屉一律暂拒（防「取消还原」与在途 PUT 竞态分叉）
+// playDrawerOpen 抽屉入场动画（D1 对齐 hub 层生命周期，2026-10-25 抽屉统一）：内容
+// 已渲染 → 强制一次布局提交初始态 → 下一帧加 .open 触发过渡；层已关/被换后迟到的
+// 帧不得点亮旧层（overlay 已随 innerHTML 清理消失，?. 自然短路）。任务/能力配置/
+// 通知表单三个抽屉同壳同动效家族。
+function playDrawerOpen() {
+  const ov = $('#layer .overlay');
+  if (!ov) return;
+  void ov.offsetWidth;
+  requestAnimationFrame(() => ov.classList.add('open'));
+}
 function openCfgDrawer(idx) {
   const a = S.cfg.agents[idx];
   if (!a) return;
@@ -681,6 +808,7 @@ function openCfgDrawer(idx) {
   if (cfgEdit && S.cfg.agents[cfgEdit.idx]) S.cfg.agents[cfgEdit.idx] = cfgEdit.snap; // 换行编辑（UI 不可达，防御）：旧行先还原
   cfgEdit = { idx, snap: JSON.parse(JSON.stringify(a)) };
   $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="cfg-drawer">${cfgDrawerView(a, idx)}</div></div>`;
+  playDrawerOpen();
   $('#layer').addEventListener('click', cfgMaskClose); // 具名引用重复注册幂等去重（与任务抽屉遮罩关闭同机制）
 }
 function cfgMaskClose(e) {
@@ -937,6 +1065,7 @@ function openNotifyForm(ch) {
   if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
   if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
   $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="notify-drawer">${notifyFormHtml(ch)}</div></div>`;
+  playDrawerOpen();
   $('#layer').addEventListener('click', nfMaskClose); // 具名引用重复注册幂等去重
 }
 function nfMaskClose(e) {
@@ -1243,15 +1372,24 @@ async function copyPrimeMcp() {
   }
 }
 
-/* ---------- 任务详情抽屉 ---------- */
+/* ---------- 任务详情抽屉 ----------
+ * 稳定 DOM（D22 硬验收，SPEC 六.五 第三条）：openDrawer 建壳（role=dialog + 稳定
+ * 分区容器，对齐 hub 壳层无障碍基线），此后刷新一律 refreshDrawer → drawerZonesApply
+ * 分区 diff 局部写入；details 开合/原文模式/焦点/滚动随未动分区保持，数据无变化
+ * 不碰 DOM；迟到请求按抽屉会话序号（drawerSeq）+ 请求序号（drawerReqSeq）丢弃；
+ * 入场动画只随壳播放一次。终态停轮询是数据面事实（node 账本终态不可变、review 不
+ * 回流），非 DOM 稳定性的替代方案。 */
 let drawerSeq = 0;       // 抽屉会话序号：防被关/被换（codex 第三轮复测）
 let drawerReqSeq = 0;    // 抽屉内请求序号：同抽屉多次刷新的乱序应答守卫（同上）
 async function openDrawer(taskID) {
   closeDrawer();
   const seq = ++drawerSeq;
-  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="drawer"><p class="muted">加载中…</p></div></div>`;
-  $('#layer').addEventListener('click', e => { if (e.target.classList.contains('overlay')) closeDrawer(); });
-  S.drawer = { id: taskID, timer: null, seq };
+  const back = document.activeElement && document.activeElement !== document.body ? document.activeElement : null; // 关闭焦点返回（D1 对齐 hub）
+  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">${drawerShellHtml()}</section></div>`;
+  $('#drawer').focus();
+  playDrawerOpen();   // 入场动画只随壳播放一次；分区刷新不重放（D22）
+  $('#layer').addEventListener('click', drawerMaskClose); // 具名引用重复注册幂等去重（与 cfg 抽屉遮罩关闭同机制）
+  S.drawer = { id: taskID, timer: null, seq, zones: {}, returnFocus: back };
   await refreshDrawer(seq);
   // 迟到守卫：首刷返回前抽屉被关闭（S.drawer=null）或被更快的新抽屉替换（seq 不符）
   if (!S.drawer || S.drawer.seq !== seq) return;
@@ -1262,11 +1400,22 @@ async function openDrawer(taskID) {
     if (S.drawer && (!t || !TERMINAL.has(t.status))) refreshDrawer(seq);
   }, 5000);
 }
+function drawerMaskClose(e) {
+  if (!S.drawer) return;   // 抽屉已关/换成 cfg 抽屉时本监听不动作（免隐式耦合）
+  if (e.target.classList.contains('overlay')) closeDrawer();
+}
 function closeDrawer() {
+  /* 关闭为直清、无 hub 的 280ms 出场动画——阶段 D 建议修 8 明确豁免（SPEC 六.五
+   * 第六条白名单）：node #layer 是任务/能力配置/通知三抽屉共用的直清家族，
+   * openDrawer/openCfgDrawer/openNotifyForm 让位路径要求立即清场，未引入 hub
+   * layerGen 世代机制前不做关闭动画；直清同时使 drawerSeq++ 即刻作废在途应答，
+   * 不存在 closing 窗口期的迟到应答竞态面。 */
   if (S.drawer?.timer) clearInterval(S.drawer.timer);
+  const back = S.drawer?.returnFocus;
   S.drawer = null;
   drawerSeq++;   // 在途 refreshDrawer 应答全部作废
   $('#layer').innerHTML = '';
+  if (back && back.isConnected) back.focus();   // 失存（轮询重建使行消失等）不强求
 }
 // taskOrigin 任务来源判定（功能性修复 7，2026-10-22）：以「我的任务」留痕的
 // origin 字段为准（后端自本地账本补）；留痕仅由本机派单写入，无 origin 的旧
@@ -1283,22 +1432,38 @@ async function refreshDrawer(seq) {
   const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(drawer.id)).catch(() => null);
   if (!S.drawer || S.drawer.seq !== seq || reqSeq !== drawerReqSeq) return;
   if (!r || r.code !== 200) {
-    $('#drawer').innerHTML = `<div class="row"><h2>${esc(S.drawer.id)}</h2>${button('×', 'close-drawer', 'close')}</div>
-      <div class="notice warn">任务查询失败${r ? ' · ' + errLine(r.data) : '（网络）'}。可能已过保留期（终态 24h / 离线 7 天）。</div>
-      <p class="footer-note">下一步：回到${button('我的任务', 'close-drawer', 'link')}列表。</p>`;
+    // 查询失败整层错误壳（白名单三处层容器级重建之一）：重置分区缓存后仍走分区写入
+    const root = $('#drawer');
+    if (!root) return;
+    S.drawer.zones = {};
+    drawerZonesApply(root, {
+      head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(drawer.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>`,
+      intro: `<div class="notice warn">任务查询失败${r ? ' · ' + errLine(r.data) : '（网络）'}。可能已过保留期（终态 24h / 离线 7 天）。</div>
+      <p class="footer-note">下一步：回到${button('我的任务', 'close-drawer', 'link')}列表。</p>`,
+    }, S.drawer.zones);
     return;
   }
   const t = r.data;
   S.drawer.task = t;
   S.live[t.id] = t;
-  $('#drawer').innerHTML = taskDrawerHtml(t);
+  const root = $('#drawer');
+  if (root) drawerZonesApply(root, taskDrawerZones(t), S.drawer.zones);
 }
 
-// taskDrawerHtml 任务抽屉正文（refreshDrawer 渲染用；「查看原文」切换只重绘
-// #log-wrap 不走全量，见 logSectionHtml）。读 t 与全局 S（taskOrigin/S.agents）。
-function taskDrawerHtml(t) {
+// syncDrawerZones 以当前 S.drawer.task 重算分区并 diff 写入（log-raw 切换等
+// 本地状态变化共用此入口；数据无变化时零 DOM 写）。
+function syncDrawerZones() {
+  const root = $('#drawer');
+  if (root && S.drawer?.task) drawerZonesApply(root, taskDrawerZones(S.drawer.task), S.drawer.zones);
+}
+
+// taskDrawerZones 任务抽屉分区内容（D22：壳由 drawerShellHtml 建一次，本函数只
+// 产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
+// 层级（e821bf8，SPEC 六.五 第二条）与 hub 同构：介绍条 → 最终答复（白底浮起
+// 主角）→ 诊断日志（折叠配角）→ 产物 → 时间线 → 归档/下一步；fail/input/review
+// 三分区为 hub 独有白名单，node 恒空。头部/文案/时间口径与 hub 同源（D2/D17/D18/D21）。
+function taskDrawerZones(t) {
   const res = t.result;
-  const errTxt = res?.error ? ERRORS[res.error.split(';')[0]] || res.error : '';
   // 双路径语义（功能性修复 7）：本机任务（origin=local，本机账本真相源）产物区
   // 从本机账本直出——产物文件就在本机 workdir/outputs 下，展示本机绝对路径；
   // 仅 hub 下发任务保留「经 hub 取回」指引。
@@ -1307,46 +1472,48 @@ function taskDrawerHtml(t) {
   const absPath = a => (agent?.workdir ? agent.workdir.replace(/\/+$/, '') + '/' : '') + a.path;
   // 产物说明段仅在有产物时计算（第六轮修复 3）：无产物完成/运行中/needs_review 的
   // res.artifacts 为 null/空数组——原实现无条件读 res.artifacts[0] 直接 TypeError，
-  // 抽屉卡「加载中」；下方模板只在 res.artifacts?.length 为真时插值本段，空串不渲染。
+  // 抽屉卡「加载中」；空串不渲染。
   const artifactNote = !res?.artifacts?.length ? '' : local
-    ? `<p class="muted small">产物在本机：<code>${esc(absPath(res.artifacts[0]))}</code>${
+    ? `<p class="footer-note">产物在本机：<code>${esc(absPath(res.artifacts[0]))}</code>${
         res.artifacts.length > 1 ? `（共 ${res.artifacts.length} 个，均在本机 outputs 目录）` : '（workdir/outputs 下，本机直接打开即可，无需经 hub 取回）'}</p>`
-    : `<p class="muted small">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>`;
-  const reviewNote = local
-    ? `<div class="notice warn"><b>这个任务结果拿不准，等你确认——执行到一半机器重启了，请勿重新提交</b>（这是单独的「等你确认」状态，不是失败；核对结论由本机主人在本控制台确认）。</div>`
-    : `<div class="notice warn"><b>这个任务结果拿不准，等你确认——执行到一半机器重启了，请勿重新提交</b>（这是单独的「等你确认」状态，不是失败；核对记录在 hub 控制台登记）。</div>`;
-  return `<div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2>${button('×', 'close-drawer', 'close')}</div>
-    <p class="muted small">任务号 <code>${esc(t.id)}</code> · 追踪 <code>${esc(t.trace_id || '—')}</code> · 提交方 ${esc(t.submitted_by || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>
-    <ul class="timeline" style="list-style:none;padding:0;margin:14px 0">
-      <li>创建 ${esc(timeFull(t.created_at))} · 更新 ${esc(timeFull(t.updated_at))}</li>
-      ${res ? `<li>开始 ${esc(timeFull(res.started_at))} · 结束 ${esc(timeFull(res.finished_at))} · 退出码 ${esc(res.exit_code)}</li>` : ''}
-    </ul>
-    ${t.status === 'needs_review' ? reviewNote : ''}
-    ${errTxt || res?.error ? `<div class="notice warn"><b>${esc(errTxt || res.error)}</b> · <code>${esc(res.error)}</code></div>` : ''}
-    ${!res ? `<p class="muted">尚未到终态（${esc(STATES[t.status] || t.status)}）。抽屉每 5s 自动刷新，可先去忙别的。</p>`
-      : `<h3>最终答复</h3>${mdAnswer(res.final_answer)}
-         ${res.artifacts?.length ? `<h3>产物（${res.artifacts.length} 个，保留至确认后 24h）</h3>${res.artifacts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(a.sha256.slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('')}${artifactNote}` : ''}
-         <details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${logSectionHtml(res)}</div></details>`}
-    <div class="row spaced"><small class="muted">终态自带下一步：</small>
-      <span class="actions">${t.status === 'completed' ? button('查看全部任务', 'close-drawer', 'link') : t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') + button('查看全部任务', 'close-drawer', 'link') : button('查看全部任务', 'close-drawer', 'link')}</span></div>`;
+    : `<p class="footer-note">产物内容保留在执行机本机；经 hub 管理面 <code>GET /api/v1/tasks/{id}/artifacts/{index}</code> 取回。</p>`;
+  // 状态介绍条（D4 统一：五态人话双端同有；needs_review 由 D18 主文案+D19 如实
+  // 指引的 reviewNote 承担，不再叠第二条告警）。
+  const statusIntro = t.status === 'needs_review' ? ''
+    : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
+    : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
+    : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
+    : '任务仍在进行，抽屉每 5 秒自动刷新。';
+  // D19 文案如实修正（阶段 B 裁决）：node 无核对登记端点（localapi 未提供），
+  // 旧文案「核对结论由本机主人在本控制台确认」承诺了不存在的能力——改为如实
+  // 指路 hub；主文案与 hub 版逐字同源（D18）。
+  const reviewNote = `<div class="notice warn"><b>这个任务结果拿不准，等你确认：执行到一半机器重启了，请核对后登记结论，不要重新提交同一任务。</b>${
+    local ? '<br>本控制台暂不支持登记核对结论，请人工核查实际结果，并到 hub 管理台登记。' : '<br>核对结论请到 hub 管理台登记。'}</div>`;
+  return {
+    head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(t.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
+    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>`,
+    intro: `${t.status === 'needs_review' ? reviewNote : `<div class="notice">${esc(statusIntro)}</div>`}
+    ${taskErrorNotice(res, t.status === 'needs_review')}`,
+    answer: drawerAnswerHtml(t, res, t.status === 'needs_review'),
+    logs: res && (res.stdout_tail || res.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${drawerLogInner(res, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
+    artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
+    timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
+    next: TERMINAL.has(t.status) && t.status !== 'needs_review'
+      ? `<div class="notice">任务已归档前保留 24 小时。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
+      : '',
+  };
 }
 
-// mdAnswer 最终答复渲染态（t20261023-969e：agent 产出正文按 Markdown 渲染）；
-// mdToHtml 对空白输入返回空串，兜底「（空）」人话。
-function mdAnswer(text) {
-  return `<div class="md-body md-answer">${mdToHtml(text) || '<p class="muted">（空）</p>'}</div>`;
-}
-
-// logSectionHtml 诊断日志区（stdout / stderr 尾部）：默认 md 渲染 + 「查看原文」
-// 切换（df -h 类空格对齐的进程输出被 md 解析会散架，agent 的 md 结构化日志又常
-// 在——默认渲染满足主诉求，误渲染一键回原文）。切换态存 S.drawer.logRaw；切换
-// 只重绘 #log-wrap，details 开合态不被整抽屉重绘冲掉。原文视图沿用单 pre 双段。
-function logSectionHtml(res) {
-  const raw = !!S.drawer?.logRaw;
-  const toggle = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；空格对齐的进程输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')}</div>`;
-  if (raw) return `${toggle}<pre>stdout:\n${esc(res.stdout_tail || '（空）')}\n\nstderr:\n${esc(res.stderr_tail || '（空）')}</pre>`;
-  const sec = (label, tail) => `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail || '') || '<p class="muted">（空）</p>'}</div>`;
-  return `${toggle}${sec('stdout', res.stdout_tail)}${sec('stderr', res.stderr_tail)}`;
+// artifactsHtml 产物区（D13/D14 统一：恒渲染 + 空态文案双端同文；标题「产物文件」
+// 同文。行内形态差异为 SPEC 六.五 白名单——node 本机绝对路径指引，hub 行内取回按钮）。
+function artifactsHtml(t) {
+  const arts = t.result?.artifacts || [];
+  if (!arts.length) return '<p class="muted">暂无已登记产物。中断任务不推断存在可交付产物。</p>';
+  const local = taskOrigin(t.id) === 'local';
+  const agent = S.agents.find(x => x.name === t.target_agent);
+  const absPath = a => (agent?.workdir ? agent.workdir.replace(/\/+$/, '') + '/' : '') + a.path;
+  return arts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('');
 }
 
 /* ---------- 复制诊断信息 ---------- */
@@ -1457,11 +1624,10 @@ document.addEventListener('click', e => {
       case 'open-task': openDrawer(arg); return;
       case 'reopen-form': closeDrawer(); route(); focusForm(); return;
       case 'close-drawer': closeDrawer(); return;
-      case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：只重绘 #log-wrap
+      case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：状态落 S.drawer 后分区重算
         if (!S.drawer?.task?.result) return;
         S.drawer.logRaw = !S.drawer.logRaw;
-        const wrap = $('#log-wrap');
-        if (wrap) wrap.innerHTML = logSectionHtml(S.drawer.task.result);
+        syncDrawerZones();   // 仅 logs 分区内容变化：缓存 diff 后只重写该分区，details 开合经 drawerZoneSwap 回放
         return;
       }
     }
