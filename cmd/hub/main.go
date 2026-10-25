@@ -21,6 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/mtl802/swarmmind/internal/decision"
 	"github.com/mtl802/swarmmind/internal/hub/api"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
@@ -44,6 +45,14 @@ type hubConfig struct {
 		WebhookURL string `yaml:"webhook_url"` // 旧版任务终态通知 webhook（兼容入口：启动时一次性导入为通知渠道）
 		Format     string `yaml:"format"`      // raw（默认）| feishu（导入时映射渠道类型）
 	} `yaml:"notify"` // 任务终态 IM 通知旧配置段（P4③ 控制台化后仅作一次性导入入口；日常配置改用管理台「设置 → 通知」）
+	Decision struct {
+		Provider   string `yaml:"provider"`    // llm-as-jev（P5.1 D1 唯一启用值）；留空/off 不启用
+		Model      string `yaml:"model"`       // 决策模型（缺省 glm-5.3-flash）
+		BaseURL    string `yaml:"base_url"`    // OpenAI 兼容端点（缺省 GLM coding plan）
+		APIKey     string `yaml:"api_key"`     // 一级密钥；留空回落 GLM_API_KEY 环境变量，再回落 swarm-prime-home
+		PrimeHome  string `yaml:"prime_home"`  // swarm-prime-home 路径；空回落 SWARM_PRIME_HOME，再回落 $HOME/swarm-prime-home
+		TimeoutSec int    `yaml:"timeout_sec"` // 单次建议预算秒数（缺省 15，GLM 尾延迟实测口径）
+	} `yaml:"decision"` // 派发建议决策服务（P5.1 D1，RFC-jev-dispatch）：决策是建议非必经，未启用/失败均不阻塞派单
 }
 
 func main() {
@@ -207,9 +216,17 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	if cfg.TLS.InsecureLoopback {
 		nodeScheme = "ws"
 	}
+	// 派发建议决策服务（P5.1 D1）：key 三级解析（配置→环境→prime-home），未启用
+	// 返回不可用实例——端点形态稳定（恒 200 降级），派单路径不依赖它。
+	homeDir, _ := os.UserHomeDir()
+	decisionSvc := decision.New(decision.Settings{
+		Provider: cfg.Decision.Provider, Model: cfg.Decision.Model, BaseURL: cfg.Decision.BaseURL,
+		APIKey: cfg.Decision.APIKey, PrimeHome: cfg.Decision.PrimeHome, TimeoutSec: cfg.Decision.TimeoutSec,
+	}, os.Getenv, homeDir, log.Printf)
 	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{
 		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
 		Notify:    notifier,
+		Decision:  decisionSvc,
 		NodeEntry: &api.NodeEntryConfig{Scheme: nodeScheme, Listen: cfg.NodeListen},
 		Enroll: &api.EnrollConfig{
 			SourceDir: envDefault("SWARM_SOURCE_DIR", "/opt/swarmmind-src"),

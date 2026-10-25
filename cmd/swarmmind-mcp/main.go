@@ -27,9 +27,10 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具：hub 模式 16 个——nodes / agents / submit / status / wait / artifact /
+// 工具：hub 模式 17 个——nodes / agents / submit / status / wait / artifact /
 // tasks（任务列表，P4⑤：正在跑/最近完成/失败速览，hub 视角，node 模式不设）/
-// decide + group_create / group_list / group_say / group_messages /
+// decide + dispatch_suggest（派发建议，P5.1 D1，hub 决策服务，node 模式不装配）/
+// group_create / group_list / group_say / group_messages /
 // group_close（群聊协作空间，GROUP-RFC 六 MVP）+ work_create / work_get /
 // work_list（工作单，P5 W1：建单幂等/读档/列表，hub 模式专属，node 模式不装
 // 配不静默降级）。node 模式 6 个——nodes（本机节点信息单条）/ agents（本机
@@ -198,7 +199,8 @@ func (nodeBackend) initResult() map[string]any {
 	}
 }
 
-// nodeTools node 模式工具清单：本机六件套（全网目录/群聊/decide 为 hub 专属）。
+// nodeTools node 模式工具清单：本机六件套（全网目录/群聊/decide/dispatch_suggest
+// 为 hub 专属——决策服务在 hub 内嵌，node 无此能力，不静默降级）。
 func (nodeBackend) tools() []toolDef {
 	return []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机统筹、hub 连接与执行账本三态计数", InputSchema: toolObj(map[string]any{})},
@@ -310,6 +312,9 @@ func tools() []toolDef {
 			"subtask_description": toolStr("子任务描述（做什么，越具体越准）"),
 			"capability_options":  toolArr("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
 		}, "subtask_description", "capability_options")},
+		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选概率分布。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
+			"goal": toolStr("任务目标/需求描述（一句话说清要做什么，越具体越准；工作单步骤描述也可直接传入）"),
+		}, "goal")},
 		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。返回群 ID", InputSchema: toolObj(map[string]any{
 			"goal":    toolStr("群目标（一句话说清要讨论出什么）"),
 			"members": toolArr("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
@@ -1721,6 +1726,87 @@ func overlapScore(a, b map[string]struct{}) (int, []string) {
 	return len(hits), hits
 }
 
+/* ---------- swarmmind_dispatch_suggest：hub 决策服务建议（P5.1 D1） ---------- */
+
+// toolDispatchSuggest 派发建议（POST /api/v1/dispatch-suggest，hub 模式专属）：
+// 候选集由 hub 从自身目录组装（在线 ∩ exposed），本工具不带候选参数。决策是建议
+// 非必经（RFC-jev-dispatch 三）：无建议/降级是正常应答（isError=false 人话转述），
+// 只有网络故障与参数错误才 isError=true。
+func toolDispatchSuggest(args map[string]any) (string, error) {
+	goal := strings.TrimSpace(argString(args["goal"], args["goal"] != nil))
+	if goal == "" {
+		return "", fmt.Errorf("goal 必填（一句话描述任务需求，越具体越准；工作单步骤描述也可直接传入）")
+	}
+	code, data, err := hubAPI("POST", "/api/v1/dispatch-suggest", map[string]any{"goal": goal})
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", fmt.Errorf("hub 返回 %d: %s", code, truncate(data))
+	}
+	var out struct {
+		Suggestion *struct {
+			TargetAgent string `json:"target_agent"`
+			TargetNode  string `json:"target_node"`
+		} `json:"suggestion"`
+		Confidence    float64            `json:"confidence"`
+		Probabilities map[string]float64 `json:"probabilities"`
+		Provider      string             `json:"provider"`
+		Degraded      bool               `json:"degraded"`
+		Note          string             `json:"note"`
+		Reason        string             `json:"reason"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	if out.Suggestion == nil {
+		note := out.Note
+		if note == "" {
+			note = "决策模型未给出建议"
+		}
+		return fmt.Sprintf("暂无建议：%s\n决策是建议不是必经——可直接 swarmmind_submit 手动指定执行者派单，不被此阻塞。", note), nil
+	}
+	var b strings.Builder
+	prov := out.Provider
+	if prov == "" {
+		prov = "决策服务"
+	}
+	fmt.Fprintf(&b, "建议派给 %s @ %s（%s）\n置信度：%.0f%%\n",
+		out.Suggestion.TargetAgent, out.Suggestion.TargetNode, prov, out.Confidence*100)
+	if out.Reason != "" {
+		fmt.Fprintf(&b, "理由：%s\n", out.Reason)
+	}
+	if len(out.Probabilities) > 1 {
+		// 概率分布按置信度降序（候选多时只列非零前 8 个，防刷屏）。
+		type kv struct {
+			k string
+			v float64
+		}
+		rows := make([]kv, 0, len(out.Probabilities))
+		for k, v := range out.Probabilities {
+			rows = append(rows, kv{k, v})
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].v != rows[j].v {
+				return rows[i].v > rows[j].v
+			}
+			return rows[i].k < rows[j].k
+		})
+		parts := make([]string, 0, 8)
+		for i, r := range rows {
+			if i == 8 || r.v <= 0 {
+				break
+			}
+			parts = append(parts, fmt.Sprintf("%s %.0f%%", r.k, r.v*100))
+		}
+		if len(parts) > 0 {
+			fmt.Fprintf(&b, "候选概率：%s\n", strings.Join(parts, "、"))
+		}
+	}
+	b.WriteString("建议可自行覆盖：swarmmind_submit 派单时不必采用本建议。")
+	return b.String(), nil
+}
+
 func statusCN(s string) string {
 	return map[string]string{
 		"submitted": "已提交", "offered": "已投递", "acknowledged": "已接收",
@@ -2377,6 +2463,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolTasks(args)
 	case "swarmmind_decide":
 		text, err = toolDecide(args)
+	case "swarmmind_dispatch_suggest":
+		text, err = toolDispatchSuggest(args)
 	case "swarmmind_group_create":
 		text, err = toolGroupCreate(args)
 	case "swarmmind_group_list":

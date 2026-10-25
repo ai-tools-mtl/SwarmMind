@@ -566,7 +566,9 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 6. **合理差异白名单**（不强求对称，入档即豁免）：hub 管理面独有——导出任务 JSON、取消任务、人工核对
    表单/记录、任务输入区、失败原因独立区、产物中继取回按钮、群组词典（GROUP_STATES 徽标兜底，hub
    群聊页专属，node badge 不取词）、**工作单视图（P5 W3：#/works 列表/详情抽屉/接管/续派/处置与
-   WORK_STATES 词典，hub 编排面专属——node 无 hub 全网工作单数据源，node 控制台不提供）**；node 执行者独有——产物本机绝对路径指引、回表单重新派单、来源
+   WORK_STATES 词典，hub 编排面专属——node 无 hub 全网工作单数据源，node 控制台不提供）**、**派单页
+   派发建议区（P5.1 D1：「获取派发建议/建议派给 X（本地决策模型）一键采纳/重新获取」建议四态——决策
+   服务 hub 内嵌，node 无 hub 全网候选目录，node 派单页不提供）**；node 执行者独有——产物本机绝对路径指引、回表单重新派单、来源
    （本机派单/hub 下发）标注、抽屉关闭直清（无 hub 的 280ms 出场动画：node #layer 为任务/能力配置/
    通知三抽屉共用的直清家族，让位路径要求立即清场，未引入 hub layerGen 世代机制前豁免，阶段 D 建议
    修 8）。白名单外的新增差异按漂移处理。
@@ -609,6 +611,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_work_list | GET /api/v1/works | 列出全部工作单：ID/目标/状态/步骤与尝试数（发现历史未完成工作） |
 | swarmmind_work_takeover | POST /api/v1/works/{id}/takeover | 接管工作单（P5 W2 断点续管，CAS 单事务）：expected_term 代校验（同刻仅一方接管成功，后来者 409 work_term_conflict）；相同操作重放幂等返回现状不新增事件；旧任期派发即被拒、其在途任务结果照常回流。接管成功后经 swarmmind_submit 携 work_ref/step_seq/prime_term 续派 |
 | swarmmind_work_collect | POST /api/v1/works/{id}/collect | 收集并关闭工作单（P5 W3，单事务终态闭合；审查修订：全部步骤终态**且全部尝试收束**才可收集（409 work_steps_open），abandoned 下未派发步骤随关闭记 skipped）；outcome 缺省/done 要求全部步骤 done，部分完成 hub 拒绝（409 work_steps_not_done，部分报告不误关闭），放弃剩余步骤用 outcome=abandoned；report 必填（任务清理后的执行摘要，随单保留 30 天）；相同请求重放幂等回执（三同源 200+dup，零事件）；终态后不可再派发/接管/收集（work_closed） |
+| swarmmind_dispatch_suggest | POST /api/v1/dispatch-suggest | 派发建议查询（P5.1 D1，RFC-jev-dispatch）：给定任务目标，由 hub 决策服务（llm-as-jev，GLM）从网内在线能力（agent@node 候选，hub 目录真相源组装）中推荐执行者，附校准置信度与候选概率分布；建议可覆盖非必经——链路故障（provider 不可用/超时）200 + suggestion:null + degraded:true + note 固定人话类别（上游原文只进 hub 日志）；候选为空/模型判断均不适合 200 + suggestion:null + degraded:false（note 区分），不阻塞派单（hub 模式专属，node 模式不装配） |
 
 ### 语义约定
 
@@ -644,6 +647,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 10. **P5 Work 工作单同步声明（2026-10-25，W1 批）**：工作单（RFC-work-resume，执行事实与断点接管）W1 交付模型+建单幂等+只读查询，本表补 `swarmmind_work_create/get/list` 三行；REST `/api/v1/works*` 组为 MCP 传输载体与 W3 管理台只读视图的数据源，建单入口 v1 仅 Prime/MCP（开放问题裁决 1：管理台无手工建单）。三工具 hub 模式专属，node 模式不装配（不静默降级）。`swarmmind_work_collect/takeover`（收集/接管续派）随 W2/W3 交付同批补行，不预占工具名。Work 无泛化 PUT/DELETE（状态只由生命周期动作推进，RFC 四.8），不设 update/delete 工具。
 11. **P5 Work W2 绑定派发与接管同步声明（2026-10-25，W2 批）**：原子接管+绑定提交+多次尝试+终态回写（RFC-work-resume W2 行）。本表补 `swarmmind_work_takeover` 一行；`swarmmind_submit` 行更新（work_ref/step_seq/prime_term 三参成组绑定派发，援引规则 7 参数扩展；step_seq 运行时严格校验 ≥1 整数不截断；node 本机直执行模式三参显式拒绝不静默）。绑定派发同键重试短路于幂等查重不新增尝试（任务 24h 清理后同键重放命中工作单去重证据，响应 task_gone 标注、不重新执行）；接管成功前/旧任期的绑定派发 409 work_term_conflict、未建立任期 409 work_no_term、完成步骤再派 409 work_step_locked。`swarmmind_status/wait` 返回体透传工作单绑定展示行（work_ref/work_step_seq/attempt_ref），不构成新工具。`swarmmind_work_collect`（收集/关闭）仍随 W3 同批补行。
 12. **P5 Work W3 收集关闭+接口补全同步声明（2026-10-25，W3 批）**：收集/关闭+清理补全（RFC-work-resume W3 行）。本表补 `swarmmind_work_collect` 一行（hub-only，node 模式不装配）；`swarmmind_work_get` 返回体透传 `tasks_gone` 读档注解、`swarmmind_work_list` 透传 `done_steps`（展示字段，不构成新工具）；工具输出与 REST 详情全量对齐（work_get 附收集报告/幂等键/尝试引用/双指纹/盖章时刻，任务清理后 agent 经 MCP 读得回执行摘要与原键）。收集/关闭/清理契约见六.五「工作单」节（回执幂等、部分报告不误关闭、终态三写入口全闭、Sweep 30 天保留清理）。Prime 提示词同批增补「工作单（多步工作的断点续管）」节（internal/hub/web/app.js PRIME_PROMPT 与 deploy/prime/PRIME.md 两处一致，web 包测试锁工具名引用 ⊆ 实际装配集+双处同文；幂等键规范含工作单命名空间维度与接管重放口径）——提示词为行为约定，不构成接口面变更。管理台工作单视图为 hub 控制台人工操作面（六.五白名单入档），无 MCP 对应物（MCP 工具面即 agent 侧全部合法能力）。
+13. **P5.1 D1 派发建议同步声明（2026-10-26，Jev 决策第一批）**：`POST /api/v1/dispatch-suggest`（只读建议查询）与 `swarmmind_dispatch_suggest` 同批交付（本表补行）。决策是建议非必经（RFC-jev-dispatch 三）：决策服务（internal/decision，D1=llm-as-jev/GLM-5.3-Flash，key 三级解析 decision.api_key → GLM_API_KEY 环境变量 → swarm-prime-home provider 配置，不硬编码）链路故障（未启用/网络错误/超时/解析失败/目标越权）一律 HTTP 200 + `suggestion:null` + `degraded:true` + note 固定人话类别（上游原始错误只进 hub 日志，不泄入应答，2026-10-26 codex 审 D1 ④闭合）；正常无建议（网内无在线候选、模型判断候选均不适合）同样 200 + `suggestion:null` 但 `degraded:false`，由 note 人话区分——degraded 只标链路故障，**绝不阻塞派单**；仅请求体非法（goal/step_desc 均空）400。概率分布恒覆盖全部候选且和为 1：模型缺失概率按均匀/均值补齐、confidence 缺失按均匀低置信兜底，不凭空补 100%（同日 codex 审 D1 ①闭合）。候选集由 hub 目录真相源组装（在线 ∩ exposed，稳定序），请求不携带候选参数。node 模式不装配该工具（决策服务在 hub 内嵌，node 无此能力，不静默降级）。管理台派单页「建议派给 X（本地决策模型）」一键采纳为 hub 控制台人工动线（建议可覆盖，采纳即回填两级下拉，无独立写接口）。置信度展示按 RFC v1.1 裁决②保守处理：REST/MCP 透传 confidence/probabilities，控制台仅展示建议+来源标签（本地决策模型），不上墙百分比。
 
 ## 七、验证标准（DoD 十一条）
 
