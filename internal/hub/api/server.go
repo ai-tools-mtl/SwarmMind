@@ -125,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
 	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))                 // 工作单创建（P5 W1，幂等）
 	mux.HandleFunc("POST /api/v1/works/{id}/takeover", s.auth(s.handleWorkTakeover)) // 原子接管（P5 W2，CAS）
+	mux.HandleFunc("POST /api/v1/works/{id}/collect", s.auth(s.handleWorkCollect))   // 收集/关闭（P5 W3，终态闭合）
 	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
 	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))

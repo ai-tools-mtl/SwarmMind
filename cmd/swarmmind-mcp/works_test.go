@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -162,6 +163,14 @@ func TestWorkToolsFullFlow(t *testing.T) {
 // realHubCore 真实 hub 全链基座（暴露 core 供注册 node；其余同 realHub）。
 func realHubCore(t *testing.T) *core.Core {
 	t.Helper()
+	c, _ := realHubCoreBus(t)
+	return c
+}
+
+// realHubCoreBus 同 realHubCore，另回传 bus（W3 收集全链：以 node 端点身份回传
+// 终态结果帧造步骤终态）。
+func realHubCoreBus(t *testing.T) (*core.Core, *transport.Bus) {
+	t.Helper()
 	realHub(t)
 	// realHub 不回传 core：重建一份同配置核心不可行（store 已被占用），这里
 	// 直接经 core 包重开不可取——改为在 realHub 的 server 之外另开 store 会
@@ -204,7 +213,7 @@ func realHubCore(t *testing.T) *core.Core {
 		t.Fatalf("PAT 响应解析失败: %v", err)
 	}
 	hubURL, hubToken = srv.URL, out.Token
-	return c
+	return c, bus
 }
 
 // TestWorkToolsW2BindingAndTakeover W2 六.六 同批（规则 11）：接管工具装配
@@ -368,5 +377,200 @@ func TestNodeSubmitRejectsWorkBinding(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "仅 hub 模式可用") {
 			t.Fatalf("node 模式 %s 应显式拒绝: %v", k, err)
 		}
+	}
+}
+
+// bindSubmitAndFinish 直连 core 绑定派发一步并以 node 端点身份回传终态
+//（MCP 层只验收集工具语义；派发/回写链 W2 已覆盖）。
+func bindSubmitAndFinish(t *testing.T, c *core.Core, bus *transport.Bus, wid, term string, step int64, key, result string) {
+	t.Helper()
+	ack, err := c.Submit(protocol.TaskSubmitRequest{
+		TargetNode: "mac-mini", TargetAgent: "diskcheck",
+		Input:       protocol.TaskInput{Args: []string{"run"}},
+		SubmittedBy: "tester",
+		IdemKey:     key, WorkRef: wid, StepSeq: step, PrimeTerm: term,
+	}, "")
+	if err != nil {
+		t.Fatalf("派发步骤 %d: %v", step, err)
+	}
+	st, res := protocol.ResultCompleted, &protocol.TaskResult{Status: protocol.ResultCompleted, ExitCode: 0, FinalAnswer: "ok"}
+	if result == "failed" {
+		st = protocol.ResultFailed
+		res = &protocol.TaskResult{Status: protocol.ResultFailed, ExitCode: 2, Error: "boom"}
+	} else if result == "needs_review" {
+		st = protocol.ResultNeedsReview
+		res = &protocol.TaskResult{Status: protocol.ResultNeedsReview, ExitCode: 0}
+	}
+	b, err := json.Marshal(protocol.TaskResultPayload{TaskID: ack.TaskID, Status: st, Result: res})
+	if err != nil {
+		t.Fatalf("结果编码: %v", err)
+	}
+	if err := bus.Endpoint("mac-mini").Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub", Payload: b,
+	}); err != nil {
+		t.Fatalf("结果回传: %v", err)
+	}
+}
+
+// TestWorkToolsW3Collect W3 六.六 同批（规则 12）：swarmmind_work_collect 装配
+// （hub-only）、真实全链（建单→绑定派发→终态→收集 done/abandoned/回执）、
+// 部分完成人话报错、空 report 工具层拒绝（请求不发出）、node 模式不装配。
+func TestWorkToolsW3Collect(t *testing.T) {
+	c, bus := realHubCoreBus(t)
+	cards := []protocol.AgentCard{{Name: "diskcheck", Kind: protocol.AgentKindCLI, InputMode: "prompt_text", OutputMode: "answer+artifacts", PermissionMode: "no-shell", ProtocolVer: 1, Exposed: true}}
+	if err := c.RegisterNode("mac-mini", cards); err != nil {
+		t.Fatalf("注册 node: %v", err)
+	}
+	c.SetOnline("mac-mini", true)
+
+	// 工具面：hub 含 collect；node 模式不含（hub-only 同批装配）
+	found := false
+	for _, td := range tools() {
+		if td.Name == "swarmmind_work_collect" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("hub 模式工具清单缺 swarmmind_work_collect")
+	}
+	for _, td := range (nodeBackend{}).tools() {
+		if td.Name == "swarmmind_work_collect" {
+			t.Fatal("node 模式不应装配 swarmmind_work_collect（hub-only）")
+		}
+	}
+
+	// 全链：建单（3 步）→ 逐步绑定派发并到 done 终态 → 收集关闭 done
+	wv, _, err := c.CreateWork(core.WorkCreateRequest{Goal: "W3 收集全链", PrimeTerm: "prime-1", Steps: []core.WorkStepInput{
+		{Desc: "盘点磁盘", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+		{Desc: "盘点内存", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+		{Desc: "汇总", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+	}}, "pat:mcp-test")
+	if err != nil {
+		t.Fatalf("建单: %v", err)
+	}
+	wid := wv.ID
+	for i, key := range []string{"m1", "m2", "m3"} {
+		bindSubmitAndFinish(t, c, bus, wid, "prime-1", int64(i+1), key, "done")
+	}
+	out := mustCall(t, "swarmmind_work_collect", map[string]any{
+		"work_id": wid, "prime_term": "prime-1", "report": "三步全部完成。",
+	})
+	for _, want := range []string{"已收集关闭", "3 步全部完成", "30 天"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("收集输出缺 %q: %s", want, out)
+		}
+	}
+	// 同参重放 → 幂等回执
+	out = mustCall(t, "swarmmind_work_collect", map[string]any{
+		"work_id": wid, "prime_term": "prime-1", "report": "三步全部完成。",
+	})
+	if !strings.Contains(out, "关闭回执") {
+		t.Fatalf("重放应幂等回执: %s", out)
+	}
+	// 终态后再收集（不同报告）→ 人话 work_closed
+	res, rpcErr := callTool("swarmmind_work_collect", map[string]any{
+		"work_id": wid, "prime_term": "prime-1", "report": "另写",
+	})
+	if rpcErr != nil || res["isError"] != true || !strings.Contains(res["content"].([]textContent)[0].Text, "已终态") {
+		t.Fatalf("终态再收集应人话报错: %v %v", rpcErr, res)
+	}
+
+	// W3 审查③：MCP 读档与 REST 全量对齐——报告/创建与盖章时刻/幂等键/尝试引用/
+	// 双指纹经 work_get 可读（任务清理后 Prime 不经 REST 也拿得回执行摘要与原键）；
+	// work_list 透传 done_steps
+	out = mustCall(t, "swarmmind_work_get", map[string]any{"work_id": wid})
+	for _, want := range []string{"收集报告", "三步全部完成。", "键 m1", wid + "#a1", "创建 ", "关闭 ", "保留至"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("work_get 输出缺 %q: %s", want, out)
+		}
+	}
+	if !regexp.MustCompile(`[0-9a-f]{64}`).MatchString(out) {
+		t.Fatalf("work_get 输出应含内容指纹（64 hex 双指纹）: %s", out)
+	}
+	out = mustCall(t, "swarmmind_work_list", nil)
+	if !strings.Contains(out, "3/3 步") {
+		t.Fatalf("work_list 应透传 done_steps（3/3 步）: %s", out)
+	}
+
+	// W3 审查②：失败阻断 + 下游 pending（从未派发）——abandoned 处置放行，
+	// 未派发步骤随关闭记为跳过（needs_review 阻断场景同出口，hub 拒绝误标完成）
+	wv3, _, err := c.CreateWork(core.WorkCreateRequest{Goal: "W3 阻断放弃", PrimeTerm: "prime-1", Steps: []core.WorkStepInput{
+		{Desc: "会失败的一步", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+		{Desc: "永远轮不到的一步", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+	}}, "pat:mcp-test")
+	if err != nil {
+		t.Fatalf("建单 3: %v", err)
+	}
+	bindSubmitAndFinish(t, c, bus, wv3.ID, "prime-1", 1, "q1", "failed")
+	out = mustCall(t, "swarmmind_work_collect", map[string]any{
+		"work_id": wv3.ID, "prime_term": "prime-1", "report": "步骤一失败，放弃剩余。", "outcome": "abandoned",
+	})
+	if !strings.Contains(out, "已处置关闭") || !strings.Contains(out, "0/2 步完成、1 步未派发随关闭跳过") {
+		t.Fatalf("pending 步骤应随放弃关闭记跳过: %s", out)
+	}
+
+	// 部分完成（步骤 2 failed）：缺省 outcome → work_steps_not_done 人话指路；
+	// outcome=abandoned → 处置关闭成功
+	wv2, _, err := c.CreateWork(core.WorkCreateRequest{Goal: "W3 部分完成", PrimeTerm: "prime-1", Steps: []core.WorkStepInput{
+		{Desc: "步骤一", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+		{Desc: "步骤二", TargetNode: "mac-mini", TargetAgent: "diskcheck"},
+	}}, "pat:mcp-test")
+	if err != nil {
+		t.Fatalf("建单 2: %v", err)
+	}
+	wid2 := wv2.ID
+	bindSubmitAndFinish(t, c, bus, wid2, "prime-1", 1, "n1", "done")
+	bindSubmitAndFinish(t, c, bus, wid2, "prime-1", 2, "n2", "failed")
+	res, rpcErr = callTool("swarmmind_work_collect", map[string]any{
+		"work_id": wid2, "prime_term": "prime-1", "report": "x",
+	})
+	if rpcErr != nil || res["isError"] != true ||
+		!strings.Contains(res["content"].([]textContent)[0].Text, "abandoned") {
+		t.Fatalf("部分完成应人话指路 abandoned: %v %v", rpcErr, res)
+	}
+	out = mustCall(t, "swarmmind_work_collect", map[string]any{
+		"work_id": wid2, "prime_term": "prime-1", "report": "步骤二失败，放弃剩余。", "outcome": "abandoned",
+	})
+	if !strings.Contains(out, "已处置关闭") || !strings.Contains(out, "1/2") {
+		t.Fatalf("abandoned 输出: %s", out)
+	}
+
+	// 工具层校验：空 report / 缺任期 / 非法 outcome → 拒绝且请求不发出
+	var seen bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/collect") {
+			seen = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"work":{"id":"w-x","status":"done","steps":[]}}`))
+	}))
+	defer srv.Close()
+	oldURL, oldTok := hubURL, hubToken
+	hubURL, hubToken = srv.URL, "tok"
+	t.Cleanup(func() { hubURL, hubToken = oldURL, oldTok })
+	for _, v := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"空 report", map[string]any{"work_id": "w-1", "prime_term": "t1", "report": "  "}},
+		{"缺 report", map[string]any{"work_id": "w-1", "prime_term": "t1"}},
+		{"缺任期", map[string]any{"work_id": "w-1", "report": "x"}},
+		{"非法 outcome", map[string]any{"work_id": "w-1", "prime_term": "t1", "report": "x", "outcome": "partial"}},
+	} {
+		if _, err := toolWorkCollect(v.args); err == nil {
+			t.Fatalf("%s 应被拒绝", v.name)
+		}
+		if seen {
+			t.Fatalf("%s 被拒时请求不得发出", v.name)
+		}
+	}
+	// 合法形态透传（outcome 缺省不携带——hub 侧归一 done）
+	if _, err := toolWorkCollect(map[string]any{"work_id": "w-1", "prime_term": "t1", "report": "x"}); err != nil {
+		t.Fatalf("合法收集不应报错: %v", err)
+	}
+	if !seen {
+		t.Fatal("请求未达 hub")
 	}
 }

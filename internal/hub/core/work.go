@@ -79,15 +79,22 @@ type WorkView struct {
 	// 为 0）——sinceEvents 小于该值说明请求区间有拉不回的缺口，调用方应据此对
 	// 齐游标（同群消息 pruned_before_seq 口径）。
 	PrunedBeforeEvents int64 `json:"pruned_before_events"`
+	// TasksGone 尝试绑定的任务 ID 已过 24h 保留期清理的列表（W3 接口补全，
+	// 仅 GetWork 读档路径计算）：Work 独立记忆仍解释终局（尝试 outcome/幂等键/
+	// 内容指纹随单保留），本列表标注「任务详情为何查不到」。写入路径响应
+	//（建单/接管/收集）不携带——返回的是写入视角现状，非解释面注解。
+	TasksGone []string `json:"tasks_gone,omitempty"`
 }
 
 // WorkSummary 工作单列表摘要（不含 Events/Steps/Attempts 明细，列表面轻量）。
 type WorkSummary struct {
-	ID        string    `json:"id"`
-	Goal      string    `json:"goal"`
-	PrimeTerm string    `json:"prime_term,omitempty"`
-	Status    string    `json:"status"`
-	Steps     int       `json:"steps"`
+	ID        string `json:"id"`
+	Goal      string `json:"goal"`
+	PrimeTerm string `json:"prime_term,omitempty"`
+	Status    string `json:"status"`
+	Steps     int    `json:"steps"`
+	// DoneSteps 已完成（done）步骤数（W3 管理台进度 x/y 用；W3 接口补全）。
+	DoneSteps int       `json:"done_steps"`
 	Attempts  int       `json:"attempts"`
 	CreatedAt time.Time `json:"created_at"`
 	// ClosedAt 终态时刻（未终态 nil 不输出；指针承载 omitempty——time.Time
@@ -371,13 +378,16 @@ func appendWorkEvent(w *store.Work, at time.Time, kind, by, principal, body stri
 
 // GetWork 工作单详情（只读；副本返回）。sinceEvents 为事件游标：只返回 seq >
 // sinceEvents 的事件（升序）；PrunedBeforeEvents 标注已裁区间上界。不存在返回
-// false。
+// false。tasks_gone 读档注解在此计算（唯一有任务存现可对照的读路径）。
 func (c *Core) GetWork(workID string, sinceEvents int64) (*WorkView, bool) {
-	w, ok := c.st.View().Works[workID]
+	view := c.st.View()
+	w, ok := view.Works[workID]
 	if !ok {
 		return nil, false
 	}
-	return workViewOf(w, sinceEvents), true
+	wv := workViewOf(w, sinceEvents)
+	wv.TasksGone = tasksGoneForWork(view, w)
+	return wv, true
 }
 
 // workViewOf 快照记录 → 详情视图：账本按游标裁剪 + pruned 标注（裁剪只从头部
@@ -414,12 +424,19 @@ func (c *Core) ListWorks() []WorkSummary {
 			t := *w.ClosedAt
 			closed = &t
 		}
+		doneSteps := 0
+		for _, s := range w.Steps {
+			if s.Status == store.StepStatusDone {
+				doneSteps++
+			}
+		}
 		out = append(out, WorkSummary{
 			ID:        w.ID,
 			Goal:      w.Goal,
 			PrimeTerm: w.PrimeTerm,
 			Status:    w.Status,
 			Steps:     len(w.Steps),
+			DoneSteps: doneSteps,
 			Attempts:  len(w.Attempts),
 			CreatedAt: w.CreatedAt,
 			ClosedAt:  closed,

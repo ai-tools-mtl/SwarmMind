@@ -4,11 +4,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mtl802/swarmmind/internal/hub/store"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -22,6 +25,7 @@ func TestWorkEndpointsAuthGate(t *testing.T) {
 		{http.MethodPost, "/api/v1/works"},
 		{http.MethodGet, "/api/v1/works"},
 		{http.MethodGet, "/api/v1/works/w-x"},
+		{http.MethodPost, "/api/v1/works/w-x/collect"}, // W3 收集/关闭同门禁
 	} {
 		if code, _ := f.do(hc, tc[0], tc[1], `{}`); code != http.StatusUnauthorized {
 			t.Fatalf("%s %s 未登录应 401, got %d", tc[0], tc[1], code)
@@ -564,5 +568,332 @@ func TestWorkBoundSubmitREST(t *testing.T) {
 	// 三参不成组 400
 	if code, _ = f.do(hc, http.MethodPost, "/api/v1/tasks", `{"target_node":"mac-mini","target_agent":"diskcheck","input":{},"submitted_by":"tester","work_ref":"`+wid+`"}`); code != http.StatusBadRequest {
 		t.Fatalf("绑定参数不成组应 400: %d", code)
+	}
+}
+
+// completeStepREST 绑定派发一步并以 node 身份回传 completed（membus 同步链，
+// 身份=端点名；api 层造终态步骤供收集用例）。baseURL+client 由调用方给
+// （f.srv+会话 或 PAT 专用 srv+PAT 客户端）。
+func completeStepREST(f *fixture, hc *http.Client, baseURL, wid, term string, step int64, idem string) string {
+	f.t.Helper()
+	body := fmt.Sprintf(`{"target_node":"mac-mini","target_agent":"diskcheck","input":{"args":["run"]},`+
+		`"idem_key":%q,"work_ref":%q,"step_seq":%d,"prime_term":%q}`, idem, wid, step, term)
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/tasks", strings.NewReader(body))
+	if err != nil {
+		f.t.Fatalf("构造提交: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := hc.Do(req)
+	if err != nil {
+		f.t.Fatalf("绑定派发: %v", err)
+	}
+	defer resp2.Body.Close()
+	resp, _ := io.ReadAll(resp2.Body)
+	if resp2.StatusCode != http.StatusAccepted {
+		f.t.Fatalf("绑定派发应 202, got %d: %s", resp2.StatusCode, resp)
+	}
+	var ack struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(resp, &ack); err != nil || ack.TaskID == "" {
+		f.t.Fatalf("202 体解析: %s", resp)
+	}
+	b, err := json.Marshal(protocol.TaskResultPayload{TaskID: ack.TaskID, Status: protocol.ResultCompleted,
+		Result: &protocol.TaskResult{Status: protocol.ResultCompleted, ExitCode: 0, FinalAnswer: "ok"}})
+	if err != nil {
+		f.t.Fatalf("结果编码: %v", err)
+	}
+	if err := f.bus.Endpoint("mac-mini").Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub", Payload: b,
+	}); err != nil {
+		f.t.Fatalf("结果回传: %v", err)
+	}
+	return ack.TaskID
+}
+
+// TestWorkCollectEndpoint 收集端点契约（P5 W3）：401 门禁、200/回执 dup、
+// 错误码映射（404/work_closed/work_no_term/work_term_conflict/work_steps_open/
+// work_steps_not_done/invalid_request）、PAT 主体落账、终态盖章字段回读。
+func TestWorkCollectEndpoint(t *testing.T) {
+	f := newFixture(t)
+	registerEchoNode(f)
+	hc := f.client(true)
+
+	// 未登录 401
+	if code, _ := f.do(f.client(false), http.MethodPost, "/api/v1/works/w-x/collect", `{}`); code != http.StatusUnauthorized {
+		t.Fatalf("未登录收集应 401, got %d", code)
+	}
+
+	// 全 done → 收集 200；终态盖章与报告回读
+	wid := createWorkBody(f, hc, "收集端点", "prime-1")
+	completeStepREST(f, hc, f.srv.URL, wid, "prime-1", 1, "c1")
+	completeStepREST(f, hc, f.srv.URL, wid, "prime-1", 2, "c2")
+	completeStepREST(f, hc, f.srv.URL, wid, "prime-1", 3, "c3")
+	code, resp := f.do(hc, http.MethodPost, "/api/v1/works/"+wid+"/collect",
+		`{"prime_term":"prime-1","report":"三步全部完成。","outcome":"done"}`)
+	if code != http.StatusOK {
+		t.Fatalf("收集应 200, got %d: %s", code, resp)
+	}
+	var out struct {
+		Work struct {
+			ID        string  `json:"id"`
+			Status    string  `json:"status"`
+			Report    string  `json:"report"`
+			ClosedAt  *string `json:"closed_at"`
+			ExpiresAt *string `json:"expires_at"`
+			Events    []struct {
+				Kind      string `json:"kind"`
+				By        string `json:"by"`
+				Principal string `json:"principal"`
+			} `json:"events"`
+		} `json:"work"`
+		Dup bool `json:"dup"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("200 体解析: %v", err)
+	}
+	if out.Work.Status != "done" || out.Work.Report != "三步全部完成。" || out.Work.ClosedAt == nil || out.Work.ExpiresAt == nil || out.Dup {
+		t.Fatalf("终态盖章回读: %s", resp)
+	}
+	last := out.Work.Events[len(out.Work.Events)-1]
+	if last.Kind != "collect" || last.Principal != "admin" || last.By != "prime-1" {
+		t.Fatalf("collect 事件主体双字段: %+v", last)
+	}
+
+	// 同参重放 → 200+dup:true；不同报告 → 409 work_closed
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+wid+"/collect",
+		`{"prime_term":"prime-1","report":"三步全部完成。","outcome":"done"}`)
+	if code != http.StatusOK || !strings.Contains(string(resp), `"dup":true`) {
+		t.Fatalf("回执重放应 200+dup: %d %s", code, resp)
+	}
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+wid+"/collect",
+		`{"prime_term":"prime-1","report":"另写的报告","outcome":"done"}`)
+	if code != http.StatusConflict || !strings.Contains(string(resp), "work_closed") {
+		t.Fatalf("报告不同应 409 work_closed: %d %s", code, resp)
+	}
+
+	// 未终态步骤 → 409 work_steps_open
+	widOpen := createWorkBody(f, hc, "有在途步骤", "prime-1")
+	completeStepREST(f, hc, f.srv.URL, widOpen, "prime-1", 1, "o1")
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+widOpen+"/collect",
+		`{"prime_term":"prime-1","report":"x"}`)
+	if code != http.StatusConflict || !strings.Contains(string(resp), "work_steps_open") {
+		t.Fatalf("未终态应 409 work_steps_open: %d %s", code, resp)
+	}
+
+	// 部分完成 → 409 work_steps_not_done（指路 abandoned）；abandoned 关闭 200
+	completeStepREST(f, hc, f.srv.URL, widOpen, "prime-1", 2, "o2")
+	body := fmt.Sprintf(`{"target_node":"mac-mini","target_agent":"diskcheck","input":{"args":["run"]},"idem_key":"o3","work_ref":%q,"step_seq":3,"prime_term":"prime-1"}`, widOpen)
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/tasks", body)
+	if code != http.StatusAccepted {
+		t.Fatalf("派发 3 应 202: %d %s", code, resp)
+	}
+	var ack struct {
+		TaskID string `json:"task_id"`
+	}
+	_ = json.Unmarshal(resp, &ack)
+	rb, _ := json.Marshal(protocol.TaskResultPayload{TaskID: ack.TaskID, Status: protocol.ResultFailed,
+		Result: &protocol.TaskResult{Status: protocol.ResultFailed, ExitCode: 2, Error: "boom"}})
+	if err := f.bus.Endpoint("mac-mini").Send("hub", &protocol.Envelope{
+		Version: protocol.ProtocolVersion, Type: protocol.MsgTaskResult,
+		MessageID: protocol.NewMessageID(), To: "hub", Payload: rb,
+	}); err != nil {
+		t.Fatalf("失败回传: %v", err)
+	}
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+widOpen+"/collect", `{"prime_term":"prime-1","report":"x"}`)
+	if code != http.StatusConflict || !strings.Contains(string(resp), "work_steps_not_done") {
+		t.Fatalf("部分完成应 409 work_steps_not_done: %d %s", code, resp)
+	}
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+widOpen+"/collect",
+		`{"prime_term":"prime-1","report":"步骤 2 失败，用户决策放弃。","outcome":"abandoned"}`)
+	if code != http.StatusOK {
+		t.Fatalf("abandoned 关闭应 200: %d %s", code, resp)
+	}
+	var ab struct {
+		Work struct {
+			Status string `json:"status"`
+			Report string `json:"report"`
+		} `json:"work"`
+	}
+	_ = json.Unmarshal(resp, &ab)
+	if ab.Work.Status != "abandoned" || ab.Work.Report == "" {
+		t.Fatalf("abandoned 盖章: %s", resp)
+	}
+
+	// W3 审查②：pending 步骤随 abandoned 关闭记 skipped（REST 契约同 core）
+	widPending := createWorkBody(f, hc, "pending 随放弃跳过", "prime-1")
+	completeStepREST(f, hc, f.srv.URL, widPending, "prime-1", 1, "ps1")
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+widPending+"/collect",
+		`{"prime_term":"prime-1","report":"步骤 1 完成，其余放弃。","outcome":"abandoned"}`)
+	if code != http.StatusOK {
+		t.Fatalf("pending 随 abandoned 关闭应 200: %d %s", code, resp)
+	}
+	var pd struct {
+		Work struct {
+			Status string `json:"status"`
+			Steps  []struct {
+				Seq    int64  `json:"seq"`
+				Status string `json:"status"`
+			} `json:"steps"`
+		} `json:"work"`
+	}
+	_ = json.Unmarshal(resp, &pd)
+	if pd.Work.Status != "abandoned" || len(pd.Work.Steps) != 3 ||
+		pd.Work.Steps[1].Status != "skipped" || pd.Work.Steps[2].Status != "skipped" {
+		t.Fatalf("未派发步骤应记 skipped: %s", resp)
+	}
+
+	// 未知单 404；空报告 400；旧任期 409 work_term_conflict
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/w-missing/collect", `{"prime_term":"t","report":"x"}`)
+	if code != http.StatusNotFound || !strings.Contains(string(resp), "work_not_found") {
+		t.Fatalf("未知单应 404: %d %s", code, resp)
+	}
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+createWorkBody(f, hc, "空报告", "prime-1")+"/collect", `{"prime_term":"prime-1","report":"  "}`)
+	if code != http.StatusBadRequest || !strings.Contains(string(resp), "invalid_request") {
+		t.Fatalf("空报告应 400: %d %s", code, resp)
+	}
+	widT := createWorkBody(f, hc, "旧任期收集", "prime-1")
+	code, _ = f.do(hc, http.MethodPost, "/api/v1/works/"+widT+"/takeover", `{"expected_term":"prime-1","new_term":"prime-2"}`)
+	if code != http.StatusOK {
+		t.Fatalf("接管应 200: %d", code)
+	}
+	code, resp = f.do(hc, http.MethodPost, "/api/v1/works/"+widT+"/collect", `{"prime_term":"prime-1","report":"x"}`)
+	if code != http.StatusConflict || !strings.Contains(string(resp), "work_term_conflict") {
+		t.Fatalf("旧任期收集应 409 work_term_conflict: %d %s", code, resp)
+	}
+
+	// PAT 入口收集：事件 principal=pat:<令牌名>
+	dataDir := t.TempDir()
+	srv := httptest.NewServer(New(Config{Core: f.core, AdminToken: "tok2", DataDir: dataDir}).Handler())
+	defer srv.Close()
+	jar, _ := cookiejar.New(nil)
+	patc := &http.Client{Jar: jar}
+	r2, err := patc.Post(srv.URL+"/api/v1/login", "application/json", strings.NewReader(`{"token":"tok2"}`))
+	if err != nil || r2.StatusCode != http.StatusOK {
+		t.Fatalf("登录2: %v %d", err, r2.StatusCode)
+	}
+	r2.Body.Close()
+	r2, err = patc.Post(srv.URL+"/api/v1/auth/tokens", "application/json", strings.NewReader(`{"name":"collector"}`))
+	if err != nil || r2.StatusCode != http.StatusCreated {
+		t.Fatalf("铸 PAT: %v %d", err, r2.StatusCode)
+	}
+	var tok struct {
+		Token string `json:"token"`
+	}
+	_ = json.NewDecoder(r2.Body).Decode(&tok)
+	r2.Body.Close()
+	// PAT 客户端建单（同一 srv：createWorkBody 固定打 f.srv，此处手工建）
+	pw, _ := json.Marshal(map[string]any{
+		"goal": "PAT 收集", "prime_term": "prime-1",
+		"steps": []map[string]any{
+			{"desc": "盘点磁盘", "target_node": "mac-mini", "target_agent": "diskcheck"},
+			{"desc": "盘点内存", "target_node": "mac-mini", "target_agent": "diskcheck"},
+			{"desc": "汇总报告", "target_node": "mac-mini", "target_agent": "reporter", "depends_on": []int{1, 2}},
+		},
+	})
+	r4, err := patc.Post(srv.URL+"/api/v1/works", "application/json", strings.NewReader(string(pw)))
+	if err != nil || r4.StatusCode != http.StatusCreated {
+		t.Fatalf("PAT 建单: %v %d", err, r4.StatusCode)
+	}
+	var pwOut struct {
+		Work struct {
+			ID string `json:"id"`
+		} `json:"work"`
+	}
+	_ = json.NewDecoder(r4.Body).Decode(&pwOut)
+	r4.Body.Close()
+	widP := pwOut.Work.ID
+	completeStepREST(f, patc, srv.URL, widP, "prime-1", 1, "pc1")
+	completeStepREST(f, patc, srv.URL, widP, "prime-1", 2, "pc2")
+	completeStepREST(f, patc, srv.URL, widP, "prime-1", 3, "pc3")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/works/"+widP+"/collect",
+		strings.NewReader(`{"prime_term":"prime-1","report":"PAT 入口收集。"}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	r3, err := http.DefaultClient.Do(req)
+	if err != nil || r3.StatusCode != http.StatusOK {
+		t.Fatalf("PAT 收集: %v %v", err, r3)
+	}
+	var patOut struct {
+		Work struct {
+			Status string `json:"status"`
+			Events []struct {
+				Principal string `json:"principal"`
+			} `json:"events"`
+		} `json:"work"`
+	}
+	_ = json.NewDecoder(r3.Body).Decode(&patOut)
+	r3.Body.Close()
+	if patOut.Work.Status != "done" {
+		t.Fatalf("PAT 收集应 done: %s", patOut.Work.Status)
+	}
+	evs := patOut.Work.Events
+	if len(evs) == 0 || evs[len(evs)-1].Principal != "pat:collector" {
+		t.Fatalf("PAT 入口 collect 事件主体: %+v", evs)
+	}
+}
+
+// TestWorkTasksGoneREST 任务 24h 清理后工作单读档仍全量可解释，且 tasks_gone
+// 标注到位（W3 接口补全；核心 3「REST 与 MCP 读档同形」的 REST 面）。
+func TestWorkTasksGoneREST(t *testing.T) {
+	f := newFixture(t)
+	registerEchoNode(f)
+	hc := f.client(true)
+	wid := createWorkBody(f, hc, "清理后读档", "prime-1")
+	var taskIDs []string
+	for i, key := range []string{"g1", "g2", "g3"} {
+		taskIDs = append(taskIDs, completeStepREST(f, hc, f.srv.URL, wid, "prime-1", int64(i+1), key))
+	}
+	code, resp := f.do(hc, http.MethodPost, "/api/v1/works/"+wid+"/collect", `{"prime_term":"prime-1","report":"完成。"}`)
+	if code != http.StatusOK {
+		t.Fatalf("收集应 200: %d %s", code, resp)
+	}
+	// 清理前 tasks_gone 为空
+	_, resp = f.do(hc, http.MethodGet, "/api/v1/works/"+wid, "")
+	if strings.Contains(string(resp), "tasks_gone") {
+		t.Fatalf("清理前不应有 tasks_gone: %s", resp)
+	}
+	// 回拨任务过 24h → Sweep 清理 → 读档仍全量 + tasks_gone 标注
+	if err := f.st.Update(func(st *store.State) error {
+		for _, id := range taskIDs {
+			tk := st.Tasks[id]
+			tk.UpdatedAt = tk.UpdatedAt.Add(-protocol.TerminalRetention - time.Minute)
+			st.Tasks[id] = tk
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("回拨: %v", err)
+	}
+	f.core.Sweep()
+	code, resp = f.do(hc, http.MethodGet, "/api/v1/works/"+wid, "")
+	if code != http.StatusOK {
+		t.Fatalf("清理后读档应 200: %d", code)
+	}
+	var out struct {
+		Work struct {
+			Status   string `json:"status"`
+			Report   string `json:"report"`
+			Attempts []struct {
+				TaskID  string `json:"task_id"`
+				Outcome string `json:"outcome"`
+				IdemKey string `json:"idem_key"`
+			} `json:"attempts"`
+			TasksGone []string `json:"tasks_gone"`
+		} `json:"work"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil {
+		t.Fatalf("读档解析: %v", err)
+	}
+	if out.Work.Status != "done" || out.Work.Report == "" || len(out.Work.Attempts) != 3 {
+		t.Fatalf("清理后执行摘要缺失: %s", resp)
+	}
+	if len(out.Work.TasksGone) != 3 {
+		t.Fatalf("tasks_gone 应 3 项: %s", resp)
+	}
+	for _, id := range taskIDs {
+		if !strings.Contains(string(resp), id) {
+			t.Fatalf("tasks_gone 缺 %s", id)
+		}
 	}
 }
