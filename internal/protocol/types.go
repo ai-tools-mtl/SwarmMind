@@ -172,6 +172,21 @@ type Task struct {
 	// 同键同群重试=dup 命中原任务，同键换群=不同指纹=新任务（对齐批次内容指纹
 	// 口径，SPEC 4.5）。
 	GroupRef string `json:"group_ref,omitempty"`
+	// WorkRef 工作单引用（P5 W2/RFC-work-resume 绑定派发，管理面扩展字段）：
+	// 任务归属的工作单 ID（w-…）。照抄 GroupRef 先例：协议帧 task_submit 不
+	// 携带（node 间提交恒空）；参与提交幂等指纹（与 WorkStep 同为请求可声明的
+	// 规范形——同键换工作单/换步骤=冲突 409，绑定是执行去重关键面非路由装饰）；
+	// 终态回写据此定位工作单（任务终态 → attempt.outcome + step 状态同事务回写）。
+	WorkRef string `json:"work_ref,omitempty"`
+	// WorkStep 绑定的工作单步骤序号（1 起声明序；与 WorkRef 成对出现）。参与
+	// 提交幂等指纹（规范形见 WorkRef）。0 = 未绑定。
+	WorkStep int64 `json:"work_step_seq,omitempty"`
+	// AttemptRef 绑定的执行尝试引用（hub 分配：<work_id>#a<seq>，W2）。照抄
+	// GroupRef 管理面登记先例，但**不参与幂等指纹**——重试回放无法声明 hub
+	// 分配号，指纹双方只能取请求可声明字段（WorkRef+WorkStep）；尝试唯一性由
+	// 「同键重放短路于 idem 查重（先于绑定事务）」构造保证。终态回写经任务 ID
+	// 在 Work.Attempts 定位尝试，本字段为管理面可读的直引键。
+	AttemptRef string `json:"attempt_ref,omitempty"`
 	// DependsOn 依赖的上游任务 idem_key 列表（P4.3/SPEC 4.12，提交后不可变）。
 	// 以 idem 寻址跨重跑稳定；提交时准入校验（存在/无自引用/无重复/深度≤4/
 	// 级联≤8），node 会话 task_submit 同样可携带。未声明为 nil。
@@ -225,6 +240,17 @@ type TaskSubmitRequest struct {
 	// 深度≤4/级联≤8 全部 400 invalid_dependency）。声明后 stdin 尾部附依赖
 	// 清单（EffectiveInput，参与幂等指纹）。
 	DependsOn []string `json:"depends_on,omitempty"`
+	// WorkRef 工作单绑定派发（P5 W2/RFC-work-resume 二.2，管理面扩展，六.六
+	// 规则 7 参数扩展）：与 StepSeq、PrimeTerm 三参成组——WorkRef 非空即绑定
+	// 派发，任务落库、尝试登记、步骤回写在同一事务原子完成（绑定失败不发布）。
+	// 协议帧 task_submit 不携带（node 间提交恒空，同 GroupRef 口径）。
+	WorkRef string `json:"work_ref,omitempty"`
+	// StepSeq 绑定的步骤序号（1 起声明序；绑定派发必填，0=未绑定）。
+	StepSeq int64 `json:"step_seq,omitempty"`
+	// PrimeTerm 任期声明（绑定派发必填）：须与工作单落库 PrimeTerm 严格相等，
+	// 否则拒绝（旧任期编排写入拒绝，RFC 二.2 接管事务）。归属标签非身份证明
+	//（RFC 六.2）；不参与幂等指纹（换任期后同键重放命中 dup 返原任务）。
+	PrimeTerm string `json:"prime_term,omitempty"`
 }
 
 // 结果终态取值（TaskResult.Status；与 TaskStatus 的四个终态同值，SPEC 4.3/4.9）。
