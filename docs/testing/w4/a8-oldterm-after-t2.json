@@ -1,0 +1,1 @@
+{"error":"work_term_conflict","message":"store: 事务被拒绝: core: 工作单任期不符: 声明任期 \"prime-t1-active\" ≠ 当前任期 \"prime-t2\"（旧任期编排写入拒绝；任务结果事实回流不受此限）"}
