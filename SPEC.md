@@ -521,6 +521,43 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - `POST /a2a/rpc`（Bearer PAT `smsw_` 或会话 cookie，与现有同一鉴权）：JSON-RPC 2.0 手写分发（零新依赖）；`message/send` 等价 POST /api/v1/tasks（submitted_by=a2a，messageId 映射幂等键 `a2a:<id>`）、`tasks/get` 等价 GET /tasks/{id}；未知方法 -32601、任务不存在 -32001。外部协议兼容层本身即 agent 调用面（与 MCP 同位），故不另设六.六工具行
 - 状态映射（七态→A2A TaskState）：submitted/offered/acknowledged→submitted、running→working、completed→completed、failed→failed、cancelled→canceled（A2A 官方单 L 拼法）、needs_review→input-required（原始状态保留于 metadata.swarmmind_status）；已知偏差清单见 internal/hub/api/a2a.go 头注
 
+### 双端 Web 展示一致性契约（2026-10-25 抽屉统一立，七条长期契约）
+
+> 背景：hub/node 控制台任务抽屉组装层漂移盘点（docs/TASK-drawer-sync.md 阶段 A，D1-D23+C1-C11）与
+> Hana 阶段 B 终裁。md 渲染器/样式 shared block 已有逐字节锁（web_md_render_test.go），本节把锁面
+> 扩到抽屉组装层的共用件；锁测试位于 internal/node/localapi（web_md_render_test.go、web_drawer_sync_test.go）。
+
+1. **共用件单一来源（shared block 逐字节锁）**：双端 app.js 的抽屉状态词典（STATES/ERRORS/TERMINAL/
+   REVIEW_ACTIONS）、抽屉时间工具、事件流与错误通知构建、答复与日志区渲染、分区更新机制一律收进
+   `===== … shared block =====` 标记块，两端逐字节同文，测试抽块比对——禁止单端私改共用件，改必双端同改同验。
+2. **材质层级基准（e821bf8 语法，双端同构）**：最终答复白底浮起（主角）→ 诊断日志/任务输入收 details
+   折叠（配角沉底）→ 中间结果灰底容器；区块次序两端一致：头部 → 状态介绍 → 失败原因（hub 独有）→
+   最终答复 → 诊断日志 → 产物 → 任务输入（hub 独有）→ 时间线 → 人工核对（hub 独有）→ 归档/下一步。
+3. **局部更新铁律（D22 硬验收）**：抽屉刷新禁止整层 innerHTML 重建——首次打开建壳（稳定分区 data-zone），
+   此后刷新按分区内容 diff 局部写入：数据无变化不碰 DOM（details 开合/原文模式/草稿/焦点/滚动随未动
+   分区自然保持）；分区替换时回放 details 开合态；迟到应答按抽屉会话序号丢弃；入场动画只随壳播放一次。
+   交互分区（核对表单等）一次创建稳定节点 + 状态驱动更新：用户输入草稿与 busy 态一律不进分区模板串，
+   busy 由状态驱动 disabled（阶段 D 终审必须修 3：草稿进模板串会使「输入→缓存与模板分叉→下轮刷新
+   整区重建」，节点身份与 busy 全丢）。本地回写（核对登记/取消）使在途列表/单查旧快照失效（数据版本
+   判定，任务本地回写版本号）：列表提交永不使任务回退到本地回写之前（阶段 D 必须修 1/2 乱序竞态）。
+   「重建后恢复状态」「终态停轮询」不算合格终解（hub 核对记录可在终态后变化；node 账本终态不可变、
+   review 不回流，终态停轮询为数据面事实而非替代方案）。
+4. **时间口径（抽屉面）**：完整时间一律 `YYYY-MM-DD HH:mm:ss UTC`，经 Date 解析转 UTC 格式化（禁止
+   ISO 串切片后硬贴 UTC 后缀）；零值（0001-01-01 开头）/非法（NaN）时刻为「无证据」：不生成时间线
+   事件、展示位兜底「—」。存储/API/导出口径不动；表格/总览等非抽屉面的全站迁移另批（C4）。
+5. **文案单一出处**：跨端同义动作同词（标准词「查看全部任务」）；needs_review 主文案以 hub 版为唯一
+   出处；能力描述必须与端上真实能力一致（node 无核对登记端点，文案不得承诺本端登记，只如实指路 hub）；
+   状态介绍条五态人话双端同有同文。
+6. **合理差异白名单**（不强求对称，入档即豁免）：hub 管理面独有——导出任务 JSON、取消任务、人工核对
+   表单/记录、任务输入区、失败原因独立区、产物中继取回按钮、群组词典（GROUP_STATES 徽标兜底，hub
+   群聊页专属，node badge 不取词）；node 执行者独有——产物本机绝对路径指引、回表单重新派单、来源
+   （本机派单/hub 下发）标注、抽屉关闭直清（无 hub 的 280ms 出场动画：node #layer 为任务/能力配置/
+   通知三抽屉共用的直清家族，让位路径要求立即清场，未引入 hub layerGen 世代机制前豁免，阶段 D 建议
+   修 8）。白名单外的新增差异按漂移处理。
+7. **变更纪律**：任何一端改动抽屉组装层或共用组件（badge/notice/时间线/产物行/日志区/时间工具），必须
+   对照本节评估另一端并同步；一致性锁测试随改动同步更新，禁止删断言换绿（旧接入断言同步更新、不双轨）；
+   行为面（刷新保真/迟到防护/深层交互态）由 headless 三层走查覆盖（docs/prototypes 截图留档）。
+
 ## 六.六、MCP 服务（agent 统一入口，2026-10-21 立）
 
 > 定位：MCP 与 REST 管理面、双端控制台同为**一等公民接口面**。此后所有面向管理面的新功能，

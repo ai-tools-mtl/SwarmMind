@@ -121,11 +121,15 @@ func TestLocalAgentsAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = led.Close() })
-	// 今日任务：echo 名下 2 条（1 条昨日的另一 agent 不计）
+	// 今日任务：echo 名下 2 条（1 条昨日的另一 agent 不计）。「今日」种子锚定当日
+	// UTC 起点 +1h/+2h：原先的 now-1h 在 UTC 零点后 1 小时内运行会跌入昨日被正确
+	// 排除（2026-10-25 08:11 CST 实测 flake），统计口径是 UTC 自然日，与断言无关
+	// 的运行时刻不应决定测试成败。
 	now := protocol.NowUTC()
+	todayStart := now.Truncate(24 * time.Hour)   // UTC 时刻 Truncate 即当日零点
 	for _, task := range []protocol.Task{
-		{ID: "t-1", TargetAgent: "echo", CreatedAt: now},
-		{ID: "t-2", TargetAgent: "echo", CreatedAt: now.Add(-time.Hour)},
+		{ID: "t-1", TargetAgent: "echo", CreatedAt: todayStart.Add(time.Hour)},
+		{ID: "t-2", TargetAgent: "echo", CreatedAt: todayStart.Add(2 * time.Hour)},
 		{ID: "t-3", TargetAgent: "sleeper", CreatedAt: now.Add(-24 * time.Hour)},
 	} {
 		if err := led.Accept(task); err != nil {

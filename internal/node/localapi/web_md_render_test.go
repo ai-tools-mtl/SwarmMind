@@ -23,7 +23,7 @@ import (
 //     与 / 相对路径，其余降级纯文本）+ target=_blank + noopener noreferrer；
 //   - 接入行：node 抽屉最终答复 mdAnswer + 诊断日志 #log-wrap + log-raw 切换
 //     （旧 pre 纯文本形态移除）；hub 抽屉最终答复 mdAnswer + 失败原因
-//     #drawer-fail/fail-raw + 运行日志 #drawer-runlog/log-raw；
+//     #drawer-fail/fail-raw + 诊断日志 #drawer-runlog/log-raw（D10 统一更名）；
 //   - 样式载体：.md-body 分级字号/md 表格收紧、.md-lang 语言徽标、.md-quote、
 //     .md-log-head/.md-log-label 日志切换行与流标签。
 //
@@ -137,10 +137,14 @@ func TestWebMdRender(t *testing.T) {
 	// ---- node 抽屉接入行 + 旧形态移除 ----
 	for _, want := range []string{
 		`mdAnswer(res.final_answer)`,
-		`<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${logSectionHtml(res)}</div></details>`,
+		// D10/D11 统一（2026-10-25 抽屉同步）：诊断日志标题/渲染条件/保留期说明双端同文，
+		// 内容经抽屉答复与日志 shared block 的 drawerLogInner（恒两段+「（空）」兜底）
+		`<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${drawerLogInner(res, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>`,
 		`case 'log-raw': {`,
 		`S.drawer.logRaw = !S.drawer.logRaw;`,
-		`if (wrap) wrap.innerHTML = logSectionHtml(S.drawer.task.result);`,
+		// D22 分区更新：切换只重算 logs 分区（缓存 diff 后仅该分区重写），不再手改 #log-wrap
+		`S.drawer.logRaw = !S.drawer.logRaw;
+        syncDrawerZones();`,
 		`button(raw ? '查看渲染' : '查看原文', 'log-raw', 'link')`,
 	} {
 		if !strings.Contains(nodeJS, want) {
@@ -158,15 +162,21 @@ func TestWebMdRender(t *testing.T) {
 	}
 
 	// ---- hub 抽屉接入行 + 旧形态移除 ----
+	// 阶段 D 终审必须修 4：最终答复区收进 shared block drawerAnswerHtml（D9 状态
+	// 优先，双端同文），接入行随改造同步更新（最终答复 md 渲染断言转 shared 块内）。
 	for _, want := range []string{
-		`mdAnswer(r.final_answer)`,
+		`answer: drawerAnswerHtml(t, r, needs),`,
 		`<div id="drawer-fail">${failInner(t)}</div>`,
-		`<div id="drawer-runlog">${runLogInner(t)}</div>`,
+		// D10 统一：hub 运行日志更名诊断日志（stdout / stderr 尾部），内容走 shared drawerLogInner
+		`<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>`,
 		`'log-raw': () => {`,
 		`'fail-raw': () => {`,
 		`S.drawer.failRaw = !S.drawer.failRaw;`,
-		`if (w) w.innerHTML = runLogInner(S.drawer.task);`,
-		`if (w) w.innerHTML = failInner(S.drawer.task);`,
+		// D22 分区更新：切换只重算对应分区（缓存 diff 后仅该分区重写），不再手改内层容器
+		`S.drawer.logRaw = !S.drawer.logRaw;
+    syncDrawerZones();`,
+		`S.drawer.failRaw = !S.drawer.failRaw;
+    syncDrawerZones();`,
 		`button(raw ? '查看渲染' : '查看原文', 'fail-raw', 'link')`,
 	} {
 		if !strings.Contains(hubJSStr, want) {
