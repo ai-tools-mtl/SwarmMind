@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mtl802/swarmmind/internal/decision"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
@@ -61,6 +62,9 @@ type Config struct {
 	// Notify 通知分发器（P4③ 控制台化升级：渠道 CRUD/发测试/站内通知端点）；
 	// nil 时通知端点统一 503 降级（旧构造方不感知）。
 	Notify *notify.Dispatcher
+	// Decision 派发建议决策服务（P5.1 D1，RFC-jev-dispatch）；nil/未启用时端点
+	// 恒 200 + suggestion:null（决策是建议非必经，不阻塞派单，RFC 三）。
+	Decision *decision.Service
 }
 
 // NodeEntryConfig 节点接入入口描述（cmd/hub 从 hub 配置推导：协议 + node_listen）。
@@ -129,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
 	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
+	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest)) // 派发建议（P5.1 D1）
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）
 	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))                               // 指定/撤销（agent_name 空 = 撤销）
 	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                          // 群聊 MVP（GROUP-RFC 六）

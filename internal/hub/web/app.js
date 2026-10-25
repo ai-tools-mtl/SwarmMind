@@ -432,8 +432,9 @@ const S = {
 };
 function freshControl() {
   /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
-   * 列表置顶的「统筹 · zcode-dev」项即统筹模式（2026-10-23 伦哥定案）。 */
-  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null };
+   * 列表置顶的「统筹 · zcode-dev」项即统筹模式（2026-10-23 伦哥定案）。
+   * suggest 派发建议状态（P5.1 D1）：{busy, sugg(REST 应答|null), note(无建议人话原因|'')} */
+  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null, suggest: { busy: false, sugg: null, note: '', goal: '' } };
 }
 function newIdem() {
   return 'ctrl-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -1659,6 +1660,39 @@ function stdinPlaceholder(node, agent) {
   const d = node && agent ? S.directory.find(x => x.node_id === node && x.card.name === agent) : null;
   return isPrimeDir(d) ? STDIN_PH_PRIME : STDIN_PH;
 }
+/* suggestLineHtml 派发建议区（P5.1 D1，RFC-jev-dispatch：决策是建议非必经）五态：
+ * 入口（未问过）→ 思考中 → 有建议（「建议派给 X（本地决策模型）」一键采纳，title
+ * 带一句话理由）→ 无建议/降级（人话原因+再试一次，采纳按钮不出现）→ 建议已失效
+ *（建议绑任务描述指纹（codex 审 D1 ②）：描述变化即失效，采纳按钮不出现）。
+ * 置信度按 RFC v1.1 裁决②保守不上墙（数据在 REST/MCP 透传）。状态存 S.C.suggest
+ *（goal=请求时描述指纹），表单视图轮询不重绘（pollTick control 豁免），重绘后恢复。 */
+const SUGGEST_STALE_NOTE = '任务描述已修改：原建议已失效，请重新获取';
+function suggestLineHtml(C) {
+  const sg = C.suggest || { busy: false, sugg: null, note: '', goal: '' };
+  if (sg.busy) return '<small class="muted">决策模型思考中…</small>';
+  const s = sg.sugg;
+  if (s && s.suggestion) {
+    /* 描述指纹重验（codex 审 D1 ②）：C.stdin 为输入事件实时镜像（见全局 input
+     * 委托），变化即判失效——不出现采纳按钮，杜绝旧建议误采纳。 */
+    if ((C.stdin || '').trim() !== sg.goal) {
+      return `<small class="muted">${esc(SUGGEST_STALE_NOTE)}</small>` + button('重新获取', 'ctrl-suggest', 'link', 'type="button"');
+    }
+    const a = s.suggestion.target_agent, n = s.suggestion.target_node;
+    return `<button type="button" data-act="ctrl-adopt" class="primary" title="${esc(s.reason || '决策模型推荐')}">建议派给 ${esc(a)} @ ${esc(n)}（本地决策模型）</button>`
+      + (s.reason ? `<small class="muted">${esc(s.reason)}</small>` : '')
+      + button('重新获取', 'ctrl-suggest', 'link', 'type="button"');
+  }
+  if (sg.note) return `<small class="muted">${esc(sg.note)}</small>` + button(sg.note === SUGGEST_STALE_NOTE ? '重新获取' : '再试一次', 'ctrl-suggest', 'link', 'type="button"');
+  return button('获取派发建议（本地决策模型）', 'ctrl-suggest', 'link', 'type="button"')
+    + '<small class="muted">填好任务描述后可先问一句派给谁；建议仅供参考，可覆盖。</small>';
+}
+/* paintSuggestLine 建议区局部更新唯一入口：只碰 #ctrl-suggest-line 容器，不整页
+ * 重绘（表单输入与下拉选择不被打断，抽屉局部刷新同款纪律）。已切页静默丢弃。 */
+function paintSuggestLine() {
+  if (S.page !== 'control' || S.C.view !== 'form') return;
+  const line = $('#ctrl-suggest-line');
+  if (line) line.innerHTML = suggestLineHtml(S.C);
+}
 function controlPage() {
   const C = S.C;
   if (C.view === 'result') return controlResult();
@@ -1670,6 +1704,7 @@ function controlPage() {
     ${orchLineHtml()}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在机器的 node.yaml 里把能力开放出去（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(stdinPlaceholder(C.node, C.agent))}">${esc(C.stdin)}</textarea></label>
+    <div class="row spaced" id="ctrl-suggest-line">${suggestLineHtml(C)}</div>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
     <div id="ctrl-feedback" class="statusline" role="status">${ctrlFeedback()}</div>
@@ -3258,6 +3293,57 @@ const ACT = {
     }
   },
   'ctrl-retry': () => { S.C.stage = 'idle'; submitControl(); },
+  /* 派发建议（P5.1 D1）：问一句「派给谁」。降级/无建议是正常应答（note 人话转述，
+   * 采纳按钮不出现）；有建议一键采纳回填两级下拉，可覆盖（采纳后照常改选改描述）。
+   * 建议绑任务描述指纹（codex 审 D1 ②）：请求时捕获描述，等待期间描述已改的
+   * 过期应答直接丢弃不采纳。 */
+  'ctrl-suggest': async () => {
+    const C = S.C;
+    if (C.stage === 'submitting' || C.stage === 'unknown' || C.suggest.busy) return;
+    const goal = (($('#ctrl-stdin')?.value) || C.stdin || '').trim();
+    if (!goal) { toast('请先填写任务描述，再获取派发建议'); return; }
+    if (!S.directory.length) { toast('网内暂无开放能力：需要先在 node.yaml 开放能力（exposed: true）'); return; }
+    C.suggest = { busy: true, sugg: null, note: '', goal };   // goal=描述指纹
+    paintSuggestLine();
+    try {
+      const r = await api('POST', '/api/v1/dispatch-suggest', { goal });
+      if ((($('#ctrl-stdin')?.value) || C.stdin || '').trim() !== goal) {
+        // 过期响应丢弃：等待期间描述已被修改，本轮应答（含建议与降级说明）一律作废。
+        C.suggest = { busy: false, sugg: null, note: SUGGEST_STALE_NOTE, goal: '' };
+        paintSuggestLine();
+        return;
+      }
+      if (r.code === 200) {
+        C.suggest = { busy: false, sugg: r.data?.suggestion ? r.data : null, note: r.data?.suggestion ? '' : (r.data?.note || '暂无建议：可手动选择执行者'), goal };
+        paintSuggestLine();
+        toast(C.suggest.sugg ? '决策模型已给出建议：可采纳或自行选择' : (r.data?.note || '暂无建议：可手动选择执行者'));
+      } else {
+        C.suggest = { busy: false, sugg: null, note: '获取建议失败（' + (r.data?.error || r.code) + '）：可手动选择执行者', goal };
+        paintSuggestLine(); toast('获取建议失败：可手动选择执行者');
+      }
+    } catch (e) {
+      if (!e.unauthorized) {
+        C.suggest = { busy: false, sugg: null, note: '获取建议失败：网络异常，可手动选择执行者', goal };
+        paintSuggestLine(); toast('获取建议失败：可手动选择执行者');
+      } else {
+        C.suggest.busy = false;
+      }
+    }
+  },
+  'ctrl-adopt': () => {
+    const sg = S.C.suggest?.sugg?.suggestion;
+    if (!sg) return;
+    /* 采纳前重验描述指纹（codex 审 D1 ②）：描述已变化则建议失效，不回填旧目标。 */
+    if ((($('#ctrl-stdin')?.value) || S.C.stdin || '').trim() !== S.C.suggest.goal) {
+      S.C.suggest = { busy: false, sugg: null, note: SUGGEST_STALE_NOTE, goal: '' };
+      paintSuggestLine();
+      toast(SUGGEST_STALE_NOTE);
+      return;
+    }
+    S.C.node = sg.target_node; S.C.agent = sg.target_agent;
+    render();
+    toast('已采纳建议：' + sg.target_agent + ' @ ' + sg.target_node + '（提交前可自行调整）');
+  },
   'ctrl-abandon': () => openLayerPlain(`${modalHead('放弃等待，不代表撤销请求')}<p>原请求可能已在 hub 持久化。表单与恢复密钥将保留：回到本页可「同键重试」安全恢复。</p><div class="notice warn">当前版本不支持撤回。请勿另开新单重复提交同一件事。</div><div class="actions">${button('保留恢复密钥，解锁表单', 'ctrl-abandon-confirm', 'primary')}</div>`, true),
   'ctrl-abandon-confirm': () => {
     S.C.stage = 'idle'; closeLayer(); render();
@@ -3355,7 +3441,17 @@ function bindEvents() {
       }
       return;
     }
-    if (e.target.id === 'ctrl-stdin') S.C.stdin = e.target.value;
+    if (e.target.id === 'ctrl-stdin') {
+      S.C.stdin = e.target.value;
+      /* 建议绑描述指纹（codex 审 D1 ②复审）：描述一改即就地失效——有建议在场时
+       * 立即销毁建议（与请求态/采纳态闸门同语义：指纹不符即失效，改回原文不复活）
+       * 并局部重绘建议区，旧采纳按钮不残留到下一次整页渲染。 */
+      const sg = S.C.suggest;
+      if (sg?.sugg?.suggestion && e.target.value.trim() !== sg.goal) {
+        S.C.suggest = { busy: false, sugg: null, note: SUGGEST_STALE_NOTE, goal: '' };
+        paintSuggestLine();
+      }
+    }
   });
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
