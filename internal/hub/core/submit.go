@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 
@@ -12,23 +13,30 @@ import (
 )
 
 // Submit 任务提交入口（HTTP 管理面与 node 间 task_submit 帧共用，SPEC 4.5/六）。
-// replyTo 为空；node 帧提交方走 SubmitFrame 携带请求 mid。
+// replyTo 为空；node 帧提交方走 SubmitFrame 携带请求 mid。直连 core 的内部调用
+// 方主体为空：绑定派发事件 principal 留空（仅限测试/内部，REST/帧入口恒带
+// 服务端已验证主体）。
 func (c *Core) Submit(req protocol.TaskSubmitRequest, submitterNode string) (*SubmitAck, error) {
-	return c.submit(req, submitterNode, "", "")
+	return c.submit(req, submitterNode, "", "", "")
 }
 
 // SubmitWithID 携预生成任务 ID 的提交入口（管理面「先登记后提交」专用，批 B
 // 修复1）：群引用登记先于提交时任务 ID 必须已知，故调用方预生成 ID（两者引用
 // 同一 ID），其余校验链与 Submit 完全一致；ID 与既有任务冲突在事务内拒绝
 //（ErrInvalid，概率可忽略）。taskID 为空等价 Submit。node 帧路径不经此。
-func (c *Core) SubmitWithID(req protocol.TaskSubmitRequest, taskID, submitterNode string) (*SubmitAck, error) {
-	return c.submit(req, submitterNode, "", taskID)
+// actor 为服务端验证的鉴权主体（REST 层 authPrincipal 取得：admin 会话 /
+// pat:<令牌名>）——绑定派发事件以独立字段落账（审查#4：不得取 SubmittedBy 兼
+// 任主体，REST 提交的 SubmittedBy 固定 admin 会丢 PAT 令牌名；SubmittedBy 语义
+// 不变，仅作显示与审计标签）。
+func (c *Core) SubmitWithID(req protocol.TaskSubmitRequest, taskID, submitterNode, actor string) (*SubmitAck, error) {
+	return c.submit(req, submitterNode, "", taskID, actor)
 }
 
 // SubmitFrame node 会话提交入口（task_submit 帧）：replyTo 为请求帧 mid，
 // submit_ack/err 帧据此回关联（node 本地 API 的请求-响应关联，Loop 4）。
+// 主体=会话身份 node_id（hub 按连接覆盖，服务端已验证，非请求自报）。
 func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyTo string) (*SubmitAck, error) {
-	return c.submit(req, submitterNode, replyTo, "")
+	return c.submit(req, submitterNode, replyTo, "", submitterNode)
 }
 
 // submit 校验链顺序固定（同键重试在信箱满时仍能取回原 task_id 的保证）：
@@ -37,19 +45,28 @@ func (c *Core) SubmitFrame(req protocol.TaskSubmitRequest, submitterNode, replyT
 //     跨节点派单；hub HTTP 管理面（submitterNode 为空）不受此限；
 //  2. 鉴权存在：提交方身份与目标字段非空（会话层 token 鉴权先于本包；HTTP 面
 //     V0 绑回环，身份仅为调用方标记）；
+//  2b. 绑定参数成组校验（审查#3）：work_ref/step_seq/prime_term 三参成组——
+//     缺 work_ref 只带其余两参的请求按无效拒绝，不静默落为普通任务派发
+//    （REST/帧入口无 MCP 层防护，core 公共入口统一把关）；
 //  3. 目标 exposed=true，否则 ErrAgentNotExposed；
 //  4. idem 查重——命中即返回，不做配额检查；
-//  5. 依赖准入（P4.3/SPEC 4.12）：depends_on 声明校验（未知 idem/自引用/重复
-//     依赖/深度/级联/环 → ErrInvalidDeps），置于 idem 查重之后——旧提交的
-//     幂等重试不因上游此后被清理而失败；
-//  6. 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
+//  4b. 尝试去重证据只读预检（审查#1/#2，与绑定写入拆分）：任务+上游已清理的
+//     同键重放在此回执补拉即返回——先于依赖准入与容量检查，不因
+//     invalid_dependency/mailbox_full/storage_full 挡在回执之外；证据含绑定
+//     事务内落盘的提交内容指纹（含提交主体=身份边界），换内容/换 work/换步骤/
+//     换主体同键 → conflict，仅群引用不同 → 按新提交（同任务级口径）；
+//  5. 依赖准入预检（事务内按快照重检——上游在两检之间被清理即拒绝）；
+//  6. 构造任务 + 序列化体积实测预检：按最终 TaskOffer 完整信封编码计字节数；
 //  7. 信箱配额/字节预算 + 存储全局预算预检；
 //  8. 单写事务持久化（事务内全部重检，依赖准入以事务内快照为准）→ SubmitAck。
+//     工作单绑定在全部校验后原子盖章；盖章后按**盖章体**重检体积与容量
+//    （审查#7/#8：绑定字段计入口径，失败以 mutate 错误整体拒绝=绑定回滚）。
 //
 // submitterNode 非 "" 表示 node 会话提交：SubmittedBy 被覆盖为该 node_id
-// （SPEC 4.9），确认与失败经帧回给该 node（submit_ack/err 帧，ReplyTo=replyTo），
-// 终态经 result_event 推送。
-func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, taskIDHint string) (*SubmitAck, error) {
+//（SPEC 4.9），确认与失败经帧回给该 node（submit_ack/err 帧，ReplyTo=replyTo），
+// 终态经 result_event 推送。actor 为服务端验证主体（绑定事件 principal 落账，
+// 与自报 prime_term/by 分开——RFC 六.2）。
+func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, taskIDHint, actor string) (*SubmitAck, error) {
 	// 1. node 会话边界锁（合并：裁剪 D9）：目标收敛为提交方本机（先于一切校验，违规不发 offer）
 	if submitterNode != "" && req.TargetNode != submitterNode {
 		err := ErrInvalid
@@ -66,6 +83,12 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		c.ackSubmitter(submitterNode, replyTo, nil, err)
 		return nil, err
 	}
+	// 2b. 绑定参数成组校验（审查#3）：三参成组，缺 work_ref 的半参请求拒绝
+	if req.WorkRef == "" && (req.StepSeq != 0 || req.PrimeTerm != "") {
+		err := fmt.Errorf("%w: 绑定派发须 work_ref/step_seq/prime_term 三参成组（缺 work_ref）", ErrInvalid)
+		c.ackSubmitter(submitterNode, replyTo, nil, err)
+		return nil, err
+	}
 	// 依赖项规范化（TrimSpace）：先于 idem 查重执行，保证重试指纹稳定
 	req.DependsOn = trimDeps(req.DependsOn)
 
@@ -78,7 +101,8 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		return nil, err
 	}
 
-	// 4. idem 查重（命中即返回，不做配额检查）
+	// 4. idem 查重（命中即返回，不做配额检查）；活任务 dup 响应带绑定回执
+	//（审查#10：与首次提交/task_gone 响应同形，调用方免二次查询）
 	if req.IdemKey != "" {
 		id, dup, err := mailbox.IdemCheck(view, req)
 		if err != nil {
@@ -87,7 +111,18 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		}
 		if dup {
 			t := view.Tasks[id]
-			ack := &SubmitAck{TaskID: t.ID, TraceID: t.TraceID, Dup: true}
+			ack := &SubmitAck{TaskID: t.ID, TraceID: t.TraceID, Dup: true, Work: workDupInfo(view, req, t.ID)}
+			c.ackSubmitter(submitterNode, replyTo, ack, nil)
+			return ack, nil
+		}
+		// 4b. 尝试去重证据只读预检（审查#2）：回执补拉先于依赖准入/容量检查
+		info, tid, hit, err := lookupAttemptEvidence(view, req)
+		if err != nil {
+			c.ackSubmitter(submitterNode, replyTo, nil, err)
+			return nil, err
+		}
+		if hit {
+			ack := &SubmitAck{TaskID: tid, TraceID: view.Tasks[tid].TraceID, Dup: true, Work: info}
 			c.ackSubmitter(submitterNode, replyTo, ack, nil)
 			return ack, nil
 		}
@@ -113,10 +148,17 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		return nil, err
 	}
 
-	// 8. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）
+	// 8. 单写事务持久化（事务内全部重检；并发同键在此收敛为 dup）。
+	// 工作单绑定（P5 W2）在全部校验之后、任务落库前：dup/去重证据命中已短路于
+	// 绑定（重试回放不新增尝试）；绑定一旦发生，其后任何失败（盖章后体积复查、
+	// 盖章体容量重检、信箱入队）以 mutate 错误整体拒绝事务（错误返回即回滚，
+	// 绑定失败不发布；上方前置校验用 txnErr+nil 是因失败点尚无任何变更，提交
+	// 空副本无害）。
 	var (
-		txnDup *SubmitAck
-		txnErr error
+		txnDup     *SubmitAck
+		txnBind    *WorkBindInfo
+		txnDedupID string // 尝试去重命中：原任务已清理，不落新任务
+		txnErr     error
 	)
 	err := c.st.Update(func(st *store.State) error {
 		if _, ok := lookupAgent(st, req.TargetNode, req.TargetAgent); !ok {
@@ -131,7 +173,18 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 			}
 			if dup {
 				t := st.Tasks[id]
-				txnDup = &SubmitAck{TaskID: t.ID, TraceID: t.TraceID, Dup: true}
+				txnDup = &SubmitAck{TaskID: t.ID, TraceID: t.TraceID, Dup: true, Work: workDupInfo(st, req, t.ID)}
+				return nil
+			}
+			// 去重证据事务内重检（预检后并发落库的同键重放在此收敛为回执）
+			info, tid, hit, err := lookupAttemptEvidence(st, req)
+			if err != nil {
+				txnErr = err
+				return nil
+			}
+			if hit {
+				txnBind = info
+				txnDedupID = tid
 				return nil
 			}
 		}
@@ -156,11 +209,26 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 			return nil
 		}
 		task.BlockedReason = evalDeps(st, req.DependsOn).blockedReason()
+		if req.WorkRef != "" {
+			info, err := c.bindWorkSubmit(st, &task, req, actor)
+			if err != nil {
+				return err
+			}
+			txnBind = info
+			// 盖章后按盖章体重检（绑定字段计入口径，审查#7/#8）：任何失败以
+			// mutate 错误整体拒绝（含绑定回写回滚）
+			if err := checkOfferSize(&task); err != nil {
+				return err
+			}
+			if err := c.checkCapacity(st, req.TargetNode, mailbox.TaskBytes(&task)); err != nil {
+				return err
+			}
+		}
 		st.Tasks[task.ID] = task
 		return mailbox.Enqueue(st, task.TargetNode, &task)
 	})
 	if err != nil && txnErr == nil {
-		txnErr = err // mutate 返回错误（信箱入队拒绝），事务已整体丢弃
+		txnErr = err // mutate 返回错误（绑定拒绝/盖章后复查失败/信箱入队拒绝），事务已整体丢弃
 	}
 	if txnErr != nil {
 		c.ackSubmitter(submitterNode, replyTo, nil, txnErr)
@@ -170,9 +238,20 @@ func (c *Core) submit(req protocol.TaskSubmitRequest, submitterNode, replyTo, ta
 		c.ackSubmitter(submitterNode, replyTo, txnDup, nil)
 		return txnDup, nil
 	}
+	if txnDedupID != "" {
+		// 尝试去重证据命中（RFC「不推迟项：去重证据」）：不重新执行，dup 语义
+		// 返回原 task_id 与原尝试定位/现终局（WorkBindInfo.TaskGone 标注原任务
+		// 是否已清理；原任务仍在的防御形态补 TraceID）
+		ack := &SubmitAck{TaskID: txnDedupID, Dup: true, Work: txnBind}
+		if t, ok := c.st.View().Tasks[txnDedupID]; ok {
+			ack.TraceID = t.TraceID
+		}
+		c.ackSubmitter(submitterNode, replyTo, ack, nil)
+		return ack, nil
+	}
 
 	c.noteTask(&task)
-	ack := &SubmitAck{TaskID: task.ID, TraceID: task.TraceID}
+	ack := &SubmitAck{TaskID: task.ID, TraceID: task.TraceID, Work: txnBind}
 	c.ackSubmitter(submitterNode, replyTo, ack, nil)
 	c.dispatch(task.TargetNode)
 	return ack, nil
@@ -222,6 +301,16 @@ func submitErrCode(err error) string {
 		return "conflict"
 	case errors.Is(err, ErrInvalidDeps):
 		return protocol.CodeInvalidDependency
+	case errors.Is(err, ErrWorkNotFound):
+		return "work_not_found"
+	case errors.Is(err, ErrWorkClosed):
+		return "work_closed"
+	case errors.Is(err, ErrWorkTermConflict):
+		return "work_term_conflict"
+	case errors.Is(err, ErrWorkNoTerm):
+		return "work_no_term"
+	case errors.Is(err, ErrWorkStepLocked):
+		return "work_step_locked"
 	case errors.Is(err, ErrInvalid):
 		return "invalid"
 	}

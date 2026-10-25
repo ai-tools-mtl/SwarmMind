@@ -39,6 +39,10 @@ const (
 	StepStatusDone      = "done"
 	StepStatusFailed    = "failed"
 	StepStatusSkipped   = "skipped"
+	// StepStatusNeedsReview 步骤最新尝试落 needs_review 终态（W2 终态回写）。
+	// RFC 二.1 六值之外的扩展：SPEC 4.8 禁止把 needs_review 折叠为 failed——
+	// 接管者必须能区分「失败可重试」与「待人工核对不可自动重跑」。
+	StepStatusNeedsReview = "needs_review"
 )
 
 // Attempt 结果取值（Attempt.Outcome；submitted 为在途，其余终局）。
@@ -47,6 +51,14 @@ const (
 	AttemptOutcomeDone       = "done"
 	AttemptOutcomeFailed     = "failed"
 	AttemptOutcomeSuperseded = "superseded"
+	// AttemptOutcomeNeedsReview 最新任务落 needs_review 终态（W2 回写映射）。
+	// RFC 二.1 四值之外的扩展，理由同 StepStatusNeedsReview：不折叠（SPEC 4.8），
+	// Work 独立记忆须在任务 24h 清理后仍可解释终局。
+	AttemptOutcomeNeedsReview = "needs_review"
+	// AttemptOutcomeCancelled 任务被管理面取消（W2 回写映射，RFC 四值之外的
+	// 扩展）：取消是事实不是失败，折叠为 failed 会在任务清理后丢失取消痕迹；
+	// 对应步骤状态按 failed 记（步骤执行未成功，可再派新尝试）。
+	AttemptOutcomeCancelled = "cancelled"
 )
 
 // MaxWorkEvents Work 事件账本滚动窗口：单 Work 只保留最新 200 条事件，超出从
@@ -87,6 +99,17 @@ type WorkAttempt struct {
 	TaskID string `json:"task_id,omitempty"`
 	// IdemKey 本次尝试的派发幂等键（请求级重试同键；任务清理后仍留档）。
 	IdemKey string `json:"idem_key,omitempty"`
+	// ContentHash/BaseContentHash 提交内容指纹（P5 W2 审查修正）：绑定事务内
+	// 由 core 按 mailbox.ContentHash/BaseContentHash 同口径计算落盘（store 不
+	// 依赖 mailbox——指纹字符串由调用方传入）。任务 24h 清理后任务级指纹查重
+	// 失效，本对指纹即同键重放的判定依据（全量合=回执补拉命中；仅群引用不同=
+	// 按新提交；其余=409 conflict，与任务级 IdemCheck 同构）——含目标/输入/
+	// 提交主体/依赖/绑定与群引用，提交主体入指纹即身份边界（知 Work+键+步骤的
+	// 他方不得冒领原 task_id）。
+	ContentHash string `json:"content_hash,omitempty"`
+	// BaseContentHash 协议内容指纹（不含群引用）：同键仅群引用不同按新提交
+	// 处理（换群重试口径），与全量指纹配合区分「换群」与「换内容」。
+	BaseContentHash string `json:"base_content_hash,omitempty"`
 	// Outcome 尝试结局（AttemptOutcomeXxx）。
 	Outcome string `json:"outcome"`
 }
@@ -122,6 +145,11 @@ type Work struct {
 	// PrimeTerm 建单/最近接管任期的逻辑归属标识（非身份证明，RFC 六.2；
 	// W2 接管事务为权威改写点）。
 	PrimeTerm string `json:"prime_term,omitempty"`
+	// TermsUsed 历史使用过的任期标签（P5 W2 审查修正：任期标签为调用方自选
+	// 字符串，无服务端单调代次——以历史使用集拒绝复用，防 ABA：旧任期标签
+	// 重新接管成功会重新放行更旧的编排写入。建单任期播种，每次接管成功追加；
+	// 接管重放（new==current）不追加）。
+	TermsUsed []string `json:"terms_used,omitempty"`
 	// Status 生命周期（WorkStatusXxx）。
 	Status string `json:"status"`
 	// Steps 计划步骤（建单定死，seq 1..N 升序）。
@@ -155,6 +183,7 @@ func (w Work) Clone() Work {
 	}
 	n.Attempts = append([]WorkAttempt(nil), w.Attempts...)
 	n.Events = append([]WorkEvent(nil), w.Events...)
+	n.TermsUsed = append([]string(nil), w.TermsUsed...)
 	if w.ClosedAt != nil {
 		t := *w.ClosedAt
 		n.ClosedAt = &t

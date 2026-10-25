@@ -24,8 +24,8 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
-	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/hub/web"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
@@ -117,32 +117,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.auth(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.auth(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/nodes", s.auth(s.handleNodes))
-	mux.HandleFunc("GET /api/v1/nodes/enroll-info", s.auth(s.handleEnrollInfo))                       // 节点接入入口地址（第六轮修复 2，enroll.go）
-	mux.HandleFunc("POST /api/v1/nodes/enroll-bundle", s.auth(s.handleEnroll)) // 部署包生成（enroll.go）
+	mux.HandleFunc("GET /api/v1/nodes/enroll-info", s.auth(s.handleEnrollInfo)) // 节点接入入口地址（第六轮修复 2，enroll.go）
+	mux.HandleFunc("POST /api/v1/nodes/enroll-bundle", s.auth(s.handleEnroll))  // 部署包生成（enroll.go）
 	mux.HandleFunc("POST /api/v1/tasks/{id}/review", s.auth(s.handleReview))
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
-	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))            // 工作单创建（P5 W1，幂等）
-	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))               // 工作单列表
-	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))           // 详情（事件游标 since_events）
+	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))                 // 工作单创建（P5 W1，幂等）
+	mux.HandleFunc("POST /api/v1/works/{id}/takeover", s.auth(s.handleWorkTakeover)) // 原子接管（P5 W2，CAS）
+	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
+	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
-	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))    // 统筹指定查询（2026-10-23 网页指定）
-	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))    // 指定/撤销（agent_name 空 = 撤销）
-	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                // 群聊 MVP（GROUP-RFC 六）
-	mux.HandleFunc("GET /api/v1/groups", s.auth(s.handleGroupList))                   // 群列表
-	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages)) // 增量拉取
-	mux.HandleFunc("POST /api/v1/groups/{id}/messages", s.auth(s.handleGroupSay))     // 发言
-	mux.HandleFunc("POST /api/v1/groups/{id}/close", s.auth(s.handleGroupClose))      // 结束（终态）
-	mux.HandleFunc("GET /api/v1/notify/channels", s.auth(s.handleNotifyChannelList))             // 通知渠道（P4③ 控制台化）
-	mux.HandleFunc("POST /api/v1/notify/channels", s.auth(s.handleNotifyChannelCreate))          // 创建（body 含明文凭证）
-	mux.HandleFunc("PUT /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelUpdate))      // 更新（****** 占位保留原值）
-	mux.HandleFunc("DELETE /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelDelete))   // 删除
-	mux.HandleFunc("POST /api/v1/notify/channels/{id}/test", s.auth(s.handleNotifyChannelTest))  // 发测试消息
-	mux.HandleFunc("GET /api/v1/notify/inbox", s.auth(s.handleNotifyInbox))                      // 站内通知（内存态，重启清空）
-	mux.HandleFunc("POST /api/v1/notify/inbox/read", s.auth(s.handleNotifyInboxRead))            // 标已读（id 缺省=全部）
-	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)                  // A2A 发现卡（免鉴权，SPEC 六.五）
-	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))                           // A2A JSON-RPC（与现有同一令牌体系）
+	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）
+	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))                               // 指定/撤销（agent_name 空 = 撤销）
+	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                          // 群聊 MVP（GROUP-RFC 六）
+	mux.HandleFunc("GET /api/v1/groups", s.auth(s.handleGroupList))                             // 群列表
+	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages))           // 增量拉取
+	mux.HandleFunc("POST /api/v1/groups/{id}/messages", s.auth(s.handleGroupSay))               // 发言
+	mux.HandleFunc("POST /api/v1/groups/{id}/close", s.auth(s.handleGroupClose))                // 结束（终态）
+	mux.HandleFunc("GET /api/v1/notify/channels", s.auth(s.handleNotifyChannelList))            // 通知渠道（P4③ 控制台化）
+	mux.HandleFunc("POST /api/v1/notify/channels", s.auth(s.handleNotifyChannelCreate))         // 创建（body 含明文凭证）
+	mux.HandleFunc("PUT /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelUpdate))     // 更新（****** 占位保留原值）
+	mux.HandleFunc("DELETE /api/v1/notify/channels/{id}", s.auth(s.handleNotifyChannelDelete))  // 删除
+	mux.HandleFunc("POST /api/v1/notify/channels/{id}/test", s.auth(s.handleNotifyChannelTest)) // 发测试消息
+	mux.HandleFunc("GET /api/v1/notify/inbox", s.auth(s.handleNotifyInbox))                     // 站内通知（内存态，重启清空）
+	mux.HandleFunc("POST /api/v1/notify/inbox/read", s.auth(s.handleNotifyInboxRead))           // 标已读（id 缺省=全部）
+	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)                            // A2A 发现卡（免鉴权，SPEC 六.五）
+	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))                                     // A2A JSON-RPC（与现有同一令牌体系）
 	console := web.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)
@@ -291,7 +292,9 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ack, err := s.cfg.Core.SubmitWithID(req.TaskSubmitRequest, preID, "")
+	// 绑定派发事件主体取服务端验证主体（authPrincipal：admin 会话/PAT 令牌名，
+	// P5 W2 审查#4）——SubmittedBy 仍固定 admin 兼容既有语义（显示与审计标签）。
+	ack, err := s.cfg.Core.SubmitWithID(req.TaskSubmitRequest, preID, "", authPrincipal(r))
 	if err != nil {
 		s.unwireGroupTask(req.GroupRef, preID) // 提交失败：回滚刚加的引用
 		writeSubmitErr(w, err)
@@ -307,6 +310,9 @@ func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	code := http.StatusAccepted
 	body := map[string]any{"task_id": ack.TaskID, "trace_id": ack.TraceID}
+	if ack.Work != nil {
+		body["work"] = ack.Work // 绑定派发结果（P5 W2：工作单/步骤/尝试定位）
+	}
 	if ack.Dup {
 		code = http.StatusOK
 		body["dup"] = true
@@ -330,6 +336,17 @@ func writeSubmitErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, core.ErrInvalidDeps):
 		// 依赖声明不合法（P4.3/SPEC 4.12：未知 idem/自引用/重复/超深度/超级联/环）
 		writeErr(w, http.StatusBadRequest, protocol.CodeInvalidDependency, err.Error())
+	case errors.Is(err, core.ErrWorkNotFound):
+		writeErr(w, http.StatusNotFound, "work_not_found", err.Error())
+	case errors.Is(err, core.ErrWorkClosed):
+		writeErr(w, http.StatusConflict, "work_closed", err.Error())
+	case errors.Is(err, core.ErrWorkTermConflict):
+		// 接管 CAS 失败或旧任期编排写入拒绝（P5 W2/RFC-work-resume 二.2）
+		writeErr(w, http.StatusConflict, "work_term_conflict", err.Error())
+	case errors.Is(err, core.ErrWorkNoTerm):
+		writeErr(w, http.StatusConflict, "work_no_term", err.Error())
+	case errors.Is(err, core.ErrWorkStepLocked):
+		writeErr(w, http.StatusConflict, "work_step_locked", err.Error())
 	case errors.Is(err, core.ErrInvalid):
 		writeErr(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:
