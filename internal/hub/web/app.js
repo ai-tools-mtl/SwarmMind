@@ -148,6 +148,10 @@ const PRIME_PROMPT = `# SwarmMind 统筹智能体（Prime）
 - swarmmind_status：查询单任务状态（不等待）
 - swarmmind_wait：等待任务到终态（completed/failed/needs_review），可设超时
 - swarmmind_artifact：取回任务产物文本（超 50KiB 只取头部，避免撑爆上下文）
+- swarmmind_work_create：创建工作单（多步工作的执行档案，断点续管的载体）
+- swarmmind_work_list / swarmmind_work_get：列出工作单 / 读档（步骤状态、尝试、事件时间线）
+- swarmmind_work_takeover：接管工作单（取得续派权）
+- swarmmind_work_collect：收集并关闭工作单（提交收集报告）
 
 ## 工作循环（严格遵循，不得跳步）
 
@@ -155,17 +159,29 @@ const PRIME_PROMPT = `# SwarmMind 统筹智能体（Prime）
 2. **查看能力**：调用 agents 与 nodes，确认执行者存在且节点在线
 3. **分解（DAG）**：拆为子任务，**数量 ≤8**；标注并行或串行。
    分解原则：每个子任务能被单个 agent 独立完成；粒度以「一次派发可验收」为准；
-   操作同一目录的子任务必须串行；**依赖双方在不同节点且预期产物超过 50KiB 的分解不合法**（跨机大数据交接平台能力就绪前禁用），检测到即上报用户
+   操作同一目录的子任务必须串行；**依赖双方在不同节点且预期产物超过 50KiB 的分解不合法**（跨机大数据交接平台能力就绪前禁用），检测到即上报用户。
+   **子任务 >1 个或存在依赖 → 先建工作单再派发**（见「工作单」节），单步小任务直接派发
 4. **展示分解方案**：格式【子任务 N】描述 → 执行者 agent（node）；依赖：N 依赖 M。展示后立即执行（控制台任期默认全自动；群模式下等待确认）
 5. **派发**：无依赖子任务并行 submit（≤4 并发）；有依赖的等前序终态并取到产物后再派，产物内容原样嵌入后继任务描述（**嵌入上限 200KiB 纯文本，超限上报用户**）
 6. **等待与收集**：一律用 wait（不用 status 轮询）。按客户端可容忍时长循环 wait 直至终态或二轮上限。超时×2 → 标记超时
 7. **终态分流**：见失败矩阵
-8. **汇总报告**：结论先行 + 子任务表格（执行者/状态/关键输出）+ 产物清单（路径）+ 遗留问题。**needs_review 的子任务只能标「待人工核对」，其内容不得进入结论**
+8. **汇总报告**：结论先行 + 子任务表格（执行者/状态/关键输出）+ 产物清单（路径）+ 遗留问题。**needs_review 的子任务只能标「待人工核对」，其内容不得进入结论**。
+   有工作单的多步工作：全部步骤终态后用 swarmmind_work_collect 关闭工作单（见「工作单」节）
 
 ## 幂等键规则
 
 每次派发携带 idem_key = \`prime-<任期号>-<序号>\`（如 prime-3-2 表示任期 3 的第 2 次派发）；
 重派同一子任务沿用**同一键**（hub 幂等去重保护，不会重复执行）；全新的尝试才用新序号。
+绑定工作单的派发用 \`prime-<任期>-<工作单>-<步骤>-<尝试>\`——幂等键在 hub 全局去重，**必须含工作单维度**（同任期两张单各自「步骤 1 尝试 1」会撞键，见「工作单」节）。
+
+## 工作单（多步工作的断点续管）
+
+- **建单时机**：拆解出的子任务 >1 个或存在依赖关系 → 先 swarmmind_work_create 建单（目标 + 步骤计划），再逐步绑定派发；单步小任务直接 submit，不建单。
+- **绑定派发**：建单后的每次派发，swarmmind_submit 必须携 \`work_ref\`（工作单 ID）+ \`step_seq\`（步骤号）+ \`prime_term\`（当前任期）三参——计划、尝试与进度因此落 hub，你中断后接管者按单续管。
+- **幂等键与接管重放**：绑定派发键 \`prime-<任期>-<工作单>-<步骤>-<尝试>\`（工作单维度必带）。接管后：传输重试**保留原键原内容**（同键重放命中幂等回执，不会重复执行）；原尝试还在 submitted/running 就继续 wait 跟踪等终态，不换键重派；仅对明确授权的新执行分配新键（新尝试新键）。
+- **断点续管**：任期开始先 swarmmind_work_list 发现未完成工作单（planning/executing/blocked）→ swarmmind_work_get 读档（步骤/尝试/事件）→ swarmmind_work_takeover（expected_term=读档任期，new_term=本任期）取得续派权 → 按档续派未完成步骤。未接管就派发会被拒绝。
+- **重试预算**：同一工作单步骤的尝试 ≤2 次；任期重派全局 ≤3 次（沿用失败矩阵限额）。超限停止续派并如实上报。
+- **收集与部分汇总**：无在途执行后 swarmmind_work_collect 关闭工作单（prime_term 与 report 必填）。全部步骤完成才可标 done；存在失败/待核对/跳过步骤时 hub 拒绝完成关闭——确认放弃剩余步骤用 outcome=abandoned 并在报告写明理由（未派发的步骤随放弃关闭自动记为跳过）。报告逐步骤如实：部分完成就是部分汇总，needs_review 只能标「待人工核对」，其内容不得进入结论。
 
 ## 失败处理矩阵
 
@@ -319,7 +335,9 @@ function drawerLogInner(res, raw) {
  * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
  * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
  * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
- * 动画只随壳播放一次，分区更新不重放。 */
+ * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
+ * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
+ * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
 const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
@@ -327,9 +345,9 @@ function drawerZoneSwap(el, html) {
   el.innerHTML = html;
   [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
 }
-function drawerZonesApply(root, zones, cache) {
+function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
   let touched = false;
-  for (const name of DRAWER_ZONES) {
+  for (const name of names) {
     const html = zones[name] || '';
     if (cache[name] === html) continue;
     const el = root.querySelector(`[data-zone="${name}"]`);
@@ -375,9 +393,10 @@ const S = {
   expAt: 0,                    // 登录应答 expires_in 推算；服务端 401 为权威兜底
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
+  works: [],                   // 工作单列表摘要（P5 W3，hub 编排面）
   prime: null,                 // 统筹指定 {node_id, agent_name, set_at, set_by}；null=未指定（回退名字约定）
-  seq: { nodes: 0, tasks: 0, directory: 0, prime: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
-  resSnap: { nodes: '', tasks: '', directory: '', prime: '' },   // 按资源指纹：任一资源有变才整页重绘
+  seq: { nodes: 0, tasks: 0, directory: 0, prime: 0, works: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
+  resSnap: { nodes: '', tasks: '', directory: '', prime: '', works: '' },   // 按资源指纹：任一资源有变才整页重绘
   fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
   pollBusy: false,             // 轮询 single-flight：上轮在途跳过本轮
   f: { status: '', trace: '', by: '', error: '', from: '', to: '' },   // 任务筛选
@@ -409,6 +428,7 @@ const S = {
   inboxItems: [],              // 站内通知（内存态，重启清空；顶栏铃铛数据源）
   inboxUnread: 0,              // 站内未读数（badge）
   bellOpen: false,             // 铃铛面板开合
+  workDrawer: null,            // 打开的工作单详情抽屉（P5 W3）{id, work, zones, forms, seq}
 };
 function freshControl() {
   /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
@@ -459,6 +479,7 @@ function errLine(data) {
 function sessionExpired() {
   if (!S.authed) { S.authed = false; route(); return; }
   S.authed = false; S.loaded = false; S.drawer = null; S.C = freshControl(); S.groupView = null;
+  S.workDrawer = null;
   S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
   closeBellPanel();   // 铃铛面板随会话收起（S.bellOpen 不跨会话）
   render();
@@ -507,11 +528,12 @@ async function loadResource(name, path, validate) {
 }
 async function loadAll() {
   const taskVerAtReq = { ...S.taskVer };   // 数据版本快照（阶段 D 必须修 1/2）：任务列表提交时判定过期
-  const [nodes, tasks, directory, prime] = await Promise.all([
+  const [nodes, tasks, directory, prime, works] = await Promise.all([
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
     loadResource('prime', '/api/v1/prime', d => (!d || !('designation' in d)) ? null : (d.designation ?? PRIME_UNSET)),
+    loadResource('works', '/api/v1/works', d => Array.isArray(d?.works) ? d.works.slice().sort(byCreatedDesc) : null),
   ]);
   let changed = false;
   const commit = (name, wrapped) => {
@@ -535,10 +557,11 @@ async function loadAll() {
     if (name === 'nodes') S.nodes = value;
     else if (name === 'tasks') S.tasks = value;
     else if (name === 'prime') S.prime = value === PRIME_UNSET ? null : value;   // 标记还原为合法 null
+    else if (name === 'works') S.works = value;
     else S.directory = value;
     changed = true;
   };
-  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime);
+  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime); commit('works', works);
   updateFreshness();
   return changed;
 }
@@ -629,6 +652,7 @@ async function pollTick() {
   try {
     let changed = await loadAll();
     refreshInbox();   // 铃铛未读数（独立 DOM 通道，不经 render；失败静默下轮再试）
+    if (S.workDrawer) fetchWorkDetail();   // 工作单抽屉轮询同步（分区 diff，稳定 DOM）
     if (S.C.view === 'result' && S.C.batch) {
       const r = await api('GET', '/api/v1/control-operations/' + encodeURIComponent(S.C.batch.batch_id));
       if (r.code === 200 && r.data) { S.C.batch = r.data; changed = true; }
@@ -646,7 +670,7 @@ async function pollTick() {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'policy', 'tokens', 'groups'];
+const PAGE_IDS = ['overview', 'nodes', 'tasks', 'control', 'works', 'policy', 'tokens', 'groups'];
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [p, arg] = h.split('/');
@@ -704,7 +728,7 @@ function humanLeft() {
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务监管'], ['control', '任务派发'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
+  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务监管'], ['control', '任务派发'], ['works', '工作单'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
@@ -1502,6 +1526,7 @@ function syncDrawerZones() {
 function closeLayer(restoreFocus = false) {
   enrollStopWait();
   S.drawer = null;
+  S.workDrawer = null;   // 工作单抽屉同属层生命周期（P5 W3）
   modalOpen = false;
   S.layerGen++;
   if (layerState === 'closed') { layerCtx = null; return; }
@@ -2451,6 +2476,241 @@ function taskFromMsgModal(seq) {
   <p class="footer-note">等价于「任务派发」页的单点派发：恢复密钥自动生成；目标离线或能力未开放会在提交结果中标出。</p>`);
 }
 
+/* ---------- 工作单（P5 W3，hub 编排面独有；SPEC 六.五白名单入档） ----------
+ * 列表 + 详情抽屉（接管/续派/处置三个写动作，无手工建单——建单入口 v1 仅
+ * Prime/MCP，RFC 六.六裁决 1）。抽屉走 D22 分区机制（workShellHtml 稳定分区 +
+ * drawerZonesApply 传 WORK_ZONES 复用 shared block 泛化后的分区 diff），动作区
+ * （data-work-actions）一次建壳恒定节点、不在分区 diff 内——表单草稿/busy 不进
+ * 模板串（阶段 D 必须修 3 同款纪律），可见性与禁用由 applyWorkFormState 状态
+ * 驱动属性写入。工作单状态词典为 hub 独有非任务词典（同 GROUP_STATES 留
+ * shared block 外，AGENTS 禁漂移条款白名单面）。 */
+const WORK_STATES = {
+  planning: '计划中', executing: '执行中', blocked: '受阻',
+  collecting: '收集中', done: '已完成', abandoned: '已放弃',
+};
+const WORK_STEP_STATES = {
+  pending: '待派发', submitted: '已派发', running: '执行中',
+  done: '完成', failed: '失败', needs_review: '等你确认', skipped: '跳过',
+};
+const WORK_TERMINAL = new Set(['done', 'abandoned']);
+const WORK_STEP_SETTLED = new Set(['done', 'failed', 'needs_review', 'skipped']);
+const WORK_ZONES = ['head', 'intro', 'steps', 'attempts', 'report', 'events'];
+const WORK_EVENT_KINDS = {
+  work_created: '建单', attempt_recorded: '派发登记', step_updated: '步骤回写',
+  takeover: '接管', collect: '收集关闭',
+};
+function workBadge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(WORK_STATES[s] || s)}</span>`; }
+function workStepBadge(s) { return `<span class="badge ${esc(s)}" title="${esc(s)}">${esc(WORK_STEP_STATES[s] || s)}</span>`; }
+
+function worksPage() {
+  return head('工作单', '多步工作的执行档案：计划、尝试与收集报告在 hub 持久，统筹中断后可按单续管。建单与派发由统筹智能体经 MCP 进行，这里查看与处置。')
+    + `<section class="card">
+    ${S.works.length ? workTable(S.works) : `<div class="empty"><h2>还没有工作单</h2><p class="muted">统筹智能体拆解多步目标时会经 MCP 创建工作单；单步小任务直接派发、不建单。</p></div>`}
+    <p class="footer-note">${S.works.length} 个工作单 · 时间为 UTC · 未完成的工作单不会清理；已关闭的保留 30 天。</p></section>`;
+}
+function workTable(list) {
+  return `<div class="table-wrap"><table><thead><tr><th>工作单</th><th>状态</th><th>步骤进度</th><th>尝试</th><th>任期</th><th>创建（UTC）</th><th>关闭（UTC）</th><th></th></tr></thead><tbody>
+  ${list.map(w => `<tr data-work="${esc(w.id)}" tabindex="0" aria-label="查看工作单 ${esc(w.id)}">
+    <td class="task-title"><strong>${esc(summarize(w.goal, 40))}</strong><small>${esc(w.id)}</small></td>
+    <td>${workBadge(w.status)}</td>
+    <td>${w.done_steps}/${w.steps}</td>
+    <td>${w.attempts}</td>
+    <td>${esc(w.prime_term || '—')}</td>
+    <td><small>${esc(fmtTime(w.created_at))}</small></td>
+    <td><small>${w.closed_at ? esc(fmtTime(w.closed_at)) : '—'}</small></td>
+    <td class="table-action">${button('查看 →', 'work-open', 'link', `data-id="${esc(w.id)}"`)}</td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+
+/* openWork 打开工作单抽屉：closeLayer 先行（单层语义，同任务抽屉 detail 入口），
+ * 壳与动作区一次建齐，数据由 fetchWorkDetail 异步补齐（分区 diff 写入）。
+ * seq=读档请求序号、rev=本地回写版本（写动作三重迟到防护，W3 审查④）。 */
+function openWork(id) {
+  closeLayer();
+  S.workDrawer = { id, work: null, zones: {}, seq: 0, rev: 0, stepSig: '' };
+  const layer = $('#layer');
+  layerOpenBegin();
+  applyInert(true);
+  layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${workShellHtml()}</section></div>`;
+  $('#work-actions').innerHTML = workActionsHtml();
+  syncWorkDrawerZones();
+  applyWorkFormState();
+  playLayerOpen(layer);
+  layer.querySelector('.drawer')?.focus();
+  fetchWorkDetail();
+}
+
+/* workShellHtml 分区壳 + 稳定动作区（动作区不参与分区 diff——表单节点一次建恒定）。 */
+function workShellHtml() {
+  return WORK_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')
+    + `<section class="card spaced" id="work-actions" data-work-actions></section>`;
+}
+
+/* workActionsHtml 接管/续派/处置三表单（hub 管理面写动作全集，无手工建单）。
+ * 全部无动态值——任期等易变事实由 applyWorkFormState 属性写入（readonly 展示位），
+ * 输入类控件值只被用户改动；busy 由状态驱动 disabled。 */
+function workActionsHtml() {
+  return `<h3>管理动作</h3>
+  <details class="spaced" id="wa-takeover-box"><summary>接管此工作单（取得续派权）</summary>
+    <p class="muted small">当前任期：<code id="wa-term-now"></code>。声明新任期接管后，旧任期的派发即被拒（其在途任务结果照常回流）；同刻仅一方接管成功。</p>
+    <label>新任期标识（接管方声明，如 prime-7）<input id="wa-new-term" placeholder="prime-7" autocomplete="off"></label>
+    <div class="actions spaced">${button('接管', 'work-takeover', 'primary')}</div>
+  </details>
+  <details class="spaced" id="wa-dispatch-box"><summary>续派步骤（绑定派发）</summary>
+    <label>步骤<select id="wa-step"></select></label>
+    <div class="fields">
+      <label>执行机器<input id="wa-node" autocomplete="off"></label>
+      <label>执行智能体<input id="wa-agent" autocomplete="off"></label>
+    </div>
+    <label>任务描述<textarea id="wa-stdin" rows="3" placeholder="描述这一步要做什么…"></textarea></label>
+    <p class="muted small">恢复密钥自动生成（新尝试新键）；任期按工作单当前事实携带，校验不过 hub 整体拒绝、不产生半截派发。</p>
+    <div class="actions spaced">${button('续派', 'work-dispatch', 'primary')}</div>
+  </details>
+  <details class="spaced" id="wa-collect-box"><summary>收集 / 处置关闭</summary>
+    <p class="muted small">无在途执行才能关闭；全部完成才可标「完成」——部分完成不会被误标（hub 拒绝）；处置放弃须写明理由，未派发步骤随关闭记为跳过。报告保留 30 天。</p>
+    <label>关闭方式<select id="wa-outcome">
+      <option value="done">完成关闭（要求全部步骤完成）</option>
+      <option value="abandoned">处置放弃剩余步骤（须写明理由）</option>
+    </select></label>
+    <label>收集报告（必填；任务清理后的执行摘要）<textarea id="wa-report" rows="4" placeholder="逐步骤结果与结论…"></textarea></label>
+    <div class="actions spaced">${button('关闭工作单', 'work-collect', 'primary')}</div>
+  </details>`;
+}
+
+/* fetchWorkDetail 工作单详情拉取：seq 请求序号 + 抽屉会话 + 本地回写版本三重守卫
+ *（迟到应答只落快照不回退新会话，对齐任务抽屉 drawerQuerySeq 纪律；在途期间发生
+ * 写动作回写（rev 推进）则本读已过时——写响应携带更新事实，旧读落地会把刚写入的
+ * 新事实回退成旧快照，W3 审查④）。404（30 天保留期到整单清理）关层提示，不留
+ * 半截抽屉。 */
+async function fetchWorkDetail() {
+  const wd = S.workDrawer;
+  if (!wd) return;
+  const seq = ++wd.seq;
+  const rev = wd.rev || 0;
+  let r = null;
+  try { r = await api('GET', '/api/v1/works/' + encodeURIComponent(wd.id), undefined, { timeoutMs: DATA_TIMEOUT_MS }); }
+  catch (e) { return; }   // 网络/超时：保留旧快照，下轮轮询再试
+  if (S.workDrawer !== wd || seq !== wd.seq) return;   // 换单/新请求在途：旧应答作废
+  if ((wd.rev || 0) !== rev) return;   // 在途期间写动作已回写本地事实：本读过时作废（下轮轮询取权威现状）
+  if (r.code === 404) {
+    S.workDrawer = null;
+    closeLayer();
+    toast('工作单已不存在（可能已过 30 天保留期清理）');
+    return;
+  }
+  if (r.code !== 200 || !r.data?.work) return;
+  wd.work = r.data.work;
+  syncWorkDrawerZones();
+  applyWorkFormState();
+}
+
+/* syncWorkDrawerZones 以 S.workDrawer.work 重算分区并 diff 写入（轮询与动作后
+ * 刷新共用；复用 shared block 分区机制，传 WORK_ZONES 自有分区表）。 */
+function syncWorkDrawerZones() {
+  const dr = $('#layer .drawer');
+  if (dr && S.workDrawer?.work && S.workDrawer.zones) {
+    drawerZonesApply(dr, workZones(S.workDrawer.work), S.workDrawer.zones, WORK_ZONES);
+  }
+}
+
+/* workZones 工作单抽屉分区内容（六分区：头部/生命周期介绍/步骤表/尝试表/收集
+ * 报告/事件时间线；报告区空单不产出——diff 收敛为不碰 DOM）。 */
+function workZones(w) {
+  const steps = w.steps || [], attempts = w.attempts || [];
+  const goneSet = new Set(w.tasks_gone || []);
+  const doneN = steps.filter(s => s.status === 'done').length;
+  const allSettled = steps.length > 0 && steps.every(s => WORK_STEP_SETTLED.has(s.status));
+  const allDone = steps.length > 0 && doneN === steps.length;
+  const keepUntil = fmtUTC(w.expires_at || '');
+  let intro;
+  if (w.status === 'done') intro = `工作单已完成关闭：${doneN}/${steps.length} 步完成${keepUntil ? '，报告存档保留至 ' + keepUntil : ''}。终态不可再派发/接管/收集。`;
+  else if (w.status === 'abandoned') intro = `工作单已处置关闭（放弃剩余步骤）：处置理由见收集报告${keepUntil ? '，保留至 ' + keepUntil : ''}。`;
+  else if (!w.prime_term) intro = '尚未建立任期：接管后才能派发或关闭。';
+  else if (allDone) intro = '全部步骤完成：可收集关闭（写报告 → 完成关闭）。';
+  else if (allSettled) intro = '全部步骤已到终态但有未完成项：可对失败步骤续派补救，或处置放弃剩余步骤（部分完成不会被标成完成）。';
+  else intro = w.status === 'blocked'
+    ? '存在阻断（有步骤未成功）：对携带阻断的步骤续派即可解除；或处置放弃剩余步骤——未派发的步骤随关闭记为跳过。'
+    : '执行中：等在途执行收束后才能收集关闭。抽屉每 5 秒自动刷新。';
+  return {
+    head: `${modalHead('工作单 · ' + esc(w.id))}
+    <div class="row"><h2>${esc(w.goal)} ${workBadge(w.status)}</h2></div>
+    <p class="muted small">任期 ${esc(w.prime_term || '（未建立）')} · 创建于 ${esc(fmtUTC(w.created_at) || '—')}${w.closed_at ? ' · 关闭于 ' + esc(fmtUTC(w.closed_at)) : ''}${keepUntil ? ' · 保留至 ' + keepUntil : ''}</p>`,
+    intro: `<div class="${w.status === 'blocked' && !WORK_TERMINAL.has(w.status) ? 'notice warn' : 'notice'}">${intro}</div>`,
+    steps: `<h3 class="spaced">步骤（${doneN}/${steps.length} 完成）</h3>
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>描述</th><th>执行者</th><th>依赖</th><th>状态</th></tr></thead><tbody>
+    ${steps.map(s => `<tr>
+      <td>${s.seq}</td>
+      <td>${esc(s.desc)}${s.note ? `<br><small class="muted">${esc(s.note)}</small>` : ''}</td>
+      <td><small>${esc(s.target_agent)} @ ${esc(s.target_node)}</small></td>
+      <td><small>${s.depends_on?.length ? '#' + s.depends_on.join(' #') : '—'}</small></td>
+      <td>${workStepBadge(s.status)}</td>
+    </tr>`).join('')}</tbody></table></div>`,
+    attempts: `<h3 class="spaced">执行尝试（${attempts.length}）</h3>${attempts.length
+    ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>步骤</th><th>任务</th><th>结局</th></tr></thead><tbody>
+      ${attempts.map(a => `<tr>
+        <td>#${a.seq}</td>
+        <td>#${a.step_seq}</td>
+        <td><code>${esc(a.task_id || '—')}</code>${goneSet.has(a.task_id) ? '<br><small class="muted">任务详情已过保留期清理，事实以本记录为准</small>' : ''}</td>
+        <td>${workStepBadge(a.outcome)}</td>
+      </tr>`).join('')}</tbody></table></div>`
+    : '<p class="muted">还没有派发记录。</p>'}`,
+    report: w.report ? `<h3 class="spaced">收集报告</h3>${mdAnswer(w.report)}` : '',
+    events: `<h3 class="spaced">事件时间线</h3>
+    <ol class="timeline">${(w.events || []).map(ev => `<li${ev.kind === 'collect' ? ' class="hl"' : ''}><b>${esc(WORK_EVENT_KINDS[ev.kind] || ev.kind)}</b>（${esc(ev.by || '—')}${ev.principal && ev.principal !== ev.by ? '｜主体 ' + esc(ev.principal) : ''}）：${esc(ev.body)}<br><small>${esc(fmtUTC(ev.at))}</small></li>`).join('')}</ol>`,
+  };
+}
+
+/* applyWorkFormState 动作区状态驱动更新（属性写入先比后写；表单节点恒定）：
+ * 终态收起全部动作；接管展示位更新当前任期；续派步骤下拉随「可派步骤集合 +
+ * 选中步骤状态」签名重建（未选中步骤的状态流转不重建、不重预填——用户改过的
+ * 执行者草稿不得被无关步骤刷新冲掉，W3 审查⑤），选中步不变时重填也不触发
+ * （预填只随真实换步发生）；无续派面（全 done/skipped）收起续派盒；busy 禁用。 */
+function applyWorkFormState() {
+  const wd = S.workDrawer;
+  const sec = $('#work-actions');
+  if (!wd || !wd.work || !sec) return;
+  const w = wd.work;
+  const terminal = WORK_TERMINAL.has(w.status);
+  if (sec.hidden !== terminal) sec.hidden = terminal;   // 先比后写：无变化刷新不碰 DOM
+  if (terminal) return;
+  const termNow = $('#wa-term-now');
+  const termTxt = w.prime_term || '（无任期——先接管）';
+  if (termNow && termNow.textContent !== termTxt) termNow.textContent = termTxt;
+  // 续派步骤下拉：签名=可派步骤 seq 集 + 选中步骤状态（其余步骤状态只在步骤表
+  // 分区呈现，下拉标签短暂滞后可接受——换来的稳定比标签实时更值钱）
+  const eligible = (w.steps || []).filter(s => s.status !== 'done' && s.status !== 'skipped');
+  const box = $('#wa-dispatch-box');
+  const sel = $('#wa-step');
+  const sig = eligible.map(s => s.seq).join(',') + '|' + (eligible.find(s => String(s.seq) === (sel?.value || ''))?.status || '');
+  if (box && sig !== wd.stepSig) {
+    wd.stepSig = sig;
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = eligible.map(s => `<option value="${s.seq}">#${s.seq} ${esc(summarize(s.desc, 30))}（${esc(WORK_STEP_STATES[s.status] || s.status)}）</option>`).join('');
+      if (eligible.some(s => String(s.seq) === prev)) sel.value = prev;
+      if (sel.value !== prev) workStepPicked();   // 选中步真的变了（被移除回退）才重预填；草稿不动
+    }
+  }
+  const noDispatch = !eligible.length;
+  if (box && box.hidden !== noDispatch) box.hidden = noDispatch;
+  for (const [act, key] of [['work-takeover', 'work-takeover:' + wd.id], ['work-dispatch', 'work-dispatch:' + wd.id], ['work-collect', 'work-collect:' + wd.id]]) {
+    const btn = sec.querySelector(`button[data-act="${act}"]`);
+    if (btn && btn.disabled !== S.busy.has(key)) btn.disabled = S.busy.has(key);
+  }
+}
+
+/* workStepPicked 步骤选择联动：执行者两栏按步骤声明预填（可改；换步重填——
+ * 「步骤选择驱动目标」可预期，stdin 草稿不动）。 */
+function workStepPicked() {
+  const wd = S.workDrawer;
+  const seq = $('#wa-step')?.value;
+  const s = wd?.work?.steps?.find(x => String(x.seq) === seq);
+  if (!s) return;
+  const n = $('#wa-node'), a = $('#wa-agent');
+  if (n) n.value = s.target_node || '';
+  if (a) a.value = s.target_agent || '';
+}
+
 /* ---------- 动作表（事件委托） ---------- */
 /* primeBusy 统筹指定互斥（P1 复审）：prime-save / prime-clear 共享——PUT /prime 在途时
  * 两入口（含跨按钮连点）都直接拒绝，防重复提交与迟到响应互相覆盖、误关新层。 */
@@ -2463,6 +2723,106 @@ const ACT = {
   detail: b => { closeLayer(); openTask(b.dataset.id); },
   'go-tasks': () => go('tasks'),
   'go-review-queue': () => go('tasks', 'needs_review'),
+  /* ---------- 工作单（P5 W3）：查看与三写动作（接管/续派/处置，无手工建单） ---------- */
+  'work-open': b => openWork(b.dataset.id),
+  'work-takeover': async () => {
+    const wd = S.workDrawer;
+    if (!wd?.work || WORK_TERMINAL.has(wd.work.status)) return;
+    const nt = $('#wa-new-term')?.value.trim();
+    if (!nt) { toast('请填写新任期标识（如 prime-7）'); $('#wa-new-term')?.focus(); return; }
+    const key = 'work-takeover:' + wd.id;
+    if (S.busy.has(key)) return;
+    S.busy.add(key); applyWorkFormState();
+    wd.seq++;   // 三重防护②（W3 审查④）：写动作在途即作废回写前发出的读档（其应答携带旧事实）
+    let r = null;
+    try {
+      r = await api('POST', `/api/v1/works/${encodeURIComponent(wd.id)}/takeover`, { expected_term: wd.work.prime_term || '', new_term: nt });
+    } catch (e) {
+      if (e.network) toast('结果未知 · 网络中断：以刷新后的任期为据，勿盲目重试');   // 同参重放是幂等回执，不产生二次变更
+    }
+    S.busy.delete(key);
+    if (S.workDrawer !== wd) return;   // 三重防护①：抽屉身份校验——换单/关层后响应作废，不碰新抽屉的表单与展示
+    if (!r) { applyWorkFormState(); return; }
+    if (r.code === 200) {
+      wd.rev++;   // 三重防护③：本地回写版本推进（写/读并发时在途旧读按版本丢弃，防新事实被旧快照回退）
+      wd.work = r.data.work;
+      syncWorkDrawerZones(); applyWorkFormState();
+      const inp = $('#wa-new-term'); if (inp) inp.value = '';
+      toast(r.data.dup ? '接管重放命中（幂等，未新增事件）' : `已接管：任期 ${wd.work.prime_term}，续派权已取得`);
+      loadAll();   // 列表任期列同步
+    } else {
+      toast('接管失败：' + errLine(r.data));
+      fetchWorkDetail();   // 409 多为他人已接管：立即对齐当前事实
+    }
+  },
+  'work-dispatch': async () => {
+    const wd = S.workDrawer;
+    if (!wd?.work || WORK_TERMINAL.has(wd.work.status)) return;
+    const stepSeq = Number($('#wa-step')?.value || 0);
+    const node = $('#wa-node')?.value.trim() || '';
+    const agent = $('#wa-agent')?.value.trim() || '';
+    const stdin = $('#wa-stdin')?.value || '';
+    if (!stepSeq) { toast('请选择要续派的步骤'); return; }
+    if (!node || !agent) { toast('请填写执行机器与执行智能体'); return; }
+    const key = 'work-dispatch:' + wd.id;
+    if (S.busy.has(key)) return;
+    S.busy.add(key); applyWorkFormState();
+    wd.seq++;   // 三重防护②：作废回写前在途读档（同接管口径，W3 审查④）
+    let r = null;
+    try {
+      r = await api('POST', '/api/v1/tasks', {
+        target_node: node, target_agent: agent,
+        input: { args: [], stdin },
+        idem_key: newIdem(),
+        work_ref: wd.id, step_seq: stepSeq, prime_term: wd.work.prime_term || '',
+      });
+    } catch (e) {
+      if (e.network) toast('结果未知 · 网络中断：恢复密钥已在提交体内，凭工作单尝试表核对，勿盲目重派');
+    }
+    S.busy.delete(key);
+    if (S.workDrawer !== wd) return;   // 三重防护①：身份校验（响应不得清空他单输入）
+    if (!r) { applyWorkFormState(); return; }
+    if (r.code === 202 || r.code === 200) {
+      const wk = r.data?.work;
+      const ta = $('#wa-stdin'); if (ta) ta.value = '';
+      toast(wk ? `已续派 ${r.data.task_id}（尝试 #${wk.attempt_seq}）` : '已续派');
+      wd.rev++;   // 三重防护③：派发已变更服务端事实，在途旧读作废（fresh 拉取）
+      fetchWorkDetail(); loadAll();
+    } else {
+      toast('续派失败：' + errLine(r.data));
+      fetchWorkDetail();
+    }
+  },
+  'work-collect': async () => {
+    const wd = S.workDrawer;
+    if (!wd?.work || WORK_TERMINAL.has(wd.work.status)) return;
+    const outcome = $('#wa-outcome')?.value || 'done';
+    const report = $('#wa-report')?.value.trim() || '';
+    if (!report) { toast('请填写收集报告（必填：任务清理后的执行摘要）'); $('#wa-report')?.focus(); return; }
+    const key = 'work-collect:' + wd.id;
+    if (S.busy.has(key)) return;
+    S.busy.add(key); applyWorkFormState();
+    wd.seq++;   // 三重防护②：作废回写前在途读档（同接管口径，W3 审查④）
+    let r = null;
+    try {
+      r = await api('POST', `/api/v1/works/${encodeURIComponent(wd.id)}/collect`, { prime_term: wd.work.prime_term || '', report, outcome });
+    } catch (e) {
+      if (e.network) toast('结果未知 · 网络中断：同参重试是幂等回执，不会重复关闭');
+    }
+    S.busy.delete(key);
+    if (S.workDrawer !== wd) return;   // 三重防护①：身份校验
+    if (!r) { applyWorkFormState(); return; }
+    if (r.code === 200) {
+      wd.rev++;   // 三重防护③
+      wd.work = r.data.work;
+      syncWorkDrawerZones(); applyWorkFormState();
+      toast(r.data.dup ? '关闭回执（相同请求重放幂等命中）' : wd.work.status === 'done' ? '工作单已完成关闭，报告已存档' : '工作单已处置关闭，理由已存档');
+      loadAll();
+    } else {
+      toast('关闭失败：' + errLine(r.data));
+      fetchWorkDetail();   // work_steps_open 等多为事实已推进：对齐当前步骤状态
+    }
+  },
   enroll: () => enrollModal(),
   /* ---------- 接入向导（四步）动作 ---------- */
   'enroll-step': b => enrollGo(Number(b.dataset.step)),
@@ -2935,7 +3295,7 @@ async function copyText(value, label) {
 }
 
 /* ---------- 事件绑定（委托） ---------- */
-const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, policy: policyPage, tokens: tokensPage, groups: groupsPage };
+const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, control: controlPage, works: worksPage, policy: policyPage, tokens: tokensPage, groups: groupsPage };
 function bindEvents() {
   window.addEventListener('hashchange', route);
   document.addEventListener('click', e => {
@@ -2958,7 +3318,9 @@ function bindEvents() {
     const bellWrap = document.getElementById('notify-bell');
     if (S.bellOpen && bellWrap && !bellWrap.contains(e.target)) closeBellPanel();
     const tr = e.target.closest('tr[data-task]');
-    if (tr) openTask(tr.dataset.task);
+    if (tr) { openTask(tr.dataset.task); return; }
+    const trw = e.target.closest('tr[data-work]');
+    if (trw) openWork(trw.dataset.work);
   });
   document.addEventListener('submit', e => {
     e.preventDefault();
@@ -3013,6 +3375,8 @@ function bindEvents() {
       if (ta) ta.placeholder = stdinPlaceholder($('#ctrl-node')?.value || '', e.target.value);
       return;
     }
+    /* 工作单抽屉续派表单：步骤切换联动执行者预填（P5 W3）。 */
+    if (e.target.id === 'wa-step') workStepPicked();
   });
   /* 智能体选择公共组件（派单 ctrl / 建群 gnew / 转任务 task）：机器切换联动、
    * 摘要行与计数行统一走组件；派单页把选择持久化到 S.C（整页重绘后恢复），

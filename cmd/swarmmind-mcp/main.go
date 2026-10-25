@@ -7,7 +7,7 @@
 // 零第三方依赖（对齐 SPEC 依赖白名单哲学）。
 //
 // 目标模式（方案 3.4 backend 分叉，2026-10-22）：SWARM_TARGET 选装配
-//（backend interface 两实现，工具路由按模式裁剪，不散落 if）：
+// （backend interface 两实现，工具路由按模式裁剪，不散落 if）：
 //
 //	SWARM_TARGET=hub（默认，完全向后兼容）——连 hub 管理面：
 //	  SWARM_HUB_URL   管理面地址，如 http://127.0.0.1:8444
@@ -241,9 +241,13 @@ func toolObj(props map[string]any, required ...string) map[string]any {
 	return m
 }
 
-func toolStr(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+func toolStr(desc string) map[string]any {
+	return map[string]any{"type": "string", "description": desc}
+}
 
-func toolNum(desc string) map[string]any { return map[string]any{"type": "number", "description": desc} }
+func toolNum(desc string) map[string]any {
+	return map[string]any{"type": "number", "description": desc}
+}
 
 func toolArr(desc string) map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
@@ -330,7 +334,7 @@ func tools() []toolDef {
 			"steps":      toolWorkSteps("步骤计划（1..64 步）：每步 {desc,target_node,target_agent,depends_on}；depends_on 为前置步骤序号整数数组（1..总步数，可选）"),
 			"prime_term": toolStr("当前任期标识（可选，如 prime-3；逻辑归属审计）"),
 		}, "goal", "steps")},
-		{Name: "swarmmind_work_get", Description: "查看工作单详情：目标、步骤状态表、执行尝试与事件时间线；since_events 游标增量拉事件（事件滚动保留最新 200 条，响应会标注已裁位置）。接管未完成工作前先读档", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_work_get", Description: "查看工作单详情：目标、步骤状态表、执行尝试（含幂等键/尝试引用/内容指纹——任务清理后凭此安全重放）、收集报告与事件时间线；since_events 游标增量拉事件（事件滚动保留最新 200 条，响应会标注已裁位置）。接管未完成工作前先读档", InputSchema: toolObj(map[string]any{
 			"work_id":      toolStr("工作单 ID（swarmmind_work_list 可查）"),
 			"since_events": toolNum("已见最大事件 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
 		}, "work_id")},
@@ -340,6 +344,12 @@ func tools() []toolDef {
 			"expected_term": toolStr("读档时看到的当前任期（swarmmind_work_get 的 prime_term；从未设任期传空串）——代校验，不符即拒绝"),
 			"new_term":      toolStr("你的新任期标识（如 prime-7）"),
 		}, "work_id", "new_term")},
+		{Name: "swarmmind_work_collect", Description: "收集并关闭工作单：无在途执行后提交收集报告，把工作单落成终态。全部步骤完成才可标 done；存在失败/等你确认/跳过的步骤时 hub 拒绝完成关闭——确认放弃剩余步骤用 outcome=abandoned 并在报告写明理由（部分完成不会被误标成完成；未派发的步骤随放弃关闭自动记为跳过）。报告随工作单保留 30 天，是任务清理后的执行摘要", InputSchema: toolObj(map[string]any{
+			"work_id":    toolStr("工作单 ID（swarmmind_work_list 可查）"),
+			"prime_term": toolStr("当前任期声明（须与工作单当前任期一致；swarmmind_work_get 读档取得）"),
+			"report":     toolStr("收集报告（必填）：逐步骤执行结果与结论摘要；处置关闭时写明放弃理由"),
+			"outcome":    toolStr("关闭方式：省略或 \"done\"=完成关闭（要求全部步骤 done）；\"abandoned\"=处置放弃剩余步骤"),
+		}, "work_id", "prime_term", "report")},
 	}
 }
 
@@ -680,6 +690,12 @@ func fmtWhen(t, now time.Time) string {
 	return t.Format("01-02 15:04")
 }
 
+// fmtUTCFull 工作单读档用完整时刻（UTC 带秒；与 hub 管理台 fmtUTC 同口径——
+// 生命周期盖章时刻须精确到秒，跨机对账用）。
+func fmtUTCFull(t time.Time) string {
+	return t.UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
 // depArgs 解析 depends_on 工具参数（P4.3 任务依赖透传）：JSON 数组 → 去空白
 // 字符串列表。非法输入显式拒绝（与 REST invalid_dependency 同语义，不静默
 // 降级——静默剔除/字符串化会把声明依赖的任务变成无条件立即执行）：未传为
@@ -828,7 +844,7 @@ func argString(v any, ok bool) string {
 }
 
 // taskStatus 拉取并汇总单个任务的可读状态（hub 模式入口）。行为保持不变
-//（node 模式见 nodeBackend.taskStatus——功能性修复 8 后两后端错误语义分叉）。
+// （node 模式见 nodeBackend.taskStatus——功能性修复 8 后两后端错误语义分叉）。
 func taskStatus(taskID string) (string, bool, error) {
 	code, data, err := hubAPI("GET", "/api/v1/tasks/"+taskID, nil)
 	if err != nil {
@@ -1917,13 +1933,15 @@ func workErrHint(code int, data []byte) error {
 	}
 	_ = json.Unmarshal(data, &e)
 	hint := map[string]string{
-		"work_not_found":     "工作单不存在（swarmmind_work_list 可查现有工作单）",
-		"invalid_work_steps": "步骤计划不合法：" + e.Message,
-		"invalid_request":    e.Message,
-		"work_term_conflict": "任期不符（同刻仅一方接管成功；旧任期派发被拒）：" + e.Message + "。先 swarmmind_work_get 读档取当前任期，再接管或以其续派",
-		"work_no_term":       "工作单尚未建立任期：" + e.Message,
-		"work_step_locked":   "步骤已完成或已跳过，不再接受派发：" + e.Message,
-		"work_closed":        "工作单已终态（done/abandoned），不可再接管或派发",
+		"work_not_found":      "工作单不存在（swarmmind_work_list 可查现有工作单）",
+		"invalid_work_steps":  "步骤计划不合法：" + e.Message,
+		"invalid_request":     e.Message,
+		"work_term_conflict":  "任期不符（同刻仅一方接管成功；旧任期派发被拒）：" + e.Message + "。先 swarmmind_work_get 读档取当前任期，再接管或以其续派",
+		"work_no_term":        "工作单尚未建立任期：" + e.Message,
+		"work_step_locked":    "步骤已完成或已跳过，不再接受派发：" + e.Message,
+		"work_closed":         "工作单已终态（done/abandoned），不可再接管或派发或收集：" + e.Message,
+		"work_steps_open":     "还有未收束的步骤/尝试（在途执行等终态回写；待派发步骤可随 outcome=abandoned 处置放弃）：" + e.Message + "。用 swarmmind_work_get 看步骤与尝试状态，等在途任务终态",
+		"work_steps_not_done": "部分完成不能标成 done：" + e.Message + "。确认放弃剩余步骤用 swarmmind_work_collect(outcome=\"abandoned\") 并在报告写明理由",
 	}[e.Error]
 	if hint == "" {
 		hint = truncate(data)
@@ -2058,6 +2076,12 @@ func toolWorkGet(args map[string]any) (string, error) {
 			Goal      string `json:"goal"`
 			Status    string `json:"status"`
 			PrimeTerm string `json:"prime_term"`
+			// Report 收集报告（任务清理后的执行摘要；W3 审查③：MCP 读档与 REST
+			// 全量对齐——接管者经 MCP 必须读得回报告，也拿得到原键安全重放）
+			Report    string     `json:"report"`
+			CreatedAt time.Time  `json:"created_at"`
+			ClosedAt  *time.Time `json:"closed_at"`
+			ExpiresAt *time.Time `json:"expires_at"`
 			Steps     []struct {
 				Seq         int64   `json:"seq"`
 				Desc        string  `json:"desc"`
@@ -2072,8 +2096,14 @@ func toolWorkGet(args map[string]any) (string, error) {
 				StepSeq int64  `json:"step_seq"`
 				TaskID  string `json:"task_id"`
 				Outcome string `json:"outcome"`
+				// IdemKey/ContentHash/BaseContentHash 尝试去重证据（原键安全重放
+				// 与身份边界，随单保留 30 天；W3 审查③）
+				IdemKey         string `json:"idem_key"`
+				ContentHash     string `json:"content_hash"`
+				BaseContentHash string `json:"base_content_hash"`
 			} `json:"attempts"`
-			Events []struct {
+			TasksGone []string `json:"tasks_gone"`
+			Events    []struct {
 				Seq       int64  `json:"seq"`
 				Kind      string `json:"kind"`
 				By        string `json:"by"`
@@ -2096,7 +2126,15 @@ func toolWorkGet(args map[string]any) (string, error) {
 	if w.PrimeTerm != "" {
 		fmt.Fprintf(&b, "｜任期 %s", w.PrimeTerm)
 	}
-	fmt.Fprintf(&b, "）\n步骤：\n")
+	fmt.Fprintf(&b, "）\n")
+	fmt.Fprintf(&b, "创建 %s", fmtUTCFull(w.CreatedAt))
+	if w.ClosedAt != nil {
+		fmt.Fprintf(&b, " · 关闭 %s", fmtUTCFull(*w.ClosedAt))
+	}
+	if w.ExpiresAt != nil {
+		fmt.Fprintf(&b, " · 报告与执行记忆保留至 %s", fmtUTCFull(*w.ExpiresAt))
+	}
+	fmt.Fprintf(&b, "\n步骤：\n")
 	for _, s := range w.Steps {
 		deps := ""
 		if len(s.DependsOn) > 0 {
@@ -2113,10 +2151,22 @@ func toolWorkGet(args map[string]any) (string, error) {
 		fmt.Fprintf(&b, "  #%d %s → %s/%s【%s】%s%s\n", s.Seq, s.Desc, s.TargetNode, s.TargetAgent, st[s.Status], deps, note)
 	}
 	if len(w.Attempts) > 0 {
-		b.WriteString("尝试：\n")
-		for _, a := range w.Attempts {
-			fmt.Fprintf(&b, "  尝试#%d（步骤#%d）任务 %s【%s】\n", a.Seq, a.StepSeq, a.TaskID, a.Outcome)
+		gone := map[string]bool{}
+		for _, id := range w.TasksGone {
+			gone[id] = true
 		}
+		b.WriteString("尝试（键/引用/指纹为去重证据，任务清理后凭此安全重放）：\n")
+		for _, a := range w.Attempts {
+			note := ""
+			if gone[a.TaskID] {
+				note = "（任务详情已过 24 小时保留期清理，执行事实以本记录与事件为准）"
+			}
+			fmt.Fprintf(&b, "  尝试#%d（步骤#%d）任务 %s【%s】%s\n", a.Seq, a.StepSeq, a.TaskID, a.Outcome, note)
+			fmt.Fprintf(&b, "    键 %s ｜ 引用 %s#a%d ｜ 指纹 %s / %s\n", a.IdemKey, w.ID, a.Seq, a.ContentHash, a.BaseContentHash)
+		}
+	}
+	if w.Report != "" {
+		fmt.Fprintf(&b, "\n收集报告（任务清理后的执行摘要）：\n%s\n", w.Report)
 	}
 	if len(w.Events) == 0 {
 		if out.PrunedBeforeEvents > 0 && since < out.PrunedBeforeEvents {
@@ -2155,6 +2205,9 @@ func toolWorkList() (string, error) {
 			Goal   string `json:"goal"`
 			Status string `json:"status"`
 			Steps  int    `json:"steps"`
+			// DoneSteps 已完成步骤数（W3 审查③：与 REST WorkSummary 全量对齐，
+			// 断点续管按进度挑单）
+			DoneSteps int `json:"done_steps"`
 			// Attempts 摘要计数（未终态工作单接管评估用）。
 			Attempts int `json:"attempts"`
 		} `json:"works"`
@@ -2169,7 +2222,7 @@ func toolWorkList() (string, error) {
 	}
 	var b strings.Builder
 	for _, w := range out.Works {
-		fmt.Fprintf(&b, "%s：%s（%s｜%d 步｜%d 次尝试）\n", w.ID, w.Goal, st[w.Status], w.Steps, w.Attempts)
+		fmt.Fprintf(&b, "%s：%s（%s｜%d/%d 步｜%d 次尝试）\n", w.ID, w.Goal, st[w.Status], w.DoneSteps, w.Steps, w.Attempts)
 	}
 	b.WriteString("接管未完成工作：先 swarmmind_work_get 读档，再按档续管。")
 	return b.String(), nil
@@ -2214,6 +2267,83 @@ func toolWorkTakeover(args map[string]any) (string, error) {
 		return fmt.Sprintf("任期未变（相同接管重放幂等命中，未新增事件）：工作单 %s（%s）当前任期 %s、状态 %s。\n续派用 swarmmind_submit 携 work_ref/step_seq/prime_term（同键重试不新增尝试）。", w.ID, w.Goal, w.PrimeTerm, st[w.Status]), nil
 	}
 	return fmt.Sprintf("已接管工作单 %s（%s）：当前任期 %s、状态 %s。\n续派用 swarmmind_submit 携 work_ref/step_seq/prime_term（同键重试不新增尝试）；旧任期的派发将被拒绝，其在途任务结果照常回流不受影响。", w.ID, w.Goal, w.PrimeTerm, st[w.Status]), nil
+}
+
+// toolWorkCollect 收集并关闭工作单（P5 W3）：全部步骤终态才可收集；outcome
+// 缺省/done 要求全部步骤 done（部分完成 hub 拒绝，不误标完成）；abandoned 为
+// 处置放弃（报告即理由）。报告必填——任务 24h 清理后它是工作单的唯一执行摘要。
+func toolWorkCollect(args map[string]any) (string, error) {
+	wid, _ := args["work_id"].(string)
+	if strings.TrimSpace(wid) == "" {
+		return "", fmt.Errorf("work_id 必填（swarmmind_work_list 可查）")
+	}
+	term := strings.TrimSpace(argString(args["prime_term"], args["prime_term"] != nil))
+	if term == "" {
+		return "", fmt.Errorf("prime_term 必填（当前任期声明；swarmmind_work_get 读档取得）")
+	}
+	report := strings.TrimSpace(argString(args["report"], args["report"] != nil))
+	if report == "" {
+		return "", fmt.Errorf("report 必填（逐步骤执行结果与结论摘要；任务清理后它是工作单的唯一执行记忆）")
+	}
+	outcome := strings.TrimSpace(argString(args["outcome"], args["outcome"] != nil))
+	if outcome != "" && outcome != "done" && outcome != "abandoned" {
+		return "", fmt.Errorf("outcome 只接受 \"done\" 或 \"abandoned\"（收到的是%s %q）", jsonArgType(args["outcome"]), args["outcome"])
+	}
+	body := map[string]any{"prime_term": term, "report": report}
+	if outcome != "" {
+		body["outcome"] = outcome
+	}
+	code, data, err := hubAPI("POST", "/api/v1/works/"+wid+"/collect", body)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", workErrHint(code, data)
+	}
+	var out struct {
+		Work struct {
+			ID     string `json:"id"`
+			Goal   string `json:"goal"`
+			Status string `json:"status"`
+			Steps  []struct {
+				Seq    int64  `json:"seq"`
+				Desc   string `json:"desc"`
+				Status string `json:"status"`
+			} `json:"steps"`
+		} `json:"work"`
+		Dup bool `json:"dup"`
+	}
+	_ = json.Unmarshal(data, &out)
+	w := out.Work
+	st := map[string]string{
+		"done": "完成", "abandoned": "已放弃", "failed": "失败",
+		"needs_review": "等你确认", "skipped": "跳过",
+	}
+	var b strings.Builder
+	if out.Dup {
+		fmt.Fprintf(&b, "关闭回执（相同收集请求重放幂等命中，零新增事件）：工作单 %s 已是 %s。\n", w.ID, st[w.Status])
+	} else if w.Status == "done" {
+		fmt.Fprintf(&b, "工作单已收集关闭：%s（%s）——%d 步全部完成，报告已存档（保留 30 天）。\n", w.ID, w.Goal, len(w.Steps))
+	} else {
+		doneN, skipN := 0, 0
+		for _, s := range w.Steps {
+			switch s.Status {
+			case "done":
+				doneN++
+			case "skipped":
+				skipN++
+			}
+		}
+		if skipN > 0 {
+			fmt.Fprintf(&b, "工作单已处置关闭：%s（%s）——%d/%d 步完成、%d 步未派发随关闭跳过，处置理由已随报告存档（保留 30 天）。\n", w.ID, w.Goal, doneN, len(w.Steps), skipN)
+		} else {
+			fmt.Fprintf(&b, "工作单已处置关闭：%s（%s）——%d/%d 步完成，剩余放弃，处置理由已随报告存档（保留 30 天）。\n", w.ID, w.Goal, doneN, len(w.Steps))
+		}
+	}
+	for _, s := range w.Steps {
+		fmt.Fprintf(&b, "  #%d %s【%s】\n", s.Seq, s.Desc, st[s.Status])
+	}
+	return b.String(), nil
 }
 
 /* ---------- 工具路由 ---------- */
@@ -2265,6 +2395,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolWorkList()
 	case "swarmmind_work_takeover":
 		text, err = toolWorkTakeover(args)
+	case "swarmmind_work_collect":
+		text, err = toolWorkCollect(args)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

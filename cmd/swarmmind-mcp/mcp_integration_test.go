@@ -348,10 +348,11 @@ func TestNodeBackendReadOnlyPrimeToken(t *testing.T) {
 	}
 }
 
-// TestHubToolListRegression hub 模式回归：17 工具清单与顺序不变（P4⑤ 新增
+// TestHubToolListRegression hub 模式回归：18 工具清单与顺序不变（P4⑤ 新增
 // swarmmind_tasks，位于 artifact 之后、decide 之前；P5 W1 新增工作单三工具
 // swarmmind_work_create/get/list，位于群工具之后；P5 W2 新增
-// swarmmind_work_takeover，位于工作单组末尾，hub 模式专属）；分发委托
+// swarmmind_work_takeover，位于工作单组末尾，hub 模式专属；P5 W3 新增
+// swarmmind_work_collect，位于 takeover 之后）；分发委托
 // callTool（未知工具协议错误、未配置 hub 的人话提示均保持原行为）。
 func TestHubToolListRegression(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
@@ -360,7 +361,7 @@ func TestHubToolListRegression(t *testing.T) {
 		"swarmmind_group_create", "swarmmind_group_list", "swarmmind_group_say",
 		"swarmmind_group_messages", "swarmmind_group_close",
 		"swarmmind_work_create", "swarmmind_work_get", "swarmmind_work_list",
-		"swarmmind_work_takeover"}
+		"swarmmind_work_takeover", "swarmmind_work_collect"}
 	got := []string{}
 	for _, td := range (hubBackend{}).tools() {
 		got = append(got, td.Name)

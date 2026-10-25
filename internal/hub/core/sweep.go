@@ -9,7 +9,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// Sweep 状态清扫（后台周期或测试手动驱动），单写事务内一次完成五个阶段：
+// Sweep 状态清扫（后台周期或测试手动驱动），单写事务内一次完成六个阶段：
 //  1. offer 超时回退：offered 超 OfferAckTimeout 未收 task_ack → submitted 回队首
 //     补推；任务已过期则直接进入过期分支（SPEC 4.3：回退 vs 过期取先发生者）；
 //  2. expire 清扫：非终态任务过 ExpireAt → failed/error=expired（提交方为 node
@@ -22,7 +22,9 @@ import (
 //     防御终态事务处的事件丢失（理论上单事务原子复评无丢失窗口，兜底未知路径）；
 //     解除阻塞即随本轮 dispatch；
 //  5. 终态清理：终态超 TerminalRetention（24h）从快照删除（idem 索引派生自任务，
-//     同步失效——SPEC 4.5「与任务同生命周期清理」）。
+//     同步失效——SPEC 4.5「与任务同生命周期清理」）；
+//  6. 终态 Work 清理（P5 W3/RFC 六.3）：done/abandoned 过 ExpiresAt（关闭+30 天）
+//     整单删除并同步清除建单幂等指纹映射；未完成 Work 不清理。
 //
 // 置终态的任务随事务释放 workdir 互斥锁（P1.5）。发布后对本会话内受影响节点
 // 逐一补推（在线才有动作）。
@@ -33,6 +35,7 @@ func (c *Core) Sweep() {
 		reDispatch   = map[string]bool{}
 		removed      []string
 		depChanged   []*protocol.Task // 依赖门控复评改动任务（发布后记账，P4.3）
+		worksGone    []string         // 到期终态 Work 删除（P5 W3，事务内收口）
 	)
 	// mergeDepRev 汇总一处复评结果（清扫事务内多处置终态均触发下游复评）。
 	mergeDepRev := func(rv *depReview) {
@@ -122,6 +125,7 @@ func (c *Core) Sweep() {
 				removed = append(removed, id)
 			}
 		}
+		worksGone = sweepWorks(st, now) // 终态 Work 30 天保留到期清理（P5 W3）
 		return nil
 	})
 	if err != nil {
@@ -138,6 +142,9 @@ func (c *Core) Sweep() {
 	}
 	for _, id := range removed {
 		c.noteDelete(id)
+	}
+	for _, id := range worksGone {
+		log.Printf("[hub] 工作单 %s 终态保留期满（关闭+30 天），已清理", id)
 	}
 	for nodeID := range reDispatch {
 		c.dispatch(nodeID)

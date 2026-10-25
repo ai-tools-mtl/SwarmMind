@@ -243,7 +243,9 @@ function drawerLogInner(res, raw) {
  * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
  * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
  * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
- * 动画只随壳播放一次，分区更新不重放。 */
+ * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
+ * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
+ * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
 const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
@@ -251,9 +253,9 @@ function drawerZoneSwap(el, html) {
   el.innerHTML = html;
   [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
 }
-function drawerZonesApply(root, zones, cache) {
+function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
   let touched = false;
-  for (const name of DRAWER_ZONES) {
+  for (const name of names) {
     const html = zones[name] || '';
     if (cache[name] === html) continue;
     const el = root.querySelector(`[data-zone="${name}"]`);
