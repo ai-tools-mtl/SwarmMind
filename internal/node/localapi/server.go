@@ -62,7 +62,8 @@ type Config struct {
 	// Ledger node 执行账本（本地任务视图、今日任务数与三态计数的数据源；本地
 	// 查询的真相源，nil 时查询端点 503）。
 	Ledger *ledger.Ledger
-	// TaskLog 本机提交任务日志（我的任务列表数据源，可为 nil）。
+	// TaskLog 本机提交留痕（任务列表的补尾源：仅覆盖账本已按保留期清理的本机
+	// 派单历史；任务列表主源是 Ledger 全量——2026-10-26 全量审计裁决。可为 nil）。
 	TaskLog *TaskLog
 	// LocalToken 本机管理令牌（只读 + 控制台管理面；Authorization: Bearer；空 =
 	// 拒绝一切请求，装配方在为空时生成并回填，见 cmd/node）。
@@ -133,6 +134,11 @@ type Server struct {
 	// mcpCommandOverride swarmmind-mcp 探测结果注桩（同包测试专用；空 = 走
 	// mcpCommand 真实探测。生产装配不设，不构成公共配置面）。
 	mcpCommandOverride string
+
+	// tasksRaceHook 在 handleLocalTasks 的 TaskLog 与 Ledger 两次快照之间回调
+	// （同包测试专用：确定性构造「提交穿插读取窗口」的并发交错，codex 审查①；
+	// 生产恒为 nil，不构成公共配置面）。
+	tasksRaceHook func()
 }
 
 // New 构造本地 API 服务。
@@ -366,7 +372,8 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	e, ok := s.cfg.Ledger.Get(r.PathValue("id"))
 	if !ok {
-		writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已过保留期（终态保留 24h，离线任务 7 天）")
+		// 保留窗口具体时长不写进文案（D2：审计保留策略待产品裁决，清理未接线）。
+		writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已不在本机账本保留窗口内")
 		return
 	}
 	writeJSON(w, http.StatusOK, ledger.TaskView(e))
