@@ -133,6 +133,13 @@ type State struct {
 	// AgentCard 上报的派生键，hub 不感知路径）。占用从 offered 起算、终态释放；
 	// 随快照持久化，hub 重启恢复（New 时按任务集自愈校正）。
 	WorkdirLocks map[string]map[string]string `json:"workdir_locks"`
+	// Works work_id → 工作单（P5/RFC-work-resume：执行事实与断点接管）。
+	// 写时复制：事务内对副本条目整体替换，禁止原地改；事实变更与事件记账同事务。
+	Works map[string]Work `json:"works"`
+	// WorkIdems 建单幂等映射：goal+steps 内容指纹 → work_id（同指纹重复建单
+	// 返回同单，响应丢失重试安全）。与 Work 同生命周期：只在建单事务内写入，
+	// Work 无独立删除路径则映射同存（口径同 BatchIdems）。
+	WorkIdems map[string]string `json:"work_idems"`
 	// Prime 全局统筹载体指定（2026-10-23 网页指定）；nil=未指定，前端回退名字约定。
 	// 写时复制：事务内构造新 *PrimeDesignation 整体替换，禁止原地改。
 	Prime *PrimeDesignation `json:"prime,omitempty"`
@@ -147,6 +154,8 @@ func NewState() *State {
 		Batches:      make(map[string]ControlBatch),
 		BatchIdems:   make(map[string]string),
 		WorkdirLocks: make(map[string]map[string]string),
+		Works:        make(map[string]Work),
+		WorkIdems:    make(map[string]string),
 	}
 }
 
@@ -170,6 +179,15 @@ func (s *State) normalize() {
 	if s.WorkdirLocks == nil {
 		s.WorkdirLocks = make(map[string]map[string]string)
 	}
+	// 旧快照迁移：Work 字段（P5 W1）落地前的快照无 works/work_idems，反序列化
+	// 得 nil map——补成空 map 即完成迁移（既有实体不受影响），归一结果随下次
+	// 事务落盘持久化。
+	if s.Works == nil {
+		s.Works = make(map[string]Work)
+	}
+	if s.WorkIdems == nil {
+		s.WorkIdems = make(map[string]string)
+	}
 }
 
 // Clone 深拷贝整个状态（容器逐层复制；string 等不可变值共享安全），
@@ -182,6 +200,8 @@ func (s *State) Clone() *State {
 		Batches:      make(map[string]ControlBatch, len(s.Batches)),
 		BatchIdems:   make(map[string]string, len(s.BatchIdems)),
 		WorkdirLocks: make(map[string]map[string]string, len(s.WorkdirLocks)),
+		Works:        make(map[string]Work, len(s.Works)),
+		WorkIdems:    make(map[string]string, len(s.WorkIdems)),
 	}
 	for id, r := range s.Nodes {
 		n.Nodes[id] = r.Clone()
@@ -204,6 +224,12 @@ func (s *State) Clone() *State {
 			inner[ws] = taskID
 		}
 		n.WorkdirLocks[nodeID] = inner
+	}
+	for id, w := range s.Works {
+		n.Works[id] = w.Clone()
+	}
+	for k, v := range s.WorkIdems {
+		n.WorkIdems[k] = v
 	}
 	if s.Prime != nil {
 		// 写时复制纪律：*PrimeDesignation 换新指针，禁止与旧状态共享

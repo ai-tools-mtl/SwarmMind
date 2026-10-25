@@ -505,6 +505,14 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - `POST /api/v1/control-operations {"agent":"inspector","targets":["n1","n2","n3"],"input":{...}}` → 202 `{"batch_id","items":[{"target","task_id"}|{"target","skipped":"offline"}]}`
 - 实现即批量 Submit：快照时点逐目标走现有校验链，离线/未暴露目标标 skipped 不阻塞其余；批次记录入快照；GET /api/v1/control-operations/{batch_id} 查询逐项状态
 
+### 工作单（P5 W1，RFC-work-resume；端点为 MCP 传输载体与 W3 管理台只读数据源）
+
+- `POST /api/v1/works {"goal","steps":[{desc,target_node,target_agent,depends_on?}],"prime_term?","created_by?"}` → 201 `{"work":{...},"pruned_before_events":0}`；同 goal+steps 内容指纹幂等命中 200 + `dup:true` 返同单（响应丢失重试安全；指纹即寻址键，无 409 冲突路径）。步骤计划不合法（引用越界/自引用/重复依赖/环/深度>4/级联>8/步骤数>64/字段缺失）400 `invalid_work_steps`；goal 缺失 400 `invalid_request`。created_by 缺省 mcp（建单入口 v1 仅 Prime/MCP，六.六裁决 1）；步骤 seq 由 hub 按声明序赋 1..N。建单单事务原子（事实+work_created 事件同事务），W1 无派发/接管/收集写端点（随 W2/W3），无泛化 PUT/DELETE
+- `GET /api/v1/works` → 200 `{works:[{id,goal,prime_term?,status,steps,attempts,created_at,closed_at?}]}`（摘要，新建在前）
+- `GET /api/v1/works/{id}?since_events=N` → 200 `{"work":{含 steps/attempts/events},"pruned_before_events"}`：事件只返 seq>N 升序增量，`pruned_before_events` 为滚动裁剪已丢事件最大 seq（现存最旧 Seq-1，同群消息 `pruned_before_seq` 口径；事件滚动保留最新 200 条，EventSeq 单调不回退）；未知 id 404 `work_not_found`
+- 事件主体双字段（RFC-work-resume 六.2 裁决）：事件条目 `by` 为**请求自报**审计标签（created_by，缺省 mcp，逻辑归属非身份证明）；`principal` 为**服务端验证鉴权主体**（鉴权中间件取得：admin 会话 → `admin`、Bearer PAT → `pat:<令牌名>`），两字段分开存储——请求自报身份不作数，不得覆盖 principal；主体随事件同事务持久化
+- 存储形态：Work/WorkIdems 随 hub_state.json 快照持久化（旧快照无该字段加载时归一迁移）；未完成 Work 不被 Sweep 清理（终态 30 天保留自关闭起算，W3 落实）
+
 ### 发现与目录
 
 - `GET /api/v1/directory`：全网 exposed=true 的 AgentCard 列表（不含 ExecProfile）——中心端独有，node 不代理此接口（node 无全网视图）；跨机能力发现经 hub（MCP swarmmind_agents / A2A）发起
@@ -588,6 +596,9 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_group_say | POST /api/v1/groups/{id}/messages | 群里发言（kind 缺省 user；agent 发言计入预算，用尽报 budget_exhausted；消息体 8KiB 上限） |
 | swarmmind_group_messages | GET /api/v1/groups/{id}/messages?since | 拉群消息（since 增量补齐，seq 单调锚点；群消息滚动保留最新 200 条，响应 `pruned_before_seq` 标注已裁区间上界） |
 | swarmmind_group_close | POST /api/v1/groups/{id}/close | 结束群（concluded 终态不可回退，重复关闭幂等；by 可选署名审计，缺省 mcp） |
+| swarmmind_work_create | POST /api/v1/works | 创建工作单：把多步工作落成可断点接管的正式执行记录（P5 W1，RFC-work-resume）；步骤计划建单定死，同 goal+steps 指纹重复调用返回同单（响应丢失重试安全，201 新建/200 幂等命中） |
+| swarmmind_work_get | GET /api/v1/works/{id}?since_events=N | 查看工作单详情：目标/步骤状态表/执行尝试/事件时间线（since_events 游标增量；事件滚动保留最新 200 条，`pruned_before_events` 标注已裁区间上界）。接管未完成工作前先读档 |
+| swarmmind_work_list | GET /api/v1/works | 列出全部工作单：ID/目标/状态/步骤与尝试数（发现历史未完成工作） |
 
 ### 语义约定
 
@@ -620,6 +631,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 7. **P4.3 任务依赖同步声明（2026-10-23，第一子批）**：任务依赖（4.12）为既有 REST 能力的参数扩展——`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（上游 idem_key 列表；node 本机直执行模式不经过 hub 状态机，不支持该参数），本表 `swarmmind_submit` 行已同步；`swarmmind_status`/`swarmmind_wait` 返回体透传 `depends_on`/`blocked_reason`/`superseded_by` 展示字段（含 blocked/upstream_failed/superseded 的人话提示），不构成新工具。依赖声明不合法经 submit 工具以 `invalid_dependency` 人话文本返回。
 8. **P4 L2 产物挂载同步声明（2026-10-24，第二子批第一子轮）**：产物挂载（4.12「产物挂载」段）为 node 执行准备阶段的内部行为（spawn 前纯复制+SHA 校验+原子发布），无新增/变更 REST 管理面能力，MCP 工具面零变更——`swarmmind_artifact` 保留（跨机场景与逐件自取仍经它），不因自动挂载删除。任务 stdin 的依赖清单文案同步为告知挂载位置（`inputs/<上游task_id>/`），属 EffectiveInput 文本更新，不构成工具面变更。
 9. **P4④ 跨机取回同步声明（2026-10-24，第二子轮）**：跨机取回（4.12「跨机取回」段）为 node→hub 协议帧扩展（dep_resolve 新增 + artifact_fetch 方向扩展 + hub 中继），无新增/变更 REST 管理面能力（hub HTTP 面零变更），MCP 工具面零变更、映射表不补行；`swarmmind_artifact` 保留（跨机自动取回是挂载准备阶段的内部行为，人工逐件自取仍走它）。任务 stdin 依赖清单尾注随能力更新为跨机自动取回说明（EffectiveInput 文本一次性变更，见 4.12 指纹口径第二次声明），不构成工具面变更。
+10. **P5 Work 工作单同步声明（2026-10-25，W1 批）**：工作单（RFC-work-resume，执行事实与断点接管）W1 交付模型+建单幂等+只读查询，本表补 `swarmmind_work_create/get/list` 三行；REST `/api/v1/works*` 组为 MCP 传输载体与 W3 管理台只读视图的数据源，建单入口 v1 仅 Prime/MCP（开放问题裁决 1：管理台无手工建单）。三工具 hub 模式专属，node 模式不装配（不静默降级）。`swarmmind_work_collect/takeover`（收集/接管续派）随 W2/W3 交付同批补行，不预占工具名。Work 无泛化 PUT/DELETE（状态只由生命周期动作推进，RFC 四.8），不设 update/delete 工具。
 
 ## 七、验证标准（DoD 十一条）
 

@@ -72,12 +72,12 @@ func TestTokenLifecycle(t *testing.T) {
 		t.Fatalf("明文应 smsw_ 前缀, got %q", created.Token[:min(10, len(created.Token))])
 	}
 
-	// 2) Bearer 鉴权命中
-	if !sv.tokens.verify(created.Token) {
-		t.Fatal("明文应通过校验")
+	// 2) Bearer 鉴权命中（返回令牌名作服务端验证主体）
+	if name, ok := sv.tokens.verify(created.Token); !ok || name != "运维本机" {
+		t.Fatalf("明文应通过校验且返回令牌名: name=%q ok=%v", name, ok)
 	}
 	// 错误明文拒绝
-	if sv.tokens.verify(created.Token + "x") {
+	if _, ok := sv.tokens.verify(created.Token + "x"); ok {
 		t.Fatal("篡改明文不应通过")
 	}
 
@@ -108,7 +108,7 @@ func TestTokenLifecycle(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("撤销应 200, got %d", res.StatusCode)
 	}
-	if sv.tokens.verify(created.Token) {
+	if _, ok := sv.tokens.verify(created.Token); ok {
 		t.Fatal("撤销后明文不应通过校验")
 	}
 	// 重复撤销 → 404
@@ -129,8 +129,8 @@ func TestTokenPersistAcrossRestart(t *testing.T) {
 		t.Fatal("应生成 ID")
 	}
 	s2 := New(Config{AdminToken: "a", DataDir: dir}) // 模拟重启：新实例同 DataDir
-	if !s2.tokens.verify(plain) {
-		t.Fatal("重启后明文令牌应仍可用")
+	if name, ok := s2.tokens.verify(plain); !ok || name != "重启测试" {
+		t.Fatalf("重启后明文令牌应仍可用且主体为令牌名: name=%q ok=%v", name, ok)
 	}
 }
 
