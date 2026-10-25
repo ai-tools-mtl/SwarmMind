@@ -27,12 +27,13 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具：hub 模式 13 个——nodes / agents / submit / status / wait / artifact /
+// 工具：hub 模式 16 个——nodes / agents / submit / status / wait / artifact /
 // tasks（任务列表，P4⑤：正在跑/最近完成/失败速览，hub 视角，node 模式不设）/
 // decide + group_create / group_list / group_say / group_messages /
-// group_close（群聊协作空间，GROUP-RFC 六 MVP）。node 模式 6 个——nodes（本机
-// 节点信息单条）/ agents（本机目录）/ submit（本机派单，prime_token）/ status /
-// wait / artifact（本机直取）。
+// group_close（群聊协作空间，GROUP-RFC 六 MVP）+ work_create / work_get /
+// work_list（工作单，P5 W1：建单幂等/读档/列表，hub 模式专属，node 模式不装
+// 配不静默降级）。node 模式 6 个——nodes（本机节点信息单条）/ agents（本机
+// 目录）/ submit（本机派单，prime_token）/ status / wait / artifact（本机直取）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
 // 失败自动降级 L2 本地规则分配（关键词匹配 + inflight 负载决胜），永不停摆，响应标注 used_level。
@@ -248,6 +249,24 @@ func toolArr(desc string) map[string]any {
 	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
 }
 
+// toolWorkSteps 工作单步骤计划参数 schema（对象数组，元素含 depends_on 数字数组）。
+func toolWorkSteps(desc string) map[string]any {
+	return map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"desc":         toolStr("步骤描述（做什么）"),
+				"target_node":  toolStr("执行节点 ID"),
+				"target_agent": toolStr("执行 agent 名"),
+				"depends_on":   map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "前置步骤序号数组（1..总步数的整数，可选；非整数/越界/非数组会被拒绝，不做截断或丢弃）"},
+			},
+			"required": []string{"desc", "target_node", "target_agent"},
+		},
+		"description": desc,
+	}
+}
+
 func tools() []toolDef {
 	return []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: toolObj(map[string]any{})},
@@ -303,6 +322,16 @@ func tools() []toolDef {
 			"group_id": toolStr("群 ID"),
 			"by":       toolStr("关闭者标识（可选，默认 mcp；记入群审计 closed_by，重复关闭不改写首次记录）"),
 		}, "group_id")},
+		{Name: "swarmmind_work_create", Description: "创建工作单：把一件多步工作落成 hub 侧的正式执行记录，Prime 断线/崩溃后接管者可按单续管。步骤计划建单即定死（依赖用步骤序号声明）；同一 goal+步骤计划重复调用返回同一工作单，响应丢失重试安全。返回 w- 工作单 ID", InputSchema: toolObj(map[string]any{
+			"goal":       toolStr("工作目标（一句话说清整件事）"),
+			"steps":      toolWorkSteps("步骤计划（1..64 步）：每步 {desc,target_node,target_agent,depends_on}；depends_on 为前置步骤序号整数数组（1..总步数，可选）"),
+			"prime_term": toolStr("当前任期标识（可选，如 prime-3；逻辑归属审计）"),
+		}, "goal", "steps")},
+		{Name: "swarmmind_work_get", Description: "查看工作单详情：目标、步骤状态表、执行尝试与事件时间线；since_events 游标增量拉事件（事件滚动保留最新 200 条，响应会标注已裁位置）。接管未完成工作前先读档", InputSchema: toolObj(map[string]any{
+			"work_id":      toolStr("工作单 ID（swarmmind_work_list 可查）"),
+			"since_events": toolNum("已见最大事件 seq（默认 0=全量；传上次拉到的最大序号即增量）"),
+		}, "work_id")},
+		{Name: "swarmmind_work_list", Description: "列出全部工作单：ID、目标、状态（planning 计划中 / executing 执行中 / blocked 受阻 / collecting 收集中 / done 完成 / abandoned 已放弃）、步骤与尝试数。用于发现历史未完成工作", InputSchema: toolObj(map[string]any{})},
 	}
 }
 
@@ -1790,6 +1819,270 @@ func toolGroupClose(args map[string]any) (string, error) {
 	return fmt.Sprintf("群 %s 已结束（concluded 终态，不再收消息）。", gid), nil
 }
 
+// ---------- 工作单工具（P5 W1，hub 模式专属；RFC-work-resume 三） ----------
+
+// workErrHint 工作单端点错误 → 人话（同 groupErrHint 风格）。
+func workErrHint(code int, data []byte) error {
+	var e struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(data, &e)
+	hint := map[string]string{
+		"work_not_found":     "工作单不存在（swarmmind_work_list 可查现有工作单）",
+		"invalid_work_steps": "步骤计划不合法：" + e.Message,
+		"invalid_request":    e.Message,
+	}[e.Error]
+	if hint == "" {
+		hint = truncate(data)
+	}
+	return fmt.Errorf("hub %d：%s", code, hint)
+}
+
+// jsonArgType 参数值的 JSON 类型名（校验错误文案用；调用方视角是 JSON，报
+// JSON 类型而非 Go 类型）。
+func jsonArgType(v any) string {
+	switch v.(type) {
+	case string:
+		return "字符串"
+	case float64:
+		return "数字"
+	case bool:
+		return "布尔"
+	case []any:
+		return "数组"
+	case map[string]any:
+		return "对象"
+	default:
+		return fmt.Sprintf("%T", v)
+	}
+}
+
+func toolWorkCreate(args map[string]any) (string, error) {
+	goal, _ := args["goal"].(string)
+	if strings.TrimSpace(goal) == "" {
+		return "", fmt.Errorf("goal 必填（一句话说清整件事）")
+	}
+	raw, _ := args["steps"].([]any)
+	if len(raw) == 0 {
+		return "", fmt.Errorf("steps 必填（至少 1 步，每步 {desc,target_node,target_agent}）")
+	}
+	steps := make([]map[string]any, 0, len(raw))
+	rawDeps := make([][]any, len(raw))
+	for i, v := range raw {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return "", fmt.Errorf("steps[%d] 须为对象 {desc,target_node,target_agent,depends_on}", i)
+		}
+		desc, _ := m["desc"].(string)
+		node, _ := m["target_node"].(string)
+		agent, _ := m["target_agent"].(string)
+		if strings.TrimSpace(desc) == "" || strings.TrimSpace(node) == "" || strings.TrimSpace(agent) == "" {
+			return "", fmt.Errorf("steps[%d] 的 desc/target_node/target_agent 均必填", i)
+		}
+		step := map[string]any{"desc": desc, "target_node": node, "target_agent": agent}
+		if dv, present := m["depends_on"]; present && dv != nil {
+			list, ok := dv.([]any)
+			if !ok {
+				// 依赖声明形态不对（如字符串 "1"、裸数字）：拒绝而非丢弃——静默
+				// 丢弃=固化 DAG 偏离调用者声明（codex 复审必须修）。null 视为
+				// 未声明（与 hub REST 的 nil 切片语义一致）。
+				return "", fmt.Errorf("steps[%d].depends_on 须为步骤序号数字数组（从 1 起，如 [1,2]），收到的是%s", i, jsonArgType(dv))
+			}
+			rawDeps[i] = list
+		}
+		steps = append(steps, step)
+	}
+	// 依赖严格校验、零改写：元素须为数字且整数值（1.9 拒绝，不截断为 1）、范围
+	// 1..总步数。上界须收齐全计划才能判（hub 允许前向引用），故两段校验。任何
+	// 校验失败返回工具错误、不发送建单请求。
+	n := int64(len(steps))
+	for i, list := range rawDeps {
+		if len(list) == 0 {
+			continue
+		}
+		deps := make([]int64, 0, len(list))
+		for _, d := range list {
+			dv, ok := d.(float64)
+			switch {
+			case !ok:
+				return "", fmt.Errorf("steps[%d].depends_on 含非数字元素（%s），须为 1..%d 的整数序号", i, jsonArgType(d), n)
+			case dv != math.Trunc(dv):
+				return "", fmt.Errorf("steps[%d].depends_on 含非整数序号 %v，须为 1..%d 的整数", i, dv, n)
+			case dv < 1 || dv > float64(n):
+				return "", fmt.Errorf("steps[%d].depends_on 序号 %d 越界（有效 1..%d）", i, int64(dv), n)
+			}
+			deps = append(deps, int64(dv))
+		}
+		steps[i]["depends_on"] = deps
+	}
+	req := map[string]any{"goal": goal, "steps": steps}
+	if pt, _ := args["prime_term"].(string); strings.TrimSpace(pt) != "" {
+		req["prime_term"] = strings.TrimSpace(pt)
+	}
+	code, data, err := hubAPI("POST", "/api/v1/works", req)
+	if err != nil {
+		return "", err
+	}
+	if code != 201 && code != 200 {
+		return "", workErrHint(code, data)
+	}
+	var out struct {
+		Work struct {
+			ID    string `json:"id"`
+			Goal  string `json:"goal"`
+			Steps []struct {
+				Seq int64 `json:"seq"`
+			} `json:"steps"`
+		} `json:"work"`
+		Dup bool `json:"dup"`
+	}
+	_ = json.Unmarshal(data, &out)
+	if out.Dup {
+		return fmt.Sprintf("已存在同一工作单（同 goal+步骤计划幂等命中，未重复建单）：%s\n共 %d 步，用 swarmmind_work_get 读档查看进度。", out.Work.ID, len(out.Work.Steps)), nil
+	}
+	return fmt.Sprintf("工作单已创建：%s\n目标：%s\n共 %d 步。派发与进度回写将在后续版本交付；当前可用 swarmmind_work_get 查看计划。", out.Work.ID, out.Work.Goal, len(out.Work.Steps)), nil
+}
+
+func toolWorkGet(args map[string]any) (string, error) {
+	wid, _ := args["work_id"].(string)
+	if wid == "" {
+		return "", fmt.Errorf("work_id 必填")
+	}
+	since := int64(0)
+	if v, ok := args["since_events"].(float64); ok && v > 0 {
+		since = int64(v)
+	}
+	code, data, err := hubAPI("GET", fmt.Sprintf("/api/v1/works/%s?since_events=%d", wid, since), nil)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", workErrHint(code, data)
+	}
+	var out struct {
+		Work struct {
+			ID        string `json:"id"`
+			Goal      string `json:"goal"`
+			Status    string `json:"status"`
+			PrimeTerm string `json:"prime_term"`
+			Steps     []struct {
+				Seq         int64   `json:"seq"`
+				Desc        string  `json:"desc"`
+				TargetNode  string  `json:"target_node"`
+				TargetAgent string  `json:"target_agent"`
+				DependsOn   []int64 `json:"depends_on"`
+				Status      string  `json:"status"`
+				Note        string  `json:"note"`
+			} `json:"steps"`
+			Attempts []struct {
+				Seq     int64  `json:"seq"`
+				StepSeq int64  `json:"step_seq"`
+				TaskID  string `json:"task_id"`
+				Outcome string `json:"outcome"`
+			} `json:"attempts"`
+			Events []struct {
+				Seq       int64  `json:"seq"`
+				Kind      string `json:"kind"`
+				By        string `json:"by"`
+				Principal string `json:"principal"`
+				Body      string `json:"body"`
+			} `json:"events"`
+		} `json:"work"`
+		PrunedBeforeEvents int64 `json:"pruned_before_events"`
+	}
+	_ = json.Unmarshal(data, &out)
+	w := out.Work
+	st := map[string]string{
+		"planning": "计划中", "executing": "执行中", "blocked": "受阻",
+		"collecting": "收集中", "done": "已完成", "abandoned": "已放弃",
+		"pending": "待派发", "submitted": "已派发", "running": "执行中",
+		"failed": "失败", "skipped": "跳过",
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "工作单 %s：%s（%s", w.ID, w.Goal, st[w.Status])
+	if w.PrimeTerm != "" {
+		fmt.Fprintf(&b, "｜任期 %s", w.PrimeTerm)
+	}
+	fmt.Fprintf(&b, "）\n步骤：\n")
+	for _, s := range w.Steps {
+		deps := ""
+		if len(s.DependsOn) > 0 {
+			parts := make([]string, len(s.DependsOn))
+			for i, d := range s.DependsOn {
+				parts[i] = fmt.Sprintf("#%d", d)
+			}
+			deps = "（依赖 " + strings.Join(parts, ",") + "）"
+		}
+		note := ""
+		if s.Note != "" {
+			note = "（" + s.Note + "）"
+		}
+		fmt.Fprintf(&b, "  #%d %s → %s/%s【%s】%s%s\n", s.Seq, s.Desc, s.TargetNode, s.TargetAgent, st[s.Status], deps, note)
+	}
+	if len(w.Attempts) > 0 {
+		b.WriteString("尝试：\n")
+		for _, a := range w.Attempts {
+			fmt.Fprintf(&b, "  尝试#%d（步骤#%d）任务 %s【%s】\n", a.Seq, a.StepSeq, a.TaskID, a.Outcome)
+		}
+	}
+	if len(w.Events) == 0 {
+		if out.PrunedBeforeEvents > 0 && since < out.PrunedBeforeEvents {
+			fmt.Fprintf(&b, "自 seq=%d 后没有新事件。注意：事件滚动只保留最新 200 条，seq≤%d 的更早事件已被裁剪、不可再拉。\n", since, out.PrunedBeforeEvents)
+		} else {
+			fmt.Fprintf(&b, "自 seq=%d 后没有新事件。\n", since)
+		}
+	} else {
+		fmt.Fprintf(&b, "事件（自 seq=%d 新增 %d 条）：\n", since, len(w.Events))
+		for _, ev := range w.Events {
+			who := ev.By
+			if ev.Principal != "" && ev.Principal != ev.By {
+				who += "｜主体 " + ev.Principal // 服务端验证鉴权主体（RFC 六.2：与自报 by 分开陈述）
+			}
+			fmt.Fprintf(&b, "  [#%d] %s（%s）：%s\n", ev.Seq, ev.Kind, who, ev.Body)
+		}
+		if out.PrunedBeforeEvents > 0 {
+			fmt.Fprintf(&b, "注意：事件滚动只保留最新 200 条，seq≤%d 的更早事件已被裁剪。\n", out.PrunedBeforeEvents)
+		}
+		b.WriteString("按 #序号 继续 swarmmind_work_get(since_events=最大序号) 轮询。")
+	}
+	return b.String(), nil
+}
+
+func toolWorkList() (string, error) {
+	code, data, err := hubAPI("GET", "/api/v1/works", nil)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", workErrHint(code, data)
+	}
+	var out struct {
+		Works []struct {
+			ID     string `json:"id"`
+			Goal   string `json:"goal"`
+			Status string `json:"status"`
+			Steps  int    `json:"steps"`
+			// Attempts 摘要计数（未终态工作单接管评估用）。
+			Attempts int `json:"attempts"`
+		} `json:"works"`
+	}
+	_ = json.Unmarshal(data, &out)
+	if len(out.Works) == 0 {
+		return "还没有工作单（swarmmind_work_create 可建）。", nil
+	}
+	st := map[string]string{
+		"planning": "计划中", "executing": "执行中", "blocked": "受阻",
+		"collecting": "收集中", "done": "已完成", "abandoned": "已放弃",
+	}
+	var b strings.Builder
+	for _, w := range out.Works {
+		fmt.Fprintf(&b, "%s：%s（%s｜%d 步｜%d 次尝试）\n", w.ID, w.Goal, st[w.Status], w.Steps, w.Attempts)
+	}
+	b.WriteString("接管未完成工作：先 swarmmind_work_get 读档，再按档续管。")
+	return b.String(), nil
+}
+
 /* ---------- 工具路由 ---------- */
 
 func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
@@ -1831,6 +2124,12 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolGroupMessages(args)
 	case "swarmmind_group_close":
 		text, err = toolGroupClose(args)
+	case "swarmmind_work_create":
+		text, err = toolWorkCreate(args)
+	case "swarmmind_work_get":
+		text, err = toolWorkGet(args)
+	case "swarmmind_work_list":
+		text, err = toolWorkList()
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

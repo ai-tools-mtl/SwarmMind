@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -122,6 +123,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
+	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))            // 工作单创建（P5 W1，幂等）
+	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))               // 工作单列表
+	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))           // 详情（事件游标 since_events）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))    // 统筹指定查询（2026-10-23 网页指定）
 	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))    // 指定/撤销（agent_name 空 = 撤销）
@@ -183,14 +187,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second)})
 }
 
-// auth 会话校验中间件：无/失效会话一律 401（五端点全部受保护）。
+// authPrincipalKey 请求上下文键：auth 中间件解析出的服务端验证主体。
+type authCtxKey int
+
+const authPrincipalKey authCtxKey = 0
+
+// withAuthPrincipal / authPrincipal 主体随请求上下文传递；未过 auth 中间件的
+// 请求取到空串（生产路由不存在此形态）。
+func withAuthPrincipal(ctx context.Context, principal string) context.Context {
+	return context.WithValue(ctx, authPrincipalKey, principal)
+}
+
+// authPrincipal 服务端验证的鉴权主体（RFC 六.2：审计事件以独立字段落账，
+// 与请求自报标签分开存储——请求体自报身份不作数）。
+func authPrincipal(r *http.Request) string {
+	v, _ := r.Context().Value(authPrincipalKey).(string)
+	return v
+}
+
+// auth 会话校验中间件：无/失效会话一律 401（五端点全部受保护）。校验通过的
+// 请求把服务端验证主体注入上下文：admin 会话 → adminIdentity；Bearer PAT →
+// pat:<令牌名>（tokens.verify 命中即身份成立）。
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		/* 优先级：会话 cookie → Bearer PAT（2026-10-21 验收：GitHub 式子令牌）。 */
 		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
-			if s.tokens != nil && s.tokens.verify(strings.TrimPrefix(h, "Bearer ")) {
-				next(w, r)
-				return
+			if s.tokens != nil {
+				if name, ok := s.tokens.verify(strings.TrimPrefix(h, "Bearer ")); ok {
+					next(w, r.WithContext(withAuthPrincipal(r.Context(), "pat:"+name)))
+					return
+				}
 			}
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "令牌无效或已撤销")
 			return
@@ -212,7 +238,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效或已过期，请重新登录")
 			return
 		}
-		next(w, r)
+		next(w, r.WithContext(withAuthPrincipal(r.Context(), adminIdentity)))
 	}
 }
 

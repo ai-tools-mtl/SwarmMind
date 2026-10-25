@@ -257,6 +257,9 @@ func NowUTC() time.Time { return time.Now().UTC() }
 // NewTaskID 生成任务 ID："t-"+16 字节 hex（SPEC 4.9，hub 生成）。
 func NewTaskID() string { return "t-" + randomHex() }
 
+// NewWorkID 生成工作单 ID："w-"+16 字节 hex（P5/RFC-work-resume 二.1，hub 生成）。
+func NewWorkID() string { return "w-" + randomHex() }
+
 // NewMessageID 生成信封去重键 mid：16 字节 hex。
 func NewMessageID() string { return randomHex() }
 

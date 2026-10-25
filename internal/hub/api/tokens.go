@@ -92,10 +92,12 @@ func (ts *tokenStore) create(name string, now time.Time) (APIToken, string, erro
 	return t, plain, ts.persist()
 }
 
-// verify 校验明文令牌；命中且未撤销 → 更新 last_used 并返回 true。
-func (ts *tokenStore) verify(plain string) bool {
+// verify 校验明文令牌；命中且未撤销 → 更新 last_used，返回 (令牌名, true)。
+// 令牌名即服务端验证的凭据主体（事件账本 principal 用，RFC 六.2：与请求自报
+// 标签分开存储；重名以令牌列表前缀人工区分，V0 简化）。
+func (ts *tokenStore) verify(plain string) (string, bool) {
 	if !strings.HasPrefix(plain, tokenPrefixPlain) {
-		return false
+		return "", false
 	}
 	sum := sha256.Sum256([]byte(plain))
 	want := hex.EncodeToString(sum[:])
@@ -109,9 +111,9 @@ func (ts *tokenStore) verify(plain string) bool {
 		}
 		t.LastUsedAt = now
 		_ = ts.persist() // 尽力而为；失败不影响本次鉴权
-		return true
+		return t.Name, true
 	}
-	return false
+	return "", false
 }
 
 // list 返回脱敏副本（不含哈希）。
