@@ -71,7 +71,10 @@ p{margin-bottom:12px}
 /* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
-.workspace .workspace-brand{display:flex;align-items:center;gap:8px}
+/* t20261026-notify-detail：13px+nowrap 实测依据——侧栏 218px 减三重 padding 后
+ * 文本区仅 125px，「SwarmMind 中心端」14px 加粗需 128px，差 3px 孤字「端」掉行；
+ * 13px 收至 ~119px 放下，nowrap 保证永不孤字换行。node 端同规见 node style.css。 */
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
 .workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
@@ -366,7 +369,12 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 
 /* ---- 通知中心（P4③ 控制台化升级）：顶栏铃铛 + 站内通知面板 + 渠道卡片 ----
  * 层叠：面板 z-index 30（压过页面内容与 sticky 表头 5，低于弹层 50 / toast 100）；
- * 面板同为玻璃家族（与 topbar 同底色），窄视口贴右缘收宽。 */
+ * 面板不再走玻璃（t20261026-notify-detail）：backdrop-filter 取样以最近的带
+ * blur 祖先为 backdrop root——面板嵌在玻璃 topbar 内，blur 取不到 topbar 之后的
+ * 页面背景，实际完全透明，页面内容（空状态大按钮等）与面板文字叠印。故收实底
+ * rgba(245,245,247,.95) 并去 blur；white-space:normal 必须显式回置：面板嵌在
+ * .top-right（nowrap 防顶栏折行）内，继承 nowrap 曾把 footer-note 顶成单行
+ * 381px，撑出面板横向滚动条（生产实测 scrollWidth 395 > clientWidth 378）。 */
 .bell-btn{position:relative;padding:0;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
 /* padding:0 必须显式重置：全局 button{padding:0 16px} 会吃掉 34px 圆钮内容区，
  * 18px SVG 被 padding 顶至横向偏移 16px——图标在底纹中明显偏右（t20261026
@@ -382,7 +390,7 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .ni-svg.st-cancelled{color:var(--ink-3)}
 .ni-svg.st-test{color:var(--accent)}
 .bell-badge{position:absolute;top:-4px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--heat);color:#fff;font-size:10.5px;font-weight:700;line-height:17px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.25)}
-.notify-panel{position:absolute;top:44px;right:0;width:min(380px,92vw);max-height:min(500px,70vh);overflow:auto;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid rgba(0,0,0,.07);border-radius:var(--r-card);box-shadow:0 2px 8px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.14);z-index:30;padding:14px}
+.notify-panel{position:absolute;top:44px;right:0;width:min(380px,92vw);max-height:min(500px,70vh);overflow:auto;background:rgba(245,245,247,.95);white-space:normal;border:1px solid rgba(0,0,0,.07);border-radius:var(--r-card);box-shadow:0 2px 8px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.14);z-index:30;padding:14px}
 /* 设置页页内分区导航（t20261026-webfix）：横向小链接排，与 head 之后自然衔接；
  * link 按钮自带灰 pill hover，不加额外底色。 */
 .page-jump{display:flex;gap:6px;margin:0 0 14px;flex-wrap:wrap}

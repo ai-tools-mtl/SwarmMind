@@ -60,7 +60,9 @@ p{margin-bottom:12px}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
-.workspace .workspace-brand{display:flex;align-items:center;gap:8px}
+/* t20261026-notify-detail 双端同规：nowrap 防长 nodeID 在 125px 文本区孤字掉行
+ * （hub 端「SwarmMind 中心端」已实测掉行并修，见 hub style.css 同名规则）。 */
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px;white-space:nowrap}
 .workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out}
