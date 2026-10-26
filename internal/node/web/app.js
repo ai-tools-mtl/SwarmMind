@@ -427,7 +427,7 @@ function notifyTypeFieldsHtml(type, format, sec) {
       </div>`;
   }
   if (type === 'inbox') {
-    return `<div class="notice">站内通知无需配置：任务终态会出现在页面顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
+    return `<div class="notice">站内通知无需配置：任务终态会出现在中心端控制台顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
   }
   return `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
 }
@@ -864,7 +864,7 @@ function recentTasksCard() {
   return `<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2><small>${S.tasksTotal} 条 · 含 hub 下发</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${listStatusBadge(e)}</td></tr>`).join('')}
-  </tbody></table></div><p class="footer-note">点击行查看详情；列表即本机账本全量（含 hub 下发任务），完整清单见「任务」页。</p>`
+  </tbody></table></div><p class="footer-note">点击行查看详情；此处为最近 8 条（含本机派单与 hub 下发），完整清单见「任务」页。</p>`
     : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
@@ -1781,7 +1781,7 @@ function taskDrawerZones(t) {
     artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
     timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
     next: TERMINAL.has(t.status) && t.status !== 'needs_review'
-      ? `<div class="notice">任务已归档前保留 24 小时。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
+      ? `<div class="notice">本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
       : '',
   };
 }

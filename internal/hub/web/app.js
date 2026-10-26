@@ -519,7 +519,7 @@ function notifyTypeFieldsHtml(type, format, sec) {
       </div>`;
   }
   if (type === 'inbox') {
-    return `<div class="notice">站内通知无需配置：任务终态会出现在页面顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
+    return `<div class="notice">站内通知无需配置：任务终态会出现在中心端控制台顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
   }
   return `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
 }
@@ -916,7 +916,13 @@ function render() {
   if (!S.authed) {
     if (loginPageRendered === null) {
       loginPageRendered = 'loading';
-      loadAccountStatus().then(init => { loginPageRendered = init; render(); });
+      const genAtProbe = S.loginGen;   // 探测代次快照（codex 复审阻塞 2）：登录/初始化成功会推进 loginGen，
+      // 迟到的旧探测应答不得覆盖登录后的真实状态（复现：旧探测 initialized=false 晚于密码登录到达，
+      // 覆盖 true → 退出后误显「首次使用」表单）
+      loadAccountStatus().then(init => {
+        if (S.loginGen !== genAtProbe) return;   // 代次已推进：本次探测作废
+        loginPageRendered = init; render();
+      });
     }
     closeLayer();   // 登录/登出渲染统一走层生命周期（D3）：generation++ 废弃在途回调 + 释放 inert
     /* 同形态跳过（t20261026-prompt-preview 附带修复）：loadAccountStatus 迟到回调
@@ -930,6 +936,7 @@ function render() {
     }
     return;
   }
+  delete app.dataset.loginPage;   // 指纹只描述登录 DOM（终审必修1）：业务态不清除，退出/401 再进登录分支时同指纹命中跳过写入，登录表单出不来
   app.innerHTML = shell(PAGES[S.page]());
   syncDrawer();
 }
@@ -1049,6 +1056,7 @@ async function doSetup(form) {
     const r = await fetch('/api/v1/auth/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
     const d = await r.json().catch(() => ({}));
     if (r.status === 201) {
+      loginPageRendered = true;   // 账户创建成功即已初始化事实（codex 复审阻塞 2 边界：覆盖「创建成功但自动登录失败」时迟到探测回填 false 的窗口）
       await doPasswordLogin(u, p); return;
     }
     fb.innerHTML = warnNotice('创建失败 · ' + esc(d.error || r.status), esc(d.message || ''));
@@ -1060,6 +1068,7 @@ async function doPasswordLogin(u, p) {
     const r = await fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
     if (r.status === 200) {
       S.authed = true;
+      loginPageRendered = true;   // 登录成功即账户已初始化（P0 修正：setup/登录后不重置，退出后误回「首次使用」表单，实测 E2E E01 路径必现）
       S.loginGen++;
       S.expAt = Date.now() + 86400 * 1000;
       S.C = freshControl();
@@ -1083,6 +1092,9 @@ async function doLogin(form) {
     const r = await api('POST', '/api/v1/login', { token }, { isLogin: true });
     if (r.code === 200) {
       S.authed = true;
+      // 令牌登录不能推导账户已初始化（codex 复审阻塞 1：后端令牌登录只校验 admin_token，
+      // 未初始化实例也可登录）——重置为 null 让下次登录分支重新探测真实状态
+      loginPageRendered = null;
       S.loginGen++;
       S.expAt = Date.now() + (r.data?.expires_in || 86400) * 1000;
       S.C = freshControl();
@@ -1583,7 +1595,7 @@ function tasksPage() {
     </div>
     </details>
     ${list.length ? taskTable(list) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`}
-    <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 已完成的任务保留 24 小时，重要结果请及时导出。</p></section>`;
+    <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务保留 24 小时，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
   return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>目标机器</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
@@ -1818,11 +1830,11 @@ function drawerZones(t) {
     logs: r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
     artifacts: `<h3>产物文件</h3>
     ${artifactsHtml(t)}
-    <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；自结果确认起保留 24 小时。</p>`,
+    <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；产物文件保留取决于执行机（无自动回收），可取性以实际取回为准。</p>`,
     input: `<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre></details>`,
     timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
     review: reviewSection(t),
-    next: `${terminal(t.status) && !needs ? `<div class="notice">任务已归档前保留 24 小时。${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
+    next: `${terminal(t.status) && !needs ? `<div class="notice">终态任务记录保留 24 小时，到期自动清理。${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
     <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`,
   };
 }

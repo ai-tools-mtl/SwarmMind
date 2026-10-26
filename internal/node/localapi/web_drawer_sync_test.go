@@ -425,7 +425,10 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		"任务仍在进行，抽屉每 5 秒自动刷新。",
 		"诊断日志（stdout / stderr 尾部）",
 		"最多保留各 64KiB。",
-		"任务已归档前保留 24 小时。",
+		// P0 事实纠错（2026-10-26）：归档期限文案按端上事实分叉——hub 终态快照真清理
+		// （core/sweep.go TerminalRetention=24h），node CleanupAcked 未接入运行循环（SPEC 4.8）
+		// 不自动清理。原双端同文句「任务已归档前保留 24 小时。」退役，两端各自断言：
+		// hub 新句见下方 hub 独有断言组；node 新句见下方 node 断言组。
 		"查看全部任务",
 		"结果还没确认——这个任务结果拿不准，等你核对。",
 		"该任务没有单独的文本答复，输出内容见下方诊断日志与产物。",
@@ -477,6 +480,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		`<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>`, // D7 折叠+沉底灰块
 		"taskErrorNotice(r, needs)", // D5 hub 接入统一错误条
 		`${badge(t.status)}</h2></div>`, // D2 头部同构：badge 入 agent@node 行
+		"终态任务记录保留 24 小时，到期自动清理。", // P0 事实纠错：hub 清理真实存在（core/sweep.go）
 	} {
 		if !strings.Contains(hubJSStr, want) {
 			t.Errorf("hub app.js 应含 %q", want)
@@ -487,7 +491,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 	for _, want := range []string{
 		"taskErrorNotice(res, t.status === 'needs_review')", // D5 node 接入统一错误条
 		`role="dialog" aria-modal="true" aria-labelledby="drawer-title"`, // D1 对齐 hub 壳层基线
-		"任务已归档前保留 24 小时。${button('查看全部任务 →', 'close-drawer', 'link')}",
+		"本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}", // 端上事实分叉（见 P0 注），不得回退 hub 清理口径
 		"button('回表单重新派单', 'reopen-form', 'link')", // node 独有白名单动作保留
 	} {
 		if !strings.Contains(nodeJS, want) {
