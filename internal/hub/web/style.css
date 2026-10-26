@@ -406,6 +406,11 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .page-jump button{height:28px;padding:0 13px;font-size:var(--fs-small)}
 .notify-panel-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
 .notify-panel-head h3{font-size:13.5px;font-weight:650;margin-right:auto}
+/* 站内通知标题问号提示（纯 CSS tooltip：hover/focus-visible 显示，文案自 footer-note 收纳） */
+.help-dot{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-left:6px;border:1px solid var(--faint);border-radius:50%;color:var(--ink-3);font-size:10px;font-weight:600;line-height:1;cursor:help;vertical-align:1px;user-select:none;flex-shrink:0}
+.help-dot:hover,.help-dot:focus-visible{border-color:var(--ink-3);color:var(--ink)}
+.help-dot::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);left:-8px;z-index:5;width:max-content;max-width:250px;padding:8px 10px;background:var(--ink);color:#fff;font-size:12px;font-weight:400;line-height:1.5;border-radius:var(--r-chip);box-shadow:var(--sh-lift);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .15s ease,transform .15s ease,visibility .15s;pointer-events:none;white-space:normal;text-align:left}
+.help-dot:hover::after,.help-dot:focus-visible::after{opacity:1;visibility:visible;transform:translateY(0)}
 .notify-item{display:flex;gap:10px;padding:9px 10px;border-radius:var(--r-thumb);cursor:pointer;align-items:flex-start}
 .notify-item:hover{background:rgba(0,0,0,.04)}
 .notify-item.unread{background:var(--accent-bg)}

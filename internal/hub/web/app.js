@@ -2439,7 +2439,8 @@ function paintBell() {
 }
 function bellPanelHtml() {
   const items = S.inboxItems || [];
-  return `<div class="notify-panel-head"><h3>站内通知</h3>
+  const inboxTip = '站内通知只保存在内存里，hub 重启后清空；想留档请配置飞书 / 邮件渠道。';
+  return `<div class="notify-panel-head"><h3>站内通知<span class="help-dot" tabindex="0" aria-label="${inboxTip}" data-tip="${inboxTip}">?</span></h3>
     ${items.length ? button(items.some(i => !i.read) ? '全部已读' : '已全部读过', 'inbox-read-all', 'link') : ''}</div>
     ${items.length ? items.map(i => `
       <div class="notify-item${i.read ? '' : ' unread'}" data-act="inbox-read" data-id="${esc(i.id)}" data-read="${i.read ? '1' : ''}" role="button" tabindex="0">
@@ -2450,8 +2451,7 @@ function bellPanelHtml() {
         </span>
         <span class="ni-time">${esc(fmtTime(i.created_at))}</span>
       </div>`).join('')
-    : `<div class="notify-empty">还没有站内通知。<br>在「设置 → 通知」添加一个「站内通知」渠道后，<br>任务终态就会出现在这里。</div>`}
-    <p class="footer-note">站内通知只保存在内存里，hub 重启后清空；想留档请配置飞书 / 邮件渠道。</p>`;
+    : `<div class="notify-empty">还没有站内通知。<br>在「设置 → 通知」添加一个「站内通知」渠道后，<br>任务终态就会出现在这里。</div>`}`;
 }
 function inboxTitle(i) {
   const st = STATES[i.status] || i.status;
