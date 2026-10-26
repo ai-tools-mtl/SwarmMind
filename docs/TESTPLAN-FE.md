@@ -152,7 +152,7 @@
 断言：两次回登录页均出现登录表单（`.login`），无业务 DOM 残留；对应 e2e E16/E17/E-401。
 超时 25s。
 
-## P3 走查清单（对照 reference.html，9 项截图逐项过）
+## P3 走查清单（9 项截图逐项过；对照原型 docs/archive/prototypes/dashboard-prototype-final.html）
 
 1. 页面地面 #f5f5f7 冷灰（取色断言）
 2. 内容承载于白色 surface（无暖米色块）

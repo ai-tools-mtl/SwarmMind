@@ -553,7 +553,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 
 品牌资源（2026-10-26）：hub/node 的顶部品牌位、登录页、侧栏与 favicon 使用同一 `assets/brand/logo-mark.svg`，由共享 assets 包 go:embed；两端公开静态路径 `/logo.svg`、`/favicon.svg` 返回 SVG。它们不返回配置或凭据，不属于管理面 REST 能力，无新增 MCP 工具。更新后需重建二进制再走查。仓库首页横幅为 `assets/brand/logo-github.svg` / `logo-github-dark.svg`，与图标使用相同几何源。
 
-> 背景：hub/node 控制台任务抽屉组装层漂移盘点（docs/TASK-drawer-sync.md 阶段 A，D1-D23+C1-C11）与
+> 背景：hub/node 控制台任务抽屉组装层漂移盘点（docs/archive/TASK-drawer-sync.md 阶段 A，D1-D23+C1-C11）与
 > Hana 阶段 B 终裁。md 渲染器/样式 shared block 已有逐字节锁（web_md_render_test.go），本节把锁面
 > 扩到抽屉组装层的共用件；锁测试位于 internal/node/localapi（web_md_render_test.go、web_drawer_sync_test.go）。
 

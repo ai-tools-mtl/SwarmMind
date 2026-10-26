@@ -1,7 +1,7 @@
 # RFC：Work 工作单与多步骤执行恢复
 
 > 版本：v2，设计日期 2026-10-25。当前开发分支已包含 W1–W3 实现；W4 有特定版本的隔离双机报告，采证边界另见报告附注。
-> 接口与错误契约见 [SPEC 六.五/六.六](../SPEC.md)，验证见 [W1](TESTPLAN-W1-work.md)、[W2](TESTPLAN-W2-work.md)、[W3](TESTPLAN-W3-work.md)测试计划及 [W4 报告](TESTREPORT-w4-p5.md)。代码实现、历史验收和生产部署分别记录。
+> 接口与错误契约见 [SPEC 六.五/六.六](../../SPEC.md)，验证见 [W1](TESTPLAN-W1-work.md)、[W2](TESTPLAN-W2-work.md)、[W3](TESTPLAN-W3-work.md)测试计划及 [W4 报告](TESTREPORT-w4-p5.md)。代码实现、历史验收和生产部署分别记录。
 
 ## 一、需要解决的问题
 

@@ -68,9 +68,9 @@ P0–P5 是项目内部实施阶段，不等同于软件发布版本。以下列
 | P5 多步骤恢复 | Work、执行尝试、任期接管、结果收集与管理台 | W1–W3 已实现；W4 历史双机报告需按其采证范围解读 |
 | P5.1 分配建议 | D1 LLM 建议接口与派发页；D2 群聊联动、D3 本地模型/级联 | D1 已实现，终版真实模型逐场景报告待补；D2/D3 规划 |
 
-当前仓库已有 P4 的主要功能，P4 观察期方案仍见 [OBSERVATION-P4-plan.md](OBSERVATION-P4-plan.md)，不能由功能存在推断观察期已经完成。P5 工作区包含 W1–W3 实现，已有 [W4 隔离双机报告](TESTREPORT-w4-p5.md)。该报告记录了特定版本的结果，但仓内 B/C 最终采证尚不足以独立复核其关闭结论，见报告核对注。P5 合入生产分支仍受 P4 验收条件与发布授权约束。
+当前仓库已有 P4 的主要功能，P4 观察期方案仍见 [OBSERVATION-P4-plan.md](archive/OBSERVATION-P4-plan.md)，不能由功能存在推断观察期已经完成。P5 工作区包含 W1–W3 实现，已有 [W4 隔离双机报告](archive/TESTREPORT-w4-p5.md)。该报告记录了特定版本的结果，但仓内 B/C 最终采证尚不足以独立复核其关闭结论，见报告核对注。P5 合入生产分支仍受 P4 验收条件与发布授权约束。
 
-历史双机报告见 [TESTREPORT-dod11-p4.md](TESTREPORT-dod11-p4.md)。其结论只适用于报告列明的代码和环境，不代替后续变更的双机复验。
+历史双机报告见 [TESTREPORT-dod11-p4.md](archive/TESTREPORT-dod11-p4.md)。其结论只适用于报告列明的代码和环境，不代替后续变更的双机复验。
 
 ## 六、暂缓能力
 
@@ -102,5 +102,5 @@ P0–P5 是项目内部实施阶段，不等同于软件发布版本。以下列
 - [产品方向](PRODUCT-DIRECTION-v2.md)：场景、优先级和术语展示要求。
 - [交互设计](INTERACTION.md)：页面职责与反馈规则。
 - [Prime 设计](PRIME-DESIGN.md)：编排角色、权限与失败处理。
-- [文件协作](FILE-COLLAB.md)、[群聊设计](GROUP-RFC.md)、[Work RFC](RFC-work-resume.md)、[派发建议 RFC](RFC-jev-dispatch.md)：专题契约与交付边界。
+- [文件协作](FILE-COLLAB.md)、[群聊设计](GROUP-RFC.md)、[Work RFC](archive/RFC-work-resume.md)、[派发建议 RFC](RFC-jev-dispatch.md)：专题契约与交付边界。
 - [历史调研](agentbridge/实测报告.md)：特定版本的评估记录，不作为当前竞品能力声明。

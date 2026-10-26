@@ -1,7 +1,7 @@
 # RFC：执行者分配建议服务（P5.1）
 
 > 设计决策日期：2026-10-26。当前 D1 实现为 `llm-as-jev`：使用 LLM 按有限候选选择的形式返回建议，不代表已经部署 Jev 原生模型或完成概率校准。
-> 实现见 `internal/decision/`，当前验收记录见 [TESTPLAN-D1-jev](TESTPLAN-D1-jev.md)。本文不维护外部模型的价格、性能或准确率宣传数据。
+> 实现见 `internal/decision/`，当前验收记录见 [TESTPLAN-D1-jev](archive/TESTPLAN-D1-jev.md)。本文不维护外部模型的价格、性能或准确率宣传数据。
 
 ## 一、目标与范围
 
