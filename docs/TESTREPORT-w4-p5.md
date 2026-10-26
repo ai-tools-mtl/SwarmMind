@@ -3,6 +3,13 @@
 > 执行：Hana 编排，2026-10-25 23:05-23:15 UTC+8。dev 分支 `9cfcd92`（W1-W3 全量）交叉编译部署。
 > 环境（隔离实测，生产 hub 未动）：hub-w4 @ 腾讯云（systemd `swarmmind-hub-test`，tailscale 内网 18443/管理 18444 回环，独立 data_dir /var/lib/swarmmind-test）+ node `mac-mini-test` @ Mac mini（真实 agent zcode-dev/GLM，TOFU 首连）。管理 API 经 SSH 隧道 127.0.0.1:18445。
 
+
+## 2026-10-26 文档核对注
+
+以下正文保留原执行者在 `9cfcd92` 上的报告，不是本轮重新实测的结论。核对仓内 28 件采证时发现：`docs/testing/w4/b5-work-after-restart.json` 仍为 executing（步骤 2 pending），`c5-work-final.json` 仍为 blocked（步骤 2 failed）。这些文件能支持恢复与阻断的部分事实，但不足以独立复核正文声称的 B/C 最终收集关闭；后续补充最终响应或重跑后再更新证据状态。
+
+正文记录的重复 collect 返回 409 是当时版本的观察。当前实现对同任期、同报告、同关闭方式的请求重放返回 200 + dup；不同内容仍拒绝。此差异由当前源码与单测核对，不回写为历史版本已验证的行为。
+
 ## 场景 A：杀 Prime 接管续管闭环 ✅
 
 Work `w-c121feb1…`（三步骤产物链，真实 GLM 执行）：

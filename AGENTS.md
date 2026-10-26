@@ -12,6 +12,8 @@
 
 ## 通用工程
 
+- 文档声明自动清理前必须核对运行调用链 → 只有 CleanupAcked 函数与单测不代表定时任务已接入，易把设计保留期写成已生效行为（2026-10-26 文档核对） → 自查：`rg -n "CleanupAcked" cmd/ internal/node/`（区分定义、测试与实际运行调用；未接线须写明）
+
 - 禁止直接覆盖写状态文件 → 崩溃时留下半截 JSON → 原子写：temp + rename。自查：`grep -rn "os.WriteFile" internal/ | grep -v tmp`
 - 文件操作安全（agent 可及面路径，2026-10-24 产物挂载审查立）：不可信面（如 workdir 内）的目录创建/前置路径校验一律 Lstat 不跟随（符号链接=拒绝，防 MkdirAll/rename 经链接逃逸），盘上操作经 os.Root 定界、路径型操作（rename 等）每步重验路径组件；源文件以打开后 fd fstat 校验（校验对象=读取对象，消 Lstat→Open TOCTOU）；复制设字节上限并核对实得字节数==登记大小（防源检查后增长）；多步 rename 状态变更写 journal（原子写+目录 fsync）崩溃后按实物回放收敛，回滚失败保留材料聚合报告。自查：`grep -rn "MkdirAll\|os.Rename" internal/node/inputs/`（每处应有 verifyDirRel/重验/放大材料保留语义伴随）
 - 源文件打开（读登记产物路径，2026-10-24 跨机取回复审 R1 立）：「不跟随符号链接/不阻塞」必须落在 open 原语本身——Lstat 预检消不掉 Lstat→Open 窗口（os.Root 的 Unix 实现还会跟随根内末段链接：ELOOP 时读链重试，用户传入的 O_NOFOLLOW 被库逻辑架空）；登记文件被换为无写端 FIFO 则 open 挂起，fd 校验无从执行，串行帧处理卡死、外部超时解不开。源读取统一经 inputs.OpenSourceFile：Unix 逐段 openat 游走（中间段 O_DIRECTORY|O_NOFOLLOW、末段 O_NOFOLLOW|O_NONBLOCK，每段锚定上一段目录 fd——检查即打开、零窗口；darwin syscall 不导出 openat，经白名单 x/sys/unix，登记见 go.mod/SPEC 三）；Windows 逐段 NtCreateFile 游走（每段 OBJ_DONT_REPARSE 打开时约束 reparse/link 解析——os.Root 在 Windows 遇 reparse point 读链后跟随根内链接不能承担该契约，O_NOFOLLOW_ANY 封装在 internal/syscall 不可导入，经白名单 x/sys/windows，登记见 go.mod/SPEC 三；Windows 无 FIFO open 阻塞语义，无需 O_NONBLOCK 对应物，2026-10-25 三审 W2）。自查：`grep -rn "OpenSourceFile\|unix.Openat\|\.Open(" internal/node/inputs/ internal/node/service/artifact.go`（源打开不得绕过 OpenSourceFile choke point）

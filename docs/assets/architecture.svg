@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="820" viewBox="0 0 1120 820" role="img" aria-labelledby="title desc">
+<title id="title">SwarmMind system architecture</title>
+<desc id="desc">Web, CLI and MCP call the hub management API. Linux, macOS and Windows nodes initiate WSS connections to the hub and execute agents locally. Files remain on source nodes.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8Z" fill="#526983"/></marker></defs>
+<style>text{font-family:system-ui,-apple-system,sans-serif;fill:#192b44}.small{font-size:14px;fill:#4b627e}.body{font-size:16px}.label{font-size:18px;font-weight:600}.line{fill:none;stroke:#526983;stroke-width:2;marker-end:url(#arrow)}.box{fill:white;stroke:#d4deeb}</style>
+<rect width="1120" height="820" rx="18" fill="#f5f7fc"/>
+<text x="40" y="45" class="label">SwarmMind</text>
+<text x="40" y="75" class="body">一个人的跨机器派单工作台 · 节点主动连接，任务与结果双向传输</text>
+<g class="box">
+<rect x="40" y="105" width="235" height="76" rx="12"/>
+<rect x="295" y="105" width="235" height="76" rx="12"/>
+<rect x="550" y="105" width="235" height="76" rx="12"/>
+<rect x="805" y="105" width="275" height="76" rx="12"/>
+</g>
+<g text-anchor="middle">
+<text x="158" y="135" class="label">浏览器管理台</text><text x="158" y="161" class="small">派发 / 监管 / 设置</text>
+<text x="412" y="135" class="label">swarmmindctl</text><text x="412" y="161" class="small">人工命令行入口</text>
+<text x="667" y="135" class="label">MCP 客户端</text><text x="667" y="161" class="small">支持 stdio MCP 的 agent</text>
+<text x="944" y="135" class="label">swarmmind-mcp</text><text x="944" y="161" class="small">独立适配进程</text>
+<text x="796" y="96" class="small">stdio</text>
+<text x="203" y="224" class="small">HTTP</text><text x="457" y="224" class="small">HTTP</text><text x="1005" y="224" class="small">HTTP + PAT</text>
+</g>
+<path d="M785 143H805" class="line"/>
+<path d="M158 181V265" class="line"/><path d="M412 181V265" class="line"/><path d="M944 181V265" class="line"/>
+<rect x="40" y="265" width="1040" height="202" rx="12" fill="#eaf1fc" stroke="#9eb5dc"/>
+<text x="65" y="296" class="label">SwarmMind Hub 中心端</text><text x="1055" y="296" class="small" text-anchor="end">管理面 :8444 / 节点接入 :8443</text>
+<g class="box"><rect x="65" y="316" width="300" height="86" rx="12"/><rect x="385" y="316" width="350" height="86" rx="12"/><rect x="755" y="316" width="300" height="86" rx="12"/></g>
+<g text-anchor="middle">
+<text x="215" y="350" class="label">管理面 / 会话 / 能力目录</text><text x="215" y="378" class="small">Web + REST / 节点连接</text>
+<text x="560" y="350" class="label">调度 / 离线信箱</text><text x="560" y="378" class="small">依赖门控 / 产物中继 / 可选建议</text>
+<text x="905" y="350" class="label">持久化任务账本</text><text x="905" y="378" class="small">任务 / Work / 结果引用</text>
+</g>
+<text x="65" y="440" class="body">hub 记录执行事实并中继产物读取；文件保留在源节点，hub 不充当产物永久存储。</text>
+<path d="M80 568V467" class="line"/><path d="M435 568V467" class="line"/><path d="M790 568V467" class="line"/>
+<g text-anchor="middle"><text x="230" y="514" class="body">主动 WSS 外连</text><text x="585" y="514" class="body">主动 WSS 外连</text><text x="940" y="514" class="body">主动 WSS 外连</text><text x="230" y="539" class="small">建连后双向传输任务与结果</text><text x="585" y="539" class="small">建连后双向传输任务与结果</text><text x="940" y="539" class="small">建连后双向传输任务与结果</text></g>
+<g class="box"><rect x="40" y="568" width="330" height="170" rx="12"/><rect x="395" y="568" width="330" height="170" rx="12"/><rect x="750" y="568" width="330" height="170" rx="12"/></g>
+<text x="60" y="600" class="label">Node A / Linux</text><text x="415" y="600" class="label">Node B / macOS</text><text x="770" y="600" class="label">Node C / Windows</text>
+<g class="body"><text x="60" y="630">连接服务 / 执行账本 / runner</text><text x="415" y="630">连接服务 / 执行账本 / runner</text><text x="770" y="630">连接服务 / 执行账本 / runner</text><text x="60" y="658">执行本机 CLI 工具与 agent</text><text x="415" y="658">执行本机 CLI 工具与 agent</text><text x="770" y="658">执行本机 CLI 工具与 agent</text></g>
+<g class="small"><text x="60" y="690">本机输入 / 输出文件 / SHA-256</text><text x="415" y="690">本机输入 / 输出文件 / SHA-256</text><text x="770" y="690">本机输入 / 输出文件 / SHA-256</text><text x="60" y="717">本机控制台 127.0.0.1:8445</text><text x="415" y="717">本机控制台 127.0.0.1:8445</text><text x="770" y="717">本机控制台 127.0.0.1:8445</text></g>
+<text x="40" y="776" class="small">可选本机入口：MCP node 模式 → 回环 API → 本机 node（编排需 prime_agent 与 prime_token）</text>
+<text x="40" y="801" class="small">箭头表示连接发起或 API 调用方向；端口为默认值，实际监听地址以配置为准。</text>
+</svg>

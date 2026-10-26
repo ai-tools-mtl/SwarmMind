@@ -1,248 +1,216 @@
 # SwarmMind
 
-**SwarmMind 是一个人的跨机器派单工作台：在任何一台机器上说清目标，它告诉你这活在哪台机器上干、干完了没有、结果在哪。机器不在线，任务先暂存，上线自动送达；执行中断拿不准的结果会标出来等你确认，绝不悄悄重跑。**
+**SwarmMind 是面向个人自托管场景的跨机器 agent 任务调度与结果管理系统。** 用户通过统一入口调用不同机器上的能力，跟踪任务状态并获取最终答复与产物。节点离线时任务暂存；执行结果不确定时进入待人工核对状态。
 
-它不是多组织协作平台，不是 agent 应用市场，也不定义协议标准——就是一个人、自己几台机器，把活派出去、放心干、等结果。
+典型用途包括 Linux 构建、macOS 代码分析、Windows 文件处理，以及多步骤任务协作。用户可以直接指定执行者，也可以指定一个 agent 担任 **Prime（编排角色，界面显示名为「智行管家」）**，负责拆解任务、派发执行和汇总结果。
 
-单二进制、无外部依赖（Go 实现）。中心端（hub）自带 Web 管理台，节点（node）自带本机控制台，任何支持 MCP 的 agent 都能直接派单、等结果、取产物。
+Go 实现；hub、node、CLI、MCP 分别构建为独立可执行文件。运行核心服务无需外部数据库或消息队列；实际执行的 agent、CLI 工具及其凭据需在节点上另行准备。
 
-## 架构
+[快速体验](#快速体验) · [搭建自己的网络](#搭建自己的网络) · [接入 MCP](#接入-mcp) · [架构详解](docs/ARCHITECTURE.md) · [文档导航](docs/README.md)
 
-```
-                ┌─────────────────────────────┐
-                │      SwarmMind Hub 中心端    │
-                │  WSS :8443   管理台 :8444    │
-                │ 任务账本 · 离线暂存 · 批次 · 目录 │
-                └──────────┬──────────────────┘
-                 TLS 长连接 │  （node 外连，hub 不反向连接）
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴─────┐       ┌────┴─────┐       ┌────┴─────┐
-   │  node A  │       │  node B  │       │  node C  │
-   │ 跨云 VPS │       │  Mac mini │      │ Windows  │
-   │ agent×3  │       │  agent×1 │       │  agent×n │
-   └──────────┘       └──────────┘       └──────────┘
-```
+## 主要功能
 
-<!-- IMAGE: docs/assets/architecture.png | 系统架构图（Hana 生成） -->
+| 能力 | 使用方式 |
+|---|---|
+| 跨机器任务调度 | Web 管理台、CLI、REST API 或 MCP 指定节点和 agent |
+| 离线暂存与恢复 | 节点主动连接 hub；断线后重连、补推任务、补传结果 |
+| 执行边界 | 固定命令与工作目录，参数和环境变量逐项授权，超时或取消终止进程组 |
+| 文件协作 | 自动登记产物；同机与跨机依赖挂载，取回时校验 SHA-256 |
+| 多 agent 协作 | Prime 拆任务、协作群记录讨论、任务结果回流 |
+| 日常管理 | 双端 Web 控制台、PAT 访问令牌、任务终态通知、Windows 服务化 |
 
-- **组网**：仿 RustDesk——节点主动外连中心端（TLS WebSocket 长连接），中心端中继，单端口部署，节点无需公网 IP。
-- **任务全链**：提交 → 持久化 → 投递（offer/ack 握手）→ 节点本机执行 → 结果回传 → 产物经中心端中继取回（SHA-256 校验）。
-- **断线可靠**：节点离线时任务进离线暂存（100 条 / 8MiB 每节点），重连自动补推；7 天未投递才过期。
-- **崩溃语义**：节点执行中重启 → 任务落 `等你确认`，绝不静默重跑；中心端崩溃 → 两阶段持久化批次自动收尾。
+**可靠性边界：** 重复投递在同一节点账本内去重；执行中断且结果不确定时进入 `needs_review`，由人核对后决定下一步。这不等于对任意外部副作用提供全局 exactly-once 保证。账本、配置和节点身份应持续保留。
 
-## 60 秒见效：跑一遍自带演示
+## 系统架构
 
-仓库自带 `scripts/demo-loopback.sh`：在你这台机器上同时拉起 1 个中心端 + 2 个节点（临时端口、临时目录，不动仓库、不留现场），自动走完一遍真实全链——派单收结果、超时杀干净进程、离线暂存补推、断线重连、双端重启恢复、重复派单幂等、越权环境变量拒绝、中断标记「等你确认」，外加一段 wss 自签证书 + 首连指纹记录的演示，逐项打印 PASS/FAIL。
+![SwarmMind 系统架构：管理入口连接 hub，节点主动外连并在本机执行 agent](docs/assets/architecture.svg)
+
+- **Hub 中心端**负责目录、任务账本、离线信箱、调度与产物中继；管理面与节点接入口分开监听。
+- **Node 节点**运行在每台执行任务的机器上，主动通过 WSS 连接 hub，无需开放节点公网入站端口；任务在本机 agent 中执行。
+- **MCP 服务**是独立的 stdio 适配进程，默认调用 hub HTTP API，也可切换为本机 node 模式。
+- **产物**保存在源节点磁盘；跨机读取经 hub 中继，hub 不充当产物永久存储。
+
+[查看组件职责、任务时序和安全边界](docs/ARCHITECTURE.md) · [编辑图源](docs/assets/architecture.mmd)
+
+## 快速体验
+
+前置：**Go 1.24+、bash、python3、curl、pgrep/pkill**；回环演示适用于 macOS、Linux 或 WSL。原生 Windows 的 node 支持前台运行和系统服务。
+
+在仓库根目录执行：
 
 ```bash
 ./scripts/demo-loopback.sh
 ```
 
-前置：Go、python3、curl、bash（macOS / Linux / WSL）。含构建约一分钟；看到「全部通过」即本机回环演示通过（脚本覆盖协议链路演练，不含构建单测与真实双机验收）。失败时现场保留在临时目录，日志齐全（脚本结尾会打印路径）。
+脚本在临时目录中构建并启动一个 hub、两个 node，使用临时端口，演练任务提交、超时、离线补推、重启恢复、幂等、权限拒绝与 `needs_review`，另含 WSS / TOFU 演示。成功清理临时现场，失败保留日志并打印路径。运行耗时取决于构建缓存和机器性能。
 
-这就是 SwarmMind 的全部日常：说目标 → 派出去 → 收结果。下面把它架到你自己的几台机器上。
+看到「全部通过」表示本机回环场景通过；构建/单测与真实双机验收分别执行，不能由这条输出替代。
 
-## 五分钟上手
+## 搭建自己的网络
 
-角色只有两个：**中心端（hub）**——一台常开的机器（VPS、家里主机都行），记账本、管路由；**节点（node）**——每台干活的机器，活在这上面跑。两端是同一份代码构建出的不同二进制。
+以下最小示例适用于 **macOS / Linux**，先用本机 echo 验证，再把 node 配置移到目标机器。命令均在仓库根目录执行，hub 和 node 使用独立数据目录。
 
-### 1. 构建
-
-```bash
-make build   # 仓库根产出 4 个二进制：hub、swarmmind-node、swarmmindctl、swarmmind-mcp
-```
-
-release 产物里中心端叫 `swarmmind-hub-<平台>`，是同一个东西；下文统一写 `./hub`。
-
-### 2. 启动中心端
+### 1. 构建四个程序
 
 ```bash
-openssl rand -hex 32   # 生成管理令牌（下文叫 admin_token）
+make build
 ```
+
+输出：`hub`、`swarmmind-node`、`swarmmindctl`、`swarmmind-mcp`。也可用 `go build -o <输出路径> ./cmd/<入口>` 单独构建；中心端入口是 `cmd/hub`，节点入口是 `cmd/node`。
+
+### 2. 配置并启动 hub
+
+分别执行两次 `openssl rand -hex 32`，得到管理令牌和此节点专用的接入令牌，替换下方占位内容。
 
 ```yaml
 # hub.yaml
-node_listen: :8443            # 各节点连入的端口（防火墙记得放行）
-api_listen: 127.0.0.1:8444    # 管理台端口；只在本机浏览器用，保持回环即可
-admin_token: <上一步生成>
-data_dir: data                # 账本、快照、证书都落这里
+node_listen: 127.0.0.1:8443
+api_listen: 127.0.0.1:8444
+admin_token: "<管理令牌>"
+nodes:
+  mac-mini: "<节点接入令牌>"
+data_dir: ./data/hub
+tls:
+  insecure_loopback: false
 ```
 
 ```bash
 ./hub --config hub.yaml
 ```
 
-浏览器开 `http://127.0.0.1:8444`，输入 admin_token 登录。
+浏览器打开 `http://127.0.0.1:8444`，用管理令牌登录。hub 自动生成节点接入所需的自签 TLS 证书，存入自己的 `data_dir`。
 
-节点接入走 TLS，但你不用碰任何证书：hub 首次启动自动生成自签证书存 `data_dir`（`hub_cert.pem` / `hub_key.pem`）。首次连接的证书需自行可信（TOFU：首连记录指纹，之后指纹变化才会拒绝）；需要防范首连冒充时，预填可信指纹 `hub_pubkey_fp`。完整配置项见 `configs/hub.example.yaml`。
+跨机器部署时，将 `node_listen` 改为 `:8443`，放行该端口；node 的 `hub_url` 改用中心端实际地址。管理面可保持回环监听，通过 SSH 转发访问，详见[部署与常见问题](docs/OPERATIONS.md)。
 
-### 3. 添加一台机器
+### 3. 配置并启动 node
 
-在管理台「**机器**」页点「添加机器」，四步向导：
-
-1. **起名**：给这台机器起个 ID（如 `mac-mini`、`build-linux`）；
-2. **登记**：向导在浏览器本地生成这台机器的接入令牌（只显示一次）——按提示把两行 `nodes:` 配置粘进 hub.yaml、重启 hub；
-3. **安装**：三选一——部署包（Linux/macOS，含二进制、node.yaml 和安装脚本）、Docker 构建包、手动复制；目标机器已经装过 node 的话更简单，复制「接入串」，到那台机器的本机控制台（`http://127.0.0.1:8445`）「接入中心端」粘贴、预览、保存即可；
-4. **等上线**：节点列表亮「在线」即接入完成。
-
-偏好手写配置的话，node.yaml 长这样（所有字段都过服务端校验，照抄可跑）：
+在另一个终端准备 `node.yaml`：
 
 ```yaml
-# node.yaml —— 在被派活的机器上
+# node.yaml
 node_id: mac-mini
-hub_url: wss://<hub 地址>:8443/ws/node
-register_token: <hub.yaml 里这一行的接入令牌>
-hub_pubkey_fp: ""               # 留空 = 首连自动记录指纹（TOFU：之后指纹变化才拒绝）；预填可防首连冒充
-local_listen: 127.0.0.1:8445    # 本机控制台，只监听本机
-data_dir: data                  # 本机管理令牌自动生成在 data/local_token
+hub_url: wss://127.0.0.1:8443/ws/node
+register_token: "<与 hub.yaml 中 mac-mini 相同的节点接入令牌>"
+hub_pubkey_fp: ""
+local_listen: 127.0.0.1:8445
+data_dir: ./data/node
 concurrency: 2
-base_env:                       # 任务执行环境基线（不继承 node 进程的环境变量）
+base_env:
   PATH: /usr/bin:/bin
   TMPDIR: /tmp
-agents:                         # 这台机器开放哪些能力
+agents:
   - name: echo
-    command: /bin/echo          # 绝对路径，任务不可更改
-    workdir: /tmp               # 绝对路径，必填
-    timeout_sec: 30             # 必填，秒
-    allow_args: true            # 允许任务传命令行参数
+    kind: cli
+    command: /bin/echo
+    workdir: /tmp
+    timeout_sec: 30
+    allow_args: true
     description: 回声测试
 ```
 
-`./swarmmind-node --config node.yaml` 启动。不写 `kind` 即 `cli`；不写 `exposed` 即开放给网内其他机器调用。本机控制台 `http://127.0.0.1:8445` 的登录令牌就是 `data/local_token` 文件内容。
+```bash
+./swarmmind-node --config node.yaml
+```
 
-### 4. 派第一个任务，收结果
+管理台「机器」页显示在线后即可提交任务。本机控制台是 `http://127.0.0.1:8445`，登录令牌自动写入 node 的 `./data/node/local_token`。
 
-管理台「**任务派发**」页：选机器、选能力、写指令，提交；「**任务监管**」页看进度、收结果、取产物。命令行同款：
+`hub_pubkey_fp` 留空使用 TOFU：首次连接记录证书公钥指纹，后续校验。首次连接需处于可信网络；要验证首连身份，应预先填入通过可信渠道获取的指纹。配置字段详见 [hub 示例](configs/hub.example.yaml)与 [node 示例](configs/node.example.yaml)。示例文件默认是回环明文开发模式，复制时须同时核对 `tls.insecure_loopback` 与 `ws://` / `wss://`。
+
+也可用管理台「添加机器」向导生成接入配置和部署包；向导生成节点令牌后，仍需按提示更新 hub 的 `nodes` 配置并重启 hub。
+
+### 4. 提交任务并查看结果
+
+管理台「任务派发」选 `mac-mini` → `echo`，提交后到「任务监管」查看。命令行等价操作：
 
 ```bash
-./swarmmindctl --hub http://127.0.0.1:8444 --token <admin_token> \
+./swarmmindctl --hub http://127.0.0.1:8444 --token '<管理令牌>' \
   submit --node mac-mini --agent echo --arg hello
-./swarmmindctl --hub http://127.0.0.1:8444 --token <admin_token> query --id t-xxxx
+
+# 将返回的任务 ID 替换到下面
+./swarmmindctl --hub http://127.0.0.1:8444 --token '<管理令牌>' \
+  query --id '<任务ID>'
 ```
 
-### 5. 进阶：直接调 API
+CLI 的 `--token` 使用管理令牌，CLI 会登录换取会话 cookie。脚本直接调 REST 和 MCP 时使用 PAT，不能把管理令牌当作 Bearer 令牌。
 
-给脚本和外部程序用的令牌（PAT）在管理台「**设置**」页创建：`smsw_` 前缀、明文只显示一次、随时可撤销。注意 admin_token 是你登录管理台用的，**不能**当 API 令牌——Bearer 方式携带它会 401：
+### 5. 接入自己的 agent
 
-```bash
-curl -X POST http://127.0.0.1:8444/api/v1/tasks \
-  -H "Authorization: Bearer smsw_xxx" -H "Content-Type: application/json" \
-  -d '{"target_node":"mac-mini","target_agent":"echo","input":{"args":["hello"]},"submitted_by":"me"}'
-```
+把 `echo` 换成目标机器上已安装工具的**绝对路径**，设置已有的 `workdir`、固定参数 `agent_args`、超时和授权项；agent 所需的 HOME/配置目录由 `config_home` 指定。node 不继承启动进程的完整环境变量，依赖的 PATH、语言或其他变量需显式配置。
 
-（或者先 `POST /api/v1/login` 用 admin_token 换会话 cookie 再携带 cookie，效果相同。）
+任务输出文件写到自动注入的 `$SWARM_OUTPUTS_DIR`，结束后登记产物。依赖任务可用 `depends_on` 声明上游，系统在执行前准备输入。详见[文件协作设计](docs/FILE-COLLAB.md)与[架构详解](docs/ARCHITECTURE.md)。
 
-## 核心概念（就这 8 个）
+## 接入 MCP
 
-| 概念 | 人话 |
-|---|---|
-| 机器 | 你的电脑。一台常开的当中心端（hub）记账管路由，其余当节点（node）干活 |
-| 任务（task） | 一条派出去的指令：给哪台机器的哪个能力、输入什么、干到哪一步了 |
-| 结果 | 任务的最终答复和退出码；监管页与 `swarmmindctl query` 都能看 |
-| 产物（artifact） | 任务落盘的文件：agent 往 `$SWARM_OUTPUTS_DIR` 写，结束自动登记，跨机取回带 SHA-256 校验 |
-| 等你确认（needs_review） | 执行中机器重启等「结果拿不准」的情况：标出来等你人工核对，系统绝不自动重跑 |
-| 令牌（token） | 每台机器一把接入令牌（register_token）；你本人用管理令牌（admin_token）登录管理台；给脚本发子令牌（PAT，`smsw_` 前缀） |
-| 权限 | 能力默认锁死：命令与工作目录写死不可改，能否传参（allow_args）、能覆盖哪些环境变量（allow_env）、是否开放给其他机器（exposed）逐项授权 |
-| 在线状态（online） | 节点是否连着中心端。不在线时任务进离线暂存（mailbox），上线自动送达，7 天未送达过期 |
-
-其余内部机制都是为这件事服务的实现细节，诊断与错误报告里可查，日常不用学。
-
-<details>
-<summary>技术细节：这些机制分别是什么</summary>
-
-epoch（任务版本号，旧版本的回写自动拒绝）、租约（执行权定时续期，过期即失去回写资格）、幂等键（重复提交只算一次）、依赖门控（声明的前置任务未完成前保持等待）。
-</details>
-
-## 智行管家（Prime）
-
-指定一个 agent 当管家：你只说目标，管家自己拆子任务、派给网内合适的 agent、盯完汇总报告。它不是常驻服务，就是你的某个 agent 扮演的角色，随时可换人。
-
-两层用法：
-
-- **全网管家**：管理台一键指定（机器契约：`PUT /api/v1/prime`），复合目标跨机器拆解派发；
-- **本机管家**：node 启动时即生成编排凭证 `data/prime_token`（0600，给本机进程和 MCP node 模式用）；node.yaml 声明 `prime_agent` 后，本机编排入口才对管家开放（未声明时编排接口返回 403）。
-
-## 用 MCP 让任何 agent 派单
-
-`swarmmind-mcp` 是标准 MCP stdio 服务，Claude Desktop / zcode / 其它支持 MCP 的客户端接入后即可自然语言派单：
+在 hub 管理台「设置」创建 PAT（`smsw_` 前缀，明文只显示一次），再向支持 MCP stdio 的客户端加入：
 
 ```json
 {
   "mcpServers": {
     "swarmmind": {
-      "command": "/opt/swarmmind/swarmmind-mcp",
+      "command": "/绝对路径/swarmmind-mcp",
       "env": {
-        "SWARM_HUB_URL": "http://<hub 地址>:8444",
-        "SWARM_HUB_TOKEN": "smsw_…（管理台「设置」页创建的访问令牌）"
+        "SWARM_HUB_URL": "http://127.0.0.1:8444",
+        "SWARM_HUB_TOKEN": "smsw_替换为实际PAT"
       }
     }
   }
 }
 ```
 
-hub 模式 13 个工具：
+`127.0.0.1` 指 **MCP 进程所在机器**。如果 hub 在远端，先配置 SSH 转发或 HTTPS 反代，不能直接照填远端机器的回环地址。
 
-| 工具 | 干什么 |
+配置完成后，可向 MCP 客户端发出以下请求：
+
+> 列出在线机器和可用能力，把 hello 派给 mac-mini 的 echo，等任务结束并返回结果。
+
+| 工具组 | 工具 |
 |---|---|
-| `swarmmind_nodes` | 看哪些机器在线、各自多少任务在进行 |
-| `swarmmind_agents` | 看全网开放了哪些能力（agent 目录） |
-| `swarmmind_submit` | 派任务：指定机器和能力，支持幂等键、依赖声明、挂到协作群 |
-| `swarmmind_status` | 查某个任务当前进度（不等待） |
-| `swarmmind_wait` | 等到任务出结果再返回（轮询至终态） |
-| `swarmmind_artifact` | 取回任务的产物文件内容 |
-| `swarmmind_tasks` | 列出网内任务：看正在跑的、最近完成的、失败的，支持按状态/节点筛选 |
-| `swarmmind_decide` | 拿不准派给谁时问一句：返回建议执行者与理由（云端模型不可用自动退回本地规则） |
-| `swarmmind_group_create` | 建协作群：围绕一个目标把几个 agent 拉进同一讨论空间 |
-| `swarmmind_group_list` | 看现有协作群与状态 |
-| `swarmmind_group_say` | 在群里发一条消息（agent 发言计入预算） |
-| `swarmmind_group_messages` | 拉群消息（增量，适合轮询） |
-| `swarmmind_group_close` | 结束群（终态，不再收消息） |
+| 发现与执行 | `swarmmind_nodes`、`swarmmind_agents`、`swarmmind_submit`、`swarmmind_status`、`swarmmind_wait`、`swarmmind_artifact` |
+| 全网任务与分配建议 | `swarmmind_tasks`、`swarmmind_dispatch_suggest`、`swarmmind_decide`（旧建议接口） |
+| 协作群 | `swarmmind_group_create`、`swarmmind_group_list`、`swarmmind_group_say`、`swarmmind_group_messages`、`swarmmind_group_close` |
+| 多步骤工作单 | `swarmmind_work_create`、`swarmmind_work_get`、`swarmmind_work_list`、`swarmmind_work_takeover`、`swarmmind_work_collect` |
 
-**跨机可达**：MCP 连的是管理台（api_listen），默认只绑 127.0.0.1。MCP 跑在另一台机器上时三选一：把 api_listen 改绑内网/公网地址（必须已配置 admin_token，否则拒绝启动；明文 HTTP 会打印警告，建议前置 nginx/Caddy 做 TLS）、或 SSH 端口转发、或反代。
+当前 hub 模式装配 **19 个工具**，node 模式装配 **6 个工具**。映射和参数以 [SPEC 六.六](SPEC.md)及客户端 `tools/list` 为准。
 
-**node 模式**（`SWARM_TARGET=node`）：不连 hub，把本机 node 当单机编排入口。环境变量 `SWARM_NODE_URL`（默认 `http://127.0.0.1:8445`）+ `SWARM_NODE_PRIME_TOKEN`（取 node 的 `data/prime_token`；node.yaml 声明 prime_agent 后编排接口才激活，否则 submit 返回 403 prime_required）。只作用于本机，6 个工具：
+Work 支持步骤计划、执行尝试、任期接管与报告收集。派发建议服务为可选能力：当前 provider 使用 LLM 生成候选建议，用户可以覆盖建议或直接指定执行者；返回的置信度不代表经过校准的成功概率。功能与验证状态见下文。
 
-| 工具 | 干什么 |
+**仅在本机编排：** 设置 `SWARM_TARGET=node`、`SWARM_NODE_URL=http://127.0.0.1:8445`、`SWARM_NODE_PRIME_TOKEN=<node data_dir/prime_token 内容>`。node 配置须声明 `prime_agent` 才激活编排入口。本机模式只有发现与执行组的六个工具，不提供全网任务列表、协作群或工作单。
+
+## 核心概念
+
+| 概念 | 含义 |
 |---|---|
-| `swarmmind_nodes` | 看本机节点信息与执行账本计数 |
-| `swarmmind_agents` | 看本机有哪些可用能力 |
-| `swarmmind_submit` | 向本机 agent 派任务 |
-| `swarmmind_status` | 查本机任务进度 |
-| `swarmmind_wait` | 等本机任务出结果 |
-| `swarmmind_artifact` | 取本机任务产物（本机直取，不经 hub 中继） |
+| Agent / 能力 | 节点管理员配置的一条执行配置：命令、目录、权限和超时 |
+| Task / 任务 | 一次派发及其状态、答复、退出码和产物引用 |
+| Artifact / 产物 | agent 写到输出目录、经登记并可校验取回的文件 |
+| Prime / 智行管家 | 被指定来拆解和编排任务的 agent；不是额外常驻服务 |
+| Group / 协作群 | 围绕目标记录讨论的空间，不替代任务执行账本 |
+| Work / 工作单 | 多步执行记录，保存计划、步骤、尝试、接管事件和收集报告 |
+| `needs_review` / 等你确认 | 结果不确定的任务终态，需人工核对，不静默重跑 |
 
-## 生产部署
+## 部署与维护
 
-- **systemd**：`deploy/swarmmind-hub.service`（配置读 `/etc/swarmmind/hub.yaml`，二进制 `/opt/swarmmind/hub`）与 `deploy/swarmmind-node.service`（配置读 `/opt/swarmmind/node.yaml`）
-- **Makefile**：`make build` / `make test` / `make release`（四平台交叉构建到 `dist/`）
-- **CI**：GitHub Actions（build + test，push 即跑）
-- **TLS**：节点接入口 hub 自带自签 TLS（节点 TOFU 记录指纹）；管理台默认明文 HTTP，对外暴露建议前置 nginx/Caddy 反代 HTTPS，api_listen 绑非回环地址时必须已配置 admin_token
-- **Windows 节点**：目前用计划任务（schtasks）拉起，服务化排在 P4
+- Linux：仓库提供 [hub systemd 单元](deploy/swarmmind-hub.service)与 [node systemd 单元](deploy/swarmmind-node.service)，安装前核对配置、二进制和工作目录路径。
+- Windows：node 支持 `service install/start/status/stop/remove`；管理员命令与真机验收项见[双机部署指南](docs/DEPLOY-P2.md)。
+- 构建产物：`make release` 按 Makefile 中列出的目标生成到 `dist/`，不代表所有程序都覆盖所有平台。
+- 端口、令牌区别、反代、恢复和容量限制见[部署与常见问题](docs/OPERATIONS.md)。
 
-## Roadmap
+## 开发与验证
 
-项目按 P0-P5 生命周期推进（详见 `docs/PLAN.md` 与 `docs/PRODUCT-DIRECTION-v2.md`），当前处于 **P4：一个人每天用得顺**。
+```bash
+go build -mod=readonly ./...
+go test ./...
+# 更深入的本地检查（CI 也执行 vet 与 race）
+go vet ./...
+go test -race ./...
+```
 
-- [x] P0-P1 V0 核心：组网、任务全链、断线可靠、needs_review 语义、Workdir 互斥、双端控制台
-- [x] 账户体系：密码登录、账户设置、PAT 令牌（GitHub 式）、恢复通道
-- [x] MCP 服务：任意 agent 经 stdio MCP 派单/等结果/取产物（hub 12 工具 / node 6 工具）
-- [x] A2A 兼容端点：外部 A2A 客户端发现并调用网内 agent（对齐 spec v0.2.6 兼容子集，v1.0 完整对齐推迟到实验区）
-- [x] 智行管家（原「统筹载体」）：复合目标一键派发，指定智能体自动分解/并行调度/汇总报告（双机实测验收）
-- [x] 跨云实测：腾讯云 ↔ 百度云 双节点、25ms 全链、产物跨机取回
-- [x] 任务租约：执行权过期后旧执行的回写自动拒绝，不会覆盖新结果（P4）
-- [x] 任务依赖门控：任务可声明前置依赖，前置未完成不启动；有更新版本时旧的自动作废（P4）
-- [x] 群聊 MVP：建群、@提及发言、发言预算、滚动窗口、控制台群聊页、MCP 五工具（P4）
-- [x] README 重写与文档黑话清扫（PRODUCT-DIRECTION-v2 P4 第一项）
-- [x] Windows 服务化：svc/mgr 服务管理、SCM 故障恢复、真机部署清单（P4②）
-- [x] 任务终态 IM 通知：webhook/飞书 + 控制台通知中心（多渠道可配置）+ node 端通知（P4③）
-- [x] 产物挂载同机骨架：depends_on 下游自动挂载上游产物、SHA-256 校验、原子发布（P4④第一子轮）
-- [x] swarmmind_tasks 列表工具：MCP 任务列表与筛选（P4⑤）
-- [ ] 产物挂载跨机取回：artifact_fetch 方向扩展 + hub 中继 + node Remote 挂载（P4④第二子轮）
-- [ ] 界面文案黑话清扫（控制台/管理台残留术语，逐页替换为人话）
-- [ ] P5 复杂工作可恢复：执行事实与接管、多步骤断点查看；Git 集成推迟至真实场景出现
-- [ ] 实验区（冻结，有真实需求才晋级）：群聊完整协议、StartLux 决策、A2A 深化、P2P 直连、E2E 加密、IDE adapter
+[测试计划](docs/TESTPLAN.md)覆盖 SPEC DoD；[双机验收](docs/DEPLOY-P2.md)需两台真实机器和真实 agent。测试报告有各自的版本和环境，不能视作任意后续工作区的通过证明。
+
+当前开发分支包含 **P5 Work W1–W3 实现**，并已有 [W4 隔离双机验收报告](docs/TESTREPORT-w4-p5.md)。报告适用于其记录的版本与环境；本轮核对发现仓内 B/C 最终关闭证据不完整，见报告附注。该报告不表示当前分支已合入 main 或已部署生产。
+
+**P5.1 D1 派发建议**已加入代码；[D1 测试计划](docs/TESTPLAN-D1-jev.md)仍登记终版真实模型逐场景报告待补录。群聊自动分配、本地 provider 和级联策略仍属后续范围。P4 真实使用观察的完成状态另按[观察期方案](docs/OBSERVATION-P4-plan.md)记录。长期路线见[总方案](docs/PLAN.md)与[产品方向](docs/PRODUCT-DIRECTION-v2.md)。
 
 ## License
 
-MIT
+[MIT](LICENSE)
