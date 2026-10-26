@@ -260,6 +260,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)
 	mux.Handle("GET /style.css", console)
+	mux.Handle("GET /logo.svg", console)
+	mux.Handle("GET /favicon.svg", console)
 	return mux
 }
 

@@ -540,7 +540,7 @@ function timeFull(iso) {
 function layout(content, pages = (S.status?.mode === 'setup' ? SETUP_PAGES : PAGES)) {
   const online = S.status?.online;
   const nums = ['①', '②', '③', '④'];
-  return `<div class="shell"><aside><div class="workspace"><strong>${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
+  return `<div class="shell"><aside><div class="workspace"><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
   <nav>${pages.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${nums[pages.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
   <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
@@ -568,7 +568,7 @@ function pageView() {
   return overviewPage();
 }
 function gateView() {
-  return `<main><div class="card login"><div class="mark">⌘</div><h1>SwarmMind Node 本地控制台</h1>
+  return `<main><div class="card login"><div class="mark"><img class="brand-logo" src="/logo.svg" alt="SwarmMind" width="64" height="64"></div><h1>SwarmMind Node 本地控制台</h1>
   <p class="muted">本机管理令牌鉴权（Bearer）。令牌来自 node.yaml 的 <code>local_token</code>；未配置时 node 首次启动已生成，见启动日志或 <code>data_dir/local_token</code> 文件。</p>
   <label>本机管理令牌<input id="gate-token" type="password" placeholder="local_token" autocomplete="off"></label>
   ${button('进入控制台', 'gate-enter', 'primary')}

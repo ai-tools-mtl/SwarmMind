@@ -774,7 +774,7 @@ function shell(inner) {
   const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务监管'], ['control', '任务派发'], ['works', '工作单'], ['policy', '策略容量'], ['tokens', '设置'], ['groups', '群聊']];
   const nr = S.tasks.filter(t => t.status === 'needs_review').length;
   return `<div class="shell"><aside>
-  <div class="workspace"><small>协作网 · 管理员</small><strong>◈ SwarmMind 中心端</strong></div>
+  <div class="workspace"><small>协作网 · 管理员</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
     `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
   <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各台机器本机</div>
@@ -834,7 +834,7 @@ async function loadAccountStatus() {
 function loginPage(initialized) {
   const pw = loginMode === 'password';
   return `<main><div class="card login">
-  <div class="mark">⌘</div><div class="eyebrow">管理员入口</div>
+  <div class="mark"><img class="brand-logo" src="/logo.svg" alt="SwarmMind" width="64" height="64"></div><div class="eyebrow">管理员入口</div>
   <h1>管理你的协作网</h1>
   ${pw ? (initialized
     ? `<form id="pw-login-form">

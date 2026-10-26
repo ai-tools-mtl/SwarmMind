@@ -50,12 +50,18 @@ p{margin-bottom:12px}
 .muted,small{color:var(--ink-3)}small{font-size:var(--fs-small)}.small{font-size:var(--fs-small)}
 .eyebrow{font-size:11px;letter-spacing:2px;color:var(--ink-4);font-weight:700;margin-bottom:9px}
 .topbar{position:sticky;top:0;z-index:20;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--hairline);padding:14px 28px;display:flex;align-items:center;gap:26px}
-.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--accent);margin-right:8px}
+.brand{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}
+/* SwarmMind brand: same geometry and sizing on both consoles. */
+.brand-logo{display:block;flex-shrink:0;object-fit:contain}
+.brand .brand-logo{width:30px;height:30px}
+.login .mark .brand-logo{width:64px;height:64px}
 .deploy{font-size:11px;max-width:420px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px}
+.workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out}
 nav button:hover{background:rgba(0,0,0,.045)}

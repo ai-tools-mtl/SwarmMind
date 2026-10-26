@@ -58,7 +58,11 @@ p{margin-bottom:12px}
  * 替代永久 hairline——页顶时顶栏与首屏内容浑然一体。 ---- */
 .topbar{position:sticky;top:0;z-index:20;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid transparent;transition:border-color 300ms ease,box-shadow 300ms ease;padding:14px 28px;display:flex;align-items:center;gap:26px}
 .topbar.scrolled{border-bottom-color:var(--hairline)}
-.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--accent);margin-right:8px}
+.brand{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}
+/* SwarmMind brand: same geometry and sizing on both consoles. */
+.brand-logo{display:block;flex-shrink:0;object-fit:contain}
+.brand .brand-logo{width:30px;height:30px}
+.login .mark .brand-logo{width:64px;height:64px}
 .switcher{display:flex;background:var(--track);padding:4px;border-radius:10px;gap:3px}.switcher button{border:0;background:transparent;height:auto;padding:7px 16px;color:var(--ink-3)}.switcher .selected{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .deploy{font-size:11px;max-width:355px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
@@ -67,6 +71,8 @@ p{margin-bottom:12px}
 /* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px}
+.workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
 nav button:hover{background:rgba(0,0,0,.045)}
