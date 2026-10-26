@@ -1355,3 +1355,25 @@ printf 'EVIDENCE_DIR=%s\n' "$T"
 ### 执行说明补充
 - 群/统筹/取消用例依赖 v0.2.x 部署版 hub；E2E 编号沿用 tests/e2e-console.mjs
 - 降级演练见 scripts/drill-degrade.sh（P4 Gate 证据）
+
+## 增补批次（2026-10-26：任务筛选 + 双端导航统一，终审必修4 补机械执行步骤）
+
+### hub 导航与目标机器筛选（hub 模式：`node tests/e2e-console.mjs`，E2E_BASE 指向 hub）
+- TC-NAV-01（E-NAV/E-NAV2）aside 导航词表 8 项（总览/机器/任务/派发/工作单/群聊/策略容量/设置）名称与顺序逐项断言；aria-current 指向当前页。定位一律用结构化选择器 `aside nav button[data-page=…]`，禁用 `:has-text("任务")` 宽泛匹配。
+- TC-NAV-02（E20/E20x）「目标机器」select 筛选：行全部命中所选机器；E20x 真实触发导出按钮→捕获下载→解析导出 JSON，断言仅含所选机器且条数与列表一致（导出与列表同源 filteredTasks 实测，不挂空名）。
+- TC-NAV-03（E20b）清除路径 A：select 改回「全部机器」→ 列表恢复、控件值复位。
+- TC-NAV-04（E20c）清除路径 B：trace 无命中 + 叠加机器筛选 → 零命中空态点「清除筛选」→ trace 输入与机器 select 双复位、列表全恢复。
+- TC-NAV-05（E-401）会话失效回归：登录→退出→登录表单出现→再登录（E16/E17）之外补 401 路径——`context.clearCookies()` 后等轮询 401，登录表单必须出现（登录页指纹缓存不残留业务 DOM）。
+- TC-NAV-06（快照消失态）选中机器后该机器从快照消失：选项保留选中项、显示零结果（不静默回退「全部机器」）；`go test ./internal/node/localapi/ -run TestWebTaskFilterBehavior`（node-gone-kept 场景）为行为锁，浏览器级在验收实例构造。
+
+### node 来源筛选与导航（node 模式：`E2E_BASE=<node local API> local_token=<本机管理令牌> node tests/e2e-console.mjs`）
+- TC-NTF-01（N01）令牌门登录：local_token 经环境变量传入，`#gate-token` 填入后进入控制台。
+- TC-NTF-02（E-NAV3）node 导航词表 4 项（总览/服务/任务/连接）名称与顺序逐项断言（`aside nav button[data-go=…]`）。
+- TC-NTF-03（N02）来源筛选行恒在：3 chip（全部/本机派单/hub 下发）空快照也不消失（终审必修2）。
+- TC-NTF-04（E-N1/E-N1b）轮询保持筛选：跨一个轮询周期（5s+余量）chip 选中态与行集不变；来源列全部命中所选来源。无已载任务记 SKIP。
+- TC-NTF-05（E-N2）翻页叠加筛选：「加载更早」后 chip 仍选中、行集增长、新增行仍命中来源。无翻页入口记 SKIP。
+- TC-NTF-06（E-N3）登出→令牌门→再登录后 S.tf 重置：「全部」chip 选中。
+- 汇总口径：PASS/SKIP/FAIL 三态分开计，SKIP 注明原因不计通过数，仅 FAIL 判败退出（终审必修4）。
+
+### 渲染行为锁（go test 常驻，不依赖部署实例）
+- `go test ./internal/node/localapi/ -run 'TestWebNavFilterStructure|TestWebTaskFilterBehavior'`：双端导航词表/navnum/aria/workspace 结构锁、blankFilters 七字段与五处重建点锁、ORIGIN_WORDS 词典单源锁；myTasksCard 渲染过滤行为锁（chip 计数/留痕归 local/零命中翻页不阻断/空快照激活筛选全程可清除/与派单表单互不干扰）+ footer 口径三数分离（rows/all/total 互异分页场景）+ hub filteredTasks 交集与选项生命周期。

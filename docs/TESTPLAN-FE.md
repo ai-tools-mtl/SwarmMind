@@ -121,6 +121,37 @@
 断言：表头吸顶（boundingBox top 接近视口顶或主滚动参照位置，偏差 ≤2px）；表头背景 computed background 为不透明色（alpha=1，无内容穿透）。
 超时 10s。
 
+## 任务筛选与导航统一（TASK-nav-filter-20261026 终审必修4 增补）
+
+对应 tests/e2e-console.mjs 自动条目（hub 模式 `node tests/e2e-console.mjs`：E-NAV/E20/E20x/E20b/E20c/E-401；node 模式 `E2E_BASE=<node local API> local_token=<本机管理令牌> node tests/e2e-console.mjs`：N01/E-NAV3/N02/E-N1/E-N2/E-N3）。以下为交互态逐条机械步骤（深层走查层，逐态截图留证）：
+
+**FE-19 hub 目标机器筛选交互态**
+准备：hub 已登录，任务页存在 ≥2 台不同 target_node 的任务。
+操作：`aside nav button[data-page=tasks]` 进任务页 → 展开 `select[data-f=node]` → 选中一台机器 → 截图。
+断言：选项来自快照去重；行全部命中所选机器；select 选中值回填（控件值与筛选一致，无「显示全部实际在筛」假状态）。
+超时 10s。
+
+**FE-20 hub 零命中空态 + 导出同源**
+操作：`select[data-f=node]` 选中一台机器 → 点 `[data-act=export]` 捕获下载并解析（验证同源过滤）→ 叠加 `input[data-f=trace]` 填不存在 ID → 截图零命中空态 → 点 `[data-act=clear-filters]`。
+断言：导出 JSON 仅含所选机器行（同源过滤，先导出后清除，避免清除后导出失去筛选约束无法验证）；空态含「没有符合筛选的任务」+「清除筛选」；清除后 trace 与机器 select 双复位、列表全恢复。
+超时 15s。
+
+**FE-21 node 来源筛选三态**
+准备：node 令牌门登录（local_token 环境变量），任务页有混合来源数据（不足则本机派单一枚 + hub 下发一枚）。
+操作：依次点击三枚来源 chip（全部/本机派单/hub 下发），各截一帧；再选一个来源后翻「加载更早的任务」截一帧。
+断言：chip 选中态显性 + 计数正确；留痕行计入「本机派单」；零命中出「没有符合筛选的任务」+「清除筛选」且「加载更早」仍可点；footer 激活筛选时显示「命中 X 条；筛选作用于已载入的 N / 共 M 条」（三数分离）。
+超时 10s。
+
+**FE-22 node 筛选跨轮询/翻页/登出**
+操作：选中「hub 下发」→ 等 6.5s（跨轮询）→ 点「加载更早的任务」→ 点 `#logout` 登出 → 令牌门重登 → 回任务页。
+断言：轮询与翻页后 chip 选中态与筛选结果保持；登出→再登录后「全部」chip 选中（S.tf 会话边界重置）。
+超时 20s。
+
+**FE-23 登录页指纹回归（hub）**
+操作：登录 → `#logout` 退出 → 再登录 → `context.clearCookies()` 等轮询 401。
+断言：两次回登录页均出现登录表单（`.login`），无业务 DOM 残留；对应 e2e E16/E17/E-401。
+超时 25s。
+
 ## P3 走查清单（对照 reference.html，9 项截图逐项过）
 
 1. 页面地面 #f5f5f7 冷灰（取色断言）

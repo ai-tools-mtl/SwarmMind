@@ -20,7 +20,8 @@ import (
 // 「抽屉展示词典 shared block」，双端逐字节同文由 sharedBlock 承载）、文案迁移
 // 完整清单（含 prime.go Go 端）——源码锚点锁。
 // 行为面：node myTasksCard 渲染过滤（来源 chip 计数/留痕行归 local/零命中空态且
-// 「加载更早」翻页不阻断/footer 作用域/与派单表单 S.f 互不干扰）、hub filteredTasks
+// 「加载更早」翻页不阻断/footer 口径三数分离（终审必修3）/空快照激活筛选全程可清
+//（终审必修2）/与派单表单 S.f 互不干扰）、hub filteredTasks
 // node 条件交集、blankFilters 形态、taskNodeOptions 选中机器从快照消失保留——经
 // node 子进程加载真实 embed 资产抽块求值实测（先例：web_prompt_zone_test.go、
 // internal/hub/web/dispatch_test.go）；node 不可得环境自动 skip，结构锁常驻兜底。
@@ -300,10 +301,12 @@ function button(label, act, cls, inner) { return '<button data-act="' + act + '"
 
 	run("nav_filter_node.js", []string{
 		"all-no-filter",        // 无筛选：全量行 + 三 chip 计数 + 无作用域说明
-		"hub-filter",           // hub 筛选：仅 hub 行 + footer 作用域 1/3
+		"hub-filter",           // hub 筛选：仅 hub 行 + footer 口径 命中1/已载3/共3
 		"local-counts-trace",   // 留痕行（无 status）计入 local 筛选与计数
 		"trace-default-local",  // origin 缺失行按 local 归口（缺省语义）
 		"zero-hit-more-alive",  // 零命中：空态+清除筛选，翻页入口不被阻断（codex 必须修项）
+		"paged-scope",          // rows>0 且 rows/all/total 三数互不等（终审必修3 口径分离）
+		"empty-snapshot-filter-flow", // 空快照+激活筛选：筛选行在位可清除、不自动重置、新任务解锁全程（终审必修2）
 		"chips-zero-gray",      // 零计数 chip 带退灰类、不禁用
 		"tf-form-independent",  // S.tf 筛选与派单表单 S.f 草稿互不干扰；清除回全量
 	})
@@ -344,7 +347,7 @@ const SCENARIOS = {
     S.tf.origin = 'hub';
     const html = myTasksCard();
     ok(count(html, /data-task=/g) === 1 && html.includes('data-task="b"'), 'hub 筛选仅剩 hub 行');
-    ok(html.includes('筛选作用于已载入的 1 / 3 条'), 'footer 作用域 1/3');
+    ok(html.includes('命中 1 条；筛选作用于已载入的 3 / 共 3 条'), 'footer 口径：命中 1；已载入 3 / 共 3（终审必修3）');
     ok(!html.includes('data-task="a"') && !html.includes('data-task="c"'), 'local 行不出现');
   },
   'local-counts-trace': () => {
@@ -355,7 +358,7 @@ const SCENARIOS = {
     const html = myTasksCard();
     ok(count(html, /data-task=/g) === 3, 'local 筛选含留痕行共 3 行');
     ok(html.includes('仅存留痕'), '留痕行按仅存留痕呈现');
-    ok(html.includes('筛选作用于已载入的 3 / 4 条'), 'footer 作用域 3/4');
+    ok(html.includes('命中 3 条；筛选作用于已载入的 4 / 共 4 条'), 'footer 口径：命中 3；已载入 4 / 共 4');
     S.tf.origin = '';
     ok(myTasksCard().includes(ORIGIN_WORDS.local + ' 3'), '留痕行计入 local chip 计数');
   },
@@ -378,7 +381,32 @@ const SCENARIOS = {
     ok(html.includes('没有符合筛选的任务'), '零命中显示空态');
     ok(html.includes('data-act="tf-clear"') && html.includes('清除筛选'), '空态带清除筛选');
     ok(html.includes('data-act="tasks-more"') && html.includes('加载更早的任务'), '零命中不阻断翻页入口（codex 必须修项）');
-    ok(html.includes('筛选作用于已载入的 0 / 2 条'), 'footer 作用域 0/2');
+    ok(html.includes('命中 0 条；筛选作用于已载入的 2 / 共 5 条'), 'rows/all/total 三数互异：命中 0；已载入 2 / 共 5（终审必修3）');
+  },
+  'paged-scope': () => {
+    base();   // 已载 3（2 local 1 hub），账本共 9
+    S.tasksTotal = 9;
+    S.tf.origin = 'hub';
+    const html = myTasksCard();
+    ok(html.includes('命中 1 条；筛选作用于已载入的 3 / 共 9 条'), 'rows>0 且 rows/all/total 三数互不等的分页场景（终审必修3）');
+    ok(!html.includes('筛选作用于已载入的 1 /'), '旧口径（命中数冒充已载入数）不得回潮');
+    ok(html.includes('加载更早的任务（还有 6 条）'), '翻页余量按全量口径计');
+  },
+  'empty-snapshot-filter-flow': () => {
+    base();
+    S.tf.origin = 'hub';
+    S.tasks = []; S.tasksTotal = 0;
+    let html = myTasksCard();
+    ok(count(html, /data-act="tf-origin"/g) === 3, '空快照下三枚来源 chip 仍在（终审必修2：筛选行不移出可见面）');
+    ok(/data-origin="hub"[^>]*class="on zero"/.test(html), 'hub chip 保持选中（S.tf 不被快照清空自动重置）');
+    ok(html.includes('没有符合筛选的任务') && html.includes('data-act="tf-clear"'), '激活筛选+空列表出筛选空态+清除按钮');
+    ok(!html.includes('本机还没有执行过任务'), '不得以首次派单空态顶替筛选空态');
+    S.tasks = [mkTask('n1', 'local')]; S.tasksTotal = 1;
+    html = myTasksCard();
+    ok(count(html, /data-task=/g) === 0, '新增 local 任务仍被 hub 筛选隐藏（筛选保留，禁自动重置规避）');
+    ok(html.includes('命中 0 条；筛选作用于已载入的 1 / 共 1 条'), '零命中仍显示已载入与总量');
+    S.tf = { origin: '' };
+    ok(count(myTasksCard(), /data-task=/g) === 1, '清除筛选后新任务可见（全程闭环）');
   },
   'chips-zero-gray': () => {
     base();
