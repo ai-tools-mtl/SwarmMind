@@ -12,7 +12,7 @@ SwarmMind 由两类角色组成：**中心端（Hub）** 与 **节点端（Node�
 | 部署数量 | 整个网络一台 | 每台要执行任务的机器各一个 |
 | 适合的机器 | 常开、地址稳定的机器（云服务器、家里的小主机） | 你的工作机：Mac、Linux、Windows 皆可 |
 | 对外监听 | `:8443` 节点入口（WSS）+ `:8444` 管理面 | `127.0.0.1:8445` 本机控制台（仅回环） |
-| 需要公网入站 | 需要放行 8443（管理面可留在回环走转发） | **完全不需要**，node 主动外连 hub |
+| 需要公网入站 | 仅跨公网直连时放行节点入口（默认 TCP 8443）；内网/同机部署只需 node 能访问到 hub；管理面可留在回环走转发 | **完全不需要**，node 主动外连 hub |
 | 凭据 | `admin_token`（管理）、每节点一份 `register_token` | `register_token`（接入）、`local_token`（本机控制台） |
 | 数据存储 | 内嵌 SQLite 单文件库 | JSON 执行账本 |
 | 谁来使用 | 提任务的人：浏览器、CLI、REST、MCP | 机器本身自动执行；主人经本机控制台管理 |
@@ -91,7 +91,7 @@ ssh -N -L 18444:127.0.0.1:8444 '<SSH用户>@<hub主机>'
 
 **登录管理台**：浏览器打开管理面地址，用 `admin_token` 登录（首次可从 hub 机器上 `cat data_dir/admin_token` 读取）。
 
-**接入节点**：管理台「节点接入」向导生成 `node_id + register_token` 对，把两行配置交给对应机器的 node.yaml（见第二章）。节点上线后在「机器」页看到在线状态与其开放的能力。
+**接入节点**：管理台「节点接入」向导生成 `node_id + register_token` 对。注意向导只在浏览器生成凭据，还需把这两行写回 hub.yaml 的 `nodes:` 段并重启 hub 才生效；然后把同一对配置交给对应机器的 node.yaml（见第二章）。节点上线后在「机器」页看到在线状态与其开放的能力。
 
 **提交任务**（四种入口任选）：
 
@@ -104,9 +104,9 @@ ssh -N -L 18444:127.0.0.1:8444 '<SSH用户>@<hub主机>'
 
 **日常管理动作**：
 
-- 任务进入 `needs_review`（执行中断、结果不确定）时，在任务页核对实际副作用与日志后人工裁决，或 `swarmmindctl review`。不要直接重复提交。
+- 任务进入 `needs_review`（执行中断、结果不确定）时，在管理台任务页核对实际副作用与日志后登记人工裁决；`swarmmindctl review` 只用于查看核对上下文，裁决在管理台登记。不要直接重复提交。
 - 「设置 → 通知」配置任务终态推送渠道（飞书 / 邮件 / webhook / 站内），运行时可改，凭证存 `data_dir/notify_channels.json`。
-- 派发建议：在 `hub.yaml` 的 `decision:` 段配置 `provider: llm-as-jev` 后，派单页出现「建议派给 X」；不配置则完全无感。
+- 派发建议：在 `hub.yaml` 的 `decision:` 段配置 `provider: llm-as-jev` 并确保模型凭据可用（`api_key`，或环境变量 `GLM_API_KEY`，或 swarm-prime-home 里的既有配置）后，派单页才会出现「建议派给 X」；凭据缺失或调用失败时降级为无建议，不阻塞派单；不配置则完全无感。
 
 ---
 
@@ -120,11 +120,11 @@ ssh -N -L 18444:127.0.0.1:8444 '<SSH用户>@<hub主机>'
 | 能力注册 | 把本机 CLI/agent 声明为命名能力，开放到全网能力目录供他人派单 |
 | 任务执行 | 固定命令与工作目录、参数/环境变量逐项授权、超时与进程组整组终止 |
 | 执行账本 | 每个任务的接受、开始、结果全部落盘；崩溃重启后恢复，结果不确定的进入 `needs_review` |
-| 产物登记 | agent 把输出写进 `$SWARM_OUTPUTS_DIR`，结束后自动登记（路径/大小/SHA-256），可被跨机取回 |
+| 产物登记 | agent 把输出写进 `$SWARM_OUTPUTS_DIR`，结束后自动登记（路径/大小/SHA-256）；受数量与单件大小限制，可被跨机取回 |
 | 本机控制台 | `http://127.0.0.1:8445`：配置本机服务、查看本机任务、管理能力开放开关 |
-| MCP 编排入口（可选） | node 模式 MCP + `prime_agent`，让本机 agent 作为 Prime 编排全网任务 |
+| MCP 编排入口（可选） | node 模式 MCP + `prime_agent`：本机编排入口，Prime 拆解后的子任务只能派给本机；要编排全网任务用 hub 模式 MCP + PAT（见 1.3 与 [Prime 配置](../deploy/prime/README.md)） |
 | 独立模式（可选） | 不连 hub 单机运行，本机提交执行任务 |
-| 终态通知 | 本机渠道推送任务终态，「同时通知」开关与 hub 侧联动 |
+| 终态通知 | 本机渠道推送本机任务终态；组网模式下可用「同时通知」开关选择本机渠道是否跟发（hub 渠道照常独立通知；独立模式本机通知即唯一通知） |
 | Windows 服务化 | `service` 子命令注册系统服务：开机自启、崩溃退避自愈、日志轮转 |
 
 ### 2.2 部署步骤
@@ -147,7 +147,7 @@ register_token: "<hub 为本机签发的令牌>"
 hub_pubkey_fp: ""                        # 留空 = TOFU 首连自动记录；防首连冒充可预填指纹
 local_listen: 127.0.0.1:8445             # 本机控制台，仅回环
 concurrency: 2                           # 同时执行的任务数
-data_dir: ~/swarmmind/data
+data_dir: /Users/你的用户名/swarmmind/data   # 必须写实际绝对路径：YAML 不会展开 ~，写 ~/swarmmind/data 会落错位置
 base_env:                                # 任务环境基线：不继承 node 进程自身环境
   PATH: /usr/bin:/bin
   TMPDIR: /tmp
@@ -183,7 +183,7 @@ agents:
     exposed: true                  # 是否开放到全网；本机控制台的开关会覆盖此基线
 ```
 
-三个自动注入的环境变量（任务不可覆盖）：`SWARM_TASK_ID`、`SWARM_TRACE_ID`、`SWARM_OUTPUTS_DIR=<workdir>/outputs/<task_id>`。agent 把产物写进 `$SWARM_OUTPUTS_DIR` 即自动登记、可跨机取回。
+三个自动注入的环境变量（任务不可覆盖）：`SWARM_TASK_ID`、`SWARM_TRACE_ID`、`SWARM_OUTPUTS_DIR=<workdir>/outputs/<task_id>`。agent 把产物写进 `$SWARM_OUTPUTS_DIR`，进程结束后自动登记；登记与跨机取回受数量（每任务最多 8 件）、单件大小（640 KiB）与校验一致性约束，限制表见[运维文档](OPERATIONS.md)。
 
 注意：`data_dir/agents-state.json` 由本机控制台的开放开关自动维护（覆盖 YAML 的 `exposed` 基线，重启保持），勿手工编辑；要改基线请改本文件并重启 node。
 
@@ -193,7 +193,7 @@ agents:
 
 **日常状态**：部署完成后 node 是无人值守的——hub 派单、本机执行、结果回传全自动，主人只在两件事时出手：改能力配置（node.yaml + 重启，或控制台开关）、排查异常任务（控制台看日志与账本状态）。
 
-**让本机 agent 当 Prime（可选）**：node.yaml 配置 `prime_agent` 后，用 `prime_token`（`data_dir/prime_token`）启动 node 模式 MCP，本机 agent 即可拆解任务并派发给全网节点执行。
+**让本机 agent 当 Prime（可选）**：node.yaml 配置 `prime_agent` 后，用 `prime_token`（`data_dir/prime_token`）启动 node 模式 MCP（环境变量 `SWARM_TARGET=node`、`SWARM_NODE_URL`、`SWARM_NODE_PRIME_TOKEN`），本机 agent 即可作为 Prime 编排；注意 node 模式只能把子任务派给本机（跨机派单在 node 侧直接拒绝），需要拆解并派发全网节点的编排用 hub 模式 MCP + PAT。两种入口的配置与验证见 [Prime 配置](../deploy/prime/README.md)。
 
 **独立模式（可选）**：不配置 `hub_url` 时 node 单机运行，仅本机提交执行，适合先在单机验证能力配置再入网。
 
