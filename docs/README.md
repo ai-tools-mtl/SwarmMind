@@ -8,6 +8,7 @@
 |---|---|
 | [项目 README](../README.md) | 项目用途、最小配置、首次任务、MCP 接入与功能状态 |
 | [架构详解](ARCHITECTURE.md) | 组件职责、任务流转、恢复语义与权限边界 |
+| [部署指南](DEPLOYMENT.md) | 中心端与节点端分章：功能清单、部署步骤、部署后使用与连通验证 |
 | [部署与排障](OPERATIONS.md) | 端口、凭据、TLS、数据保留与常见问题 |
 | [双机与 Windows 部署](DEPLOY-P2.md) | 部署模板、系统服务与真实环境验收清单 |
 | [Prime 配置](../deploy/prime/README.md) | 全网和本机两种编排入口、实际验证方式 |

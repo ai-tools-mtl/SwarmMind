@@ -1,6 +1,6 @@
 # 部署与常见问题
 
-先完成 [README 最小闭环](../README.md)，再接真实机器和真实 agent。原始配置参考 [hub](../configs/hub.example.yaml) / [node](../configs/node.example.yaml)。
+按角色分端的部署步骤与使用说明见[部署指南](DEPLOYMENT.md)。先完成 [README 最小闭环](../README.md)，再接真实机器和真实 agent。原始配置参考 [hub](../configs/hub.example.yaml) / [node](../configs/node.example.yaml)。
 
 ## 端口与远程访问
 

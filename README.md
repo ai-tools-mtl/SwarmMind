@@ -55,6 +55,8 @@ Go 实现；hub、node、CLI、MCP 分别构建为独立可执行文件。运行
 
 ## 搭建自己的网络
 
+> 中心端（Hub）与节点端（Node）的完整功能对照、逐端部署步骤与部署后使用说明，见[部署指南](docs/DEPLOYMENT.md)。本节是两机互通的最短路径。
+
 以下最小示例适用于 **macOS / Linux**，先用本机 echo 验证，再把 node 配置移到目标机器。命令均在仓库根目录执行，hub 和 node 使用独立数据目录。
 
 ### 1. 构建四个程序
@@ -199,6 +201,7 @@ Work 支持步骤计划、执行尝试、任期接管与报告收集。派发建
 
 - Linux：仓库提供 [hub systemd 单元](deploy/swarmmind-hub.service)与 [node systemd 单元](deploy/swarmmind-node.service)，安装前核对配置、二进制和工作目录路径。
 - Windows：node 支持 `service install/start/status/stop/remove`；管理员命令与真机验收项见[双机部署指南](docs/DEPLOY-P2.md)。
+- 按角色分端的部署与使用说明（功能清单、配置逐项、部署后操作）见[部署指南](docs/DEPLOYMENT.md)。
 - 构建产物：`make release` 按 Makefile 中列出的目标生成到 `dist/`，不代表所有程序都覆盖所有平台。
 - 端口、令牌区别、反代、恢复和容量限制见[部署与常见问题](docs/OPERATIONS.md)。
 
