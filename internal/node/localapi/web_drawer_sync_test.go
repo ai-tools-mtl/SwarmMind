@@ -108,7 +108,9 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	}
 	// 答复与日志：mdAnswer 白底主角+（空）兜底；诊断日志恒两段+空段（空）+单 pre 双段原文
 	// （D8/D10/D11/D12 统一口径全部锁在本块内，两端同文即同行为）；drawerAnswerHtml
-	// D9 状态优先——终态判定先行，cancelled+result=null（后端合法态）不得落「尚未到终态」
+	// D9 状态优先——终态判定先行，cancelled+result=null（后端合法态）不得落「尚未到终态」；
+	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文）——
+	// stdin 优先 md 渲染+原文切换、空回退 args 逐参数 code、皆空省略
 	for _, want := range []string{
 		"function mdAnswer(text) {",
 		"function drawerAnswerHtml(t, res, needs) {",
@@ -119,6 +121,12 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 		"<pre>stdout:\\n${esc(res.stdout_tail || '（空）')}\\n\\nstderr:\\n${esc(res.stderr_tail || '（空）')}</pre>",
 		"sec('stdout', res.stdout_tail) + sec('stderr', res.stderr_tail)",
 		"'<p class=\"muted\">（空）</p>'",
+		"function promptZoneHtml(t) {",
+		"t.input?.stdin",
+		"t.input?.args",
+		"'prompt-raw'",
+		"本任务以命令行参数下达（逐参数展示，保留边界）：",
+		"任务指令",
 	} {
 		if !strings.Contains(logBlk, want) {
 			t.Errorf("抽屉答复与日志 shared block 应含 %q", want)

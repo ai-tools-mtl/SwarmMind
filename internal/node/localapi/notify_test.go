@@ -15,13 +15,15 @@ import (
 	"github.com/mtl802/swarmmind/internal/notify"
 )
 
-// newNotifySrv 构造装配了通知 Dispatcher 的本地 API（独立临时 data_dir 渠道存储）。
+// newNotifySrv 构造装配了通知 Dispatcher 的本地 API（独立临时 data_dir：渠道存储
+// 与「同时通知」开关都落这里，绝不外溢）。
 func newNotifySrv(t *testing.T) (*httptest.Server, *notify.Dispatcher) {
 	t.Helper()
 	disp := notify.NewDispatcher(mustChannelStore(t), nil)
 	srv := httptest.NewServer(New(Config{
 		NodeID: "nodeA", LocalToken: "local-tok", PrimeToken: "prime-tok",
-		Notify: disp,
+		DataDir: t.TempDir(),
+		Notify:  disp,
 	}).Handler())
 	t.Cleanup(srv.Close)
 	return srv, disp
@@ -79,7 +81,7 @@ func TestNotifyAuthLocalOnly(t *testing.T) {
 			t.Fatalf("%s: GET 应 401，got %d", tc.name, code)
 		}
 	}
-	code, _ := reqJSON(t, "POST", base, "prime-tok", map[string]any{"type": "feishu", "name": "x", "secrets": map[string]string{"webhook_url": "https://example.com/hook"}})
+	code, _ := reqJSON(t, "POST", base, "prime-tok", map[string]any{"type": "webhook", "format": "feishu", "name": "x", "secrets": map[string]string{"url": "https://example.com/hook"}})
 	if code != http.StatusUnauthorized {
 		t.Fatalf("prime_token 创建应 401，got %d", code)
 	}
@@ -175,7 +177,7 @@ func TestNotifyInboxTypeRejected(t *testing.T) {
 	}
 	// 既有渠道切换到 inbox 同拒
 	code, body = reqJSON(t, "POST", base, "local-tok", map[string]any{
-		"type": "feishu", "name": "飞书", "secrets": map[string]string{"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/x"},
+		"type": "webhook", "format": "feishu", "name": "飞书", "secrets": map[string]string{"url": "https://open.feishu.cn/open-apis/bot/v2/hook/x"},
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("feishu 创建应 201，got %d", code)
@@ -187,13 +189,13 @@ func TestNotifyInboxTypeRejected(t *testing.T) {
 	if code != http.StatusBadRequest {
 		t.Fatalf("切换到 inbox 应 400，got %d", code)
 	}
-	if ch, _ := disp.Store().Get(id); ch.Type != "feishu" {
+	if ch, _ := disp.Store().Get(id); ch.Type != notify.TypeWebhook {
 		t.Fatalf("被拒更新不得改类型，got %q", ch.Type)
 	}
 }
 
-// TestNotifyUnavailable503 未装配 Dispatcher（networked/setup 口径）：端点组
-// 503 降级（通知归 hub，本机不收配置）。
+// TestNotifyUnavailable503 未装配 Dispatcher（旧构造方防御口径，2026-10-26 起
+// 三模式全装配、正常构造恒就绪）：端点组 503 降级。
 func TestNotifyUnavailable503(t *testing.T) {
 	srv := httptest.NewServer(New(Config{NodeID: "nodeA", LocalToken: "local-tok"}).Handler())
 	t.Cleanup(srv.Close)
@@ -204,6 +206,50 @@ func TestNotifyUnavailable503(t *testing.T) {
 	}
 	if body["error"] != "notify_unavailable" {
 		t.Fatalf("错误码应 notify_unavailable，got %v", body["error"])
+	}
+}
+
+// TestNotifySettingsEndpoints 「同时通知」开关端点（2026-10-26 改动三）：GET
+// 默认 true；PUT false 落盘即刻可读；PUT 缺 also_notify / 非布尔 400；与渠道
+// 端点同走 local_token 鉴权。
+func TestNotifySettingsEndpoints(t *testing.T) {
+	srv, _ := newNotifySrv(t)
+	base := srv.URL + "/api/v1/local/notify/settings"
+
+	code, body := reqJSON(t, "GET", base, "local-tok", nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET 应 200，got %d", code)
+	}
+	if v, ok := body["also_notify"].(bool); !ok || !v {
+		t.Fatalf("未配置应默认 true，got %v", body)
+	}
+	// 写 false → 立即读回 false（读盘不缓存）
+	code, body = reqJSON(t, "PUT", base, "local-tok", map[string]any{"also_notify": false})
+	if code != http.StatusOK {
+		t.Fatalf("PUT 应 200，got %d: %v", code, body)
+	}
+	if v, _ := body["also_notify"].(bool); v {
+		t.Fatalf("PUT 应答应回显 false，got %v", body)
+	}
+	code, body = reqJSON(t, "GET", base, "local-tok", nil)
+	if v, _ := body["also_notify"].(bool); code != http.StatusOK || v {
+		t.Fatalf("PUT 后 GET 应读到 false，got %d %v", code, body)
+	}
+	// 校验：缺 also_notify / 非布尔 / 空请求体一律 400
+	for name, payload := range map[string]any{
+		"缺字段": map[string]any{},
+		"非布尔": map[string]any{"also_notify": "yes"},
+		"空体":  nil,
+	} {
+		code, _ := reqJSON(t, "PUT", base, "local-tok", payload)
+		if code != http.StatusBadRequest {
+			t.Fatalf("%s 应 400，got %d", name, code)
+		}
+	}
+	// 鉴权：prime_token 不放行（凭据管理面同口径）
+	code, _ = reqJSON(t, "PUT", base, "prime-tok", map[string]any{"also_notify": true})
+	if code != http.StatusUnauthorized {
+		t.Fatalf("prime_token PUT 应 401，got %d", code)
 	}
 }
 

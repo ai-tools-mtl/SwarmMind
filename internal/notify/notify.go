@@ -1,21 +1,8 @@
 // Package notify 任务终态通知（PRODUCT-DIRECTION v2 P4③ 及其控制台化升级）：
 // 任务首次落终态时，Dispatcher 把通知路由到全部启用且订阅该事件的渠道
-// （notify_channels.json，管理台「设置 → 通知」可视化配置）——首批支持飞书
-// 自定义机器人、email（SMTP）、通用 webhook（JSON POST）、inbox（站内=控制台
-// 通知中心）；sms 占位暂未开放。
-//
-// 可靠性边界（设计定稿）：发送在独立 goroutine 进行，不阻塞状态机持久化；
-// 单渠道单次 5s 超时；渠道级失败独立重试 3 次指数退避（1s/2s/4s），穷尽只记
-// 日志（凭证与 webhook URL query 脱敏），绝不影响任务终态与主流程。去重不在
-// 本包——触发点（core 终态旁路）只在非终态→终态首次转换时调用一次（重复
-// 结果/冲突/清扫重扫均不触发），Sweep/重放天然不产生重复通知。
-//
-// 装配位置（2026-10-24 自 internal/hub/notify 提升，channel/dispatch/store 为
-// hub/node 通用组件）：hub 组网模式由 core 终态旁路触发；node standalone 模式
-// （hub_url 为空，hub 不存在）由 node service 终态落账本触发补盲区——networked
-// 模式通知归 hub，node 不装配（零调用零重复）。inbox 仅 hub 控制台装配（铃铛
-// 专用，见 inbox.go）；node 侧 Dispatcher 以 nil inbox 装配，inbox 渠道类型在
-// node 管理面准入即拒绝。
+//（notify_channels.json，管理台可视化配置）——首批支持 email（SMTP）、通用
+// webhook（JSON POST，消息格式维度含飞书机器人，2026-10-26 独立 feishu 类型
+// 并入）、inbox（站内=控制台通知中心）；sms 占位暂未开放。
 //
 // 可靠性边界（设计定稿）：发送在独立 goroutine 进行，不阻塞状态机持久化；
 // 单渠道单次 5s 超时；渠道级失败独立重试 3 次指数退避（1s/2s/4s），穷尽只记
@@ -23,9 +10,18 @@
 // 本包——触发点（core 终态旁路 / node service 落终态）只在非终态→终态首次
 // 转换时调用一次（重复结果/冲突/清扫重扫均不触发），重放天然不产生重复通知。
 //
+// 装配位置（2026-10-24 自 internal/hub/notify 提升，channel/dispatch/store 为
+// hub/node 通用组件；2026-10-26 伦哥裁决「同时通知」：hub 组网模式由 core 终态
+// 旁路触发照常，node 三模式（standalone/networked/setup）全部装配本机渠道——
+// networked 下本机任务终态是否跟发本机渠道由 data_dir/notify_settings.json
+// also_notify 决定（默认 true，见 settings.go），standalone 本机通知即唯一通知、
+// 开关不参与门控）。inbox 仅 hub 控制台装配（铃铛专用，见 inbox.go）；node 侧
+// Dispatcher 以 nil inbox 装配，inbox 渠道类型在 node 管理面准入即拒绝。
+//
 // 兼容性：hub.yaml 旧 notify 段（webhook_url+format）启动时一次性导入为一个
-// 渠道（幂等，见 store.go ImportLegacy，hub 专用）；旧 Format 常量保留用于
-// 导入口径。
+// webhook 渠道（幂等，见 store.go ImportLegacy，hub 专用）；旧 Format 常量保留
+// 用于导入口径与迁移识别。存量独立 feishu 渠道载入时自动归一为 webhook+飞书
+// 格式（migrateLegacyFeishu）。
 package notify
 
 import (

@@ -1,8 +1,9 @@
 // 通知渠道（P4③ 控制台化升级）：类型枚举、事件订阅模型、凭证脱敏与准入校验。
 //
-// 四类首批渠道：feishu（飞书自定义机器人）、email（SMTP）、webhook（通用
-// JSON POST）、inbox（站内=控制台通知中心）；sms 在枚举中占位但暂不开放
-// （需接入服务商，API 与 UI 均拒绝）。
+// 三类首批渠道：email（SMTP）、webhook（JSON POST，消息格式含飞书机器人——
+// 2026-10-26 起独立 feishu 类型并入 webhook 类型成为其 Format 维度，存量渠道
+// 载入时自动归一，见 store.go migrateLegacyFeishu）、inbox（站内=控制台通知
+// 中心）；sms 在枚举中占位但暂不开放（需接入服务商，API 与 UI 均拒绝）。
 //
 // 事件订阅（events，三选多，默认全订阅）：task_final=全部终态；
 // task_failed=仅失败；task_needs_review=仅等你确认。空列表=全订阅。
@@ -19,7 +20,9 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// 渠道类型（首批四类 + sms 占位）。
+// 渠道类型（首批三类 + sms 占位）。TypeFeishu 已退役为 webhook 的消息格式维度
+//（Format=feishu），常量仅作存量迁移识别（migrateLegacyFeishu），新渠道准入
+// 不再接受该类型。
 const (
 	TypeFeishu  = "feishu"
 	TypeEmail   = "email"
@@ -37,8 +40,22 @@ const (
 	EventNeedsReview  = "task_needs_review" // 仅等你确认
 )
 
-// ChannelTypes 类型枚举（含 sms 占位；UI 据此渲染下拉并对 sms 禁用）。
-var ChannelTypes = []string{TypeFeishu, TypeEmail, TypeWebhook, TypeInbox, TypeSMS}
+// ChannelTypes 类型枚举（含 sms 占位；UI 据此渲染下拉并对 sms 禁用）。feishu
+// 已并入 webhook 类型（消息格式维度），不再作为独立类型开放创建。
+var ChannelTypes = []string{TypeEmail, TypeWebhook, TypeInbox, TypeSMS}
+
+// FormatGeneric webhook 渠道消息格式：通用 JSON POST（terminalPayloadFor 载荷 +
+// 自定义请求头）。空串同义（字段 omitempty，零值即通用格式）。
+const FormatGeneric = "generic"
+
+// normalizeFormat 渠道消息格式归一：空/未知 → 通用格式（TrimSpace 防手滑空格）。
+// "feishu" 原样保留（复用 legacy 常量 FormatFeishu）。
+func normalizeFormat(f string) string {
+	if strings.TrimSpace(f) == FormatFeishu {
+		return FormatFeishu
+	}
+	return FormatGeneric
+}
 
 // EventValues 合法事件订阅值。
 var EventValues = []string{EventTaskFinal, EventTaskFailed, EventNeedsReview}
@@ -51,6 +68,10 @@ const MaskPlaceholder = "******"
 type Channel struct {
 	ID        string            `json:"id"`
 	Type      string            `json:"type"`
+	// Format 消息格式（webhook 类型专用维度，2026-10-26 feishu 并入 webhook）：
+	// "generic"（空同义）=通用 JSON POST；"feishu"=飞书自定义机器人文本消息。
+	// 其他类型恒空。
+	Format    string            `json:"format,omitempty"`
 	Name      string            `json:"name"`
 	Enabled   bool              `json:"enabled"`
 	Events    []string          `json:"events"`            // 空=全订阅
@@ -124,15 +145,27 @@ func normalizeEvents(events []string) ([]string, error) {
 	return out, nil
 }
 
-// validateChannel 渠道准入校验（创建与更新共用）：类型枚举、名称、事件订阅、
-// 按类型必填凭证。name 上限 64 字符（rune 计）防滥用。
-func validateChannel(typ, name string, events []string, secrets map[string]string) error {
+// validateChannel 渠道准入校验（创建与更新共用）：类型枚举、消息格式、名称、
+// 事件订阅、按类型必填凭证。name 上限 64 字符（rune 计）防滥用。format 仅
+// webhook 类型合法（generic/feishu，空=generic）；其余类型带格式即拒绝
+//（不收一条带无效字段的渠道配置）。
+func validateChannel(typ, format, name string, events []string, secrets map[string]string) error {
 	switch typ {
-	case TypeFeishu, TypeEmail, TypeWebhook, TypeInbox:
+	case TypeEmail, TypeWebhook, TypeInbox:
 	case TypeSMS:
 		return fmt.Errorf("sms 渠道需接入服务商，暂未开放")
 	default:
+		if typ == TypeFeishu {
+			return fmt.Errorf("独立 feishu 渠道已并入 webhook 类型（消息格式选「飞书机器人」）")
+		}
 		return fmt.Errorf("未知渠道类型 %q", typ)
+	}
+	norm := normalizeFormat(format)
+	if typ != TypeWebhook {
+		if format != "" && norm != FormatGeneric {
+			return fmt.Errorf("消息格式仅 webhook 渠道支持")
+		}
+		norm = FormatGeneric
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -144,25 +177,37 @@ func validateChannel(typ, name string, events []string, secrets map[string]strin
 	if _, err := normalizeEvents(events); err != nil {
 		return err
 	}
-	return validateSecrets(typ, secrets)
+	return validateSecrets(typ, norm, secrets)
 }
 
-// validateSecrets 按类型校验必填凭证：
-//   - feishu：webhook_url 必填且须为合法 http(s) URL（飞书机器人地址）；
+// validateSecrets 按类型校验必填凭证（webhook 类型按消息格式分叉）：
+//   - webhook（不分格式）：webhook_url 已退役为非法键，键出现即拒绝（存量迁移
+//     已归一为 url，见 store.go migrateLegacyFeishu）；
+//   - webhook+generic：url 必填且须为合法 http(s) URL；headers 可选（header.<名> 键）；
+//   - webhook+feishu：url 必填（飞书机器人地址）；自定义头不支持（飞书机器人
+//     不读自定义头，存了也永不生效——宁可明确报错）；
 //   - email：host/port/username/password/from/to 六件套必填，port 为 1-65535 数字；
-//   - webhook：url 必填且须为合法 http(s) URL；headers 可选（header.<名> 键）；
 //   - inbox：无凭证。
-func validateSecrets(typ string, secrets map[string]string) error {
+func validateSecrets(typ, format string, secrets map[string]string) error {
 	switch typ {
-	case TypeFeishu:
-		return requireHTTPURL(secrets, "webhook_url")
 	case TypeWebhook:
+		// webhook_url 已退役为非法键（存量迁移已归一为 url，见 store.go
+		// migrateLegacyFeishu）：键出现即独立拒绝，与 url 是否合法无关——否则
+		//「合法 url + 旧 webhook_url」双键并存会被静默持久化，退役键复活且
+		// 永不生效（投递只读 url）。
+		if _, legacy := secrets["webhook_url"]; legacy {
+			return fmt.Errorf("webhook_url 已退役：类型选 Webhook 后地址填入 url（存量飞书渠道升级时已自动归一）")
+		}
 		if err := requireHTTPURL(secrets, "url"); err != nil {
 			return err
 		}
+		feishu := normalizeFormat(format) == FormatFeishu
 		for k, v := range secrets {
 			if !isHeaderKey(k) || v == "" {
 				continue
+			}
+			if feishu {
+				return fmt.Errorf("飞书机器人格式不支持自定义请求头（头 %q 不会被发送）", strings.TrimPrefix(k, "header."))
 			}
 			name, ok := headerName(k)
 			if !ok || strings.ContainsAny(name, " \t\r\n:") {
@@ -273,6 +318,7 @@ func (c Channel) clone() Channel {
 
 // applyUpdate 把更新请求合并进现有渠道（PUT 语义核心）：
 //   - name 非空（Trim 后）才更新；type 非空且变化才切换（凭证按合并结果重校验）；
+//     format 非空（Trim 后）才覆盖，且只属 webhook 类型——类型切走即清空；
 //   - enabled/events 由指针区分「未提供（保留）」与「提供（覆盖，events 可为
 //     空数组=全订阅）」；
 //   - secrets 未提供（nil）→ 全部保留（部分更新如「启用开关」只传 enabled）；
@@ -280,10 +326,17 @@ func (c Channel) clone() Channel {
 //     即生效），其余键 merge：值为 ****** 占位 → 保留原值（原值不存在则丢弃
 //     该键——占位无原值可保，等于未填，交由校验报缺）；空串 → 显式清除该键；
 //     其余 → 覆盖。
-func applyUpdate(cur *Channel, typ, name string, enabled *bool, events []string, haveEvents bool, secrets map[string]string) error {
+func applyUpdate(cur *Channel, typ, format, name string, enabled *bool, events []string, haveEvents bool, secrets map[string]string) error {
 	newTyp := cur.Type
 	if strings.TrimSpace(typ) != "" {
 		newTyp = strings.TrimSpace(typ)
+	}
+	newFormat := cur.Format
+	if strings.TrimSpace(format) != "" {
+		newFormat = strings.TrimSpace(format)
+	}
+	if newTyp != TypeWebhook {
+		newFormat = "" // 消息格式只属 webhook 类型，类型切走即清空
 	}
 	newName := cur.Name
 	if strings.TrimSpace(name) != "" {
@@ -302,10 +355,10 @@ func applyUpdate(cur *Channel, typ, name string, enabled *bool, events []string,
 		newEvents = norm
 	}
 	newSecrets := mergeSecrets(cur, newTyp, secrets)
-	if err := validateChannel(newTyp, newName, newEvents, newSecrets); err != nil {
+	if err := validateChannel(newTyp, newFormat, newName, newEvents, newSecrets); err != nil {
 		return err
 	}
-	cur.Type, cur.Name, cur.Enabled, cur.Events, cur.Secrets = newTyp, newName, newEnabled, newEvents, newSecrets
+	cur.Type, cur.Format, cur.Name, cur.Enabled, cur.Events, cur.Secrets = newTyp, newFormat, newName, newEnabled, newEvents, newSecrets
 	return nil
 }
 

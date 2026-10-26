@@ -90,10 +90,9 @@ type Config struct {
 	// RotatePrime 总理凭证轮换回调（重生成 + 原子写盘，返回新凭证；装配方接线，
 	// 见 cmd/node）。nil = 轮换端点 503。
 	RotatePrime func() (string, error)
-	// Notify 通知渠道管理面（standalone 通知补盲区，2026-10-24）：装配方接
-	// internal/notify.Dispatcher（cmd/node 仅 standalone 模式构造，networked
-	// 通知归 hub 不装配、setup 无 agents 不装配）。nil = notify 端点组 503 降级
-	//（与 hub api notifyReady 同口径）。
+	// Notify 通知渠道管理面（2026-10-24 standalone 补盲区；2026-10-26 伦哥裁决
+	// 「同时通知」起三模式全装配——networked 下本机渠道是否跟发由 also_notify
+	// 决定，见 cmd/node notifyDispatcherFor）。nil = notify 端点组 503 降级。
 	Notify *notify.Dispatcher
 	// SetupOps setup 向导装配方（写盘路径与落盘回调；nil = setup 端点 503）。
 	SetupOps *SetupOps
@@ -252,6 +251,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/local/notify/channels/{id}", s.authLocal(s.handleNotifyChannelUpdate))
 	mux.HandleFunc("DELETE /api/v1/local/notify/channels/{id}", s.authLocal(s.handleNotifyChannelDelete))
 	mux.HandleFunc("POST /api/v1/local/notify/channels/{id}/test", s.authLocal(s.handleNotifyChannelTest))
+	mux.HandleFunc("GET /api/v1/local/notify/settings", s.authLocal(s.handleNotifySettingsGet))
+	mux.HandleFunc("PUT /api/v1/local/notify/settings", s.authLocal(s.handleNotifySettingsPut))
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
 	mux.HandleFunc("POST /api/v1/local/setup/disconnect", s.authLocal(s.handleSetupDisconnect))

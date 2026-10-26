@@ -1,7 +1,7 @@
-// node 侧任务终态通知挂钩（standalone 通知补盲区，2026-10-24）：hub_url 为空的
-// standalone 模式 hub 不存在，任务终态无任何 IM 通知——本文件把终态落账本与
-// 通知钩子接起来。通知归 hub 的 networked 模式装配方不传 Notifier（nil），零
-// 调用零重复；hub 路由任务只存在于 networked 模式，天然不会经此触发。
+// node 侧任务终态通知挂钩（standalone 通知补盲区，2026-10-24；2026-10-26 伦哥
+// 裁决「同时通知」起 networked 也装配——本机任务终态是否跟发本机渠道由装配方
+// 传入的 Notifier 实现决定（cmd/node alsoNotifyGate 读 also_notify 开关），
+// service 本身只认接口不认模式；hub 路由任务经 hub core 终态旁路通知，不经此）。
 package service
 
 import (
@@ -39,7 +39,7 @@ func (s *Service) notifyTerminal(taskID string) {
 // 过期）恰是最需要通知的场景。entries 传 Recovery.Downgraded：降级是 recover 单
 // 写事务内的一次性非终态→终态转换，每任务至多一条、重启后已 finished 不再降级，
 // 同一任务只通知一次（去重锚点在账本恢复逻辑；本方法不做二次去重，调用点唯一
-// ——cmd/node 装配处）。nil 钩子零开销（networked/setup 装配口径，通知归 hub）。
+// ——cmd/node 装配处）。nil 钩子零开销（旧构造方未装配通知的降级路径）。
 func (s *Service) NotifyRecoveredTerminal(entries []ledger.Entry) {
 	if s.cfg.Notifier == nil {
 		return

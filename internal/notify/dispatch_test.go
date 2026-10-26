@@ -54,8 +54,8 @@ func TestDispatcherRoutesToAllEnabledChannels(t *testing.T) {
 	wh := newHookServer(t, 0)
 	fe := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "通用", nil, map[string]string{"url": wh.srv.URL})
-	mustCreate(t, s, TypeFeishu, "飞书", nil, map[string]string{"webhook_url": fe.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "通用", nil, map[string]string{"url": wh.srv.URL})
+	mustCreate(t, s, TypeWebhook, FormatFeishu, "飞书", nil, map[string]string{"url": fe.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 
 	d.TaskFinal(testTask(protocol.StatusCompleted, &protocol.TaskResult{FinalAnswer: "done"}))
@@ -88,12 +88,12 @@ func TestDispatcherRoutesToAllEnabledChannels(t *testing.T) {
 func TestDispatcherSkipsDisabledAndUnsubscribed(t *testing.T) {
 	wh := newHookServer(t, 0)
 	s := newTestStore(t)
-	disabled := mustCreate(t, s, TypeWebhook, "停用中", nil, map[string]string{"url": wh.srv.URL})
+	disabled := mustCreate(t, s, TypeWebhook, "", "停用中", nil, map[string]string{"url": wh.srv.URL})
 	off := false
-	if _, err := s.Update(disabled.ID, "", "", &off, nil, false, nil); err != nil {
+	if _, err := s.Update(disabled.ID, "", "", "", &off, nil, false, nil); err != nil {
 		t.Fatalf("停用渠道: %v", err)
 	}
-	filtered := mustCreate(t, s, TypeWebhook, "只订失败", []string{EventTaskFailed}, map[string]string{"url": wh.srv.URL})
+	filtered := mustCreate(t, s, TypeWebhook, "", "只订失败", []string{EventTaskFailed}, map[string]string{"url": wh.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 
 	// completed：停用不收；只订失败的不收
@@ -114,7 +114,7 @@ func TestDispatcherSkipsDisabledAndUnsubscribed(t *testing.T) {
 
 	// 运行时启用「停用中」渠道 → completed 也触达
 	toggle := true
-	if _, err := s.Update(disabled.ID, "", "", &toggle, nil, false, nil); err != nil {
+	if _, err := s.Update(disabled.ID, "", "", "", &toggle, nil, false, nil); err != nil {
 		t.Fatalf("更新 enabled: %v", err)
 	}
 	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
@@ -130,8 +130,8 @@ func TestDispatcherPerChannelIndependence(t *testing.T) {
 	bad := newHookServer(t, 1<<30) // 恒 500
 	good := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "坏渠道", nil, map[string]string{"url": bad.srv.URL})
-	mustCreate(t, s, TypeWebhook, "好渠道", nil, map[string]string{"url": good.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "坏渠道", nil, map[string]string{"url": bad.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "好渠道", nil, map[string]string{"url": good.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 
 	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
@@ -149,7 +149,7 @@ func TestDispatcherPerChannelIndependence(t *testing.T) {
 func TestDispatcherWebhookCustomHeaders(t *testing.T) {
 	wh := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "带头", nil, map[string]string{
+	mustCreate(t, s, TypeWebhook, "", "带头", nil, map[string]string{
 		"url":                 wh.srv.URL,
 		"header.X-Swarm-Token": "abc123",
 	})
@@ -169,7 +169,7 @@ func TestDispatcherWebhookCustomHeaders(t *testing.T) {
 // 开关与事件过滤职责）；其余类型渠道照常各自投递。
 func TestDispatcherInboxRoute(t *testing.T) {
 	s := newTestStore(t)
-	mustCreate(t, s, TypeInbox, "站内", nil, nil)
+	mustCreate(t, s, TypeInbox, "", "站内", nil, nil)
 	d, ib := newTestDispatcher(t, s)
 
 	d.TaskFinal(testTask(protocol.StatusCompleted, &protocol.TaskResult{FinalAnswer: "搞定了"}))
@@ -184,7 +184,7 @@ func TestDispatcherInboxRoute(t *testing.T) {
 
 	// 事件过滤：只订失败的 inbox 渠道对 completed 不写
 	s2 := newTestStore(t)
-	mustCreate(t, s2, TypeInbox, "只订失败", []string{EventTaskFailed}, nil)
+	mustCreate(t, s2, TypeInbox, "", "只订失败", []string{EventTaskFailed}, nil)
 	d2, ib2 := newTestDispatcher(t, s2)
 	d2.TaskFinal(testTask(protocol.StatusCompleted, nil))
 	d2.WaitIdle()
@@ -198,14 +198,14 @@ func TestDispatcherInboxRoute(t *testing.T) {
 func TestDispatcherInboxAggregation(t *testing.T) {
 	wh := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeInbox, "全订阅", nil, nil)
-	mustCreate(t, s, TypeInbox, "只订失败", []string{EventTaskFailed}, nil)
-	off := mustCreate(t, s, TypeInbox, "停用", nil, nil)
+	mustCreate(t, s, TypeInbox, "", "全订阅", nil, nil)
+	mustCreate(t, s, TypeInbox, "", "只订失败", []string{EventTaskFailed}, nil)
+	off := mustCreate(t, s, TypeInbox, "", "停用", nil, nil)
 	en := false
-	if _, err := s.Update(off.ID, "", "", &en, nil, false, nil); err != nil {
+	if _, err := s.Update(off.ID, "", "", "", &en, nil, false, nil); err != nil {
 		t.Fatalf("停用渠道: %v", err)
 	}
-	mustCreate(t, s, TypeWebhook, "webhook 并存", nil, map[string]string{"url": wh.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "webhook 并存", nil, map[string]string{"url": wh.srv.URL})
 	d, ib := newTestDispatcher(t, s)
 
 	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
@@ -234,7 +234,7 @@ func TestDispatcherInboxAggregation(t *testing.T) {
 func TestDispatcherDeliversFullURL(t *testing.T) {
 	wh := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "带凭证地址", nil,
+	mustCreate(t, s, TypeWebhook, "", "带凭证地址", nil,
 		map[string]string{"url": wh.srv.URL + "/open-apis/bot/v2/hook/sekret-token?x-sign=topsecret"})
 	d, _ := newTestDispatcher(t, s)
 	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
@@ -259,7 +259,7 @@ func TestErrorMessagesLeakNoCredentials(t *testing.T) {
 	}
 	// 端到端口径：不可达渠道测试按钮的失败原因不含 path/query 凭证
 	s := newTestStore(t)
-	ch := mustCreate(t, s, TypeWebhook, "带凭证不可达", nil,
+	ch := mustCreate(t, s, TypeWebhook, "", "带凭证不可达", nil,
 		map[string]string{"url": "http://127.0.0.1:1/hook/sekret-path?token=topsecret-query"})
 	d, _ := newTestDispatcher(t, s)
 	ok, msg := d.TestChannel(ch.ID)
@@ -345,7 +345,7 @@ func TestSMTPDeadlineHangsServer(t *testing.T) {
 			addr := mustHangServer(t, tc.port)
 			host, port, _ := net.SplitHostPort(addr)
 			s := newTestStore(t)
-			ch := mustCreate(t, s, TypeEmail, "挂起服务器", nil, map[string]string{
+			ch := mustCreate(t, s, TypeEmail, "", "挂起服务器", nil, map[string]string{
 				"host": host, "port": port, "username": "u", "password": "p", "from": "a@x", "to": "b@x",
 			})
 			d := NewDispatcher(s, &Inbox{}, WithSMTPTimeout(300*time.Millisecond))
@@ -371,7 +371,7 @@ func TestSMTPDeadlineHangsServer(t *testing.T) {
 func TestWebhookPayloadFieldTable(t *testing.T) {
 	h := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "全量", nil, map[string]string{"url": h.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "全量", nil, map[string]string{"url": h.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 	d.TaskFinal(testTask(protocol.StatusCompleted, &protocol.TaskResult{
 		Status:      protocol.ResultCompleted,
@@ -410,7 +410,7 @@ func TestWebhookPayloadFieldTable(t *testing.T) {
 func TestWebhookPayloadSummaryTruncation(t *testing.T) {
 	h := newHookServer(t, 0)
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "截断", nil, map[string]string{"url": h.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "截断", nil, map[string]string{"url": h.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 	long := ""
 	for i := 0; i < 300; i++ {
@@ -449,7 +449,7 @@ func TestFeishuPayloadFourStatuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHookServer(t, 0)
 			s := newTestStore(t)
-			mustCreate(t, s, TypeFeishu, "飞书", nil, map[string]string{"webhook_url": h.srv.URL})
+			mustCreate(t, s, TypeWebhook, FormatFeishu, "飞书", nil, map[string]string{"url": h.srv.URL})
 			d, _ := newTestDispatcher(t, s)
 			d.TaskFinal(testTask(tc.status, tc.result))
 			d.WaitIdle()
@@ -475,7 +475,7 @@ func TestPerAttemptTimeout(t *testing.T) {
 	h.sleep = 200 * time.Millisecond
 	h.mu.Unlock()
 	s := newTestStore(t)
-	mustCreate(t, s, TypeWebhook, "慢", nil, map[string]string{"url": h.srv.URL})
+	mustCreate(t, s, TypeWebhook, "", "慢", nil, map[string]string{"url": h.srv.URL})
 	d, _ := newTestDispatcher(t, s)
 	d.hc.Timeout = 20 * time.Millisecond
 	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
@@ -493,9 +493,9 @@ func TestPerAttemptTimeout(t *testing.T) {
 func TestChannelTestButton(t *testing.T) {
 	h := newHookServer(t, 0)
 	s := newTestStore(t)
-	ok := mustCreate(t, s, TypeWebhook, "能通", nil, map[string]string{"url": h.srv.URL})
-	bad := mustCreate(t, s, TypeWebhook, "不通", nil, map[string]string{"url": "http://127.0.0.1:1/nope"})
-	ibCh := mustCreate(t, s, TypeInbox, "站内", nil, nil)
+	ok := mustCreate(t, s, TypeWebhook, "", "能通", nil, map[string]string{"url": h.srv.URL})
+	bad := mustCreate(t, s, TypeWebhook, "", "不通", nil, map[string]string{"url": "http://127.0.0.1:1/nope"})
+	ibCh := mustCreate(t, s, TypeInbox, "", "站内", nil, nil)
 	d, ib := newTestDispatcher(t, s)
 
 	if okK, msg := d.TestChannel(ok.ID); !okK || msg != "" {

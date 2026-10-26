@@ -234,6 +234,22 @@ function drawerLogInner(res, raw) {
   const sec = (label, tail) => `<b class="md-log-label">${label}</b><div class="md-body md-log">${mdToHtml(tail || '') || '<p class="muted">（空）</p>'}</div>`;
   return head + sec('stdout', res.stdout_tail) + sec('stderr', res.stderr_tail);
 }
+/* promptZoneHtml 任务指令分区（t20261026-webfix 新增；t20261026-notify-unify 改动四
+ * 提升进本块双端同文——node Ledger Entry.Task 本就持久化完整任务输入，TaskView 投影
+ * 后 node 单查端点含 input，双端同构点亮）：stdin（控制台/表单派单走 stdin 语义，
+ * 即原始提示词）默认 Markdown 渲染 + 查看原文切换（同 fail 分区 raw 模式，切换态
+ * 存各自 S.drawer.promptRaw，切换经 syncDrawerZones 只重写 prompt 分区）；stdin 空
+ * 时回退 args 命令行形态（逐参数 code 胶囊保留参数边界）；两者皆空分区省略。底部
+ * 「任务输入（原样 JSON）」details（hub 独有白名单）保留完整技术细节，两不误。 */
+function promptZoneHtml(t) {
+  const stdin = t.input?.stdin || '';
+  const args = t.input?.args || [];
+  if (!stdin && !args.length) return '';
+  if (!stdin) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p><p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  const raw = !!S.drawer?.promptRaw;
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输入。' : '默认按 Markdown 渲染；需要看原文请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'prompt-raw', 'link')}</div>`;
+  return `<h3>任务指令</h3>${head}${raw ? `<pre>${esc(stdin)}</pre>` : `<div class="md-body">${mdToHtml(stdin) || '<p class="muted">（空）</p>'}</div>`}`;
+}
 /* ===== 抽屉答复与日志 shared block end ===== */
 
 /* ===== 抽屉分区更新 shared block begin ===== */
@@ -268,15 +284,19 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 }
 /* ===== 抽屉分区更新 shared block end ===== */
 
-/* 通知渠道类型与事件订阅（standalone 通知补盲区，2026-10-24）：口径与 hub 控制台
- * 「设置 → 通知」一致，唯 node 不提供 inbox（站内通知为 hub 控制台铃铛专属，
+/* 通知渠道类型与事件订阅（standalone 通知补盲区，2026-10-24；2026-10-26
+ * notify-unify 改动二双端同改：独立 feishu 类型并入 webhook 的「消息格式」维度，
+ * 与 hub 控制台同词同构——唯 node 不提供 inbox（站内通知为 hub 控制台铃铛专属，
  * 服务端准入同样拒绝）；sms 占位灰显未开放。 */
 const NOTIFY_TYPES = {
-  feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
   email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
   sms: { label: '短信', form: '' },
 };
+/* 消息格式词典（webhook 类型专用维度，与 hub 同文）：generic=通用 JSON POST；
+ * feishu=飞书自定义机器人文本消息（不带自定义头）。FEISHU_HINT 双端同文。 */
+const NOTIFY_FORMATS = { generic: '通用 JSON', feishu: '飞书机器人' };
+const FEISHU_HINT = '路径：电脑端进群 → 右上角「···」→ 设置 → 群机器人 → 添加机器人 → 自定义机器人（手机端添加不了）。创建后把 Webhook 地址贴进来——这是群内创建的机器人，不需要去开放平台开发者后台建应用。';
 const NOTIFY_EVENT_OPTS = [
   ['task_final', '全部终态（完成 / 失败 / 等你确认 / 取消）'],
   ['task_failed', '仅失败'],
@@ -312,10 +332,13 @@ const S = {
          restart_cmd: '', config_path: '', structural: [], msg: '' },  // 能力配置编辑（方案 3.5）；编辑会话在模块级 cfgEdit（t20261023-a4b1 抽屉化）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
                            // 在途请求发起时捕获，应答返回时代次不一致 = 迟到应答，丢弃不写状态
-  notifyChannels: [],      // 通知渠道列表（已脱敏形态；standalone 专属，status.notify_available 门控）
+  notifyChannels: [],      // 通知渠道列表（已脱敏形态；三模式装配后恒可用，status.notify_available 门控）
   notifyLoading: false,    // 通知区块加载态（D2 模式：局部更新）
   notifyError: '',         // 通知渠道加载失败信息（空=正常）
   notifyLoaded: false,     // 本会话已拉取过渠道列表（进 services 页拉一次，变更后重拉）
+  notifyAlso: null,        // 「同时通知」开关（notify-unify 改动三；null=未加载，networked toggle 用）
+  notifyAlsoSaving: false, // 开关保存中（codex 审查必修 2：保存态进渲染，toggle 置灰显示目标值）
+  notifyAlsoPending: null, // 保存中的目标值（保存成功/失败落定即清空；null=无在途保存）
 };
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -335,6 +358,9 @@ function resetPrimeState() {
   S.notifyLoaded = false;
   S.notifyLoading = false;
   S.notifyError = '';
+  S.notifyAlso = null;
+  S.notifyAlsoSaving = false;
+  S.notifyAlsoPending = null;
 }
 
 /* ---------- API 访问（Bearer 本机管理令牌） ---------- */
@@ -480,10 +506,12 @@ function route() {
     S.cfg._loading = true;
     loadCfg().finally(() => { S.cfg._loading = false; });
   }
-  // 通知区块（standalone 专属）：status.notify_available 由装配决定（networked
-  // 归 hub、setup 不装配，两端口径一致）；进页拉一次，变更动作各自重拉。
+  // 通知区块（notify-unify 改动三起三模式渲染）：status.notify_available 由装配
+  // 决定（全装配恒 true；setup 页面裁剪不可达）；进页拉一次，变更动作各自重拉。
+  // 「同时通知」开关同点拉取。
   if (S.page === 'services' && S.authed && S.status?.notify_available && !S.notifyLoaded && !S.notifyLoading) {
     loadNotifyChannels();
+    loadNotifySettings();
   }
   render();
 }
@@ -942,17 +970,73 @@ async function setExposed(name, exposed, btn) {
   pollTick();
 }
 
-/* ---------- 通知渠道管理（standalone 补盲区，与 hub 控制台同家族） ----------
- * D2 局部刷新纪律：进页渲染容器（notifyCard），loadNotifyChannels 只 innerHTML
- * 替换 #notify-section，能力配置区与 agent 卡不被触碰；编辑走右侧抽屉家族
- *（#layer，与能力配置/任务详情同基建），抽屉期间 pollTick 重绘不碰 #layer。 */
+/* ---------- 通知渠道管理（2026-10-24 standalone 补盲区；2026-10-26 notify-unify
+ * 改动三起 networked 同样渲染——「同时通知」裁决）：D2 局部刷新纪律：进页渲染容器
+ *（notifyCard），loadNotifyChannels 只 innerHTML 替换 #notify-section，能力配置区
+ * 与 agent 卡不被触碰；编辑走右侧抽屉家族（#layer，与能力配置/任务详情同基建），
+ * 抽屉期间 pollTick 重绘不碰 #layer。「同时通知」toggle 声明式渲染（codex 审查
+ * 必修 2）：唯一真相是 S.notifyAlso/S.notifyAlsoSaving/S.notifyAlsoPending，
+ * 轮询 render 重建节点与保存回调重绘都从状态出发——不再持 DOM 节点跨 await
+ * 操作（轮询重建后旧节点脱挂，写它不落屏，显示与实际值脱节）。 */
+function notifyAlsoHtml() {
+  const saving = S.notifyAlsoSaving;
+  const val = saving && S.notifyAlsoPending != null ? S.notifyAlsoPending : S.notifyAlso;
+  return `<label class="checkline" title="开启后，本机执行的任务终态除中心端渠道外，本机渠道也同步通知"><input type="checkbox" id="notify-also"${val === false ? '' : ' checked'}${S.notifyAlso == null || saving ? ' disabled' : ''}> 同时通知${saving ? '（保存中…）' : ''}</label>`;
+}
+function paintNotifyAlso() {
+  const el = $('#notify-also-zone');
+  if (el) el.innerHTML = notifyAlsoHtml();
+}
 function notifyCard() {
   if (!S.status?.notify_available) return '';
+  /* 「同时通知」toggle 仅 networked 出现（standalone 本机通知即唯一通知，语义
+   * 不存在；setup 页面裁剪不可达）。加载未完成（S.notifyAlso==null）先禁用，
+   * 应答回填。 */
+  const networked = S.status?.mode === 'networked';
+  const alsoToggle = networked ? `<span id="notify-also-zone">${notifyAlsoHtml()}</span>` : '';
+  const footer = networked
+    ? '组网模式：任务终态通知由中心端渠道发送；开启「同时通知」后，本机执行任务的终态本机渠道也同步发一份（本机未配渠道则自然静默）。开关即时生效。'
+    : 'standalone 模式由本机直接发送（本机通知即唯一通知）。多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。';
   return `<section class="card spaced"><div class="row"><div><h2>通知</h2>
-    <small class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时本机主动给你发消息：飞书、邮件、自建 webhook。</small></div>
-    <div class="actions">${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div></div>
+    <small class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时主动给你发消息：飞书、邮件、自建 webhook。</small></div>
+    <div class="actions">${alsoToggle}${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div></div>
     <div id="notify-section" class="spaced">${notifySectionHtml()}</div>
-    <p class="footer-note">standalone 模式由本机直接发送（组网模式任务通知统一由 hub 发送，届时本区块不再出现）。多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。</p></section>`;
+    <p class="footer-note">${footer}</p></section>`;
+}
+/* loadNotifySettings 拉「同时通知」开关（GET）：应答落状态后局部重绘 toggle
+ *（声明式，D2）。会话代次防护与 loadNotifyChannels 同款：登出/再登录后迟到
+ * 应答不写状态、不碰新会话 DOM。 */
+async function loadNotifySettings() {
+  const epochAtReq = S.sessionEpoch;
+  const r = await api('GET', '/api/v1/local/notify/settings').catch(() => null);
+  if (S.sessionEpoch !== epochAtReq) return;
+  if (r && r.code === 200 && typeof r.data?.also_notify === 'boolean') {
+    S.notifyAlso = r.data.also_notify;
+    paintNotifyAlso();
+  }
+}
+/* saveAlsoNotify 开关写入（声明式，codex 审查必修 2）：进入保存态即重绘（toggle
+ * 置灰、显示目标值+保存中），PUT 应答落状态后再重绘——保存期间轮询 render 重建
+ * 节点同样从状态出发，显示与实际值不再脱节；失败回滚到已保存值。会话代次防护：
+ * 登出/再登录后迟到应答不写状态不重绘（新会话会重新拉取）。 */
+async function saveAlsoNotify(cb) {
+  if (S.notifyAlsoSaving) return;
+  const want = cb.checked;
+  const epochAtReq = S.sessionEpoch;
+  S.notifyAlsoSaving = true;
+  S.notifyAlsoPending = want;
+  paintNotifyAlso();
+  const r = await api('PUT', '/api/v1/local/notify/settings', { also_notify: want }).catch(() => null);
+  if (S.sessionEpoch !== epochAtReq) return; // 迟到应答：会话已换代，状态归新会话重拉
+  S.notifyAlsoSaving = false;
+  S.notifyAlsoPending = null;
+  if (r && r.code === 200) {
+    S.notifyAlso = want;
+    toast(want ? '已开启同时通知：本机渠道与中心端渠道都会收到终态通知' : '已关闭同时通知：终态通知只走中心端渠道');
+  } else {
+    toast('开关保存失败 · ' + (r ? errLine(r.data) : '网络异常'));
+  }
+  paintNotifyAlso();
 }
 /* loadNotifyChannels 拉渠道列表（已脱敏形态），完成后只重绘通知区块。
    会话代次防护（返工建议修 4）：登出/再登录后迟到的应答不写回状态——加载态已随
@@ -984,14 +1068,16 @@ function notifySectionHtml() {
   return S.notifyChannels.map(notifyChannelCardHtml).join('');
 }
 function notifyChannelCardHtml(ch) {
-  const t = NOTIFY_TYPES[ch.type] || { label: ch.type };
+  /* 徽标：webhook+飞书格式沿用「飞书机器人」心智词，与 hub 同规则（notify-unify
+   * 改动二）。 */
+  const label = ch.type === 'webhook' && ch.format === 'feishu' ? NOTIFY_FORMATS.feishu : (NOTIFY_TYPES[ch.type] || { label: ch.type }).label;
   const ev = (ch.events || []).map(e => (NOTIFY_EVENT_OPTS.find(([k]) => k === e) || ['', e])[1]).join('、') || '全部终态';
   const secretKeys = Object.keys(ch.secrets || {}).filter(k => k !== 'password' && !k.startsWith('header.'));
   const meta = secretKeys.length ? secretKeys.map(k => ch.secrets[k]).filter(Boolean).join(' · ') : '';
   return `<div class="chan-card${ch.enabled ? '' : ' off'}">
     <div class="chan-main">
       <button type="button" class="switch${ch.enabled ? ' on' : ''}" data-act="notify-toggle:${esc(ch.id)}" aria-label="${ch.enabled ? '停用' : '启用'} ${esc(ch.name)}" title="${ch.enabled ? '点击停用' : '点击启用'}"></button>
-      <span class="badge">${esc(t.label)}</span>
+      <span class="badge">${esc(label)}</span>
       <span class="chan-name">${esc(ch.name)}</span>
     </div>
     <div class="chan-actions">
@@ -1006,7 +1092,8 @@ function notifyChannelCardHtml(ch) {
 /* notifyFormHtml 渠道编辑抽屉（新建 ch=null）。类型切换只重绘凭证字段容器
  *（#nf-type-fields），名称与事件勾选不被冲掉（局部刷新纪律）。 */
 function notifyFormHtml(ch) {
-  const type = ch?.type || 'feishu';
+  const type = ch?.type || 'webhook';
+  const format = ch?.format || 'generic';
   return `<div class="row"><h2>${ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道'}</h2>${button('×', 'nf-close', 'close')}</div>
   <form id="notify-form" class="fields" onsubmit="return false">
     <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
@@ -1016,7 +1103,7 @@ function notifyFormHtml(ch) {
       </select>
     </label>
     <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
-    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, ch?.secrets || {})}</div>
+    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, format, ch?.secrets || {})}</div>
     <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
       ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
         const on = !ch || (ch.events || []).includes(k);
@@ -1027,20 +1114,28 @@ function notifyFormHtml(ch) {
   </form>
   <p class="footer-note">凭证只保存在本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
 }
-/* notifyTypeFieldsHtml 按类型渲染凭证表单。编辑回填：password 与自定义头的值
- * 显示 ****** 占位（保存原样传回 = 不修改，GitHub 式语义）；内嵌登录凭证
- *（user:pass@host）的地址整串显示 ******；其余地址类字段明文回填可核对。 */
-function notifyTypeFieldsHtml(type, sec) {
+/* notifyTypeFieldsHtml 按类型与消息格式渲染凭证表单（与 hub 同构，notify-unify
+ * 改动二：格式 select 为 webhook 专用维度，切换只重绘本容器且保留已输入地址）。
+ * 编辑回填：password 与自定义头的值显示 ****** 占位（保存原样传回 = 不修改，
+ * GitHub 式语义）；内嵌登录凭证（user:pass@host）的地址整串显示 ******；其余
+ * 地址类字段明文回填可核对；飞书格式（存量迁移渠道）回填格式选中态与地址。 */
+function notifyTypeFieldsHtml(type, format, sec) {
   const v = k => esc(String(sec[k] ?? ''));
-  const hint = NOTIFY_TYPES[type]?.form;
   let fields = '';
-  if (type === 'feishu') {
-    fields = `<label>Webhook 地址<input id="nf-webhook-url" value="${v('webhook_url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`;
-  } else if (type === 'webhook') {
-    const headers = Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n');
-    fields = `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
-      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${headers}</textarea></label>`;
-  } else if (type === 'email') {
+  if (type === 'webhook') {
+    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
+    const feishu = fmt === 'feishu';
+    const hint = feishu ? FEISHU_HINT : NOTIFY_TYPES.webhook.form;
+    const addr = feishu
+      ? `<label>飞书机器人 Webhook 地址<input id="nf-url" value="${v('url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`
+      : `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
+      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n')}</textarea></label>`;
+    fields = `<label>消息格式<select id="nf-format">
+        ${Object.keys(NOTIFY_FORMATS).map(k => `<option value="${k}"${k === fmt ? ' selected' : ''}>${esc(NOTIFY_FORMATS[k])}</option>`).join('')}
+      </select></label>${addr}`;
+    return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
+  }
+  if (type === 'email') {
     fields = `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
       <div class="form-grid">
         <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
@@ -1054,17 +1149,18 @@ function notifyTypeFieldsHtml(type, sec) {
   } else {
     fields = `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
   }
-  return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
+  return `${NOTIFY_TYPES[type]?.form ? `<p class="muted small">${esc(NOTIFY_TYPES[type].form)}</p>` : ''}${fields}`;
 }
-/* collectNotifyForm 从抽屉 DOM 收集请求体；headers 文本按行解析为 header.<名> 键。 */
+/* collectNotifyForm 从抽屉 DOM 收集请求体；headers 文本按行解析为 header.<名> 键
+ * （飞书格式无 headers 输入框，天然不带）。 */
 function collectNotifyForm() {
   const id = $('#nf-id')?.value || '';
   const type = $('#nf-type')?.value || '';
   const name = $('#nf-name')?.value.trim() || '';
   const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
-  let secrets = {};
-  if (type === 'feishu') secrets = { webhook_url: $('#nf-webhook-url')?.value.trim() || '' };
-  else if (type === 'webhook') {
+  let format = '', secrets = {};
+  if (type === 'webhook') {
+    format = $('#nf-format')?.value || 'generic';
     secrets = { url: $('#nf-url')?.value.trim() || '' };
     for (const line of ($('#nf-headers')?.value || '').split('\n')) {
       const idx = line.indexOf(':');
@@ -1077,7 +1173,7 @@ function collectNotifyForm() {
     username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
     from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
   };
-  return { id, type, name, events, secrets };
+  return { id, type, format, name, events, secrets };
 }
 async function saveNotifyChannel() {
   const f = collectNotifyForm();
@@ -1520,7 +1616,8 @@ function syncDrawerZones() {
 
 // taskDrawerZones 任务抽屉分区内容（D22：壳由 drawerShellHtml 建一次，本函数只
 // 产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
-// 层级（e821bf8，SPEC 六.五 第二条）与 hub 同构：介绍条 → 最终答复（白底浮起
+// 层级（e821bf8，SPEC 六.五 第二条）与 hub 同构：介绍条 → 任务指令（2026-10-26
+// 改动四 shared block 提升，TaskView 含 Input 双端同构点亮）→ 最终答复（白底浮起
 // 主角）→ 诊断日志（折叠配角）→ 产物 → 时间线 → 归档/下一步；fail/input/review
 // 三分区为 hub 独有白名单，node 恒空。头部/文案/时间口径与 hub 同源（D2/D17/D18/D21）。
 function taskDrawerZones(t) {
@@ -1556,6 +1653,7 @@ function taskDrawerZones(t) {
     <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>`,
     intro: `${t.status === 'needs_review' ? reviewNote : `<div class="notice">${esc(statusIntro)}</div>`}
     ${taskErrorNotice(res, t.status === 'needs_review')}`,
+    prompt: promptZoneHtml(t),
     answer: drawerAnswerHtml(t, res, t.status === 'needs_review'),
     logs: res && (res.stdout_tail || res.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${drawerLogInner(res, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
     artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
@@ -1692,6 +1790,12 @@ document.addEventListener('click', e => {
         syncDrawerZones();   // 仅 logs 分区内容变化：缓存 diff 后只重写该分区，details 开合经 drawerZoneSwap 回放
         return;
       }
+      case 'prompt-raw': {   // 任务指令 查看原文/查看渲染 切换（2026-10-26 改动四，与 hub 同机制）
+        if (!S.drawer?.task) return;
+        S.drawer.promptRaw = !S.drawer.promptRaw;
+        syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
+        return;
+      }
     }
   }
   if (tr && !e.target.closest('button')) openDrawer(tr.dataset.task);
@@ -1719,11 +1823,19 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());
 });
 /* 通知渠道抽屉：类型切换只重绘凭证字段容器（#nf-type-fields），名称与事件
- * 勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）。 */
+ * 勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）；类型切走格式重置通用。
+ * 消息格式切换（notify-unify 改动二）同容器重绘，已输入地址随值回填不丢。 */
 document.addEventListener('change', e => {
+  if (e.target.id === 'notify-also') { saveAlsoNotify(e.target); return; }
   if (e.target.id === 'nf-type') {
     const box = $('#nf-type-fields');
-    if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, {});
+    if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, 'generic', {});
+    return;
+  }
+  if (e.target.id === 'nf-format') {
+    const box = $('#nf-type-fields');
+    if (box) box.innerHTML = notifyTypeFieldsHtml($('#nf-type')?.value || 'webhook', e.target.value, { url: $('#nf-url')?.value || '' });
+    return;
   }
 });
 $('#logout').addEventListener('click', () => {
