@@ -344,7 +344,10 @@ func workStepBlockedHere(prevStepStatus string) bool {
 // writebackWorkTerminal 任务首落终态的同一事务内回写工作单事实（result/cancel/
 // sweep 三终态路径共用）：attempt.outcome + step.status + work.status（非 done
 // 终局即 blocked）+ step_updated 事件。t.WorkRef 为空即未绑定 no-op；找不到
-// 对应尝试为防御 no-op（原子绑定先于落库，不可达）。并发尝试同一步骤时，步骤
+// 对应尝试为防御 no-op（原子绑定先于落库，不可达）。已终态（done/abandoned）的
+// 工作单不回写（W3 审查①）：collect 的全尝试收束门保证关闭时点无在途尝试，正常
+// 流程不可达；防御纵深——迟到的任务结果/异常数据不得改写终态事实（status/步骤/
+// 账本/盖章原样，30 天存档是解释面，关闭后零变更）。并发尝试同一步骤时，步骤
 // 状态以最后落盘的终态事实为准（单写事务串行化，last-writer-wins）；各尝试
 // outcome 随各自任务回写互不覆盖。系统回写事件 by=hub、principal 空（服务端
 // 自身动作，无外部请求主体）。
@@ -354,6 +357,9 @@ func writebackWorkTerminal(st *store.State, t *protocol.Task, now time.Time) {
 	}
 	w, ok := st.Works[t.WorkRef]
 	if !ok {
+		return
+	}
+	if w.Status == store.WorkStatusDone || w.Status == store.WorkStatusAbandoned {
 		return
 	}
 	for i := range w.Attempts {
@@ -409,6 +415,9 @@ func terminalWorkMapping(s protocol.TaskStatus) (outcome, stepStatus string) {
 func (c *Core) recoverWorks() {
 	err := c.st.Update(func(st *store.State) error {
 		for id, w := range st.Works {
+			if w.Status == store.WorkStatusDone || w.Status == store.WorkStatusAbandoned {
+				continue // 终态单不补写（同 writebackWorkTerminal 终态保护，W3 审查①）
+			}
 			type backfill struct {
 				attemptIdx int
 				task       protocol.Task
