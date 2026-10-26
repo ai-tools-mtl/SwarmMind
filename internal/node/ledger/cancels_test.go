@@ -2,6 +2,7 @@ package ledger
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,107 +11,117 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// writeTombstoneFile 直写 sidecar（测试回拨时刻用；内存映射同 cancels.json 格式）。
-func writeTombstoneFile(dir string, m map[string]time.Time) error {
-	b, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(dir, cancelsFileName), b, 0o644)
-}
+// 2026-10-26 双审缺陷1回归：取消墓碑先写后见纪律。旧实现 add/clear 先改内存
+// 后落盘、persist 失败不回滚——add 同键重试命中内存假成功（永久跳过写盘，重启
+// 丢墓碑，迟到 offer 可执行已取消任务）。修复后：副本构造 → persist 成功 →
+// 才替换内存；本组测试用注入钩子逐场景断言。
 
-// TestCancelTombstoneLifecycle 墓碑生命周期：登记 → 命中 → 跨重启持久 → 消费
-// 即清 → TTL 兜底（2026-10-22 修复轮2：取消先于 offer 的执行窗口封堵）。
-func TestCancelTombstoneLifecycle(t *testing.T) {
+// newTestCancels 构造独立墓碑集合（包内单元测试用，不启 Ledger/flock）。
+func newTestCancels(t *testing.T) *cancelTombstones {
+	t.Helper()
 	dir := t.TempDir()
-	l, _, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// 登记 + 幂等（重复登记不报错、不更新时刻）
-	if err := l.AddCancelTombstone("t-tb-1"); err != nil {
-		t.Fatalf("登记墓碑: %v", err)
-	}
-	if err := l.AddCancelTombstone("t-tb-1"); err != nil {
-		t.Fatalf("重复登记应幂等: %v", err)
-	}
-	if !l.HasCancelTombstone("t-tb-1") {
-		t.Fatal("登记后应命中墓碑")
-	}
-
-	// 跨重启持久（sidecar 落盘）
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
-	}
-	l2, _, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l2.Close() }()
-	if !l2.HasCancelTombstone("t-tb-1") {
-		t.Fatal("重启后墓碑应仍在（cancels.json 持久化）")
-	}
-
-	// 消费即清
-	if err := l2.ClearCancelTombstone("t-tb-1"); err != nil {
-		t.Fatalf("消费墓碑: %v", err)
-	}
-	if l2.HasCancelTombstone("t-tb-1") {
-		t.Fatal("清除后不应再命中")
-	}
-	if err := l2.ClearCancelTombstone("t-tb-1"); err != nil {
-		t.Fatalf("重复清除应幂等: %v", err)
+	return &cancelTombstones{
+		path: filepath.Join(dir, cancelsFileName),
+		tmp:  filepath.Join(dir, cancelsTmpName),
+		m:    map[string]time.Time{},
 	}
 }
 
-// TestCancelTombstoneTTL 超保留期的墓碑：加载时与显式清理时均被清除。
-func TestCancelTombstoneTTL(t *testing.T) {
-	dir := t.TempDir()
-	l, _, err := Open(dir)
+// readCancelsFile 读盘上墓碑文件（断言持久化真实发生/真实移除）。
+func readCancelsFile(t *testing.T, c *cancelTombstones) map[string]time.Time {
+	t.Helper()
+	b, err := os.ReadFile(c.path)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("读墓碑文件: %v", err)
 	}
-	if err := l.AddCancelTombstone("t-tb-old"); err != nil {
-		t.Fatal(err)
+	var m map[string]time.Time
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("解析墓碑文件: %v", err)
 	}
-	if err := l.Close(); err != nil {
-		t.Fatal(err)
+	return m
+}
+
+// TestCancelsAddPersistFailNoMemoryPollution add 落盘失败不得污染内存、同键
+// 重试不得假成功；解除注入后重试真实落盘（内存与盘一致）。
+func TestCancelsAddPersistFailNoMemoryPollution(t *testing.T) {
+	c := newTestCancels(t)
+	now := protocol.NowUTC()
+
+	c.inject = func(op, stage string) error { return errors.New("注入: 磁盘满") }
+	if err := c.add("t-1", now); err == nil {
+		t.Fatal("注入写盘失败应返回错误")
+	}
+	if c.has("t-1") {
+		t.Fatal("persist 失败后内存不得污染（has 应为 false）")
+	}
+	// 同键重试：注入未解除，必须再次尝试写盘并再失败（旧实现命中内存假成功）
+	if err := c.add("t-1", now); err == nil {
+		t.Fatal("注入未解除时同键重试不得假成功")
+	}
+	if c.has("t-1") {
+		t.Fatal("重试失败后内存仍不得污染")
+	}
+	// 解除注入：重试成功，内存与盘一致
+	c.inject = nil
+	if err := c.add("t-1", now); err != nil {
+		t.Fatalf("解除注入后 add 应成功: %v", err)
+	}
+	if !c.has("t-1") {
+		t.Fatal("成功后墓碑应在内存")
+	}
+	if _, ok := readCancelsFile(t, c)["t-1"]; !ok {
+		t.Fatal("盘上应有墓碑（持久化真实发生）")
+	}
+}
+
+// TestCancelsClearPersistFailKept clear 落盘失败墓碑必须仍在内存（语义：
+// 「未清除成功」，消费方可重试），解除注入后重试清除且盘上真实移除。
+func TestCancelsClearPersistFailKept(t *testing.T) {
+	c := newTestCancels(t)
+	now := protocol.NowUTC()
+	if err := c.add("t-2", now); err != nil {
+		t.Fatalf("add: %v", err)
 	}
 
-	// 手写 sidecar 回拨写入时刻至保留期之前（add 的 now 参数不透出，直改文件）
-	at := protocol.NowUTC().Add(-protocol.TerminalRetention - time.Minute)
-	if err := writeTombstoneFile(dir, map[string]time.Time{"t-tb-old": at}); err != nil {
-		t.Fatal(err)
+	c.inject = func(op, stage string) error { return errors.New("注入: 磁盘满") }
+	if err := c.clear("t-2"); err == nil {
+		t.Fatal("注入写盘失败 clear 应返回错误")
 	}
+	if !c.has("t-2") {
+		t.Fatal("clear persist 失败后墓碑必须仍在内存")
+	}
+	c.inject = nil
+	if err := c.clear("t-2"); err != nil {
+		t.Fatalf("解除注入后 clear 应成功: %v", err)
+	}
+	if c.has("t-2") {
+		t.Fatal("成功清除后墓碑应不在内存")
+	}
+	if _, ok := readCancelsFile(t, c)["t-2"]; ok {
+		t.Fatal("盘上墓碑应已移除")
+	}
+}
 
-	// 加载即清（内存不可见）
-	l2, _, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
+// TestCancelsCleanupPersistFailNoMemoryPrune cleanup 落盘失败内存不清理
+//（先写后见同口径：盘未落，内存不替换）。
+func TestCancelsCleanupPersistFailNoMemoryPrune(t *testing.T) {
+	c := newTestCancels(t)
+	now := protocol.NowUTC()
+	if err := c.add("t-3", now); err != nil {
+		t.Fatalf("add: %v", err)
 	}
-	if l2.HasCancelTombstone("t-tb-old") {
-		_ = l2.Close()
-		t.Fatal("超保留期墓碑加载时应被清除")
+	c.inject = func(op, stage string) error { return errors.New("注入: 磁盘满") }
+	if err := c.cleanup(now.Add(protocol.TerminalRetention+time.Hour), time.Hour); err == nil {
+		t.Fatal("注入写盘失败 cleanup 应返回错误")
 	}
-	if err := l2.Close(); err != nil {
-		t.Fatal(err)
+	if !c.has("t-3") {
+		t.Fatal("cleanup persist 失败后墓碑不得从内存消失")
 	}
-
-	// 未超期的保留
-	future := protocol.NowUTC().Add(-time.Minute)
-	if err := writeTombstoneFile(dir, map[string]time.Time{"t-tb-new": future}); err != nil {
-		t.Fatal(err)
+	c.inject = nil
+	if err := c.cleanup(now.Add(protocol.TerminalRetention+time.Hour), time.Hour); err != nil {
+		t.Fatalf("解除注入后 cleanup 应成功: %v", err)
 	}
-	l3, _, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = l3.Close() }()
-	if err := l3.CleanupCancelTombstones(protocol.NowUTC()); err != nil {
-		t.Fatalf("显式清理: %v", err)
-	}
-	if !l3.HasCancelTombstone("t-tb-new") {
-		t.Fatal("未超期墓碑不应被清理")
+	if c.has("t-3") {
+		t.Fatal("成功清理后墓碑应不在内存")
 	}
 }

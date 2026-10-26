@@ -499,6 +499,14 @@ func (l *Ledger) AddCancelTombstone(taskID string) error {
 // HasCancelTombstone 报告任务是否带未消费的取消墓碑。
 func (l *Ledger) HasCancelTombstone(taskID string) bool { return l.cancels.has(taskID) }
 
+// InjectCancelsForTest 设置墓碑落盘故障注入（跨包测试专用，如 service 端到端
+// 注入墓碑落盘失败；op+stage 拦截与 Ledger.inject 同风格；生产零调用）。
+func (l *Ledger) InjectCancelsForTest(inject func(op, stage string) error) {
+	l.cancels.mu.Lock()
+	l.cancels.inject = inject
+	l.cancels.mu.Unlock()
+}
+
 // ClearCancelTombstone 消费墓碑（幂等）：cancelled 终态落盘成功后清除——账本
 // 条目此后由 ErrDuplicate 挡住重复执行，墓碑使命完成。
 func (l *Ledger) ClearCancelTombstone(taskID string) error { return l.cancels.clear(taskID) }

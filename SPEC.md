@@ -61,6 +61,7 @@ repo/
 | github.com/coder/websocket | node→hub WSS 长会话 | 标准库无 WebSocket 实现 |
 | gopkg.in/yaml.v3 | hub/node 配置解析 | 标准库无 yaml |
 | golang.org/x/sys | Windows 服务化（svc/svc/mgr）+ Job Object 进程治理（P4②）；unix 源文件逐段 openat 游走（inputs/sourceopen_unix.go，2026-10-24 复审 R1）；windows 源文件逐段 NtCreateFile+OBJ_DONT_REPARSE 游走（inputs/sourceopen_windows.go，2026-10-25 三审 W2） | 半标准库（Go 官方扩展库）：Windows SCM 服务编程唯一正道，无更轻替代；源打开需在 open 原语上强制不跟随——unix 侧标准库 syscall 在 darwin 不导出 openat、os.Root 会跟随根内末段链接；windows 侧 os.Root 遇 reparse point 读链后跟随根内链接、OBJ_DONT_REPARSE 等价旗标封装在 internal/syscall 不可导入。仅 Windows 服务化/Job Object + windows/unix 源打开引入，同模块零新增 |
+| modernc.org/sqlite | hub 全量状态持久层（internal/hub/store，2026-10-26 迁移）：实体分表 + key + JSON 体列，diff 增量写入，WAL+FULL | 纯 Go 实现（无 cgo，保 Windows 构建与交叉编译纪律）；单文件嵌入库零部署（对齐自用轻运维定位，无独立 DB 进程）；WAL+synchronous=FULL 兑现掉电耐久性升级（进程崩溃不丢已确认提交）。间接依赖树较大（libc/memory/exp 等）属纯 Go SQLite 方案已知代价，接受。node ledger 不引库（KB 级账本保持 JSON，见 4.8） |
 
 ## 四、协议（internal/protocol）
 
@@ -188,11 +189,23 @@ submitted → offered → acknowledged → running → completed | failed | need
 | 信箱字节预算 | 每 node 8MiB（submitted 任务体字节和），超则 503 `mailbox_full` |
 | hub 任务存储全局字节预算 | 256MiB（含终态 24h 保留），超则拒新提交 503 `storage_full`；部署声明：2核2G 云机目标为低负载（≤5 node 且预算内），满配（20 node×100 条×1MiB≈2GiB）不承诺 |
 
-### 4.7 持久化事务（hub store 与 node ledger 同模式）
+### 4.7 持久化事务（hub store 为 SQLite；node ledger 保持 JSON，同模式同纪律）
 
-**先写后见**：单写 goroutine 串行处理变更 → 构造新状态副本 → 落盘（临时文件+rename）→ 成功后才原子替换内存可见状态并发 Ack → 失败则丢弃副本、不发布、不 Ack。禁止先改内存再补盘。掉电耐久性不承诺（已声明）。
-node 侧关键顺序：accepted 落盘成功 → 发 task_ack；started 落盘成功 → 发 task_started → spawn；finished+result 落盘成功 → 发 task_result。
-`data_dir` 单实例锁：**OS 文件锁（Unix flock，进程退出自动释放）**，不用 O_EXCL 锁文件（SIGKILL 后残留会永久阻塞重启，DoD 6/10 无法执行）；锁冲突则退出报错。Windows 侧随 P4② 服务化落地同语义实现（CreateFile 独占打开 + LockFileEx，句柄随进程退出由 OS 释放；lock_test.go 跨平台同一套契约断言）。
+**先写后见（不变的事务语义）**：单写 goroutine 串行处理变更 → 构造新状态副本 → 持久化成功 → 才原子替换内存可见状态并发 Ack → 失败则丢弃副本、不发布、不 Ack。禁止先改内存再补盘。node 侧关键顺序不变：accepted 落盘成功 → 发 task_ack；started 落盘成功 → 发 task_started → spawn；finished+result 落盘成功 → 发 task_result。
+
+**hub store 持久层（2026-10-26 迁 SQLite，替代 JSON 全量快照）**：
+- **存储形态**：`data_dir/hub_state.db`（SQLite 单库）。实体分表九张（nodes/tasks/mailboxes/batches/batch_idems/workdir_locks/works/work_idems/prime），行 = key（map 键，主键）+ body（条目 JSON 体）。schema 版本记 PRAGMA user_version，库版本高于本代码时拒绝启动（诚实失败优于误读）。
+- **增量事务**：Update 后对比 old/new 产出 diff（map key 集合差 + 变 key 条目 JSON 相等比较），仅 UPSERT/DELETE 变化行，单事务提交；**diff 为空零写库**（无变化事务照常发布+Ack，不触盘——顺带消灭 JSON 时代 sweep 空转全量重写问题）。禁止全表重写（仅首启导入路径例外）。
+- **掉电耐久性（较 JSON 快照升级，如实声明）**：WAL 模式 + synchronous=FULL + 单连接（SetMaxOpenConns(1)，与单写 goroutine 模型对齐）——进程崩溃不丢已确认提交（WAL 恢复）；主机掉电以 fsync 语义为准（FULL 下提交时同步 WAL，不承诺机房级灾难）。注入点语义沿用：after_rename = COMMIT 成功之后，「已提交但确认丢失」重启以磁盘为准。
+- **旧 JSON 自动导入（停机切换，无双写）**：首启检测——SQLite 库为新空库（user_version=0）且 hub_state.json 存在 → 单事务「建表+导入全量+盖版本」→ 成功后将 json 备份改名 `hub_state.json.imported-<unix秒>`；导入/解析失败保留 json 原样、启动报错（下次启动重试）。已初始化库与 json 并存 → 以 SQLite 为准，json 不动。残留 hub_state.json.tmp（JSON 时代产物）忽略。
+- **内存模型不变**：内存仍驻留全量 State（View 零拷贝只读契约、写时复制、Clone 深拷贝纪律原样），SQLite 只是持久层。View 遍历式调用方零改动。
+- **部署注记**：WAL 需本地盘（网络文件系统上不可靠；生产 hub 为本地盘，满足）。备份口径从「拷 json」变为「拷 hub_state.db（建议 sqlite3 .backup 或停机后拷，避免拷到 WAL 中间态）」。运维自查可用 ReadSnapshot（独立只读连接绕过运行中 Store）。
+
+**node ledger（保持 JSON，不变）**：账本为 KB 级、无容量压力，保持 ledger.json 临时文件+rename 原子写；不引 SQLite（2026-10-26 迁移裁决：一次迁移两侧都动风险翻倍，node 病是纪律病不是容量病）。
+**取消墓碑先写后见修正（2026-10-26 双审缺陷修复）**：cancels.json（独立 sidecar，同 flock 保护）的 add/clear/cleanup 一律「副本构造 → 落盘成功 → 替换内存」——落盘失败内存不污染、同键重试不得假成功（旧实现先改内存后写盘，失败后重试命中内存跳过写盘，重启丢墓碑）。
+
+`data_dir` 单实例锁：**OS 文件锁（Unix flock，进程退出自动释放）**，不用 O_EXCL 锁文件（SIGKILL 后残留会永久阻塞重启，DoD 6/10 无法执行）；锁冲突则退出报错。Windows 侧随 P4② 服务化落地同语义实现（CreateFile 独占打开 + LockFileEx，句柄随进程退出由 OS 释放；lock_test.go 跨平台同一套契约断言）。hub 与 node 锁语义均不变，与持久层形态无关。
+**取消链路确认语义（2026-10-26 双审缺陷修复）**：取消闭环确认（task_cancelled ack / task_result）必须以持久化成功为前提——墓碑落盘失败不发 ack（hub 重发重试）；MarkFinished 失败区分错误：ErrWrongState（先到终态为准）回幂等 ack，IO 落盘失败不发任何确认（旧实现两错混发 ack，ack 掉则重启后无防复活保障）。
 
 ### 4.8 node 执行账本（internal/node/ledger）
 
