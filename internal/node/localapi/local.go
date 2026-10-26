@@ -112,8 +112,9 @@ type localStatus struct {
 	Epoch      int64          `json:"epoch"`
 	// LastSyncAt 最近一次注册成功时刻（最近同步）；从未注册为 null。
 	LastSyncAt *time.Time `json:"last_sync_at"`
-	// NotifyAvailable 通知渠道管理面可用（standalone 装配 Dispatcher 后为 true；
-	// networked 通知归 hub、setup 不装配——控制台据此决定是否渲染「通知」区块）。
+	// NotifyAvailable 通知渠道管理面可用（2026-10-26 起三模式全装配 Dispatcher，
+	// 正常构造恒 true；判定随装配态而非模式硬编码——控制台据此决定是否渲染
+	// 「通知」区块）。
 	NotifyAvailable bool `json:"notify_available"`
 	// Ledger 账本三态计数（accepted/started/finished，SPEC 4.8）。
 	Ledger map[string]int `json:"ledger"`

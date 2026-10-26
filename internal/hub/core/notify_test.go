@@ -77,7 +77,7 @@ func newNotifyClient(t *testing.T, url string) *notify.Dispatcher {
 	if err != nil {
 		t.Fatalf("打开渠道存储: %v", err)
 	}
-	if _, err := channels.Create(notify.TypeWebhook, "测试渠道", nil,
+	if _, err := channels.Create(notify.TypeWebhook, "", "测试渠道", nil,
 		map[string]string{"url": url}, time.Now()); err != nil {
 		t.Fatalf("创建测试渠道: %v", err)
 	}

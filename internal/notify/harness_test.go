@@ -111,10 +111,11 @@ func newTestStore(t *testing.T) *ChannelStore {
 	return s
 }
 
-// mustCreate 创建渠道（失败即 Fatal）。
-func mustCreate(t *testing.T, s *ChannelStore, typ, name string, events []string, secrets map[string]string) Channel {
+// mustCreate 创建渠道（失败即 Fatal）。format 为消息格式（webhook 专用维度，
+// 其余类型传 ""）。
+func mustCreate(t *testing.T, s *ChannelStore, typ, format, name string, events []string, secrets map[string]string) Channel {
 	t.Helper()
-	ch, err := s.Create(typ, name, events, secrets, testNow)
+	ch, err := s.Create(typ, format, name, events, secrets, testNow)
 	if err != nil {
 		t.Fatalf("创建渠道 %s/%s: %v", typ, name, err)
 	}

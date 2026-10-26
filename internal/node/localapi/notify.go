@@ -1,13 +1,13 @@
-// node 本地通知渠道管理面（standalone 通知补盲区，2026-10-24；与 hub api/notify.go
-// 同一家族）：渠道 CRUD、发测试。五端点全部仅 local_token 可调（本机主人管理面，
-// 鉴权分级方案 3.2.1——prime_token 是编排凭证，不放行凭据配置）。
+// node 本地通知渠道管理面（standalone 通知补盲区，2026-10-24；2026-10-26 伦哥
+// 裁决「同时通知」起三模式全装配——networked 下本机渠道是否跟发由 also_notify
+// 决定，见本文件 settings 端点；与 hub api/notify.go 同一家族）：渠道 CRUD、
+// 发测试、同时通知开关。全部端点仅 local_token 可调（本机主人管理面，鉴权分级
+// 方案 3.2.1——prime_token 是编排凭证，不放行凭据配置）。
 //
 // 与 hub 侧的口径差异（其余语义一一对应）：
 //   - inbox 类型在 node 准入即拒绝（400 inbox_unsupported）——站内通知是 hub
 //     控制台铃铛专属（node 无站内动线，Dispatcher nil inbox 装配），宁可明确
-//     报错，不收一条永远发不出去的渠道配置（同 sms 口径）；
-//   - 网络模式下端点 503（notify_unavailable）——通知归 hub，本机渠道配置了
-//     也不会发（Configure 装配即排除，见 cmd/node openNotifyDispatcher）。
+//     报错，不收一条永远发不出去的渠道配置（同 sms 口径）。
 //
 // 安全红线同 hub：读响应经 Channel.Masked 脱敏（口令字段/自定义头的值/内嵌登录
 // 凭证的地址 → ****** 占位）；更新传回占位保留原值（语义在 notify.ChannelStore，
@@ -26,21 +26,30 @@ import (
 )
 
 // channelWriteReq 渠道创建/更新请求体。enabled/events 用指针区分「未提供
-// （更新时保留原值）」与「提供」；events 空数组=全订阅。与 hub 同形。
+// （更新时保留原值）」与「提供」；events 空数组=全订阅。format 为 webhook
+// 渠道消息格式（generic/feishu，空=generic；2026-10-26 独立 feishu 类型并入）。
+// 与 hub 同形。
 type channelWriteReq struct {
 	Type    string            `json:"type"`
+	Format  string            `json:"format"`
 	Name    string            `json:"name"`
 	Enabled *bool             `json:"enabled"`
 	Events  []string          `json:"events"`
 	Secrets map[string]string `json:"secrets"`
 }
 
-// notifyReady 通知面可用性守卫：Dispatcher 未装配（networked/setup）时统一
-// 503 降级，与 hub api notifyReady 同口径。
+// notifySettingsReq 同时通知开关请求体。指针区分「未提供」（400——开关只收
+// 显式布尔，不存在部分更新语义）与「提供」。
+type notifySettingsReq struct {
+	AlsoNotify *bool `json:"also_notify"`
+}
+
+// notifyReady 通知面可用性守卫：Dispatcher 未接线（旧构造方）时统一 503 降级
+//（2026-10-26 起三模式全装配，正常构造下恒就绪；守卫保留作防御）。
 func (s *Server) notifyReady(w http.ResponseWriter) bool {
 	if s.cfg.Notify == nil {
 		writeErr(w, http.StatusServiceUnavailable, "notify_unavailable",
-			"通知功能仅 standalone 模式可用（组网模式任务通知由 hub 统一发送，本机不重复配置）")
+			"通知功能未装配（本机通知渠道管理面不可用）")
 		return false
 	}
 	return true
@@ -84,7 +93,7 @@ func (s *Server) handleNotifyChannelCreate(w http.ResponseWriter, r *http.Reques
 	if rejectInboxForNode(w, req.Type) {
 		return
 	}
-	ch, err := s.cfg.Notify.Store().Create(req.Type, req.Name, req.Events, req.Secrets, time.Now())
+	ch, err := s.cfg.Notify.Store().Create(req.Type, req.Format, req.Name, req.Events, req.Secrets, time.Now())
 	if err != nil {
 		writeChannelErr(w, err)
 		return
@@ -107,7 +116,7 @@ func (s *Server) handleNotifyChannelUpdate(w http.ResponseWriter, r *http.Reques
 	if rejectInboxForNode(w, req.Type) {
 		return
 	}
-	ch, err := s.cfg.Notify.Store().Update(r.PathValue("id"), req.Type, req.Name, req.Enabled, req.Events, req.Events != nil, req.Secrets)
+	ch, err := s.cfg.Notify.Store().Update(r.PathValue("id"), req.Type, req.Format, req.Name, req.Enabled, req.Events, req.Events != nil, req.Secrets)
 	if err != nil {
 		writeChannelErr(w, err)
 		return
@@ -161,4 +170,26 @@ func writeChannelErr(w http.ResponseWriter, err error) {
 		log.Printf("[node] 通知渠道配置落盘失败: %v", err)
 		writeErr(w, http.StatusInternalServerError, "internal", "保存失败")
 	}
+}
+
+// handleNotifySettingsGet GET /api/v1/local/notify/settings：「同时通知」开关
+// 读取（200 {also_notify}）。语义见 notify.AlsoNotify（默认 true=跟发）。
+func (s *Server) handleNotifySettingsGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"also_notify": notify.AlsoNotify(s.cfg.DataDir)})
+}
+
+// handleNotifySettingsPut PUT /api/v1/local/notify/settings：「同时通知」开关
+// 写入（校验布尔，落盘即时生效——下一个终态事件即按新值）。200 {also_notify}。
+func (s *Server) handleNotifySettingsPut(w http.ResponseWriter, r *http.Request) {
+	var req notifySettingsReq
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.AlsoNotify == nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {\"also_notify\": true|false}")
+		return
+	}
+	if err := notify.SetAlsoNotify(s.cfg.DataDir, *req.AlsoNotify); err != nil {
+		log.Printf("[node] 同时通知开关落盘失败: %v", err)
+		writeErr(w, http.StatusInternalServerError, "internal", "保存失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"also_notify": *req.AlsoNotify})
 }

@@ -136,9 +136,9 @@ func (d *Dispatcher) Store() *ChannelStore { return d.store }
 // Inbox 站内通知表访问器（管理面拉取/标已读入口；未接线时 nil）。
 func (d *Dispatcher) Inbox() *Inbox { return d.inbox }
 
-// deliver 单渠道投递（非 inbox 类型；inbox 聚合在 TaskFinal）：按类型构建
-// 载荷后带重试发送。渠道级失败只记日志（渠道名+ID+脱敏后的原因），不打断
-// 其他渠道。
+// deliver 单渠道投递（非 inbox 类型；inbox 聚合在 TaskFinal）：按类型与消息
+// 格式（webhook 的 Format 维度，2026-10-26 feishu 并入 webhook）构建载荷后带
+// 重试发送。渠道级失败只记日志（渠道名+ID+脱敏后的原因），不打断其他渠道。
 func (d *Dispatcher) deliver(ch Channel, t protocol.Task) {
 	defer func() {
 		if r := recover(); r != nil { // 单渠道 panic 不拖垮其余渠道（防御）
@@ -148,12 +148,16 @@ func (d *Dispatcher) deliver(ch Channel, t protocol.Task) {
 	switch ch.Type {
 	case TypeEmail:
 		d.retry(ch, func() error { return d.sendEmail(ch.Secrets, t) })
-	case TypeFeishu:
-		body := mustJSON(feishuMessage{MsgType: "text", Content: feishuContent{Text: feishuText(t)}})
-		// 投递用原始完整地址（query/userinfo 里可能就是认证凭证，脱敏会打断认证）；
-		// 脱敏只发生在错误展示路径（retry→sanitizeErrMsg，只留域名与状态码）。
-		d.retry(ch, func() error { return d.postHTTP(ch, ch.Secrets["webhook_url"], body, nil) })
 	case TypeWebhook:
+		if normalizeFormat(ch.Format) == FormatFeishu {
+			// 飞书机器人格式：msg_type text 文本消息；无自定义头（飞书不读，见
+			// validateSecrets——配置层已拒，此处 nil 兜底）。投递用原始完整地址
+			//（query/userinfo 里可能就是认证凭证，脱敏会打断认证）；脱敏只发生在
+			// 错误展示路径（retry→sanitizeErrMsg，只留域名与状态码）。
+			body := mustJSON(feishuMessage{MsgType: "text", Content: feishuContent{Text: feishuText(t)}})
+			d.retry(ch, func() error { return d.postHTTP(ch, ch.Secrets["url"], body, nil) })
+			return
+		}
 		body := mustJSON(terminalPayloadFor(t))
 		headers := headerMap(ch.Secrets)
 		d.retry(ch, func() error { return d.postHTTP(ch, ch.Secrets["url"], body, headers) })
@@ -201,11 +205,12 @@ func (d *Dispatcher) TestChannel(id string) (bool, string) {
 	case TypeEmail:
 		err := d.sendEmail(ch.Secrets, sampleTestTask())
 		return err == nil, sanitizeErrMsg(err)
-	case TypeFeishu:
-		body := mustJSON(feishuMessage{MsgType: "text", Content: feishuContent{Text: testText(ch.Name)}})
-		err := d.postHTTP(ch, ch.Secrets["webhook_url"], body, nil)
-		return err == nil, sanitizeErrMsg(err)
 	case TypeWebhook:
+		if normalizeFormat(ch.Format) == FormatFeishu {
+			body := mustJSON(feishuMessage{MsgType: "text", Content: feishuContent{Text: testText(ch.Name)}})
+			err := d.postHTTP(ch, ch.Secrets["url"], body, nil)
+			return err == nil, sanitizeErrMsg(err)
+		}
 		body := mustJSON(testPayload(ch.Name))
 		err := d.postHTTP(ch, ch.Secrets["url"], body, headerMap(ch.Secrets))
 		return err == nil, sanitizeErrMsg(err)
@@ -249,7 +254,7 @@ func testPayload(name string) map[string]any {
 	return map[string]any{"event": "test", "message": "SwarmMind 通知渠道「" + name + "」测试消息"}
 }
 
-// testText 渠道测试文案（feishu 类型）。
+// testText 渠道测试文案（webhook 飞书格式）。
 func testText(name string) string {
 	return "🔔 SwarmMind 测试消息：通知渠道「" + name + "」配置成功。"
 }

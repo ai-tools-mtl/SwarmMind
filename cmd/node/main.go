@@ -252,12 +252,15 @@ func run(cfgPath, dataDirOverride string) error {
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧
 	// 一律 transport.ErrNoEndpoint（service 按良性静默），历史 hub 条目的迟到重发
 	// 不出本机；本地任务本就被 origin 堵点拦在发送之前（方案 3.2）。
-	// 通知装配（standalone 补盲区，2026-10-24）：仅 standalone 打开渠道存储并
-	// 接 service 终态钩子——networked 通知归 hub（node 不装配零调用），setup 无
-	// agents 不通知。渠道存 data_dir/notify_channels.json（与 hub 同一 JSON 存储
-	// 形态，控制台运行时可改）；inbox 为 hub 控制台专属，node 以 nil inbox 装配
-	// （管理面准入拒绝 inbox 类型，见 localapi notify.go）。
-	disp, err := notifyDispatcherFor(mode, cfg.DataDir)
+	// 通知装配（2026-10-26 伦哥裁决「同时通知」，取代 2026-10-24「networked 归
+	// hub 不装配」旧口径）：三模式（standalone/networked/setup）都打开渠道存储
+	// 并接 service 终态钩子——standalone 本机通知即唯一通知；networked 下 hub
+	// 渠道照常，本机渠道是否跟发由 data_dir/notify_settings.json also_notify
+	// 决定（默认 true，serviceNotifier 内 gate；false=本机静默 hub 一份照发）；
+	// setup 无 agents 无任务不触达（装配无害）。渠道存 data_dir/notify_channels.json
+	//（与 hub 同一 JSON 存储形态，控制台运行时可改）；inbox 为 hub 控制台专属，
+	// node 以 nil inbox 装配（管理面准入拒绝 inbox 类型，见 localapi notify.go）。
+	disp, err := notifyDispatcherFor(cfg.DataDir)
 	if err != nil {
 		return err
 	}
@@ -293,11 +296,11 @@ func run(cfgPath, dataDirOverride string) error {
 		Runners:       runners,
 		ArtifactRoots: artifactRoots,
 		Concurrency:   cfg.Concurrency,
-		// 仅 standalone 赋接口（返工必修1，收口在 serviceNotifier）：nil 具体
-		// 指针直接赋给接口会成为非 nil 的 typed-nil，Notifier==nil 判空失效，
-		// networked 终态仍会读账本调 TaskFinal——违反「networked 零调用」承诺。
-		// networked/setup 恒真 nil。
-		Notifier: serviceNotifier(disp),
+		// 通知钩子（serviceNotifier 收口）：三模式均非 nil disp，包装差异在
+		// 模式——networked 加「同时通知」gate（读 also_notify 决定本机渠道是否
+		// 跟发），standalone 直连（本机通知即唯一通知）；nil dispatcher 仍须返回
+		// 真 nil 接口（typed-nil 会使 Notifier==nil 判空失效，见 serviceNotifier）。
+		Notifier: serviceNotifier(disp, mode, cfg.DataDir),
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；
@@ -311,7 +314,7 @@ func run(cfgPath, dataDirOverride string) error {
 	// 崩溃重启转 needs_review）不经 MarkFinished，运行期 notifyTerminal 旁路接
 	// 不到，恢复清单里新降级条目在此补发。降级是 recover 单写事务、每任务至多
 	// 一条且重启后已 finished 不再降级——同一任务只通知一次（去重锚点在账本恢复
-	// 逻辑）。networked/setup 的 Notifier 为真 nil，方法内零开销早退（通知归 hub）。
+	// 逻辑）。networked 侧同样经「同时通知」gate（Notifier 包装，见 serviceNotifier）。
 	svc.NotifyRecoveredTerminal(rec.Downgraded)
 
 	// 本机凭证（SPEC 六 + 方案 3.2.1，返工 #1）：local_token 管只读+管理面，
@@ -380,7 +383,7 @@ func run(cfgPath, dataDirOverride string) error {
 		DataDir:           cfg.DataDir, // 影子 home 兜底 data_dir/home（primewire 与 runner HOME 同口径）
 		RotatePrime:       rotatePrime,
 		ArtifactFetch:     svc.FetchArtifactLocal,
-		Notify:            disp, // standalone 非 nil（本机渠道管理面）；其余形态 nil（端点 503 降级）
+		Notify:            disp, // 三模式全装配（2026-10-26 同时通知）；notifyReady 守卫降级仅剩防御意义
 		ConfigOps: &localapi.ConfigOps{
 			ConfigPath: cfgPath, // 读改写启动时 --config 原路径（绝不写示例文件）
 			ReloadExecutors: func(profiles []protocol.ExecProfile) error {
@@ -470,32 +473,53 @@ func run(cfgPath, dataDirOverride string) error {
 // closeBudget 本地 API 优雅关闭预算（调度节拍，非协议常量）。
 const closeBudget = 5 * time.Second
 
-// serviceNotifier service 终态通知钩子装配（返工必修1）：nil dispatcher 必须返回
-// 真 nil 接口——nil 具体指针直接赋给接口会成非 nil 的 typed-nil（Notifier==nil
-// 判空失效，networked 终态路径空跑账本读取与 TaskFinal），故经本函数收口（可测，
-// cmd/node notify_test 锁定 nil⇒真 nil 语义）。
-func serviceNotifier(d *notify.Dispatcher) service.TerminalNotifier {
+// serviceNotifier service 终态通知钩子装配（返工必修1收口 + 2026-10-26 同时通
+// 知 gate）：nil dispatcher 必须返回真 nil 接口——nil 具体指针直接赋给接口会成
+// 非 nil 的 typed-nil（Notifier==nil 判空失效），故经本函数收口（可测，cmd/node
+// notify_test 锁定 nil⇒真 nil 语义）。模式差异：
+//   - networked：包 alsoNotifyGate——每次终态读 data_dir/notify_settings.json
+//     also_notify（默认 true=跟发；false=本机静默，hub 渠道一份照发）。读盘
+//     不缓存：开关运行时即时生效，盘是唯一真相（notify.SettingsFile 同口径）。
+//   - standalone：直连 dispatcher（本机通知即唯一通知，开关不参与门控）。
+//   - setup：直连 dispatcher（无 agents 无任务不触达；启动恢复降级条目如存在
+//     照常补发，渠道未配置自然静默）。
+func serviceNotifier(d *notify.Dispatcher, mode string, dataDir string) service.TerminalNotifier {
 	if d == nil {
 		return nil
+	}
+	if mode == localapi.ModeNetworked {
+		return alsoNotifyGate{disp: d, dataDir: dataDir}
 	}
 	return d
 }
 
-// notifyDispatcherFor 形态门控的通知装配套件（返工必修1）：仅 standalone 打开
-// 渠道存储构造分发器；networked/setup 返回 (nil, nil)。两个消费点——service
-// Notifier 经 serviceNotifier（接口字段，必须拦 typed-nil）与 localapi Notify
-// （具体指针字段，nil 指针赋值安全、notifyReady 判空即降级 503）。门控收口一处、
-// 可测（cmd/node notify_test）。
-func notifyDispatcherFor(mode string, dataDir string) (*notify.Dispatcher, error) {
-	if mode != localapi.ModeStandalone {
-		return nil, nil
+// alsoNotifyGate networked 模式的「同时通知」闸（service.TerminalNotifier 实现，
+// 见 serviceNotifier）：gate 的是 node 本机渠道这份「跟发」，hub 渠道通知不经过
+// node 侧（hub core 终态旁路），天然不受影响。
+type alsoNotifyGate struct {
+	disp    *notify.Dispatcher
+	dataDir string
+}
+
+func (g alsoNotifyGate) TaskFinal(t protocol.Task) {
+	if !notify.AlsoNotify(g.dataDir) {
+		return
 	}
+	g.disp.TaskFinal(t)
+}
+
+// notifyDispatcherFor 通知装配套件（2026-10-26 起三模式统一装配，旧 standalone
+// 门控随「同时通知」裁决退役）：打开 data_dir 渠道存储构造分发器。两个消费点——
+// service Notifier 经 serviceNotifier（接口字段，必须拦 typed-nil）与 localapi
+// Notify（具体指针字段，nil 指针赋值安全、notifyReady 判空即 503 降级）。收口
+// 一处、可测（cmd/node notify_test）。存储打开失败按启动失败处理（与账本同口径：
+// data_dir 不可写越早暴露越好）。
+func notifyDispatcherFor(dataDir string) (*notify.Dispatcher, error) {
 	return openNotifyDispatcher(dataDir)
 }
 
-// openNotifyDispatcher standalone 通知装配：打开 data_dir 渠道存储（notify_channels.json，
+// openNotifyDispatcher 通知装配：打开 data_dir 渠道存储（notify_channels.json，
 // 与 hub 同一 JSON 存储形态），构造分发器（inbox=nil——站内通知 hub 控制台专属）。
-// 存储打开失败按启动失败处理（与账本同口径：data_dir 不可写越早暴露越好）。
 func openNotifyDispatcher(dataDir string) (*notify.Dispatcher, error) {
 	channels, err := notify.OpenChannelStore(dataDir)
 	if err != nil {
@@ -506,7 +530,7 @@ func openNotifyDispatcher(dataDir string) (*notify.Dispatcher, error) {
 
 // waitNotifyIdle 通知在途投递收尾（对齐 cmd/hub 同名函数）：预算内尽力等待
 //（通知是出站 HTTP，独立于监听器生命周期）；超时放弃——通知本身非可靠投递
-// 机制（崩溃在发出前即漏发），关闭不被它拖住。disp 为 nil（networked/setup）零开销。
+// 机制（崩溃在发出前即漏发），关闭不被它拖住。disp 为 nil（旧构造方）零开销。
 func waitNotifyIdle(disp *notify.Dispatcher, budget time.Duration) {
 	if disp == nil {
 		return

@@ -20,9 +20,11 @@ import (
 )
 
 // channelWriteReq 渠道创建/更新请求体。enabled/events 用指针区分「未提供
-// （更新时保留原值）」与「提供」；events 空数组=全订阅。
+// （更新时保留原值）」与「提供」；events 空数组=全订阅。format 为 webhook
+// 渠道消息格式（generic/feishu，空=generic；2026-10-26 独立 feishu 类型并入）。
 type channelWriteReq struct {
 	Type    string            `json:"type"`
+	Format  string            `json:"format"`
 	Name    string            `json:"name"`
 	Enabled *bool             `json:"enabled"`
 	Events  []string          `json:"events"`
@@ -63,7 +65,7 @@ func (s *Server) handleNotifyChannelCreate(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为渠道配置 JSON")
 		return
 	}
-	ch, err := s.cfg.Notify.Store().Create(req.Type, req.Name, req.Events, req.Secrets, time.Now())
+	ch, err := s.cfg.Notify.Store().Create(req.Type, req.Format, req.Name, req.Events, req.Secrets, time.Now())
 	if err != nil {
 		writeChannelErr(w, err)
 		return
@@ -83,7 +85,7 @@ func (s *Server) handleNotifyChannelUpdate(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为渠道配置 JSON")
 		return
 	}
-	ch, err := s.cfg.Notify.Store().Update(r.PathValue("id"), req.Type, req.Name, req.Enabled, req.Events, req.Events != nil, req.Secrets)
+	ch, err := s.cfg.Notify.Store().Update(r.PathValue("id"), req.Type, req.Format, req.Name, req.Enabled, req.Events, req.Events != nil, req.Secrets)
 	if err != nil {
 		writeChannelErr(w, err)
 		return
