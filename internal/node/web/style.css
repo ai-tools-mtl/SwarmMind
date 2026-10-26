@@ -194,14 +194,21 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .empty h2{font-size:var(--fs-h2);font-weight:600;letter-spacing:-.01em;color:var(--ink)}
 .empty p{max-width:440px;margin:8px auto 16px;font-size:13.5px;line-height:1.7;color:var(--ink-3)}
 .login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--accent);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
-.overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px}
+/* 弹层（t20261026-notify-polish 改动三：通知渠道编辑改居中 modal，与 hub 同形态
+ * 同视觉——.modal 宽度/圆角/阴影/入场动效与 .overlay 遮罩淡入自 hub style.css
+ * 同文同步，不发明新样式；node #layer 为直清家族（白名单豁免），无 .closing
+ * 出场路径，故不引入该侧规则）。 */
+.overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;opacity:0;transition:opacity var(--dur-scrim) ease}
+.overlay.open{opacity:1}
+.modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:var(--surface);padding:28px;border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);opacity:0;transform:translateY(12px) scale(.98);transition:opacity var(--dur-enter) var(--ease-spring),transform var(--dur-enter) var(--ease-spring)}
+.overlay.open .modal{opacity:1;transform:none}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
 .drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay);opacity:0;transform:translateX(48px);transition:transform var(--dur-enter) var(--ease-spring),opacity var(--dur-enter) var(--ease-spring)}
 .overlay.open .drawer{transform:none;opacity:1}
 /* 入场动画只随壳播放一次（openDrawer 下一帧加 .open）；分区刷新不重放（D22）。
  * 减弱动效降级与 hub 同口径（transform 归零、保留透明度过渡）。 */
 @media (prefers-reduced-motion:reduce){
-  .overlay,.drawer{transform:none!important;transition:opacity 200ms ease!important}
+  .overlay,.drawer,.modal{transform:none!important;transition:opacity 200ms ease!important}
 }
 /* 时间线事件流与产物行分隔线：双端同文规则（D14/D15 node 补齐，2026-10-25 抽屉
  * 统一；锁测试 TestWebDrawerComponentStyles 抽行比对，任一端私改即红）。 */
@@ -243,6 +250,9 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * 两列表单栅格 / .checkline 事件勾选行 / .nf-events 事件字段集。 ===== */
 .fields{display:grid;gap:8px}
 .fields label{margin:0}
+/* #nf-hint 格式相关说明槽去默认下边距（t20261026-notify-polish 改动二，与 hub
+ * style.css 同值同补：grid gap 8px 已给节奏，说明随格式切换不占字段区高度）。 */
+#nf-hint{margin:0}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .form-grid label{margin:0}
 .form-grid .full{grid-column:1/-1}

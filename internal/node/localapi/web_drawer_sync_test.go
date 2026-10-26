@@ -167,6 +167,146 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	}
 }
 
+// TestWebNotifyFormSharedBlock 通知渠道编辑面双端一致性锁（t20261026-notify-polish，
+// SPEC 六.五「双端 Web 展示一致性契约」第一条 + 2026-10-26 三层范围裁决）：通知表单
+// 骨架、类型/消息格式词典、modalHead 与配套局部重绘收进「通知表单与词典 shared
+// block」双端逐字节同文；操作逻辑层（居中 modal 形态/字段恒显恒位/卡片位置）不进
+// shared block 锁，锁关键行；node 无 inbox 的如实口径以 NOTIFY_TYPE_KEYS 参数体现。
+func TestWebNotifyFormSharedBlock(t *testing.T) {
+	bus := transport.NewBus()
+	svc := newService(t, bus.Endpoint("nodeA"))
+	srv := httptest.NewServer(New(Config{
+		NodeID: "nodeA", Service: svc,
+		Agents:     newState(t, t.TempDir(), nil),
+		LocalToken: "tok-local",
+	}).Handler())
+	t.Cleanup(srv.Close)
+
+	fetch := func(path string) string {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s 应 200, got %d", path, resp.StatusCode)
+		}
+		return string(b)
+	}
+	nodeJS, nodeCSS := fetch("/app.js"), fetch("/style.css")
+	hubJS, err := os.ReadFile("../../hub/web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubCSS, err := os.ReadFile("../../hub/web/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubJSStr, hubCSSStr := string(hubJS), string(hubCSS)
+
+	// ---- shared block 双端逐字节一致 + 关键行（词典/恒定骨架/参数化面） ----
+	blk := sharedBlock(t, nodeJS, hubJSStr, "通知表单与词典 shared block")
+	for _, want := range []string{
+		"const NOTIFY_TYPES = {",
+		"const NOTIFY_FORMATS = { generic: '通用 JSON', feishu: '飞书机器人' };",
+		"const NOTIFY_EVENT_OPTS = [",
+		"function modalHead(title) {",
+		// modalHead × 按钮内联字面量（双端 button() 签名不同，带 aria-label 无法同文经助手）
+		`<button type="button" data-act="close" class="close" aria-label="关闭弹层">×</button>`,
+		`<h2 id="layer-title">`,
+		"function notifyTypeOptionsHtml(type, typeKeys) {",
+		"function notifyHintHtml(type, format) {",
+		"function notifyFormHtml(ch, typeKeys) {",
+		// 恒定骨架：消息格式/推送地址/自定义请求头三件恒显恒位，切格式仅 label 与 disabled 变化
+		`<label>消息格式<select id="nf-format">`,
+		`id="nf-url"`,
+		`id="nf-headers" rows="2"`,
+		`' disabled'`,
+		"飞书机器人协议不支持自定义请求头",
+		`id="nf-hint"`,
+		"function nfRepaint(type, format, sec) {",
+		"function nfSecFromDom() {",
+		"function collectNotifyForm() {",
+	} {
+		if !strings.Contains(blk, want) {
+			t.Errorf("通知表单与词典 shared block 应含 %q", want)
+		}
+	}
+
+	// ---- node 端形态：类型键参数化（无 inbox 如实口径）+ 居中 modal + 直清家族 ----
+	for _, want := range []string{
+		"const NOTIFY_TYPE_KEYS = ['email', 'webhook', 'sms'];",
+		"notifyFormHtml(ch, NOTIFY_TYPE_KEYS)",
+		// 居中 modal（与 hub openLayerPlain 同形态），无障碍对齐：role/aria-modal/aria-labelledby
+		`<section class="modal" id="notify-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">`,
+		"$('#layer [role=dialog]')?.focus();",
+		// shared modalHead ×/取消同词关闭动作（守护防误清其他层）
+		"case 'close':",
+		"if ($('#notify-modal')) closeNotifyForm();",
+		// 切换只重绘两槽（D2 局部刷新），格式切换经 nfSecFromDom 回填不丢
+		"nfRepaint(e.target.value, 'generic', {});",
+		"nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());",
+		// 改动四：通知卡上移页头后第一位（head 之后 notifyCard 紧随，能力配置沉底）
+		"return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +",
+	} {
+		if !strings.Contains(nodeJS, want) {
+			t.Errorf("node app.js 应含 %q（通知编辑 modal 化/类型键参数化/通知卡上移）", want)
+		}
+	}
+	for _, ban := range []string{
+		`id="notify-drawer"`,           // 旧右侧抽屉形态退役（改动三）
+		"case 'nf-close':",             // 旧关闭动作词退役（与 hub 同词 close）
+		"cfgSection() + notifyCard()", // 旧卡片沉底次序退役（改动四）
+	} {
+		if strings.Contains(nodeJS, ban) {
+			t.Errorf("node app.js 不应再含 %q（通知编辑 modal 化/卡片上移后旧形态退役）", ban)
+		}
+	}
+
+	// ---- hub 端形态：全集类型键（不传 typeKeys）+ 切换走 shared nfRepaint ----
+	for _, want := range []string{
+		"openLayerPlain(notifyFormHtml(null))",
+		"nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());",
+	} {
+		if !strings.Contains(hubJSStr, want) {
+			t.Errorf("hub app.js 应含 %q（通知表单接入 shared 块函数）", want)
+		}
+	}
+
+	// ---- 样式：modal 形态同文 / 恒定骨架 grid / 说明槽去边距 / 铃铛几何根因 ----
+	for _, css := range []struct{ side, src string }{{"node", nodeCSS}, {"hub", hubCSSStr}} {
+		for _, want := range []string{
+			// .overlay 遮罩淡入 + .modal 尺寸/圆角/阴影/入场动效（node 自 hub 同文同步）
+			".overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;opacity:0;transition:opacity var(--dur-scrim) ease}",
+			".overlay.open .modal{opacity:1;transform:none}",
+			".modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:var(--surface);padding:28px;border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);",
+			// 事件字段集与说明槽（改动二双端同补）
+			".nf-events{border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:12px 14px;margin:14px 0 4px;display:grid;gap:8px}",
+			"#nf-hint{margin:0}",
+		} {
+			if !strings.Contains(css.src, want) {
+				t.Errorf("%s style.css 应含 %q（通知表单/modal 双端同文样式）", css.side, want)
+			}
+		}
+	}
+	// hub 专属：铃铛 padding:0 重置（全局 button padding 顶偏图标的根因修复，改动一）
+	if !strings.Contains(hubCSSStr, ".bell-btn{position:relative;padding:0;") {
+		t.Error("hub style.css .bell-btn 应显式 padding:0（铃铛图标居中，DoD 几何断言 <1px）")
+	}
+	// node 专属：通知表单 grid 骨架在 node 是全局 .fields 覆盖（既有），hub 以 #notify-form 同值收齐
+	if !strings.Contains(nodeCSS, ".fields{display:grid;gap:8px}") {
+		t.Error("node style.css 应含 .fields grid 覆盖（通知表单纵向堆叠基准）")
+	}
+	if !strings.Contains(hubCSSStr, "#notify-form.fields{display:grid;gap:8px}") {
+		t.Error("hub style.css 应含 #notify-form.fields grid 覆盖（与 node 表单骨架同构）")
+	}
+}
+
 // TestWebDrawerComponentStyles 抽屉共用组件样式双端一致锁（SPEC 六.五 第一/二条）：
 // .timeline 事件流（左轨圆点+needs_review 热点）与 .artifact 产物行分隔线为双端同文
 // 规则——node 补齐后抽壳比对，任一端私改即红。

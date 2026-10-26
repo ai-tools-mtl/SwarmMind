@@ -367,7 +367,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 通知中心（P4③ 控制台化升级）：顶栏铃铛 + 站内通知面板 + 渠道卡片 ----
  * 层叠：面板 z-index 30（压过页面内容与 sticky 表头 5，低于弹层 50 / toast 100）；
  * 面板同为玻璃家族（与 topbar 同底色），窄视口贴右缘收宽。 */
-.bell-btn{position:relative;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
+.bell-btn{position:relative;padding:0;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
+/* padding:0 必须显式重置：全局 button{padding:0 16px} 会吃掉 34px 圆钮内容区，
+ * 18px SVG 被 padding 顶至横向偏移 16px——图标在底纹中明显偏右（t20261026
+ * notify-polish 改动一，生产实测几何：svg 中心与按钮中心偏差须 <1px）。 */
 .bell-btn:hover{background:rgba(0,0,0,.08);color:var(--ink)}
 /* 站内通知 SVG 图标（t20261026-webfix）：铃铛按钮 18px、条目 16px，语义色只走描边
  * （全站四色预算内）；.ni-icon 原 font-size 形态随 emoji 一起退役。 */
@@ -406,6 +409,17 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-meta{flex-basis:100%;font-size:12px;color:var(--ink-3)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
 .chan-actions button{padding:6px 12px;font-size:12px}
+/* 渠道编辑弹层表单骨架（t20261026-notify-polish 改动二，双端同构）：hub 全局
+ * .fields 是 flex 横排（向导/登录用），通知表单须与 node 控制台同构纵向堆叠——
+ * 字段恒显恒位、切消息格式零跳动（DoD：#nf-type-fields 高度差=0），故本表单
+ * 改 grid，值与 node style.css 的 .fields 覆盖同源；#nf-hint 说明槽去默认下边距
+ * （双端同值，grid gap 8px 已给节奏）；.nf-events 事件字段集从 node 同文收齐
+ * （原 hub 依赖全局 fieldset 重置呈无边框，与 node 有边框盒漂移）。 */
+#notify-form.fields{display:grid;gap:8px}
+#notify-form label{margin:0}
+#nf-hint{margin:0}
+.nf-events{border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:12px 14px;margin:14px 0 4px;display:grid;gap:8px}
+.nf-events legend{font-weight:600;color:var(--ink-2);font-size:var(--fs-small);padding:0 6px}
 /* 启用开关（纯 CSS 滑块，button 承载保持键盘可达） */
 .switch{position:relative;width:38px;height:22px;flex-shrink:0;border:0;border-radius:11px;background:rgba(0,0,0,.16);cursor:pointer;transition:background 180ms ease;padding:0}
 .switch::after{content:'';position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:translate 180ms var(--ease-out-quart)}

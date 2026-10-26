@@ -376,21 +376,20 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 }
 /* ===== 抽屉分区更新 shared block end ===== */
 
-/* ---------- 展示词典（非任务类）：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
-/* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
-const SKIPS = {
-  offline: '离线或未注册',
-  not_exposed: '在线，但没有开放这个能力',
-  interrupted: '中心端创建中断，未及提交',
-};
-const BATCH_STATES = { creating: '收尾中', complete: '已完成' };
-/* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
-const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
-const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
-/* 通知渠道词典（P4③ 控制台化；2026-10-26 notify-unify 改动二：独立 feishu 类型
- * 并入 webhook 的「消息格式」维度——类型下拉不再有飞书项，Webhook 表单内选格式）：
- * 类型徽标文案 + 表单提示 + 事件订阅勾选 + 消息格式词典。
- * sms 在枚举中占位（option disabled 灰显「需接入服务商，暂未开放」）。 */
+/* ===== 通知表单与词典 shared block begin（双端同步维护：通知渠道编辑表单骨架、
+ * 类型/消息格式词典与弹层头部 modalHead 双端逐字节同文，
+ * internal/node/localapi/web_drawer_sync_test.go 抽块比对锁一致性——改本块必须
+ * 两端同改同验。t20261026-notify-polish。）
+ * · 双端一致三层（2026-10-26 伦哥裁决）：本块承载渲染层与文案层；操作逻辑层
+ *   （弹层形态=居中 modal、表单结构、卡片位置）由代码结构承载，不进块内。
+ * · 字段区恒定骨架（webhook 类型）：消息格式 / 推送地址 / 自定义请求头三件恒显
+ *   恒位，切格式只变 label 文本与 disabled，#nf-type-fields 高度不变（零跳动）；
+ *   格式相关说明独立 #nf-hint 槽位（位置恒定，内容随格式切换，不占字段区高度）。
+ * · 类型枚举表参数化：NOTIFY_TYPES 为全集词典；端上可见类型键经
+ *   notifyFormHtml(ch, typeKeys) 传入（hub 缺省=全集；node 传 NOTIFY_TYPE_KEYS
+ *   不含 inbox——站内通知为 hub 铃铛专属，如实口径不在词典上分叉）。
+ * · 飞书格式：headers textarea 恒显但 disabled（协议不支持自定义头），行内说明进
+ *   label；切走再切回经 nfSecFromDom 保留已输入地址与请求头。 ===== */
 const NOTIFY_TYPES = {
   email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
@@ -408,6 +407,143 @@ const NOTIFY_EVENT_OPTS = [
   ['task_failed', '仅失败'],
   ['task_needs_review', '仅等你确认（结果拿不准）'],
 ];
+/* modalHead 弹层头部（id="layer-title" 供对话框 aria-labelledby 指向；× 关闭动作
+ * 双端同词 act=close。× 按钮为内联字面量：双端 button() 助手签名不同（hub 4 参
+ * extra / node 5 参 inner+attr），带 aria-label 的调用无法同文，故不经助手）。 */
+function modalHead(title) {
+  return `<div class="row"><h2 id="layer-title">${title}</h2><button type="button" data-act="close" class="close" aria-label="关闭弹层">×</button></div>`;
+}
+/* notifyTypeOptionsHtml 类型下拉选项（typeKeys=端上可见类型键序，缺省=全集；
+ * sms 在枚举中占位，option disabled 灰显「需接入服务商，暂未开放」）。 */
+function notifyTypeOptionsHtml(type, typeKeys) {
+  return (typeKeys || Object.keys(NOTIFY_TYPES)).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('');
+}
+/* notifyHintHtml 格式相关说明槽内容（独立于字段区：切换不改字段区高度）。 */
+function notifyHintHtml(type, format) {
+  if (type === 'webhook') {
+    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
+    return fmt === 'feishu' ? FEISHU_HINT : NOTIFY_TYPES.webhook.form;
+  }
+  return NOTIFY_TYPES[type]?.form || '';
+}
+/* notifyFormHtml 渠道编辑弹层内容（新建 ch=null；typeKeys=端上可见类型键序）。
+ * 类型/格式切换只局部重绘 #nf-hint 与 #nf-type-fields（nfRepaint），名称与事件
+ * 勾选不被冲掉（局部刷新纪律）。 */
+function notifyFormHtml(ch, typeKeys) {
+  const type = ch?.type || 'webhook';
+  const format = ch?.format || 'generic';
+  const hint = notifyHintHtml(type, format);
+  return `${modalHead(ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道')}
+  <form id="notify-form" class="fields" onsubmit="return false">
+    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
+    <label>渠道类型
+      <select id="nf-type">
+        ${notifyTypeOptionsHtml(type, typeKeys)}
+      </select>
+    </label>
+    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
+    <p class="muted small" id="nf-hint"${hint ? '' : ' hidden'}>${esc(hint)}</p>
+    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, format, ch?.secrets || {})}</div>
+    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
+      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
+        const on = !ch || (ch.events || []).includes(k);
+        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
+      }).join('')}
+    </fieldset>
+    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'close', 'link')}</div>
+  </form>
+  <p class="footer-note">凭证只保存在本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
+}
+/* notifyTypeFieldsHtml 恒定骨架字段区（#nf-type-fields，容器高度切换不变）：
+ * webhook=消息格式/推送地址/自定义请求头三件恒显恒位，切格式仅 label 文本与
+ * headers 的 disabled 变化；飞书格式 headers disabled（协议不支持）。编辑回填：
+ * password 与自定义头的值显示 ****** 占位（保存原样传回 = 不修改，GitHub 式
+ * 语义）；内嵌登录凭证（user:pass@host）的地址整串显示 ******；其余地址类字段
+ * 明文回填可核对。 */
+function notifyTypeFieldsHtml(type, format, sec) {
+  const v = k => esc(String(sec[k] ?? ''));
+  if (type === 'webhook') {
+    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
+    const feishu = fmt === 'feishu';
+    const headers = Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n');
+    return `<label>消息格式<select id="nf-format">
+        ${Object.keys(NOTIFY_FORMATS).map(k => `<option value="${k}"${k === fmt ? ' selected' : ''}>${esc(NOTIFY_FORMATS[k])}</option>`).join('')}
+      </select></label>
+    <label>${feishu ? '飞书机器人 Webhook 地址' : '推送地址'}<input id="nf-url" value="${v('url')}" placeholder="${feishu ? 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' : 'https://example.com/hook'}" autocomplete="off" spellcheck="false"></label>
+    <label>${feishu ? '自定义请求头（飞书机器人协议不支持自定义请求头）' : '自定义请求头（可选，每行一个「名称: 值」）'}<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false"${feishu ? ' disabled' : ''}>${headers}</textarea></label>`;
+  }
+  if (type === 'email') {
+    return `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
+      <div class="form-grid">
+        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
+        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
+      <div class="form-grid">
+        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
+        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
+      </div>`;
+  }
+  if (type === 'inbox') {
+    return `<div class="notice">站内通知无需配置：任务终态会出现在页面顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
+  }
+  return `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
+}
+/* nfRepaint 通知表单局部重绘（D2）：类型/格式切换只写 #nf-hint 与
+ * #nf-type-fields 两个槽位，名称/事件勾选/按钮区不碰；空说明整槽隐藏（不占位）。 */
+function nfRepaint(type, format, sec) {
+  const hint = notifyHintHtml(type, format);
+  const hp = $('#nf-hint');
+  if (hp) { hp.textContent = hint; hp.hidden = !hint; }
+  const box = $('#nf-type-fields');
+  if (box) box.innerHTML = notifyTypeFieldsHtml(type, format, sec);
+}
+/* nfSecFromDom 读当前地址与请求头输入原值（格式切换回填用：切走再切回不丢已
+ * 输入；原样不 trim——回填保真，保存时才收口）。 */
+function nfSecFromDom() {
+  const sec = { url: $('#nf-url')?.value || '' };
+  for (const line of ($('#nf-headers')?.value || '').split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
+    if (hname) sec['header.' + hname] = hval;
+  }
+  return sec;
+}
+/* collectNotifyForm 从弹层 DOM 收集请求体；headers 文本经 nfSecFromDom 按行解析
+ * 为 header.<名> 键（地址保存时才 trim 收口）。 */
+function collectNotifyForm() {
+  const id = $('#nf-id')?.value || '';
+  const type = $('#nf-type')?.value || '';
+  const name = $('#nf-name')?.value.trim() || '';
+  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
+  let format = '', secrets = {};
+  if (type === 'webhook') {
+    format = $('#nf-format')?.value || 'generic';
+    secrets = nfSecFromDom();
+    secrets.url = secrets.url.trim();
+  } else if (type === 'email') secrets = {
+    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
+    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
+    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
+  };
+  return { id, type, format, name, events, secrets };
+}
+/* ===== 通知表单与词典 shared block end ===== */
+
+/* ---------- 展示词典（非任务类）：人话在前，技术态进详情/悬停（PRODUCT-DIRECTION v2 术语翻译表） ---------- */
+/* 技术码仅作为 title 提示保留，不再进入主文案（产品化：见名知意）。 */
+const SKIPS = {
+  offline: '离线或未注册',
+  not_exposed: '在线，但没有开放这个能力',
+  interrupted: '中心端创建中断，未及提交',
+};
+const BATCH_STATES = { creating: '收尾中', complete: '已完成' };
+/* 群聊词典（GROUP-RFC 六）：状态与消息类别的人话文案，badge() 与时间线共用。 */
+const GROUP_STATES = { discussing: '进行中', concluded: '已结束' };
+const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
+/* 通知渠道词典（类型全集/消息格式/事件订阅）与表单骨架已收进「通知表单与词典
+ * shared block」（上方抽屉分区更新块之后），双端同文，hub 用全集类型键。 */
 /* 站内通知条目图标（t20261026-webfix：emoji ✅❌⚠️🚫 跨平台渲染不一致且与灰阶工具
  * 视觉不符，换 stroke=currentColor 线性 SVG；语义色只走描边，全站四色预算内，
  * 未知状态回退 completed 勾形而非乱码）。 */
@@ -1586,9 +1722,6 @@ function closeLayer(restoreFocus = false) {
     layerCtx = null;
   }, LAYER_CLEAR_MS);
 }
-function modalHead(title) {
-  return `<div class="row"><h2 id="layer-title">${title}</h2>${button('×', 'close', 'close', 'aria-label="关闭弹层"')}</div>`;
-}
 /* drawerZones 任务抽屉分区内容（D22 稳定 DOM：壳由 drawerShellHtml 建一次，本函数
  * 只产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
  * 层级（e821bf8，SPEC 六.五 第二条）：介绍条 → 任务指令（t20261026-webfix 新增，
@@ -2187,94 +2320,9 @@ function notifyChannelCardHtml(ch) {
   </div>`;
 }
 
-/* notifyFormHtml 渠道编辑弹层（新建 ch=null）。类型切换只重绘凭证字段容器
- * （#nf-type-fields），名称与事件勾选不被冲掉（局部刷新纪律）。 */
-function notifyFormHtml(ch) {
-  const type = ch?.type || 'webhook';
-  const format = ch?.format || 'generic';
-  return `${modalHead(ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道')}
-  <form id="notify-form" class="fields" onsubmit="return false">
-    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
-    <label>渠道类型
-      <select id="nf-type">
-        ${Object.keys(NOTIFY_TYPES).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('')}
-      </select>
-    </label>
-    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
-    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, format, ch?.secrets || {})}</div>
-    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
-      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
-        const on = !ch || (ch.events || []).includes(k);
-        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
-      }).join('')}
-    </fieldset>
-    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'close', 'link')}</div>
-  </form>
-  <p class="footer-note">凭证只保存在 hub 本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
-}
-/* notifyTypeFieldsHtml 按类型与消息格式渲染凭证表单（notify-unify 改动二：格式
- * select 为 webhook 类型专用维度，切换只重绘本容器且保留已输入地址）。编辑回填：
- * password 与自定义头的值显示 ****** 占位（保存原样传回 = 不修改，GitHub 式语义）；
- * 内嵌登录凭证（user:pass@host）的地址整串显示 ******；其余地址类字段明文回填可
- * 核对；飞书格式（存量迁移渠道）回填格式选中态与地址。 */
-function notifyTypeFieldsHtml(type, format, sec) {
-  const v = k => esc(String(sec[k] ?? ''));
-  let fields = '';
-  if (type === 'webhook') {
-    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
-    const feishu = fmt === 'feishu';
-    const hint = feishu ? FEISHU_HINT : NOTIFY_TYPES.webhook.form;
-    const addr = feishu
-      ? `<label>飞书机器人 Webhook 地址<input id="nf-url" value="${v('url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`
-      : `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
-      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n')}</textarea></label>`;
-    fields = `<label>消息格式<select id="nf-format">
-        ${Object.keys(NOTIFY_FORMATS).map(k => `<option value="${k}"${k === fmt ? ' selected' : ''}>${esc(NOTIFY_FORMATS[k])}</option>`).join('')}
-      </select></label>${addr}`;
-    return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
-  }
-  if (type === 'email') {
-    fields = `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
-      <div class="form-grid">
-        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
-        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
-      </div>
-      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
-      <div class="form-grid">
-        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
-        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
-      </div>`;
-  } else if (type === 'inbox') {
-    fields = `<div class="notice">站内通知无需配置：任务终态会出现在页面顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
-  } else {
-    fields = `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
-  }
-  return `${NOTIFY_TYPES[type]?.form ? `<p class="muted small">${esc(NOTIFY_TYPES[type].form)}</p>` : ''}${fields}`;
-}
-/* collectNotifyForm 从弹层 DOM 收集请求体；headers 文本按行解析为 header.<名> 键
- * （飞书格式无 headers 输入框，天然不带）。 */
-function collectNotifyForm() {
-  const id = $('#nf-id')?.value || '';
-  const type = $('#nf-type')?.value || '';
-  const name = $('#nf-name')?.value.trim() || '';
-  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
-  let format = '', secrets = {};
-  if (type === 'webhook') {
-    format = $('#nf-format')?.value || 'generic';
-    secrets = { url: $('#nf-url')?.value.trim() || '' };
-    for (const line of ($('#nf-headers')?.value || '').split('\n')) {
-      const idx = line.indexOf(':');
-      if (idx <= 0) continue;
-      const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
-      if (hname) secrets['header.' + hname] = hval;
-    }
-  } else if (type === 'email') secrets = {
-    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
-    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
-    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
-  };
-  return { id, type, format, name, events, secrets };
-}
+/* notifyFormHtml/notifyTypeFieldsHtml/collectNotifyForm/notifyHintHtml/nfRepaint/
+ * nfSecFromDom 已收进「通知表单与词典 shared block」（双端同文，见上方块内定义）；
+ * hub 调用 notifyFormHtml(ch) 不传 typeKeys = 全集类型键（含站内通知）。 */
 async function saveNotifyChannel() {
   const f = collectNotifyForm();
   if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
@@ -3527,17 +3575,16 @@ function bindEvents() {
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
     if (k) { S.f[k] = e.target.value; render(); return; }
-    /* 通知渠道弹层：类型切换只重绘凭证字段容器（#nf-type-fields），名称与
-     * 事件勾选不被冲掉（局部刷新纪律，弹层不整层重开）；类型切走格式重置通用。
-     * 消息格式切换（notify-unify 改动二）同容器重绘，已输入地址随值回填不丢。 */
+    /* 通知渠道弹层：类型切换只重绘 #nf-hint 与 #nf-type-fields 两槽（shared
+     * nfRepaint），名称与事件勾选不被冲掉（局部刷新纪律，弹层不整层重开）；
+     * 类型切走格式重置通用。消息格式切换同槽重绘，已输入地址与请求头经
+     * nfSecFromDom 回填不丢（t20261026-notify-polish 恒定骨架）。 */
     if (e.target.id === 'nf-type') {
-      const box = $('#nf-type-fields');
-      if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, 'generic', {});
+      nfRepaint(e.target.value, 'generic', {});
       return;
     }
     if (e.target.id === 'nf-format') {
-      const box = $('#nf-type-fields');
-      if (box) box.innerHTML = notifyTypeFieldsHtml($('#nf-type')?.value || 'webhook', e.target.value, { url: $('#nf-url')?.value || '' });
+      nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());
       return;
     }
     /* 派单页选中统筹载体时切换任务描述占位为复合目标提示；选普通智能体恢复。
