@@ -246,7 +246,7 @@ function drawerLogInner(res, raw) {
  * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
  * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
  * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+const DRAWER_ZONES = ['head', 'intro', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -594,7 +594,7 @@ function overviewPage() {
     <section class="card"><h3>连接状态</h3><div class="metric"><span class="badge ${st?.online ? 'online' : 'offline'}">${st?.online ? '在线' : '离线'}</span></div>
       <small class="muted">掉线自动重连，任务不丢</small></section>
     <section class="card"><h3>重启恢复</h3><small class="muted">执行到一半的任务重启后标成「等你确认」，绝不自动重跑；已完成的结果原样保留。</small>
-      <details><summary>诊断：账本计数</summary><div class="mini-stat"><span><b>${esc(led.accepted ?? 0)}</b><small>accepted</small></span><span><b>${esc(led.started ?? 0)}</b><small>started</small></span><span><b>${esc(led.finished ?? 0)}</b><small>finished</small></span></div></details></section>
+      <div class="ledger-line">账本 · 受理 <b>${esc(led.accepted ?? 0)}</b> · 进行中 <b>${esc(led.started ?? 0)}</b> · 已结束 <b>${esc(led.finished ?? 0)}</b></div></section>
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
   </div>

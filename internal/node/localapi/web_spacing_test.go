@@ -55,10 +55,11 @@ func TestWebOverviewSpacing(t *testing.T) {
 		`<section class="card spaced"><h2>本机管家 · 形态</h2>`,                    // setup 分支
 		`<section class="card spaced"><div class="row"><h2>本机管家 · 形态</h2>`,   // 常态 head
 		`<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2>`, // recentTasksCard（2026-10-26 账本全量驱动随批改词）
-		// 三卡内部节奏统一：恢复卡诊断折叠内 mini-stat 保持卡内 9px 节奏（与 .metric 同）；
-		// 账本三态默认隐藏进诊断折叠（契约：账本恢复态诊断可查，主面留人话恢复说明）
+		// 三卡内部节奏统一：恢复卡账本计数条（t20261026-webfix：旧「诊断：账本计数」
+		// details 折叠+裸大数字改为一行中文标签计数条，伦哥 2026-10-26 反馈换展示形式；
+		// 卡内节奏与 .metric 同 9px，账本三态常显但人话标签小字形态不上主面重心）
 		`<h3>重启恢复</h3>`,
-		`<summary>诊断：账本计数</summary><div class="mini-stat">`,
+		`<div class="ledger-line">账本 · 受理 <b>`,
 		// 其他页同类漏挂（要求 4：一次修完，只动顶层区块间距）
 		// 注意：下一行是 Go 反引号原始串（不插值），${on} 是逐字匹配 app.js 里的
 		// JS 模板字面量源码——拼接在测试内 on 分支完成，勿当 Go 插值「修」掉。
@@ -77,11 +78,16 @@ func TestWebOverviewSpacing(t *testing.T) {
 		t.Error("app.js 不应再有未挂 spaced 的 grid cols3（区块零间距回归）")
 	}
 	// 文案契约（codex 复审 ①②，2026-10-25）：三态裸词上主面与技术态前置不得回潮——
-	// 人话在前，账本三态进诊断折叠，形态代号只进悬停（title="形态代号：…"）
+	// 人话在前，形态代号只进悬停（title="形态代号：…"）；账本三态改计数条常显
+	// （t20261026-webfix）后，旧「诊断：账本计数」折叠形态不得回潮。
 	for _, banned := range []string{
 		`执行账本（三态）`,
 		`standalone（本机自治，不连 hub）`,
 		`setup（未连接中心端）`,
+		`诊断：账本计数`,
+		`<small>accepted</small>`,
+		`<small>started</small>`,
+		`<small>finished</small>`,
 	} {
 		if strings.Contains(js, banned) {
 			t.Errorf("app.js 不应再有 %q（人话在前，技术态进诊断/悬停）", banned)
@@ -91,42 +97,24 @@ func TestWebOverviewSpacing(t *testing.T) {
 		t.Error(`app.js 应含 title="形态代号：…"（形态技术态悬停可查）`)
 	}
 	// 结构性防回潮（codex 终审，2026-10-25）：上面的正反向 Contains 只能挡逐字节
-	// 复刻，挡不住变体（details 加 open 属性、字段挪回主面、旧文案微调）——改为
-	// 解析式断言，锁结构而非字符串：
-	//   ① 诊断折叠：定位含「诊断：账本计数」的 <details> 块，开标签属性不得含
-	//      open（默认收起＝主面只留人话恢复说明），summary 之后的折叠体内含
-	//      accepted/started/finished 三字段，且三字段在全文件的出现必须全部落
-	//      在折叠体内（挪回/复制到主面即红）；
+	// 复刻，挡不住变体（字段挪回主面、旧文案微调）——改为解析式断言，锁结构而非
+	// 字符串：
+	//   ① 账本计数条（t20261026-webfix：替换旧「诊断：账本计数」折叠，伦哥反馈换
+	//      展示形式）：定位 <div class="ledger-line"> 块，锁「中文标签 + b 数字 +
+	//      esc(led.<字段> ?? 0) 数据链」完整形态，且三字段引用全文件各恰一次——
+	//      改裸英文标签、换回 details 折叠、字段引用断裂即红；
 	//   ② 形态三态配对：standalone/setup/networked 三态各验——modeTxt 链把形态
 	//      映射到人话（可见面）、modeTech 链映射到代号本身（悬停面），modeStat
 	//      模板把 title="形态代号：…" 与 esc(modeTxt) 绑在同一 <b> 上；三段咬合
 	//      才有「任一形态下人话可见 + 代号只进悬停」的配对语义。
-	var diagAttrs, diagBody string
-	for _, m := range regexp.MustCompile(`(?s)<details([^>]*)>(.*?)</details>`).FindAllStringSubmatch(js, -1) {
-		if strings.Contains(m[2], `诊断：账本计数`) {
-			if diagBody != "" {
-				t.Fatal("app.js 含「诊断：账本计数」的 <details> 应只有一个")
-			}
-			diagAttrs, diagBody = m[1], m[2]
-		}
+	ledgerRe := regexp.MustCompile(`(?s)<div class="ledger-line">(.*?)</div>`)
+	ledgerMatches := ledgerRe.FindAllStringSubmatch(js, -1)
+	if len(ledgerMatches) != 1 {
+		t.Fatalf("app.js 应恰含一个 ledger-line 计数条，got %d", len(ledgerMatches))
 	}
-	if diagBody == "" {
-		t.Fatal("app.js 应含「诊断：账本计数」<details> 折叠（账本恢复态诊断可查契约）")
-	}
-	if regexp.MustCompile(`(?i)(?:^|\s)open(?:\s|=|/|>|$)`).MatchString(diagAttrs) {
-		t.Errorf("诊断折叠开标签属性 %q 不得含 open（账本三态默认收起；<details open> 变体即回潮）", diagAttrs)
-	}
-	summary, diagContent, hasClose := strings.Cut(diagBody, "</summary>")
-	if !hasClose || strings.Count(diagBody, "<summary>") != 1 || !strings.Contains(summary, `诊断：账本计数`) {
-		t.Fatalf("诊断折叠应为一个 <summary>诊断：账本计数</summary> + 折叠体，got %q", diagBody)
-	}
-	for _, field := range []string{"accepted", "started", "finished"} {
-		label := "<small>" + field + "</small>"
-		if n := strings.Count(diagContent, label); n == 0 {
-			t.Errorf("诊断折叠体内应含账本字段 %s（三态进折叠，不得上主面）", field)
-		} else if strings.Count(js, label) != n {
-			t.Errorf("账本字段 %s 在诊断折叠之外还有出现（挪回主面回潮）", field)
-		}
+	ledgerBody := ledgerMatches[0][1]
+	if !strings.HasPrefix(ledgerBody, `账本 · 受理 <b>${esc(led.accepted ?? 0)}</b> · 进行中 <b>${esc(led.started ?? 0)}</b> · 已结束 <b>${esc(led.finished ?? 0)}</b>`) {
+		t.Errorf("ledger-line 计数条结构被改：应锁「账本 · 受理/进行中/已结束 + esc(led.<字段> ?? 0)」完整中文标签+数据链形态，got %q", ledgerBody)
 	}
 	assign := func(name string) string {
 		m := regexp.MustCompile(`(?s)const ` + name + ` = (.*?);`).FindStringSubmatch(js)
