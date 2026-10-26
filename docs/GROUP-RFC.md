@@ -1,89 +1,76 @@
-# SwarmMind GROUP-RFC：群聊/协作空间（v1.0 草案，2026-10-20）
+# 群聊与协作空间设计
 
-> 三方讨论产物：Hana（产品编排）+ zcode（实现者视角）+ codex（协议/架构视角）。
-> 状态：**MVP 已合入**（2026-10-22：group store + REST + 控制台群聊页 + MCP 五工具），实现偏差与恢复归属见第八节。
-> **2026-10-24 产品方向 v2**：关门清单（发言许可制/推送扇出 group_msg_event/多维预算/24h 过期）转入**实验区冻结**——单人群场景 MVP 子集够用，有真实自治讨论需求再晋级（docs/PRODUCT-DIRECTION-v2.md）。
-> **R7 终审待闭合项（原要求 P4 关门前闭合；2026-10-24 产品方向 v2 起随完整协议一并转实验区冻结，见顶部注与第八节）**：①协议闭环补帧（group_ack/发言许可/stop/转任务与终态回流）；②历史补齐的缺口响应与游标落盘规则；③人类主体与权限模型（observer 权限/邀请授权与 exposed 协调）；④MVP 与 DoD 对齐（waiting_human 与 paused 关系/预算预留结算纳入 MVP）。
+> 本文区分当前实现与暂缓的完整协议设想。现有群聊提供讨论记录和任务关联，不构成自主多 agent 工作流或独立权限系统。
+> 接口见 `internal/hub/api/groups.go`，存储见 `internal/hub/group/`，工具映射见 [SPEC 六.六](../SPEC.md)。
 
-## 一、问题与定位
+## 一、用途
 
-当前任务模型是单发单收（submit→execute→result），agent 每次被调用都是冷启动：无记忆、无延续。复杂目标需要的「讨论、分工、互相评审、迭代」无法表达。
+协作群围绕一个目标保存消息和相关任务。用户可以记录讨论、指定成员执行正式任务，再查看任务结果回流。群记录与任务记录是不同实体：发消息不等于提交任务，形成讨论结论也不等于工作已完成。
 
-**群聊 = 有目标的多 agent 持续协作空间**：Group 是一等实体（非任务附属），因为目标驱动的协作可能产生多个任务、多轮迭代。人可以是 observer（旁观）或 member（参与）。
+## 二、当前数据模型
 
-## 二、核心模型（采纳 zcode 骨架 + codex 修正）
-
-```
-Group        {group_id, goal, success_criteria?, status(forming|discussing|paused|concluded),
-              host, host_term, members[], budget, created_at}
-Member       {agent_ref{node_id, agent_name}, role(host|member|observer)}
-GroupMessage {msg_id, group_id, seq, from, reply_to?, kind(user|agent|system), body, created_at}
-Task         + GroupRef string `json:"group_ref,omitempty"`   // 向后兼容
-Session      {(group_id, member) → session_id/resume能力映射}   // 协议实体预留（见风险节）
-```
-
-- `seq` 由 hub 单调分配：历史一致性的唯一锚点（思想同 epoch）
-- `status` 只四态；`concluded` 终态不可回退（对齐任务状态机哲学）
-- `success_criteria` 可选：收敛判定的可验证依据（codex：意见一致≠目标完成）
-
-## 三、协议（新增 6 帧，全走现有 Envelope）
-
-| type | 方向 | 语义 |
+| 实体 | 主要字段 | 含义 |
 |---|---|---|
-| group_create | 人/agent→hub | goal+members+host? → group_ack{group_id}；hub 校验成员已注册且 exposed |
-| group_msg | 成员→hub | hub 落盘分配 seq 后扇出 |
-| group_msg_event | hub→成员 node | 完整 GroupMessage；node 回 ack 仅驱动补推游标 |
-| group_sync | node→hub | {group_id, since_seq} 重连补拉，按 seq 去重 |
-| group_close | host/人→hub | → concluded，终态 |
-| group_task_created | hub→群 | 转正式任务时自动注入 kind=system 消息（task_id+status+截断 FinalAnswer） |
+| Group | `group_id`、`goal`、`status`、`host`、`members`、`budget`、`task_refs` | 目标、成员标识、消息预算与关联任务 |
+| GroupMessage | `msg_id`、`group_id`、`seq`、`from`、`kind`、`body`、`created_at` | 按组内序号排列的消息 |
+| Task.group_ref | 群 ID | 将一次正式派发关联到群 |
 
-**可靠性语义（两方共识）**：群消息不做三段 Ack，做「至少一次 + seq 补齐」——群消息无副作用，重复投递最坏是重复说一句话，msg_id+seq 幂等足以压住；hub 侧先写后见落盘（复用 4.7 事务模式），node 侧不持久化只存 last_seq 游标。agent 发言失败不重试（防发言风暴），失败变 system 消息由 host/人决策。
+当前创建即进入 `discussing`，关闭后为 `concluded`，不再接受普通消息。`forming` 是预留值；早期规划的 `paused`、成员角色权限和 host_term 发言租约不属于当前完整可用契约。
 
-**独立轻量信箱**：群消息 200 条滚动/24h 过期/单体 8KiB 上限——不与任务信箱（100 条/7 天/8MiB）混用，防群聊刷屏挤兑正经任务。
+群和消息持久化到 hub `data_dir/groups.json`，与任务快照分开。消息 `seq` 由 hub 单调分配，窗口裁剪不会把序号或预算计数重置。
 
-## 四、编排与护栏（采纳 codex 修正）
+## 三、REST 与 MCP
 
-1. **发言许可制**：消息全员可见，但只有获得发言许可的成员启动计算；补历史/重放/Ack 一律不触发回复。V1 默认流程：收集意见 → host 归纳 → 定向质疑/补证 → 决策或转 Task → 验证
-2. **主持权**：V1 的 host 就是人（防死循环最便宜的手段是发言权在手里）；协议字段预留 `host_term`（任期+轮次+截止），V2 自动主持时做租约 fencing——旧主持人迟到调度必须被拒
-3. **预算代码强制（非 prompt 约定）**：总轮数/agent 调用次数/Task 数/墙钟/单次上下文/输出长度/每成员与全群预算；派发前预留、完成结算；CLI 无法报 token 时显示「估算/未知」用次数与上下文大小兜底
-4. **收敛**：goal 配 success_criteria；无新证据/同义反复/达预算 → paused/waiting_human；意见一致≠目标完成；副作用执行中断保留 needs_review，禁止因群未完成自动重跑
+| 操作 | REST | MCP |
+|---|---|---|
+| 创建群 | `POST /api/v1/groups` | `swarmmind_group_create` |
+| 群列表 | `GET /api/v1/groups` | `swarmmind_group_list` |
+| 发送消息 | `POST /api/v1/groups/{id}/messages` | `swarmmind_group_say` |
+| 增量读取 | `GET /api/v1/groups/{id}/messages?since=N` | `swarmmind_group_messages` |
+| 关闭群 | `POST /api/v1/groups/{id}/close` | `swarmmind_group_close` |
+| 关联任务 | 提交任务时携带 `group_ref` | `swarmmind_submit` 的 `group_ref` |
 
-## 五、会话持续性（最大风险与解法）
+消息读取返回 `seq > since` 的现存消息，并通过 `pruned_before_seq` 标明已裁剪区间。游标落在被清理区间时只能取得剩余消息，不能保证恢复全部历史。
 
-**根本张力**：V0 全部可靠性建立在「任务=无状态单次执行」上；群聊要求跨调用记忆，而记忆的两条路各有代价——策略 b（context-injection）每轮全量重放上下文，3 成员×10 轮×32KiB 注入即百万 token 级成本；策略 a（session-resume）记忆存 node 本地，hub 不可见、行为不可解释。
+外部发送消息只允许 `user` 或 `agent` 类别；`system` 为 hub 内部任务注记和结果回流保留。显示字段 `from` 和 `host` 不能单独作为可验证身份或细粒度访问授权依据。
 
-**解法（两方融合）**：
-- MVP 只实现策略 b（prompt 模板版本化、固定窗口裁剪替代 LLM 摘要）
-- **协议先为 a 留位**：session_id 贯穿群消息帧、node 上报 session 生命周期事件（created/resumed/overflow）、AgentCard 声明 resume 能力；维护 (group_id, member) → session 映射（对齐 A2A contextId 不透明标识经验）
-- 记忆漂移（原生 session vs 注入窗口）是设计固有属性，文档声明不强求一致
-- desktop 原生会话推送（策略 c）留 V2
+## 四、任务关联与执行
 
-## 六、MVP 切法（zcode 案，codex 补充采纳）
+群消息通过 REST/MCP 读取，不向所有 node 自动扇出，也不会因历史补拉或消息重放自动启动所有成员。需要执行时，由控制台或调用者提交正式任务；成员名称与消息中的提及本身不是独立的派发协议。
 
-一句话：**人建一个 2-3 agent 的群，按序点名发言讨论出结论，人可随时插话，结论转一个正式任务，结果回流群。**
+携带 `group_ref` 的任务与群建立引用，hub 写入创建注记并在终态回流结果。群显示或注记失败不改变已提交任务的执行事实；终态回流有去重和补偿机制，但仍受存储错误、群状态及消息保留窗口影响。
 
-不做：host 自动决策、LLM 摘要、自由讨论模式、策略 a/c 实现。
-做：协议 6 帧 + 2 Schema + Task.GroupRef；hub group store（复用先写后见）+ seq + 扇出补推 + 独立信箱；node 策略 b + FinalAnswer 回传；`swarmmindctl group create/say/talk/close`（talk=点名驱动循环，人 stop 或轮数上限即结束）。
+群关闭不等于取消已经关联的在途任务。任务取消由管理员通过现有管理面处理；执行不确定时仍遵循 `needs_review` 的人工核对流程。
 
-群版 DoD 增补（不替代原 11 条）：双成员群 3 轮往返；离线重连 group_sync 补齐不重复；转任务+结果回流；spawn 失败注入 system 消息；同 msg_id 重放不重复发言；旧 host_term 不能继续派发。
+## 五、预算与保留
 
-## 七、安全与阶段
+| 项目 | 当前实现 |
+|---|---|
+| 单条正文 | 8 KiB 字节上限 |
+| 滚动窗口 | 每群最新 200 条消息 |
+| 消息过期 | 24 小时；写入与周期维护路径执行清理 |
+| agent 发言预算 | `max_rounds`，默认 20 条 `kind=agent` 消息 |
+| user/system 计数 | 不计入 agent 发言预算；仍受消息大小和保留窗口约束 |
 
-- hub 可见明文在群聊暴露面变大：群消息体 8KiB 上限 + 文档级警告；端到端加密按规划 V2
-- 群是新的信任边界：拉人进群=暴露群历史给新成员，邀请需 host 确认（与 D7 接入主权协调）
-- **阶段归属（codex 建议，采纳）**：V0/P1-P2 只留边界（信封寻址扩展、消息类型命名空间，不实现群状态机）；V0.5/P3 验证持续上下文+控制台鉴权；**P4/V1 交付完整协作空间**（Group、邀请授权、历史补齐、主持权、预算护栏、人 observer/member）——*2026-10-24 冻结：完整协议转实验区，仅保留 MVP 子集，见 PRODUCT-DIRECTION-v2*；V2/P5 深度桌面联动、跨组织联邦、群端到端加密
-- 业界借鉴：A2A contextId、SLIM 群会话成员控制、Mattermost since 补取、AgentBridge 有界收敛——V1 不引入 SLIM/MLS/新中间件，维持轻量自研路线
+窗口裁剪和过期并存，先达到限制的条件可以使历史消息不可再取。agent 预算使用累计计数，不因旧消息清理而恢复。预算耗尽返回 `budget_exhausted`，不是自动结束全部关联任务。
 
-## 八、MVP 实现偏差记录（2026-10-22）
+代码未提供 token、墙钟时间、每成员调用次数等完整预算体系。不能把早期多维预算设计写成当前已具备的强制约束。
 
-> 独立评审后补记：MVP 已合入部分（hub group store + REST + 控制台群聊页 + MCP
-> 五工具，2026-10-22）相对本 RFC 的已知偏差。均属「六、MVP 切法」范围内的裁剪，
-> 逐条注明恢复归属，防后续实现者误把 MVP 现状当 RFC 全量。
+## 六、当前未实现或暂缓的设计
 
-1. **预算全维裁为 max_rounds**：四.3 所列 token/墙钟/单次上下文/输出长度/每成员等维度均未实现，仅剩 agent 消息条数一维（默认 20，`group.Store` 代码强制，用尽返回 `budget_exhausted`）。
-2. **群消息不做 node 推送扇出**：三 的 `group_msg_event` 扇出未做；消费侧统一为 REST 增量拉取（`GET /api/v1/groups/{id}/messages?since=seq`，控制台 3s 轮询、MCP `swarmmind_group_messages` 同口径）。
-3. **node 侧不持久化群消息**：node 不保存群消息，last_seq 游标机制（三 可靠性语义）随之未做；留 V2 与推送扇出一并交付。
-4. **协议 6 帧中 group_sync / group_msg_event 未实现**：历史补齐与事件推送由 REST since 增量拉取替代（语义等价：seq 单调 + 只补增量）；group_create / group_msg / group_close / group_task_created 以 REST 端点语义落地（POST groups、POST messages、POST close、转任务注记）。
-5. **发言许可制简化为 @提及触发**：四.1 的许可仲裁未做——成员智能体不因群消息自动启动计算，仅在人点名提及（或其操作者主动经 MCP `swarmmind_group_say`）时参与发言；补历史/重放不触发回复的原则不变。
+| 设计项 | 当前边界 |
+|---|---|
+| `group_msg_event` / `group_sync` 等 WebSocket 群协议 | 现有读取使用 REST 增量接口，不提供 node 推送与本地群游标持久化 |
+| 发言许可、主持权任期、自动收敛 | 由调用者组织讨论，不存在完整仲裁状态机 |
+| 成员邀请、observer/member 细粒度授权 | 当前成员标识不能替代独立权限模型 |
+| 跨调用 agent session-resume | 不保证恢复任意客户端原生会话或统一其记忆 |
+| `swarmmindctl group ...` | 当前 CLI 不提供这些子命令；群操作使用控制台、REST 或 MCP |
+| 多维预算与自动摘要 | 暂缓，需明确需求和验收条件 |
 
-**信箱配额声明**：三 的「独立轻量信箱 200 条滚动/24h 过期/单体 8KiB」中，已落实**单体 8KiB 上限**（`group.MaxBodyBytes`，按字节实测）、**200 条滚动窗口**（`group.MaxGroupMessages`，2026-10-22 双审批 C 落地：超窗口从最小 seq 起丢最旧，seq 账本与 agent 预算计数独立累计不回退；`ListMessages` 响应以 `pruned_before_seq` 标注已裁区间上界供调用方对齐游标；裁剪随先写后见事务落盘，`groups.json` 不无限膨胀）与 agent 发言预算护栏。**24h 过期仍未做**，与 node 推送扇出原列 **P4 关门前清单**——2026-10-24 起转实验区冻结（PRODUCT-DIRECTION-v2），不再作为关门 DoD 核实项；过期落地前，防刷屏挤兑任务信箱靠 200 条滚动 + max_rounds 预算（仅约束 agent 发言；人/system 发言无条数上限，靠 8KiB 单体上限、200 条滚动与群终态兜底）。
+这些范围根据 [产品方向](PRODUCT-DIRECTION-v2.md)按需求重新评估。已有 24 小时过期机制不再列为待实现项。
+
+## 七、安全与验证
+
+hub 能读取群消息；当前没有群消息端到端加密或多组织隔离。添加成员、展示历史和引用工具输出时，应遵循现有管理员信任模型，不推导未实现的权限保证。
+
+验证应覆盖：创建/列表/关闭、消息大小、累计预算、200 条窗口、24 小时过期、增量游标缺口、外部伪造 system 消息拒绝、任务引用、快速终态回流与重复回调去重。真实 agent 讨论质量与存储/协议正确性分别验收。

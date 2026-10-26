@@ -1,6 +1,6 @@
 # SwarmMind SPEC — V0（v3.0 FINAL）
 
-> 上位文档：PLAN.md v3.0 FINAL。本文是 V0 的唯一执行真相源。
+> 本文维护协议、接口与可靠性契约，包含 V0 基础及后续 P3–P5.1 增补。项目范围与实施状态见 [PLAN](docs/PLAN.md)。契约要求、实际运行差异与验收报告分别标注。
 > 版本轨迹：v2 契约闭合 → v2.1 Schema/产物/权限升级（内容升级时未滚动版本号，终审修正）→ v3.0 FINAL：终审修订——产物拉取协议、FinalAnswer 提取规则、版本号统一、校验链顺序、60s 断开规则、ExecProfile 字段补齐、DoD 十一条。
 
 **目录**
@@ -25,9 +25,9 @@
 
 - hub 单进程双监听：
   - `node_listen`（默认 `:8443`）：node 会话入口，路径 `/ws/node`。TLS 证书 hub 首次启动自签生成存 `data/`（ECDSA P-256）。配置 `insecure_loopback: true` 时降级为 ws:// 且强制校验监听地址为 127.0.0.1/::1，非回环拒绝启动（代码强制，非文档约束）。
-  - `api_listen`（默认 `127.0.0.1:8444`）：HTTP 管理面 `/api/v1/*`，与节点监听物理分离。**V0 强制只绑 127.0.0.1**（代码校验，无鉴权面不得离开回环；未来需要内网访问时随管理鉴权一起设计）。
+  - `api_listen`（默认 `127.0.0.1:8444`）：HTTP 管理面 `/api/v1/*`，与节点监听物理分离。默认回环监听。当前实现允许配置非回环地址，但要求预先设置非空 `admin_token`，否则拒绝启动；管理面仍为 HTTP，远程访问需配置 HTTPS 反代或 SSH 转发。
 - node 单进程：不监听任何公网端口，仅提供本机回环 API（127.0.0.1:8445，提交/查询）。指纹校验：`hub_pubkey_fp` = 证书 SPKI 的 SHA-256（base64）；TOFU——首连成功将 `host:port→fp` 记入 `data/trusted_hubs.json`，此后不匹配即断开告警；指纹非空则首连即强校验（TLS 握手时完成 pin 验证，验证通过后才发 register_token）；TOFU 记录写失败仅告警不阻断。
-- 鉴权：register_token 每 node 独立（hub 配置 `nodes: {<node_id>: <token>}` 映射），token 绑定 node_id，不可跨身份使用。**每次连接全量鉴权**（V0 无会话凭证复用/撤销机制，V2 再建），连接本身即会话。防重复执行保证范围=同一 data_dir 账本（单实例锁，见 4.7）；复制 token 到他机属新 node 需新 token。
+- 鉴权：register_token 每 node 独立（hub 配置 `nodes: {<node_id>: <token>}` 映射），token 绑定 node_id，不可跨身份使用。**每次连接全量鉴权**（V0 无会话凭证复用/撤销机制，V2 再建），连接本身即会话。防重复执行保证范围=同一 data_dir 账本（单实例锁，见 4.7）；新增节点应分配独立 node_id 与 token；复制同一身份并发运行可能替换当前会话，不视为安全的新节点注册。
 
 ## 三、目录结构
 
@@ -183,7 +183,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 | 信箱配额 | 100 条/node（计 submitted 状态），出队转 offered 即释放；offered 超时回退 submitted 时若配额已满仍回队（重投预留，允许短暂超额，不丢已确认任务）；满则 503 + `mailbox_full` |
 | stdout/stderr tail | 64KiB |
 | 任务离线保留 | 7 天（expire_at 到期非终态 → failed/error=expired） |
-| 终态保留 | 24h 后从快照清理；node 账本 result_acked 条目 24h 后清理 |
+| 终态保留 | hub 终态任务 24h 后清理；node 已实现 CleanupAcked（按 first_acked_at+24h），但当前未接入运行循环，不能视作自动清理已生效，审计保留策略待确定 |
 | node 执行并发 | 2（可配） |
 | 信箱字节预算 | 每 node 8MiB（submitted 任务体字节和），超则 503 `mailbox_full` |
 | hub 任务存储全局字节预算 | 256MiB（含终态 24h 保留），超则拒新提交 503 `storage_full`；部署声明：2核2G 云机目标为低负载（≤5 node 且预算内），满配（20 node×100 条×1MiB≈2GiB）不承诺 |
@@ -201,8 +201,8 @@ node 侧关键顺序：accepted 落盘成功 → 发 task_ack；started 落盘�
 - accepted（未 started）：检查任务 expire_at——已过期 → 不执行，写 finished（status=failed，error=expired）并回传；未过期 → 进入本地调度执行；
 - started 未 finished：执行结果不确定 → 写 finished，status=`needs_review`，error=`node_restarted_midway`，回传；**禁止自动重新执行**；
 - finished 且未 acked：重发 task_result 直至 result_ack。
-result_acked 条目 24h 后清理。needs_review 是独立终态：查询可见、语义为「执行结果不确定，需人工核对」，协议与展示层不得折叠为 failed（防止调用方误自动重提）。
-**产物隔离与保留**：产物目录按任务隔离（outputs/<task_id>/），进程结束后 runner 冻结产物清单（登记后新增文件不追认）；产物文件保留至 result_ack 后 24h；artifact_fetch 取回时 node 校验 SHA-256 与登记一致，不一致回 err(artifact_mismatch)。
+已实现的 CleanupAcked 可按 first_acked_at+24h 清理 result_acked 条目，但当前未在运行循环调用；该时间是清理契约而非已生效的自动审计保留期。needs_review 是独立终态：查询可见、语义为「执行结果不确定，需人工核对」，协议与展示层不得折叠为 failed（防止调用方误自动重提）。
+**产物隔离与保留**：产物目录按任务隔离（outputs/<task_id>/），进程结束后 runner 冻结产物清单（登记后新增文件不追认）；原设计要求以 result_ack 后 24h 作为产物保留窗口，但当前没有相应的自动文件回收接线；文件实际可取还取决于源文件、账本、节点可达与 hub 任务记录，不能据保留期保证一直可取；artifact_fetch 取回时 node 校验 SHA-256 与登记一致，不一致回 err(artifact_mismatch)。
 
 ### 4.9 核心数据结构 Schema（完整字段表，实现以此为准）
 
@@ -328,7 +328,7 @@ type TaskSubmitRequest struct {
 1. **授予**：每次派发（dispatch 事务内）捕获该 node 当前注册代次（4.4）作为租约快照，随 offer 帧下发并落库 `Task.Lease.FenceEpoch`——**重派（重新授予）即按当下注册代次重新落库：node 已换代（重连 epoch+1）后的重派即换新租约；同会话内的补推（未换代，如 offer 超时回退后原代次补推）捕获同值，租约等值不变**。重派写时复制保留 `Lease` 的拒收审计字段（Rejects/LastRejectedFence/LastAt 只随任务累计，不因换租约清零）。代次为 0（membus 等价链路未注册）不落库。
 2. **回带**：node 入账时（`ledger Entry.FenceEpoch`）随条目持久化租约快照，task_result（含重连重发/重复 offer 重发等全部路径）原样回带；账本条目的租约只在 hub 显式（重）授予时变更——入账，或**重臂**（重复 task_offer=重派收口，携新代次，node `RearmFence` 对齐后重发；task_cancel=取消收口的对账取大者，见第 5 条）。重臂**落盘失败即不确认不回发**（hub 按 offer-ack 超时重推本帧重试）——带旧租约的确认与回执对新租约 hub 必拒，只会把任务推入永久滞留。重臂换新代次成功时同时解除该条目的 closed（被拒旧代次的停止重发标记随代次一并失效，新租约下的结果重发恢复）；重连重发等 node 自发路径永不改写；zombie 进程无当前会话，收不到授予帧即无法自臂。
 3. **仲裁**：hub 结果仲裁在状态收敛前校验——回带 `fence_epoch` 与任务落库租约**等值**才进入收敛表；**缺省宽容**：回带缺失（0，旧版 node/旧账本/未携租约派发）按「缺省=当前租约」放行，向后兼容。**等值基准是任务落库租约而非 node 当前代次**：进程重启恢复（SPEC 4.8 needs_review 回传）、结果重发（4.5）都是「新会话持有者报旧租约执行结果」的合法路径，等值基准取任务租约使这些路径自然通过，同时精确排除「重派后旧派单回写」（唯一被门禁拦下的正是租约不符的回写）。**防御边界声明：缺省宽容是无条件降级通道——旧版 node（不回带 fence_epoch）不受租约门禁保护**，其回写按「缺省=当前租约」放行；本机制的防写边界仅覆盖升级后回带租约的 node，混部期 zombie 若为旧版进程，防线退化为会话层身份担保（4.4）。
-4. **拒收**：不符 → `zombie_result_rejected`：任务维持原状态（不改 Status/UpdatedAt/Result，不动七态状态机），`Task.Lease` 记审计（Rejects++/LastRejectedFence/LastAt，随快照持久化、查询面可见），hub stderr 记日志（含 fence_epoch 与 current_lease），并回 err(result_conflict)（msg 注明 zombie_result_rejected，ErrInfo 结构化携带 `fence_epoch`=被拒回带值、`lease_epoch`=当时落库租约）——node **仅当被拒 fence 与账本条目当前 fence 等值才置 closed 停止重发**（拒收旧代次不得关闭已重臂条目，否则新租约结果首发丢失后周期/重启补传全被跳过，任务永久滞留；未携 fence 字段的旧版对端与普通终态冲突按既有规则无条件关闭），zombie 结果不再周期性重入仲裁。
+4. **拒收**：不符 → `zombie_result_rejected`：任务维持原状态（不改 Status/UpdatedAt/Result，不动既有任务状态机），`Task.Lease` 记审计（Rejects++/LastRejectedFence/LastAt，随快照持久化、查询面可见），hub stderr 记日志（含 fence_epoch 与 current_lease），并回 err(result_conflict)（msg 注明 zombie_result_rejected，ErrInfo 结构化携带 `fence_epoch`=被拒回带值、`lease_epoch`=当时落库租约）——node **仅当被拒 fence 与账本条目当前 fence 等值才置 closed 停止重发**（拒收旧代次不得关闭已重臂条目，否则新租约结果首发丢失后周期/重启补传全被跳过，任务永久滞留；未携 fence 字段的旧版对端与普通终态冲突按既有规则无条件关闭），zombie 结果不再周期性重入仲裁。
 5. **task_cancel 口径（P1-2 修订）**：取消帧自身**不需要门禁**——取消 ⇒ 任务 hub 侧终态 ⇒ 同 task_id 永不重派，故「旧取消命中新派单执行」在结构上不可能；重复取消由幂等 ack/取消墓碑收敛（node 侧既有语义）。帧携 **hub 当前任务落库租约（cancel_fence）**，node 侧取消回写（task_result(cancelled)）前对「账本条目租约 vs cancel_fence」**取大者重臂**后回带——重派已推进租约而 node 未及重臂的滞后（ack 丢后重派、重派 offer 送达失败留 submitted 等）经取消帧补授收敛；hub 对 cancelled 回执按 **cancel_fence ≥ 落库租约**宽校验接受（取消是管理面意图，宽于执行回执的等值）。经当前会话送达的取消帧 zombie 收不到，无法伪造新 cancel_fence；旧代次的 cancelled 回执（< 落库租约）仍被第 3 条门禁拒收。ack/started 类过程帧同理不设门：无结果载荷，无状态污染面。
 
 **与 4.4 会话 epoch 的关系**：正交两层。会话 epoch 保证「帧只经当前会话进入」（传输层，送达方身份可信）；任务租约保证「回执对齐当前派发」（任务层，派发代次一致）。防御目标：同 node_id 被两个进程持有（部署事故/慢 zombie 抢回连接）时，旧进程在旧派单下产生的结果无法覆盖新派单状态。
@@ -343,7 +343,7 @@ type TaskSubmitRequest struct {
 
 **寻址（FILE-COLLAB 终审口径）**：`depends_on` 使用 **idem_key**（跨重跑稳定）而非 task_id；声明后不可变（提交即定，无改边路径）。
 
-**Schema（新字段全部 optional，七态状态机/收敛表/终态规则零改动）**：
+**Schema（新字段全部 optional，既有任务状态机/收敛表/终态规则零改动）**：
 
 | 字段 | 载体 | 语义 |
 |---|---|---|
@@ -360,10 +360,10 @@ type TaskSubmitRequest struct {
 6. 级联超限：上溯可达的去重上游任务总数 > 8；
 7. 依赖环：边只指向已存在任务天然无环；防御 idem 跨终态清理期被复用构环——上溯链解析回自身 idem 即拒绝。
 
-**幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。**清单文案一次性变更声明（2026-10-24，挂载交付）**：清单尾注由「产物自动挂载尚未提供」更新为挂载位置说明（`inputs/<上游task_id>/`）——指纹含生效 stdin 全文，跨本次升级重试「升级前提交的携依赖+idem 任务」将 409 conflict 而非 dup 命中（属一次性声明的不兼容；绝对稳定的重试请换新 idem_key）。**第二次一次性变更声明（2026-10-24，跨机取回交付）**：清单尾注「跨机场景暂未提供自动取回」更新为跨机自动取回说明（同前例：升级窗口内携依赖任务的幂等重试 409 conflict，换新 idem_key 可绝对稳定重试）。
+**幂等指纹口径（SPEC 4.5 补充）**：声明 `depends_on` 时提交输入取**生效形态**——stdin 尾部附加依赖清单（上游 idem 列表；幂等判据 `[swarmmind:depends_on]` 标记行，不重复追加），清单为提交请求的确定性函数；请求指纹（ContentHash）与落库任务指纹（taskContentHash）过同一变换，重试 dup 判定不受清单注入影响。未声明依赖时逐字节兼容旧口径。依赖列表本身参与指纹（同键换依赖=不同内容=409）。**清单文案一次性变更声明（2026-10-24，挂载交付）**：清单尾注由「产物自动挂载尚未提供」更新为挂载位置说明（`inputs/<上游task_id>/`）——指纹含生效 stdin 全文，跨本次升级重试「升级前提交的携依赖+idem 任务」将 409 conflict 而非 dup 命中（属一次性声明的不兼容；出现冲突时先查询原任务、核对是否已接受或执行；不要仅为绕过冲突而换键重复提交）。**第二次一次性变更声明（2026-10-24，跨机取回交付）**：清单尾注「跨机场景暂未提供自动取回」更新为跨机自动取回说明（同前例：升级窗口内携依赖任务的幂等重试 409 conflict，冲突时先查询原任务并核对执行事实，需要新的执行时才分配新键）。
 
 **门控与调度**：
-- **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；七态状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用）。
+- **blocked 不进状态机**：依赖未满足的任务保持 `submitted`，不投递；既有任务状态机、迟到事件收敛表、终态规则零改动。出队 eligible 增补一条：`BlockedReason` 非空即跳过（与 P1.5 workdir 互斥门控同机制复用）。
 - **blocked 任务留信箱占配额**：入箱/计量口径与普通 submitted 任务一致；信箱满拒新提交的既有语义不变（SPEC 4.6）。
 - **事件触发复评**：上游任务到终态的仲裁事务处——result.go 首次落终态（task_result 接受分支）、CancelTask 置 cancelled、Sweep 三处置终态（expired/排队超时/offer 超时过期）——**同一单写事务内**复评其 idem 的全部下游任务（依赖全 completed → 解除阻塞，发布后按目标节点 dispatch；任一上游 failed/needs_review/cancelled → 保持 blocked 并更新标注）。单事务原子生效，无「上游已 completed 而下游仍 blocked」的事件丢失窗口。
 - **Sweep 兜底**：每秒扫描（`sweepInterval` tick）对全部 blocked 的 submitted 任务全量复评，防御未知路径的事件丢失；解除阻塞随本轮 dispatch。
@@ -383,7 +383,7 @@ type TaskSubmitRequest struct {
 - **限制（对登记重检，防御超清单）**：每上游 ≤8 件（MaxArtifacts）、单件 ≤640KiB（ArtifactLimit），与既有产物扫描口径一致。
 - **失败语义**：上游产物缺失/SHA 不符/超限/解析失败/发布失败 → 下游任务 **accepted 直达 failed**（不 started 不执行，对齐 expired/policy_denied 的 pre-started 失败先例），`error=input_prepare_failed` + 上游任务 ID + 文件定位；该失败即上游失败语义，继续向下游的下游传播 `upstream_failed` 标注。挂载期间管理面取消 → cancelled 收口；服务关闭打断 → 条目保持 accepted 由重启恢复再调度（重挂幂等：先按 journal 回放收敛崩溃残留再挂载）。
 - **独立超时**：输入准备独立于任务执行超时（service 装配参数 `InputPrepareTimeout`，默认 60s；本子轮不进 node.yaml），超时按上述失败语义收敛。
-- **边界（如实声明）**：同机（同 node）上游直接读本机 outputs 目录；上游在异机 node → 自动跨机取回（见下段）；上游 agent 配置漂移（workdir 不可定位，本机性失败）同失败不转远端（文案即真相）；上游 completed 零产物登记（答案型）→ 不建目录不失败（本地/远端口径一致）；同一上游任务满足多个 idem → 去重只挂一次。
+- **边界（如实声明）**：同机（同 node）上游直接读本机 outputs 目录；上游在异机 node → 自动跨机取回（见下段）；上游 agent 配置漂移（workdir 不可定位，本机性失败）同失败不转远端（返回明确原因）；上游 completed 零产物登记（答案型）→ 不建目录不失败（本地/远端口径一致）；同一上游任务满足多个 idem → 去重只挂一次。
 - **无依赖红线**：无 `depends_on` 的任务不进入挂载路径，行为零变化。
 
 **跨机取回（P4④第二子轮，2026-10-24 交付；FILE-COLLAB L2「跨机交接」的 V0 形态，分块传输 V1 不做）**：下游 node 本机账本无依赖 idem 的 completed 上游时（源在异机 node，或本机账本条目已随保留期清理而 hub 尚存），经 hub 中继自动取回上游产物字节流，进入与同机路径**完全相同**的挂载事务（`UpstreamInputs.Fetch` 字节源缝：SHA 校验/暂存/原子发布/回滚零分叉；standalone/setup 不装配跨机取回，行为与第一子轮一致）。
@@ -480,18 +480,18 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 ### node 本地 API（本机派发/查询入口，V0）
 
-node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：`POST /api/v1/tasks` 与 `GET /api/v1/tasks/{id}`，语义与 hub 管理面一致，内部经 WSS 会话转发为 task_submit/task_query 帧。任意本机进程（脚本/agent）都能对本机派单与查询，但**只限本机**：`target_node` 非本机 node_id 即 400 拒绝（不发帧、不留提交日志），hub 侧 D9/D10 双保险兜底——node 无全网派发与全网视图，跨机协作统一经 hub（MCP/A2A）发起。**已知限制**：提交方若非 node 本机而是 hub 侧回环调用方，取结果靠 hub 管理面轮询；node 提交方的终态经 result_event 推送。
+node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks` 走 `SubmitLocalDirect` 在本机账本接受并执行，不要求经 hub 转发；`GET /api/v1/tasks/{id}` 根据本机执行记录与任务来源返回结果或相应指引。调用须通过本机凭据鉴权，编排入口还受 prime_agent/prime_token 规则约束。target_node 只能是本机 node_id，跨机任务统一经 hub 入口提交。`GET /api/v1/local/tasks` 返回本机现存账本任务（含 hub 下发）并合并提交留痕，支持 limit/offset/total：默认 200、上限 1000，非法参数 400，超出 limit 上限按 1000 截取。该清单不代表永久历史；自动账本清理尚未接入，保留策略另行确认。旧 node 会话 task_submit/task_query 协议仍受上一段归属约束，不等于当前本机直执行 API 的实现路径。
 
 **通知渠道管理（standalone 通知补盲区，2026-10-24）**：standalone 模式（hub_url 为空）hub 不存在，任务终态无任何 IM 通知——node 自己发通知补盲区；**networked 模式通知归 hub 统一发送，node 不装配（零调用零重复），setup 亦不装配**。触发挂钩在 node service 终态落账本点（`MarkFinished` 成功 = 首次落终态，账本先到为准天然去重；覆盖正常完成/过期/取消/关闭中断/墓碑收口全部路径，`internal/node/service/notify.go`）。渠道配置存 `data_dir/notify_channels.json`（与 hub 同一 JSON 存储形态：internal/notify.ChannelStore + internal/settings.Store 原子写），**node.yaml 不设 notify 段**——控制台 CRUD 要求运行时可改即时生效（node.yaml 编辑走「应用并重启」流程），node 为全新能力无存量配置需兼容（hub 的 YAML legacy 导入是为存量用户付的兼容成本，node 不重复背），凭证放 data_dir（0600，与 local_token/prime_token 同域）也更符合本仓安全纪律。端点组：`GET|POST /api/v1/local/notify/channels`、`PUT|DELETE /api/v1/local/notify/channels/{id}`、`POST /api/v1/local/notify/channels/{id}/test`（列表脱敏/创建/更新占位保留/删除/发测试），全部仅 local_token 可调（主人管理面，六.六豁免⑧）；inbox 类型 node 侧准入即拒绝（站内通知为 hub 控制台铃铛专属，node 控制台无铃铛动线）；非 standalone 模式端点组 503 降级。安全红线同 hub：读响应脱敏（Channel.Masked）、占位保留更新、投递/展示分离（原始 URL 投递、错误路径剥 path/query/userinfo）、日志不泄凭证、SMTP 全链路 deadline。控制台入口「我的服务 → 通知」（status.notify_available 门控）。
 
-**统筹凭证与钦定·自动接线（docs/archive/PLAN-node-standalone.md §3.2.1 + 任务 t20261023-62a2）**：`POST /api/v1/local/prime/rotate`（轮换 prime_token：重生成→原子写盘→即时重载，旧凭证下一请求失效）与 `POST /api/v1/local/prime/declare`（网页钦定统筹载体：校验 agent 存在→钦定即换凭证→yaml round-trip 写 node.yaml `prime_agent`→即时生效）均仅 local_token 可调（主人人工操作，六.六豁免③④）。**钦定即自动接线**：declare/rotate 成功后，node 自动把 swarmmind MCP 配置片段（含最新 prime_token）合并写入被钦定 agent 影子 home（`ExecProfile.ConfigHome`，空则 `data_dir/home`，与 runner HOME 同口径）内的宿主配置文件——布局探测只认 zcode 一种（`<home>/.zcode/cli/setting.json`，注意文件名单数）：存在且为合法 JSON 才命中（合法 = 全文恰一个 JSON 对象：`null`、尾部多余内容均不命中）；命中即合并顶层 `mcpServers.swarmmind`（幂等覆盖同键、不动其他键），写前备份 `<file>.bak-prime`（直接覆盖旧备份不堆积），临时文件+rename 原子写、0600（文件内含凭证）。应答带 `wired: true|false` 与 `wired_target`（命中时的绝对路径），declare/rotate 两口径一致、应答均带 `mcp_config` 片段（降级时主人拿得到手贴内容）；**降级口径**：文件/目录不存在、JSON 非法（含 `null` 与尾部多余内容）、顶层或 mcpServers 非对象、写失败、或 swarmmind-mcp 探测未命中（command 为占位符——占位配置落盘无用，一律不写）→ `wired:false`，绝不硬写、绝不创建宿主目录，应答保留 `mcp_config` 片段与手动指引由主人粘贴（宁可手贴，不猜布局乱写）。rotate 同步刷新影子 home 内的 `SWARM_NODE_PRIME_TOKEN`（否则旧 token 残留，统筹载体下一请求 401）；撤销统筹不清理已写入配置（token 已即时失效，残留无害）。全部接线动作发生在 declare/rotate 这个主人人工操作的事务内，prime_token 仍不经 agent 面分发（豁免③口径不变）。
+**统筹凭证与指定·自动接线（docs/archive/PLAN-node-standalone.md §3.2.1 + 任务 t20261023-62a2）**：`POST /api/v1/local/prime/rotate`（轮换 prime_token：重生成→原子写盘→即时重载，旧凭证下一请求失效）与 `POST /api/v1/local/prime/declare`（网页指定统筹载体：校验 agent 存在→指定即换凭证→yaml round-trip 写 node.yaml `prime_agent`→即时生效）均仅 local_token 可调（主人人工操作，六.六豁免③④）。**指定即自动接线**：declare/rotate 成功后，node 自动把 swarmmind MCP 配置片段（含最新 prime_token）合并写入被指定 agent 影子 home（`ExecProfile.ConfigHome`，空则 `data_dir/home`，与 runner HOME 同口径）内的宿主配置文件——布局探测只认 zcode 一种（`<home>/.zcode/cli/setting.json`，注意文件名单数）：存在且为合法 JSON 才命中（合法 = 全文恰一个 JSON 对象：`null`、尾部多余内容均不命中）；命中即合并顶层 `mcpServers.swarmmind`（幂等覆盖同键、不动其他键），写前备份 `<file>.bak-prime`（直接覆盖旧备份不堆积），临时文件+rename 原子写、0600（文件内含凭证）。应答带 `wired: true|false` 与 `wired_target`（命中时的绝对路径），declare/rotate 两口径一致、应答均带 `mcp_config` 片段（降级时主人拿得到手贴内容）；**降级口径**：文件/目录不存在、JSON 非法（含 `null` 与尾部多余内容）、顶层或 mcpServers 非对象、写失败、或 swarmmind-mcp 探测未命中（command 为占位符——占位配置落盘无用，一律不写）→ `wired:false`，绝不硬写、绝不创建宿主目录，应答保留 `mcp_config` 片段与手动指引由主人粘贴（宁可手贴，不猜布局乱写）。rotate 同步刷新影子 home 内的 `SWARM_NODE_PRIME_TOKEN`（否则旧 token 残留，统筹载体下一请求 401）；撤销统筹不清理已写入配置（token 已即时失效，残留无害）。全部接线动作发生在 declare/rotate 这个主人人工操作的事务内，prime_token 仍不经 agent 面分发（豁免③口径不变）。
 
 ## 六.五、P3 增补契约（Web 控制台，按 INTERACTION.md 分级清单落地）
 
 ### 鉴权（控制台登录制）
 
 - hub 配置新增 `admin_token`；`POST /api/v1/login {"token":"..."}` → 200 + `Set-Cookie: swarmmind_session=...`（HttpOnly；V0 会话内存态，hub 重启需重登）
-- 除 `/api/v1/login` 外全部管理面端点要求有效会话，否则 401
+- 任务、目录、Work、通知等管理 API 要求有效会话 cookie 或 Bearer PAT，否则 401。登录、账户初始化/状态和 A2A 发现卡等显式入口有各自访问规则，路由以 `internal/hub/api/server.go` 为准；admin_token 用于换取会话，不能直接作为 Bearer。
 - 中心端「控制能力」实现澄清：hub 不内嵌执行体；控制操作（全网巡检等）= 管理员从中心端向任意 node 的巡检类 agent 派发正式任务（走现有全链），hub 保持登记处与控制面，服务执行始终在 node 侧
 
 ### 核对记录持久化
@@ -562,7 +562,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    事件、展示位兜底「—」。存储/API/导出口径不动；表格/总览等非抽屉面的全站迁移另批（C4）。
 5. **文案单一出处**：跨端同义动作同词（标准词「查看全部任务」）；needs_review 主文案以 hub 版为唯一
    出处；能力描述必须与端上真实能力一致（node 无核对登记端点，文案不得承诺本端登记，只如实指路 hub）；
-   状态介绍条五态人话双端同有同文。
+   五类详情介绍使用一致的状态说明，双端共享内容保持一致。
 6. **合理差异白名单**（不强求对称，入档即豁免）：hub 管理面独有——导出任务 JSON、取消任务、人工核对
    表单/记录、任务输入区、失败原因独立区、产物中继取回按钮、群组词典（GROUP_STATES 徽标兜底，hub
    群聊页专属，node badge 不取词）、**工作单视图（P5 W3：#/works 列表/详情抽屉/接管/续派/处置与
@@ -573,7 +573,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
    通知三抽屉共用的直清家族，让位路径要求立即清场，未引入 hub layerGen 世代机制前豁免，阶段 D 建议
    修 8）。白名单外的新增差异按漂移处理。
 7. **变更纪律**：任何一端改动抽屉组装层或共用组件（badge/notice/时间线/产物行/日志区/时间工具），必须
-   对照本节评估另一端并同步；一致性锁测试随改动同步更新，禁止删断言换绿（旧接入断言同步更新、不双轨）；
+   对照本节评估另一端并同步；一致性锁测试随改动同步更新，禁止删除断言以规避失败（旧接入断言同步更新、不双轨）；
    行为面（刷新保真/迟到防护/深层交互态）由 headless 三层走查覆盖（docs/prototypes 截图留档）。
 
 ## 六.六、MCP 服务（agent 统一入口，2026-10-21 立）
@@ -586,7 +586,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - `cmd/swarmmind-mcp`：MCP stdio 服务，newline-delimited JSON-RPC 2.0 手写实现，
   **零第三方依赖**（对齐 SPEC 三依赖白名单哲学）；新进程、不在 hub/node 内嵌。
 - 配置仅环境变量：`SWARM_HUB_URL`（管理面地址）、`SWARM_HUB_TOKEN`
-  （`smsw_` PAT 或 admin_token）；不读配置文件（MCP 客户端 env 注入为准）。
+  （`smsw_` PAT；admin_token 仅用于人工/CLI 登录换会话，不能用于此 Bearer 配置）；不读配置文件（MCP 客户端 env 注入为准）。
 - 鉴权：全部调用走 `Authorization: Bearer <token>`，与 REST 同一令牌体系（六.五 PAT）。
 
 ### 工具面（与 REST 端点映射）
@@ -599,7 +599,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |
 | swarmmind_artifact | GET /api/v1/tasks/{id}/artifacts/{i} | 取产物（文本回读，二进制提示走控制台） |
-| swarmmind_tasks | GET /api/v1/tasks | 任务列表：正在跑/最近完成/失败一屏速览，支持按状态/节点/agent 筛选（P4⑤；REST V0 全量直出不解析 query、不分页，筛选与条数截断在 MCP 侧本地完成、请求恒裸路径；每行短码+状态人话+节点/agent+提交时间+耗时或错误码，行尾附全号供 status/wait/artifact 寻址；hub 视角，node 模式不设） |
+| swarmmind_tasks | GET /api/v1/tasks | 任务列表：正在跑/最近完成/失败一屏速览，支持按状态/节点/agent 筛选（P4⑤；REST V0 全量直出不解析 query、不分页，筛选与条数截断在 MCP 侧本地完成、请求恒裸路径；每行任务短标识+状态说明+节点/agent+提交时间+耗时或错误码，行尾附全号供 status/wait/artifact 寻址；hub 视角，node 模式不设） |
 | swarmmind_decide | 外部 StartLux /v1/decisions（bamboonode/MLX 本地） | 分配决策查询：云端 L0 → 规则兜底 L2 自动降级，响应标 used_level（P4.1） |
 | swarmmind_group_create | POST /api/v1/groups | 建协作群（目标+成员；返回 g- 群 ID，创建即 discussing；GROUP-RFC 六 MVP，P4/V1） |
 | swarmmind_group_list | GET /api/v1/groups | 看全部协作群（目标/状态/成员/发言预算） |
@@ -611,7 +611,7 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 | swarmmind_work_list | GET /api/v1/works | 列出全部工作单：ID/目标/状态/步骤与尝试数（发现历史未完成工作） |
 | swarmmind_work_takeover | POST /api/v1/works/{id}/takeover | 接管工作单（P5 W2 断点续管，CAS 单事务）：expected_term 代校验（同刻仅一方接管成功，后来者 409 work_term_conflict）；相同操作重放幂等返回现状不新增事件；旧任期派发即被拒、其在途任务结果照常回流。接管成功后经 swarmmind_submit 携 work_ref/step_seq/prime_term 续派 |
 | swarmmind_work_collect | POST /api/v1/works/{id}/collect | 收集并关闭工作单（P5 W3，单事务终态闭合；审查修订：全部步骤终态**且全部尝试收束**才可收集（409 work_steps_open），abandoned 下未派发步骤随关闭记 skipped）；outcome 缺省/done 要求全部步骤 done，部分完成 hub 拒绝（409 work_steps_not_done，部分报告不误关闭），放弃剩余步骤用 outcome=abandoned；report 必填（任务清理后的执行摘要，随单保留 30 天）；相同请求重放幂等回执（三同源 200+dup，零事件）；终态后不可再派发/接管/收集（work_closed） |
-| swarmmind_dispatch_suggest | POST /api/v1/dispatch-suggest | 派发建议查询（P5.1 D1，RFC-jev-dispatch）：给定任务目标，由 hub 决策服务（llm-as-jev，GLM）从网内在线能力（agent@node 候选，hub 目录真相源组装）中推荐执行者，附校准置信度与候选概率分布；建议可覆盖非必经——链路故障（provider 不可用/超时）200 + suggestion:null + degraded:true + note 固定人话类别（上游原文只进 hub 日志）；候选为空/模型判断均不适合 200 + suggestion:null + degraded:false（note 区分），不阻塞派单（hub 模式专属，node 模式不装配） |
+| swarmmind_dispatch_suggest | POST /api/v1/dispatch-suggest | 派发建议查询（P5.1 D1，RFC-jev-dispatch）：给定任务目标，由 hub 决策服务（llm-as-jev，GLM）从网内在线能力（agent@node 候选，hub 目录组装）中推荐执行者，附模型置信度与归一化候选分布（不构成统计校准证明）；建议可覆盖非必经——链路故障（provider 不可用/超时）200 + suggestion:null + degraded:true + note 使用概括性错误类别（上游原文只进 hub 日志）；候选为空/模型判断均不适合 200 + suggestion:null + degraded:false（note 区分），不阻塞派单（hub 模式专属，node 模式不装配） |
 
 ### 语义约定
 
@@ -620,18 +620,18 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 - `needs_review` 是合法终态：MCP 结果必须明确「结果不确定，需人工核对」，
   禁止 agent 基于未核对结果下结论（对齐 4.8 语义）。
 - 产物仅回读文本类（无 NUL 字节）；二进制提示走控制台取回。
-- 错误一律包装为人话文本（isError=true），不向 agent 泄漏内部堆栈。
+- 错误统一为包含原因与处理指引的文本（isError=true），不向 agent 泄漏内部堆栈。
 
 ### 同步开发规则（强制）
 
 1. **新功能入库检查单新增一条**：面向管理面的新 REST 能力，同一变更内必须：
-   ① SPEC 本节表格补一行映射；② cmd/swarmmind-mcp 增补对应工具（含人话描述）；
+   ① SPEC 本节表格补一行映射；② cmd/swarmmind-mcp 增补对应工具（含用途说明）；
    ③ MCP 层至少一条实测或单测。
 2. 纯内部实现（调度/存储/协议内部）不适用本规则。
 3. **人工管理专属豁免（2026-10-22）**：以下管理面端点不设 MCP 工具——
    ① `POST /api/v1/tasks/{id}/cancel`（任务取消）：取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）；
    ② `POST /api/v1/nodes/enroll-bundle`（节点接入部署包生成）：端点为管理端人工装机操作专属——生成的部署包内嵌节点 register_token 凭据，agent 无权获取凭据，部署包亦不经 agent 面分发，只对管理端会话开放。
-   ③ `POST /api/v1/local/prime/declare`（node 网页钦定统筹载体，2026-10-22）：本机主人人工操作专属（仅 local_token 可调）——钦定即凭据授予（应答带新 prime_token 与 MCP 连接片段），暴露给 agent 面等于 agent 可自行换发统筹凭证，属提权通道；授权交接由本机主人在 node 控制台完成。t20261023-62a2 自动接线补充口径：钦定/轮换后 node 合并写入被钦定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
+   ③ `POST /api/v1/local/prime/declare`（node 网页指定统筹载体，2026-10-22）：本机主人人工操作专属（仅 local_token 可调）——指定即凭据授予（应答带新 prime_token 与 MCP 连接片段），暴露给 agent 面等于 agent 可自行换发统筹凭证，属提权通道；授权交接由本机主人在 node 控制台完成。t20261023-62a2 自动接线补充口径：指定/轮换后 node 合并写入被指定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
    ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接统筹凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
    ⑤ `GET /api/v1/nodes/enroll-info`（节点接入入口地址查询，2026-10-23 第六轮修复 2）：接入向导人工装机流程的配套元数据端点（与豁免 ② 同一人工流程）——返回 hub 自身节点接入入口地址（node_listen 推导，无凭据），供控制台向导预填 hub_url；agent 面无使用场景，豁免 MCP 映射。
    ⑥ `GET /api/v1/prime`、`PUT /api/v1/prime`（hub 网页指定统筹载体，2026-10-23）：管理员管理面操作（hub 控制台指定/撤销全网唯一统筹载体），统筹智能体自身无需读写该状态，豁免 MCP 映射。
@@ -641,13 +641,13 @@ node 侧同开回环 API（默认 `127.0.0.1:8445`，仅本机进程可用）：
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。
 6. **P4 任务租约同步检查声明（2026-10-23）**：任务租约（4.11）为协议内防写机制（Envelope fence_epoch 门禁 + Task.Lease 审计），结果路径无新增/变更 REST 管理面能力，MCP 工具面零变更——豁免映射表补行；任务查询工具返回体透传新增 `lease` 展示字段，不构成工具面变更。
-7. **P4.3 任务依赖同步声明（2026-10-23，第一子批）**：任务依赖（4.12）为既有 REST 能力的参数扩展——`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（上游 idem_key 列表；node 本机直执行模式不经过 hub 状态机，不支持该参数），本表 `swarmmind_submit` 行已同步；`swarmmind_status`/`swarmmind_wait` 返回体透传 `depends_on`/`blocked_reason`/`superseded_by` 展示字段（含 blocked/upstream_failed/superseded 的人话提示），不构成新工具。依赖声明不合法经 submit 工具以 `invalid_dependency` 人话文本返回。
+7. **P4.3 任务依赖同步声明（2026-10-23，第一子批）**：任务依赖（4.12）为既有 REST 能力的参数扩展——`swarmmind_submit`（hub 模式）新增 `depends_on` 数组参数透传（上游 idem_key 列表；node 本机直执行模式不经过 hub 状态机，不支持该参数），本表 `swarmmind_submit` 行已同步；`swarmmind_status`/`swarmmind_wait` 返回体透传 `depends_on`/`blocked_reason`/`superseded_by` 展示字段（含 blocked/upstream_failed/superseded 的状态说明），不构成新工具。依赖声明不合法经 submit 工具以 `invalid_dependency` 错误说明返回。
 8. **P4 L2 产物挂载同步声明（2026-10-24，第二子批第一子轮）**：产物挂载（4.12「产物挂载」段）为 node 执行准备阶段的内部行为（spawn 前纯复制+SHA 校验+原子发布），无新增/变更 REST 管理面能力，MCP 工具面零变更——`swarmmind_artifact` 保留（跨机场景与逐件自取仍经它），不因自动挂载删除。任务 stdin 的依赖清单文案同步为告知挂载位置（`inputs/<上游task_id>/`），属 EffectiveInput 文本更新，不构成工具面变更。
 9. **P4④ 跨机取回同步声明（2026-10-24，第二子轮）**：跨机取回（4.12「跨机取回」段）为 node→hub 协议帧扩展（dep_resolve 新增 + artifact_fetch 方向扩展 + hub 中继），无新增/变更 REST 管理面能力（hub HTTP 面零变更），MCP 工具面零变更、映射表不补行；`swarmmind_artifact` 保留（跨机自动取回是挂载准备阶段的内部行为，人工逐件自取仍走它）。任务 stdin 依赖清单尾注随能力更新为跨机自动取回说明（EffectiveInput 文本一次性变更，见 4.12 指纹口径第二次声明），不构成工具面变更。
 10. **P5 Work 工作单同步声明（2026-10-25，W1 批）**：工作单（RFC-work-resume，执行事实与断点接管）W1 交付模型+建单幂等+只读查询，本表补 `swarmmind_work_create/get/list` 三行；REST `/api/v1/works*` 组为 MCP 传输载体与 W3 管理台只读视图的数据源，建单入口 v1 仅 Prime/MCP（开放问题裁决 1：管理台无手工建单）。三工具 hub 模式专属，node 模式不装配（不静默降级）。`swarmmind_work_collect/takeover`（收集/接管续派）随 W2/W3 交付同批补行，不预占工具名。Work 无泛化 PUT/DELETE（状态只由生命周期动作推进，RFC 四.8），不设 update/delete 工具。
 11. **P5 Work W2 绑定派发与接管同步声明（2026-10-25，W2 批）**：原子接管+绑定提交+多次尝试+终态回写（RFC-work-resume W2 行）。本表补 `swarmmind_work_takeover` 一行；`swarmmind_submit` 行更新（work_ref/step_seq/prime_term 三参成组绑定派发，援引规则 7 参数扩展；step_seq 运行时严格校验 ≥1 整数不截断；node 本机直执行模式三参显式拒绝不静默）。绑定派发同键重试短路于幂等查重不新增尝试（任务 24h 清理后同键重放命中工作单去重证据，响应 task_gone 标注、不重新执行）；接管成功前/旧任期的绑定派发 409 work_term_conflict、未建立任期 409 work_no_term、完成步骤再派 409 work_step_locked。`swarmmind_status/wait` 返回体透传工作单绑定展示行（work_ref/work_step_seq/attempt_ref），不构成新工具。`swarmmind_work_collect`（收集/关闭）仍随 W3 同批补行。
 12. **P5 Work W3 收集关闭+接口补全同步声明（2026-10-25，W3 批）**：收集/关闭+清理补全（RFC-work-resume W3 行）。本表补 `swarmmind_work_collect` 一行（hub-only，node 模式不装配）；`swarmmind_work_get` 返回体透传 `tasks_gone` 读档注解、`swarmmind_work_list` 透传 `done_steps`（展示字段，不构成新工具）；工具输出与 REST 详情全量对齐（work_get 附收集报告/幂等键/尝试引用/双指纹/盖章时刻，任务清理后 agent 经 MCP 读得回执行摘要与原键）。收集/关闭/清理契约见六.五「工作单」节（回执幂等、部分报告不误关闭、终态三写入口全闭、Sweep 30 天保留清理）。Prime 提示词同批增补「工作单（多步工作的断点续管）」节（internal/hub/web/app.js PRIME_PROMPT 与 deploy/prime/PRIME.md 两处一致，web 包测试锁工具名引用 ⊆ 实际装配集+双处同文；幂等键规范含工作单命名空间维度与接管重放口径）——提示词为行为约定，不构成接口面变更。管理台工作单视图为 hub 控制台人工操作面（六.五白名单入档），无 MCP 对应物（MCP 工具面即 agent 侧全部合法能力）。
-13. **P5.1 D1 派发建议同步声明（2026-10-26，Jev 决策第一批）**：`POST /api/v1/dispatch-suggest`（只读建议查询）与 `swarmmind_dispatch_suggest` 同批交付（本表补行）。决策是建议非必经（RFC-jev-dispatch 三）：决策服务（internal/decision，D1=llm-as-jev/GLM-5.3-Flash，key 三级解析 decision.api_key → GLM_API_KEY 环境变量 → swarm-prime-home provider 配置，不硬编码）链路故障（未启用/网络错误/超时/解析失败/目标越权）一律 HTTP 200 + `suggestion:null` + `degraded:true` + note 固定人话类别（上游原始错误只进 hub 日志，不泄入应答，2026-10-26 codex 审 D1 ④闭合）；正常无建议（网内无在线候选、模型判断候选均不适合）同样 200 + `suggestion:null` 但 `degraded:false`，由 note 人话区分——degraded 只标链路故障，**绝不阻塞派单**；仅请求体非法（goal/step_desc 均空）400。概率分布恒覆盖全部候选且和为 1：模型缺失概率按均匀/均值补齐、confidence 缺失按均匀低置信兜底，不凭空补 100%（同日 codex 审 D1 ①闭合）。候选集由 hub 目录真相源组装（在线 ∩ exposed，稳定序），请求不携带候选参数。node 模式不装配该工具（决策服务在 hub 内嵌，node 无此能力，不静默降级）。管理台派单页「建议派给 X（本地决策模型）」一键采纳为 hub 控制台人工动线（建议可覆盖，采纳即回填两级下拉，无独立写接口）。置信度展示按 RFC v1.1 裁决②保守处理：REST/MCP 透传 confidence/probabilities，控制台仅展示建议+来源标签（本地决策模型），不上墙百分比。
+13. **P5.1 D1 派发建议同步声明（2026-10-26）**：`POST /api/v1/dispatch-suggest` 与 `swarmmind_dispatch_suggest` 同批交付，hub 模式专属。当前 D1 provider 为 llm-as-jev，使用配置的 LLM 服务；本地 provider 和群聊自动派发未实现。请求提供 goal/step_desc，候选由 hub 的在线且开放能力目录构造。未启用服务：公共 REST 返回 HTTP 200 + `suggestion:null` + `degraded:true`；无候选或模型判断均不适合：200 + `suggestion:null` + `degraded:false`，note 说明原因；已启用 provider 的请求/解析/超时/越权目标失败：200 + `suggestion:null` + `degraded:true`。仅请求体非法 400，鉴权失败 401；无建议不影响普通任务提交。上游原始错误只进入日志，响应返回概括类别。概率覆盖全部候选并归一化，缺失值按规则补齐，不代表已证明统计校准或实际成功率。密钥来源依次为配置、GLM_API_KEY 与 Prime HOME provider 配置。管理台采纳只回填目标选择，描述变化后建议失效；当前固定来源标签「本地决策模型」不能当作本地部署证明。真实模型终版逐场景复验待补录，详见 TESTPLAN-D1-jev。
 
 ## 七、验证标准（DoD 十一条）
 

@@ -1,0 +1,28 @@
+flowchart TB
+    Web[浏览器管理台] -->|HTTP 管理面| Hub
+    CLI[swarmmindctl] -->|HTTP 管理面| Hub
+    Client[MCP 客户端] -->|stdio| MCP[swarmmind-mcp]
+    MCP -->|HTTP + PAT| Hub
+    subgraph Hub[SwarmMind Hub]
+        API[管理面与节点接入]
+        Core[目录 / 调度 / 离线信箱 / 产物中继 / 可选建议]
+        Store[持久化任务账本]
+        API --- Core
+        Core --- Store
+    end
+    subgraph A[Node A · Linux]
+        NA[连接服务 / 执行账本 / runner] --> AA[本机 Agent]
+        AA --> OA[本机产物文件]
+    end
+    subgraph B[Node B · macOS]
+        NB[连接服务 / 执行账本 / runner] --> AB[本机 Agent]
+        AB --> OB[本机产物文件]
+    end
+    subgraph C[Node C · Windows]
+        NC[连接服务 / 执行账本 / runner] --> AC[本机 Agent]
+        AC --> OC[本机产物文件]
+    end
+    NA -->|主动 WSS 外连| API
+    NB -->|主动 WSS 外连| API
+    NC -->|主动 WSS 外连| API
+    Local[MCP node 模式 / 本机控制台] -.->|回环 API| NB

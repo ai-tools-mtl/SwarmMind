@@ -1,14 +1,35 @@
 # SwarmMind 功能测试文档
 
+## 文档内容修订专项（2026-10-26）
+
+此专项验证文档修订；基础用例中的工具发现清单随当前接口同步更新。独立执行者从当前文件读取需求，逐条记录到 `docs/TESTREPORT-docs-20261026.md`，不宣称外部双机或 Windows 真机已验收。
+
+| ID | 操作 | 通过条件 |
+|---|---|---|
+| DOC-01 | 检查 README、ARCHITECTURE、OPERATIONS、docs/README 中本地 Markdown 链接和图片路径 | 文件存在；架构 SVG 和 Mermaid 均非被忽略文件 |
+| DOC-02 | 对照 cmd 入口、configs、Makefile 检查 README 构建、最小配置和 CLI 命令 | 输出名、参数、TLS/URL、独立 data_dir 和令牌用途一致；隔离实例手动派发 echo 返回 hello |
+| DOC-03 | 构建 MCP 到临时目录，向 stdio 发送 tools/list，分别设 SWARM_TARGET=hub / node | hub 19 工具（含 Work 五个与新建议工具）、node 六个，与 README 一致 |
+| DOC-04 | XML 解析 SVG，实际渲染检查文字、连线、节点和方向；对照 architecture.mmd 与架构详解 | 三节点主动连 hub，入口分离，无截断/重叠；Mermaid 可解析 |
+| DOC-05 | 对照 protocol/constants.go、鉴权、inputs 与 Work 实现核对文档 | 容量、保留期、凭据、产物存放与 P5 开发边界有代码依据 |
+| DOC-06 | `go build -mod=readonly ./...` 与 `go test ./...` | 均退出 0；保留命令与日志证据 |
+| DOC-07 | `./scripts/demo-loopback.sh` | 退出 0，DoD 3–10 输出 PASS；说明 DoD 6/8 注入子项由单测补充 |
+| DOC-08 | 逐条对照 SPEC 第七节 11 项 | 逐项记录证据；DoD 11 未执行须明示，不用历史报告冒充通过 |
+| DOC-09 | 对照源码与报告核对 Work、D1、node 分页/清理、群聊、旧 Prime 模板 | 明确实现/验证/发布边界；无虚构的本地部署、概率校准或自动清理保证 |
+| DOC-10 | 检查本轮主要文档术语、历史记录与代码差异 | 当前说明无口号式表述；历史结论不冒充新验证；除配置注释和文档外不改运行代码；Prime 行为节同步锁通过 |
+
+本轮验证仅针对文档改动与当前本机回归。D1 真实模型、W4 远程故障、Windows 服务真机及观察期不在本轮执行；报告必须逐项列为未执行或引用带边界的历史事实。
+
+所有验证使用隔离临时实例与空闲端口，不触碰已有部署。手动首次派单用临时目录替代示例 data_dir，其余保持 README 最小配置语义。
+
 ## 执行说明
 
 ### 测试范围与判定原则
 
-本文共 **55 条用例**，覆盖：
+以下为基础用例与后续增补。Work、任务可见性和 D1 建议服务还需各自专项，不能把本文件基础回归当作全部功能验收。覆盖：
 
 - 中心端管理面 REST API、账户、密码登录、PAT、任务、产物、核对记录、控制批次、目录与节点。
-- Web 控制台：hub 七页（总览、节点接入、任务监管、任务派发、策略容量、设置、群聊），node 四页（总览、我的服务、派任务·我的任务、接入）。登录作为独立交互入口检查。
-- MCP stdio 服务六工具。
+- Web 控制台：hub 八页（总览、机器、任务监管、任务派发、工作单、策略容量、设置、群聊），node 四页（总览、我的服务、派任务·我的任务、接入）。登录作为独立交互入口检查。
+- MCP stdio 基础执行工具与 hub 当前工具发现；新增工具行为见专项。
 - node 本地 API、跨节点派单、离线信箱、幂等、断线恢复、`needs_review`。
 - SPEC DoD 十一项、工作目录互斥、持久化与协议边界。
 
@@ -950,7 +971,7 @@ assert(rows>=1);
 '
 ```
 
-## 六、MCP 六工具与协议入口
+## 六、MCP 工具发现与基础执行入口
 
 `tool` 发送的实际 JSON-RPC 行结构为：
 
@@ -962,7 +983,7 @@ assert(rows>=1);
 
 | 编号 | 模块 | 前置条件 | 步骤 | 期望结果 | 优先级 |
 |---|---|---|---|---|---|
-| TC-46 | MCP 初始化及工具发现 | 主 PAT 有效 | `mcp tools/list '{}'`；`jq -e 'select(.id==1)\|.result.protocolVersion=="2024-11-05" and .result.serverInfo.name=="swarmmind"' "$T/$ID.rpc"`；`mcheck '([.result.tools[].name]\|sort)==(["swarmmind_nodes","swarmmind_agents","swarmmind_submit","swarmmind_status","swarmmind_wait","swarmmind_artifact"]\|sort) and all(.result.tools[];(.description\|length)>0 and .inputSchema.type=="object")'` | 初始化可解析；恰好六工具，固定前缀和非空能力描述；通知不产生多余应答 | P0 冒烟 |
+| TC-46 | MCP 初始化及工具发现 | 主 PAT 有效 | `mcp tools/list '{}'`；`jq -e 'select(.id==1)\|.result.protocolVersion=="2024-11-05" and .result.serverInfo.name=="swarmmind"' "$T/$ID.rpc"`；`mcheck '([.result.tools[].name]\|sort)==(["swarmmind_nodes","swarmmind_agents","swarmmind_submit","swarmmind_status","swarmmind_wait","swarmmind_artifact","swarmmind_tasks","swarmmind_decide","swarmmind_dispatch_suggest","swarmmind_group_create","swarmmind_group_list","swarmmind_group_say","swarmmind_group_messages","swarmmind_group_close","swarmmind_work_create","swarmmind_work_get","swarmmind_work_list","swarmmind_work_takeover","swarmmind_work_collect"]\|sort) and all(.result.tools[];(.description\|length)>0 and .inputSchema.type=="object")'` | 初始化可解析；hub 当前 19 工具，固定前缀和非空能力描述；通知不产生多余应答 | P0 冒烟 |
 | TC-47 | swarmmind_nodes / agents | 两节点在线 | `tool swarmmind_nodes '{}'`；`mcheck '.result.isError==false'`；`jq -er '.result.content[0].text' "$T/$ID.mcp" > "$T/mcp.nodes.txt"`；`grep -F "$N1：在线" "$T/mcp.nodes.txt"`；`tool swarmmind_agents '{}'`；`mcheck '.result.isError==false'`；`jq -er '.result.content[0].text' "$T/$ID.mcp" > "$T/mcp.agents.txt"`；`grep -F "qa-cat @ $N2" "$T/mcp.agents.txt"` | 节点在线/负载与 REST 一致；能力来自已暴露目录 | P0 冒烟 |
 | TC-48 | swarmmind_submit / status / wait | qa-cat、qa-sh 可调用 | 执行下方“MCP 派单与等待命令” | MCP 可提交、查状态、等待 completed；失败也是终态；等待超时返回当前状态且不伪造终态 | P0 冒烟 |
 | TC-49 | swarmmind_artifact | TC-17 | `tool swarmmind_artifact "$(jq -nc --arg id "$ART" --argjson i "$TXT_INDEX" '{task_id:$id,index:$i}')"`；`mcheck '.result.isError==false and (.result.content[0].text\|contains("SWARM_ARTIFACT_OK"))'`；`tool swarmmind_artifact "$(jq -nc --arg id "$ART" --argjson i "$BIN_INDEX" '{task_id:$id,index:$i}')"`；`mcheck '.result.isError==false and (.result.content[0].text\|contains("二进制")) and (.result.content[0].text\|contains("控制台"))'` | 文本回读；含 NUL 的二进制只提示经控制台取回；不把二进制当文本交付 | P1 核心 |

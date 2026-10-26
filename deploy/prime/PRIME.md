@@ -1,75 +1,14 @@
-# SwarmMind 统筹智能体（Prime）
+# Prime 提示词资产
 
-你是 SwarmMind 协作网络的统筹调度智能体。使命：把用户的目标转化为网内多智能体的协同执行，交付可验收的结果。**你不亲自干活**——找不到合适执行者时上报用户，由人决策；你负责：理解、分解、派发、等待、收集、汇总、上报。
+配置与验证步骤已整理到 [README](README.md)，角色与权限见 [Prime 设计](../../docs/PRIME-DESIGN.md)。全网编排使用 hub 模式与 PAT；node 模式只有本机六项工具。两者配置不能互换。
 
-# 客户端配置：把一台机器的智能体变成统筹载体
+## 运行模板范围与已知差异
 
-统筹身份在 **hub 网页指定**（2026-10-23 伦哥定案：派发页「指定统筹」入口，两级选择保存/撤销，全网同一时刻至多一个），不必改配置文件；node.yaml 只需保证能力本身存在并可暴露。网页未指定时，hub 按能力名约定回退识别（名字含 `zcode-dev` 的 exposed 能力），向后兼容旧配置。
+下方从「分配决策」开始的行为节与 `internal/hub/web/app.js` 的 `PRIME_PROMPT` 通过一致性测试锁定。W3 工作单节已实现并包含建单、接管和收集要求。
 
-## 三步接入
+其他早期段落仍包含旧决策工具名、修改内容同键重派、跨机产物大小限制等过时指导。它们是运行模板的已知限制，不是本轮已经修复的行为；正确接口与重试边界见设计文档。本轮仅修订此前混入的安装说明，保留行为节原文，以免形成文档资产与运行代码不同步。
 
-1. **node.yaml** 的 `agents:` 下加条目（以下是 mac-mini 实配，可整体照抄改路径）：
-
-   ```yaml
-   agents:
-     - name: zcode-dev                # 名字固定：hub 端按此名识别为统筹载体
-       kind: cli
-       command: /opt/homebrew/bin/zcode   # 该机的 zcode 可执行路径
-       workdir: /Users/tl.m/coding         # 统筹的默认工作目录
-       config_home: /path/to/prime-home    # 独立配置目录（与日常用隔离，见第 2 步）
-       agent_args: ["-p"]                  # 无头模式
-       timeout_sec: 900                    # 统筹要拆解派发多轮，给足超时
-       allow_args: true
-       allow_env: []
-       description: 统筹智能体：接收复合目标，拆解为子任务并派发网内能力，汇总产出报告
-       permission_mode: 智能体自带权限沙盒
-       exposed: true                       # 默认 true，可省略
-   ```
-
-2. **给统筹的大脑接上 SwarmMind MCP**（没有它统筹只是普通智能体，收了提示词也没有手）——**钦定即自动接线（主路径，零手贴）**：
-
-   先构建 MCP 服务二进制（在 SwarmMind 仓库，node 与 mcp 二进制同目录部署时可省，declare 会自动探测同目录 `swarmmind-mcp`）：
-
-   ```bash
-   go build -o bin/swarmmind-mcp ./cmd/swarmmind-mcp
-   ```
-
-   再在 config_home 指向的目录预置 zcode 布局（只需目录与一个合法 JSON 空文件，内容 declare 会自动合并）：
-
-   ```bash
-   mkdir -p <config_home>/.zcode/cli
-   echo '{}' > <config_home>/.zcode/cli/setting.json   # 已有 zcode 配置则跳过
-   ```
-
-   然后在 node 网页「本机统筹」区钦定（或 `POST /api/v1/local/prime/declare`）——钦定成功即自动把 `mcpServers.swarmmind`（含 command 与最新 prime_token 的 env）合并写入 `<config_home>/.zcode/cli/setting.json`：应答 `wired: true` + `wired_target`（写入的绝对路径），写前自动备份同目录 `setting.json.bak-prime`；此后网页「轮换凭证」或重新钦定都会自动刷新同一配置，无需重复操作。**降级兜底（探测未命中时手动贴）**：影子 home 内无 `.zcode/cli/setting.json`、JSON 非法（含 `null`、尾部多余内容）、写入失败，或 node 同目录未探测到 `swarmmind-mcp`（command 为占位符——node 不落盘启动不了的占位配置）→ 应答 `wired: false` 并保留 `mcp_config` 片段（轮换应答同口径），此时按下方片段手动合并（node 绝不猜布局乱写、绝不创建宿主目录）：
-
-   ```json
-   "mcpServers": {
-     "swarmmind": {
-       "command": "<SwarmMind 仓库>/bin/swarmmind-mcp",
-       "env": {
-         "SWARM_NODE_URL": "http://127.0.0.1:8445",
-         "SWARM_NODE_PRIME_TOKEN": "<钦定/轮换应答带出的 prime_token>"
-       }
-     }
-   }
-   ```
-
-   凭证用 node 单凭证模式（`SWARM_NODE_PRIME_TOKEN`）：统筹经本机 node 编排全网，prime_token 同时授权编排 submit 与只读六工具。跨机模式可改用 `SWARM_HUB_URL` + `SWARM_HUB_TOKEN`（hub 管理面 PAT）。
-
-   > **前提：先钦定本机统筹（否则派单 403）**。`SWARM_NODE_PRIME_TOKEN` 模式的编排接口要求本机已钦定统筹——node.yaml 未声明 `prime_agent` 时，submit 一律 `403 prime_required`。**钦定会轮换 prime_token（旧凭证立即失效）**：自动接线路径下新 token 随钦定直接写入配置（应答与 `data_dir/prime_token` 同值）；手动兜底路径才需要在每次钦定/轮换后把应答新 token 同步进 MCP 配置。
-
-3. **重启 node 进程**：macOS `launchctl kickstart -k gui/$(id -u)/com.swarmmind.node`；Linux `systemctl restart swarmmind-node`。
-
-之后在 hub 派发页点「指定统筹」，选机器、选该智能体、保存即完成——智能体下拉即出现「统筹」分组。验证接线：以统筹身份问一句「用 swarmmind_nodes 查看网内节点」，能报出节点列表即通。**只读工具通过不代表派单已放行**，建议再实际 submit 一单收尾验收（如 `swarmmind_submit` 给本机一个 echo 类能力派个小任务并 wait 到终态）——若返回 `403 prime_required`，回到上一步：先钦定本机统筹（自动接线路径确认钦定应答 `wired: true` 且 `wired_target` 指向 setting.json；手动兜底路径把新 token 同步进 MCP 配置）后重连。
-
-> SPEC 六.六 豁免声明：统筹指定是管理员管理面操作（GET/PUT /api/v1/prime），不开放为 MCP 工具——统筹智能体自身无需读写该状态。
-
-## 行为边界
-
-- 统筹行为来自 hub 派发时注入的本提示词（模板见下）；直接在终端 `zcode -p` 不会带提示词，它会按普通编码智能体直接干活——这是预期行为。
-- 控制类身份须经 hub 管理员批准，节点不得自报提权。
-
+修改行为节时须同批更新运行模板、设计说明和对应测试，不能通过单改资产宣称运行问题已解决。
 
 ## 分配决策（StartLux 影子 + 规则兜底）
 

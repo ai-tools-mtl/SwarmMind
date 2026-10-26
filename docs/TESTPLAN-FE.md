@@ -1,12 +1,14 @@
 # SwarmMind 前端优化测试计划（TESTPLAN-FE v1）
 
 > 本文件是 FE-PLAN v3 的验收规程本体。用例固定 ID，每例含准备/操作/断言/超时/清理。
-> 执行方式：独立会话逐条执行并输出逐条结果；必测项 SKIP 不算全绿。
+> 执行方式：独立会话逐条执行并输出逐条结果；必测项 SKIP 不计为通过。
 > 登记入口：docs/archive/FE-PLAN-v3.md（FE-PLAN v3，已归档）。
+
+> 本文保留基础控制台用例；新增 Work、任务可见性和派发建议按相应 TESTPLAN 专项执行，不以旧页面数量限制当前实现。
 
 ## 通用约定
 
-- 环境：`go test ./...` 全绿后，`make deploy-hub` 部署至测试环境，或本地 `go run ./cmd/hub` 连真实 hub 只读快照
+- 环境：使用临时配置、独立 data_dir 与空闲端口启动本地测试实例；构建与单测先通过。远程部署或真实实例操作另行授权，不把部署命令作为默认测试准备步骤。
 - 工具：Playwright（chromium，1440×900）；`route()` 拦截 mock 延迟/失败
 - 断言口径：PASS 需逐条给出截图或 evaluate 返回值证据；SKIP 需注明原因且不计入通过数
 - 计数锚点：`.metric`≥3、`.chip-link`===8、`[data-act]`/`#id` 全集不破坏

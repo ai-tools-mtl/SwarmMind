@@ -9,11 +9,11 @@ admin_token: ""                   # 管理台登录令牌（浏览器登录与 s
 data_dir: data
 notify:                           # 【旧版兼容入口】任务终态 IM 通知——日常配置请用管理台「设置 → 通知」（可视化多渠道：飞书/邮件/webhook/站内，运行时可改，凭证存 data_dir/notify_channels.json）
   webhook_url: ""                 # 本段仅在「启动时渠道存储为空」被一次性导入为一个通知渠道（幂等，只导一次）；导入后本段不再生效，改这里无效
-  format: raw                     # raw→导入为通用 webhook 渠道（结构化 JSON）；feishu→导入为飞书机器人渠道（一行人话摘要）
+  format: raw                     # raw→导入为通用 webhook 渠道（结构化 JSON）；feishu→导入为飞书机器人渠道（简短结果摘要）
 decision:                         # 【可选】派发建议决策服务（P5.1 D1）：派单页「建议派给 X」与 swarmmind_dispatch_suggest 的后端；决策是建议非必经——未启用/失败均返回无建议，不阻塞派单
   provider: ""                    # llm-as-jev = 启用（GLM 兼容 chat completions）；留空或 off = 不启用
   model: ""                       # 决策模型（留空 = glm-5.3-flash）
   base_url: ""                    # OpenAI 兼容端点（留空 = GLM coding plan；配置了 api_key 时建议一并确认端点匹配）
   api_key: ""                     # 一级密钥；留空依次回落环境变量 GLM_API_KEY、swarm-prime-home（.zcode/v2/provider_config.json 的 providerRules[].config.access.apiKey，PRIME 链路同款）
   prime_home: ""                  # swarm-prime-home 路径（留空回落环境变量 SWARM_PRIME_HOME，再回落 ~/swarm-prime-home）
-  timeout_sec: 15                 # 单次建议预算秒数（GLM 实测中位 ~5s、尾部 >8s）；超时降级为无建议不阻塞派单
+  timeout_sec: 15                 # 单次建议超时预算（实际延迟取决于模型、网络与配额）；超时降级为无建议不阻塞派单
