@@ -1,5 +1,29 @@
 # SwarmMind 功能测试文档
 
+## Logo 接入专项（2026-10-26）
+
+测试使用本轮重新构建的 hub/node 二进制、独立临时配置和空闲端口。独立执行者按下表验证，记录到 `docs/TESTREPORT-logo.md`。用户既有通知界面等改动保留；不提交、不推送、不操作现有部署。
+
+### 双端形态对照
+
+| 位置 | hub | node | 一致要求 |
+|---|---|---|---|
+| 顶部品牌位 | 图标 + SwarmMind + 中心端 | 图标 + SwarmMind + 本机 | 同图、30×30、同间距；端角色保留 |
+| 登录页 | 64×64 图标 + 管理员登录 | 64×64 图标 + 本机令牌登录 | 同图、同尺寸；不改表单字段/逻辑 |
+| 侧栏 | 24×24 图标 + 中心端名称 | 24×24 图标 + 节点名称 | 同组件形态和位置，名称按角色 |
+| 页签 | `/favicon.svg` | `/favicon.svg` | 相同 SVG；免登录可达 |
+
+| ID | 操作 | 通过条件 |
+|---|---|---|
+| LOGO-01 | 检查 assets/brand SVG/PNG、字标路径及脚本 | 四模块图形/配色延续已批准方案；SVG 无外部引用/字体依赖，PNG 透明版含 alpha；文件未被 Git 忽略 |
+| LOGO-02 | `python3 scripts/build-brand.py` 前后比较 SVG 内容；核对 README picture 与文件 | 导出确定性；明暗横幅可预览；GitHub 版与系统同一图形 |
+| LOGO-03 | 实际请求重建后两端 `/logo.svg`、`/favicon.svg` | 均200、image/svg+xml、同字节、无认证、无配置/凭据；未知资源404 |
+| LOGO-04 | Playwright 等登录视图就绪后检查登录与登录后页面 | 顶部/登录/侧栏图标 naturalWidth>0，favicon可取；双端对比截图；32/24像素图标可辨，窄屏无横向溢出 |
+| LOGO-05 | 验证登录/导航及共享展示测试 | 登录与页面跳转仍可用；`go test ./internal/node/localapi/ -run 'TestWebMdRender|TestWebDrawer'` 通过；不改既有通知行为 |
+| LOGO-06 | `go build ./...`、`go test ./...`、回环演示 | 构建和测试通过；DoD1–11逐项列出证据与未执行边界；不以静态截图代替运行接入 |
+
+只做资源整理和界面接入，不在本轮更改任务协议、权限、通知配置或部署状态。PNG 是由 SVG 渲染的交付文件，原概念提案板不当作运行 Logo。
+
 ## 文档内容修订专项（2026-10-26）
 
 此专项验证文档修订；基础用例中的工具发现清单随当前接口同步更新。独立执行者从当前文件读取需求，逐条记录到 `docs/TESTREPORT-docs-20261026.md`，不宣称外部双机或 Windows 真机已验收。
@@ -28,7 +52,7 @@
 以下为基础用例与后续增补。Work、任务可见性和 D1 建议服务还需各自专项，不能把本文件基础回归当作全部功能验收。覆盖：
 
 - 中心端管理面 REST API、账户、密码登录、PAT、任务、产物、核对记录、控制批次、目录与节点。
-- Web 控制台：hub 八页（总览、机器、任务监管、任务派发、工作单、策略容量、设置、群聊），node 四页（总览、我的服务、派任务·我的任务、接入）。登录作为独立交互入口检查。
+- Web 控制台：hub 八页（总览、机器、任务、派发、工作单、群聊、策略容量、设置），node 四页（总览、服务、任务、连接）。登录作为独立交互入口检查。
 - MCP stdio 基础执行工具与 hub 当前工具发现；新增工具行为见专项。
 - node 本地 API、跨节点派单、离线信箱、幂等、断线恢复、`needs_review`。
 - SPEC DoD 十一项、工作目录互斥、持久化与协议边界。
@@ -716,13 +740,13 @@ test "$(wc -l < "$T/a/w/outputs/$REVIEW/executions" | tr -d ' ')" = 1
 |---|---|---|---|---|---|
 | TC-37 | hub 总览与登录入口 | 已有任务及 needs_review | 执行下方 TC-37 浏览器命令 | 总览展示真实节点、异常和任务；主行动可进入节点接入；过期会话回登录；密码登录可完成 | P0 冒烟 |
 | TC-38 | hub 节点接入 | 两节点在线 | 执行下方 TC-38 浏览器命令 | 向导生成身份对应片段，令牌掩码；明确手工配置限制；“吊销”不冒充已生效能力 | P1 核心 |
-| TC-39 | hub 任务监管 | TC-10、TC-17、TC-29 | 执行下方 TC-39 浏览器命令 | 筛选、空态、详情、真实产物下载、needs_review 警示和核对入口有效 | P0 冒烟 |
-| TC-40 | hub 任务派发 | 两节点在线 | 执行下方 TC-40 浏览器命令 | 请求确已落库但响应丢失后，表单冻结；同键重试命中原批次，进入报告与下一步 | P1 核心 |
+| TC-39 | hub 任务 | TC-10、TC-17、TC-29 | 执行下方 TC-39 浏览器命令 | 筛选、空态、详情、真实产物下载、needs_review 警示和核对入口有效 | P0 冒烟 |
+| TC-40 | hub 派发 | 两节点在线 | 执行下方 TC-40 浏览器命令 | 请求确已落库但响应丢失后，表单冻结；同键重试命中原批次，进入报告与下一步 | P1 核心 |
 | TC-41 | hub 策略容量 | 已登录 | 执行下方 TC-41 浏览器命令 | 明确只读，显示容量/保留规则，无保存入口，不发送变更请求 | P1 核心 |
 | TC-42 | hub 设置 | 账户已初始化 | 执行下方 TC-42 浏览器命令 | 账户设置存在；创建 PAT 明文一次展示；关闭后不再展示；UI 撤销后 Bearer 立即失效 | P1 核心 |
 | TC-43 | node 总览与诊断 | node A 在线 | 执行下方 TC-43 浏览器命令 | 三卡（连接状态/执行账本/最近同步）可见且页面无「信箱余量」；剪贴板诊断为真实 JSON；派单导航有效 | P1 核心 |
-| TC-44 | node 我的服务 | node A 在线 | 执行下方 TC-44 浏览器命令，并验证恢复暴露 | 配置只读；开关显示同步反馈，网络准入随之变化；操作不取消已有任务 | P1 核心 |
-| TC-45 | node 派任务·我的任务 | 两节点在线 | 执行下方 TC-45 浏览器命令 | 目录选择、未知态冻结、同键重试、任务留痕、结果抽屉及下一步完整闭合 | P0 冒烟 |
+| TC-44 | node 服务 | node A 在线 | 执行下方 TC-44 浏览器命令，并验证恢复暴露 | 配置只读；开关显示同步反馈，网络准入随之变化；操作不取消已有任务 | P1 核心 |
+| TC-45 | node 任务 | 两节点在线 | 执行下方 TC-45 浏览器命令 | 目录选择、未知态冻结、同键重试、任务留痕、结果抽屉及下一步完整闭合 | P0 冒烟 |
 
 TC-37：
 
@@ -903,7 +927,7 @@ SERVICE_TASK="$(submit "$N1" qa-sh 'sleep 4; printf "SERVICE_CONTINUES\n"')"
 wait_task "$SERVICE_TASK" running
 
 ui node services '
-await expect(page.locator("h1")).toHaveText("我的服务");
+await expect(page.locator("h1")).toHaveText("服务");
 await expect(page.locator("body")).toContainText("只读");
 await page.locator("[data-act=\"expose-off:qa-sh\"]").click();
 await expect(page.locator("#sync-qa-sh")).toContainText("网内生效");
@@ -1331,3 +1355,25 @@ printf 'EVIDENCE_DIR=%s\n' "$T"
 ### 执行说明补充
 - 群/统筹/取消用例依赖 v0.2.x 部署版 hub；E2E 编号沿用 tests/e2e-console.mjs
 - 降级演练见 scripts/drill-degrade.sh（P4 Gate 证据）
+
+## 增补批次（2026-10-26：任务筛选 + 双端导航统一，终审必修4 补机械执行步骤）
+
+### hub 导航与目标机器筛选（hub 模式：`node tests/e2e-console.mjs`，E2E_BASE 指向 hub）
+- TC-NAV-01（E-NAV/E-NAV2）aside 导航词表 8 项（总览/机器/任务/派发/工作单/群聊/策略容量/设置）名称与顺序逐项断言；aria-current 指向当前页。定位一律用结构化选择器 `aside nav button[data-page=…]`，禁用 `:has-text("任务")` 宽泛匹配。
+- TC-NAV-02（E20/E20x）「目标机器」select 筛选：行全部命中所选机器；E20x 真实触发导出按钮→捕获下载→解析导出 JSON，断言仅含所选机器且条数与列表一致（导出与列表同源 filteredTasks 实测，不挂空名）。
+- TC-NAV-03（E20b）清除路径 A：select 改回「全部机器」→ 列表恢复、控件值复位。
+- TC-NAV-04（E20c）清除路径 B：trace 无命中 + 叠加机器筛选 → 零命中空态点「清除筛选」→ trace 输入与机器 select 双复位、列表全恢复。
+- TC-NAV-05（E-401）会话失效回归：登录→退出→登录表单出现→再登录（E16/E17）之外补 401 路径——`context.clearCookies()` 后等轮询 401，登录表单必须出现（登录页指纹缓存不残留业务 DOM）。
+- TC-NAV-06（快照消失态）选中机器后该机器从快照消失：选项保留选中项、显示零结果（不静默回退「全部机器」）；`go test ./internal/node/localapi/ -run TestWebTaskFilterBehavior`（node-gone-kept 场景）为行为锁，浏览器级在验收实例构造。
+
+### node 来源筛选与导航（node 模式：`E2E_BASE=<node local API> local_token=<本机管理令牌> node tests/e2e-console.mjs`）
+- TC-NTF-01（N01）令牌门登录：local_token 经环境变量传入，`#gate-token` 填入后进入控制台。
+- TC-NTF-02（E-NAV3）node 导航词表 4 项（总览/服务/任务/连接）名称与顺序逐项断言（`aside nav button[data-go=…]`）。
+- TC-NTF-03（N02）来源筛选行恒在：3 chip（全部/本机派单/hub 下发）空快照也不消失（终审必修2）。
+- TC-NTF-04（E-N1/E-N1b）轮询保持筛选：跨一个轮询周期（5s+余量）chip 选中态与行集不变；来源列全部命中所选来源。无已载任务记 SKIP。
+- TC-NTF-05（E-N2）翻页叠加筛选：「加载更早」后 chip 仍选中、行集增长、新增行仍命中来源。无翻页入口记 SKIP。
+- TC-NTF-06（E-N3）登出→令牌门→再登录后 S.tf 重置：「全部」chip 选中。
+- 汇总口径：PASS/SKIP/FAIL 三态分开计，SKIP 注明原因不计通过数，仅 FAIL 判败退出（终审必修4）。
+
+### 渲染行为锁（go test 常驻，不依赖部署实例）
+- `go test ./internal/node/localapi/ -run 'TestWebNavFilterStructure|TestWebTaskFilterBehavior'`：双端导航词表/navnum/aria/workspace 结构锁、blankFilters 七字段与五处重建点锁、ORIGIN_WORDS 词典单源锁；myTasksCard 渲染过滤行为锁（chip 计数/留痕归 local/零命中翻页不阻断/空快照激活筛选全程可清除/与派单表单互不干扰）+ footer 口径三数分离（rows/all/total 互异分页场景）+ hub filteredTasks 交集与选项生命周期。

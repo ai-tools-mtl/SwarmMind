@@ -12,6 +12,8 @@ import (
 	"embed"
 	"net/http"
 	"strings"
+
+	brandassets "github.com/mtl802/swarmmind/assets"
 )
 
 //go:embed index.html app.js style.css
@@ -29,6 +31,10 @@ var contentType = map[string]string{
 // 不做路径拼接，无目录列举与穿越面。
 func Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/logo.svg" || r.URL.Path == "/favicon.svg" {
+			brandassets.ServeLogo(w, r)
+			return
+		}
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		if name == "" {
 			name = "index.html"

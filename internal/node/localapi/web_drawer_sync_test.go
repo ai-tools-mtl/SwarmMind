@@ -109,8 +109,14 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	// 答复与日志：mdAnswer 白底主角+（空）兜底；诊断日志恒两段+空段（空）+单 pre 双段原文
 	// （D8/D10/D11/D12 统一口径全部锁在本块内，两端同文即同行为）；drawerAnswerHtml
 	// D9 状态优先——终态判定先行，cancelled+result=null（后端合法态）不得落「尚未到终态」；
-	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文）——
-	// stdin 优先 md 渲染+原文切换、空回退 args 逐参数 code、皆空省略
+	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文；
+	// 2026-10-26 prompt-args-md 重构：args 形态判据分流——任一参数含换行或总长 >300
+	// 字符⇒提示词文本形态 md 渲染+原文切换，否则短参数逐参 code 胶囊；stdin+args 并存
+	// 双小节标题共享一个原文切换；单源不显示小节标题；皆空省略；2026-10-26
+	// prompt-preview 预览折叠——总内容 >PROMPT_PREVIEW_MAX(1200) 字符折叠预览
+	//（prompt-preview 容器+prompt-fade 渐隐遮罩+「展开全部」/「收起」切换），展开态存
+	// S.drawer.promptExpanded 从状态算 HTML（D22）。判据行为边界由
+	// TestWebPromptZoneShapeBehavior 经 node 实测，此处只锁双端同文的文案/挂点行）
 	for _, want := range []string{
 		"function mdAnswer(text) {",
 		"function drawerAnswerHtml(t, res, needs) {",
@@ -127,6 +133,14 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 		"'prompt-raw'",
 		"本任务以命令行参数下达（逐参数展示，保留边界）：",
 		"任务指令",
+		"任务说明（stdin）",
+		"命令行参数（args · ${args.length} 段）",
+		"'当前为原始输入。'",
+		"const PROMPT_PREVIEW_MAX = 1200;",
+		"'prompt-expand'",
+		`<div class="prompt-preview${expanded ? ' prompt-open' : ''}">`,
+		`'<div class="prompt-fade"></div>'`,
+		"expanded ? '收起' : '展开全部'",
 	} {
 		if !strings.Contains(logBlk, want) {
 			t.Errorf("抽屉答复与日志 shared block 应含 %q", want)
@@ -167,9 +181,150 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	}
 }
 
+// TestWebNotifyFormSharedBlock 通知渠道编辑面双端一致性锁（t20261026-notify-polish，
+// SPEC 六.五「双端 Web 展示一致性契约」第一条 + 2026-10-26 三层范围裁决）：通知表单
+// 骨架、类型/消息格式词典、modalHead 与配套局部重绘收进「通知表单与词典 shared
+// block」双端逐字节同文；操作逻辑层（居中 modal 形态/字段恒显恒位/卡片位置）不进
+// shared block 锁，锁关键行；node 无 inbox 的如实口径以 NOTIFY_TYPE_KEYS 参数体现。
+func TestWebNotifyFormSharedBlock(t *testing.T) {
+	bus := transport.NewBus()
+	svc := newService(t, bus.Endpoint("nodeA"))
+	srv := httptest.NewServer(New(Config{
+		NodeID: "nodeA", Service: svc,
+		Agents:     newState(t, t.TempDir(), nil),
+		LocalToken: "tok-local",
+	}).Handler())
+	t.Cleanup(srv.Close)
+
+	fetch := func(path string) string {
+		t.Helper()
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s 应 200, got %d", path, resp.StatusCode)
+		}
+		return string(b)
+	}
+	nodeJS, nodeCSS := fetch("/app.js"), fetch("/style.css")
+	hubJS, err := os.ReadFile("../../hub/web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubCSS, err := os.ReadFile("../../hub/web/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hubJSStr, hubCSSStr := string(hubJS), string(hubCSS)
+
+	// ---- shared block 双端逐字节一致 + 关键行（词典/恒定骨架/参数化面） ----
+	blk := sharedBlock(t, nodeJS, hubJSStr, "通知表单与词典 shared block")
+	for _, want := range []string{
+		"const NOTIFY_TYPES = {",
+		"const NOTIFY_FORMATS = { generic: '通用 JSON', feishu: '飞书机器人' };",
+		"const NOTIFY_EVENT_OPTS = [",
+		"function modalHead(title) {",
+		// modalHead × 按钮内联字面量（双端 button() 签名不同，带 aria-label 无法同文经助手）
+		`<button type="button" data-act="close" class="close" aria-label="关闭弹层">×</button>`,
+		`<h2 id="layer-title">`,
+		"function notifyTypeOptionsHtml(type, typeKeys) {",
+		"function notifyHintHtml(type, format) {",
+		"function notifyFormHtml(ch, typeKeys) {",
+		// 恒定骨架：消息格式/推送地址/自定义请求头三件恒显恒位，切格式仅 label 与 disabled 变化
+		`<label>消息格式<select id="nf-format">`,
+		`id="nf-url"`,
+		`id="nf-headers" rows="2"`,
+		`' disabled'`,
+		"飞书机器人协议不支持自定义请求头",
+		`id="nf-hint"`,
+		"function nfRepaint(type, format, sec) {",
+		"function nfSecFromDom() {",
+		"function collectNotifyForm() {",
+	} {
+		if !strings.Contains(blk, want) {
+			t.Errorf("通知表单与词典 shared block 应含 %q", want)
+		}
+	}
+
+	// ---- node 端形态：类型键参数化（无 inbox 如实口径）+ 居中 modal + 直清家族 ----
+	for _, want := range []string{
+		"const NOTIFY_TYPE_KEYS = ['email', 'webhook', 'sms'];",
+		"notifyFormHtml(ch, NOTIFY_TYPE_KEYS)",
+		// 居中 modal（与 hub openLayerPlain 同形态），无障碍对齐：role/aria-modal/aria-labelledby
+		`<section class="modal" id="notify-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">`,
+		"$('#layer [role=dialog]')?.focus();",
+		// shared modalHead ×/取消同词关闭动作（守护防误清其他层）
+		"case 'close':",
+		"if ($('#notify-modal')) closeNotifyForm();",
+		// 切换只重绘两槽（D2 局部刷新），格式切换经 nfSecFromDom 回填不丢
+		"nfRepaint(e.target.value, 'generic', {});",
+		"nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());",
+		// 改动四：通知卡上移页头后第一位（head 之后 notifyCard 紧随，能力配置沉底）
+		"return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +",
+	} {
+		if !strings.Contains(nodeJS, want) {
+			t.Errorf("node app.js 应含 %q（通知编辑 modal 化/类型键参数化/通知卡上移）", want)
+		}
+	}
+	for _, ban := range []string{
+		`id="notify-drawer"`,           // 旧右侧抽屉形态退役（改动三）
+		"case 'nf-close':",             // 旧关闭动作词退役（与 hub 同词 close）
+		"cfgSection() + notifyCard()", // 旧卡片沉底次序退役（改动四）
+	} {
+		if strings.Contains(nodeJS, ban) {
+			t.Errorf("node app.js 不应再含 %q（通知编辑 modal 化/卡片上移后旧形态退役）", ban)
+		}
+	}
+
+	// ---- hub 端形态：全集类型键（不传 typeKeys）+ 切换走 shared nfRepaint ----
+	for _, want := range []string{
+		"openLayerPlain(notifyFormHtml(null))",
+		"nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());",
+	} {
+		if !strings.Contains(hubJSStr, want) {
+			t.Errorf("hub app.js 应含 %q（通知表单接入 shared 块函数）", want)
+		}
+	}
+
+	// ---- 样式：modal 形态同文 / 恒定骨架 grid / 说明槽去边距 / 铃铛几何根因 ----
+	for _, css := range []struct{ side, src string }{{"node", nodeCSS}, {"hub", hubCSSStr}} {
+		for _, want := range []string{
+			// .overlay 遮罩淡入 + .modal 尺寸/圆角/阴影/入场动效（node 自 hub 同文同步）
+			".overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;opacity:0;transition:opacity var(--dur-scrim) ease}",
+			".overlay.open .modal{opacity:1;transform:none}",
+			".modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:var(--surface);padding:28px;border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);",
+			// 事件字段集与说明槽（改动二双端同补）
+			".nf-events{border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:12px 14px;margin:14px 0 4px;display:grid;gap:8px}",
+			"#nf-hint{margin:0}",
+		} {
+			if !strings.Contains(css.src, want) {
+				t.Errorf("%s style.css 应含 %q（通知表单/modal 双端同文样式）", css.side, want)
+			}
+		}
+	}
+	// hub 专属：铃铛 padding:0 重置（全局 button padding 顶偏图标的根因修复，改动一）
+	if !strings.Contains(hubCSSStr, ".bell-btn{position:relative;padding:0;") {
+		t.Error("hub style.css .bell-btn 应显式 padding:0（铃铛图标居中，DoD 几何断言 <1px）")
+	}
+	// node 专属：通知表单 grid 骨架在 node 是全局 .fields 覆盖（既有），hub 以 #notify-form 同值收齐
+	if !strings.Contains(nodeCSS, ".fields{display:grid;gap:8px}") {
+		t.Error("node style.css 应含 .fields grid 覆盖（通知表单纵向堆叠基准）")
+	}
+	if !strings.Contains(hubCSSStr, "#notify-form.fields{display:grid;gap:8px}") {
+		t.Error("hub style.css 应含 #notify-form.fields grid 覆盖（与 node 表单骨架同构）")
+	}
+}
+
 // TestWebDrawerComponentStyles 抽屉共用组件样式双端一致锁（SPEC 六.五 第一/二条）：
-// .timeline 事件流（左轨圆点+needs_review 热点）与 .artifact 产物行分隔线为双端同文
-// 规则——node 补齐后抽壳比对，任一端私改即红。
+// .timeline 事件流（左轨圆点+needs_review 热点）、.artifact 产物行分隔线与
+// .prompt-preview 任务指令预览折叠（t20261026-prompt-preview：限高+渐隐遮罩+按钮行）
+// 为双端同文规则——node 补齐后抽壳比对，任一端私改即红。
 func TestWebDrawerComponentStyles(t *testing.T) {
 	bus := transport.NewBus()
 	svc := newService(t, bus.Endpoint("nodeA"))
@@ -209,6 +364,10 @@ func TestWebDrawerComponentStyles(t *testing.T) {
 		".timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}",
 		".timeline li.hl:before{background:var(--heat)}",
 		".artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}",
+		".prompt-preview{position:relative;max-height:180px;overflow:hidden}",
+		".prompt-preview.prompt-open{max-height:none}",
+		".prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}",
+		".prompt-foot{margin-top:4px;text-align:right}",
 	}
 	for _, r := range rules {
 		if !strings.Contains(nodeCSS, r) {
@@ -266,7 +425,10 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		"任务仍在进行，抽屉每 5 秒自动刷新。",
 		"诊断日志（stdout / stderr 尾部）",
 		"最多保留各 64KiB。",
-		"任务已归档前保留 24 小时。",
+		// P0 事实纠错（2026-10-26）：归档期限文案按端上事实分叉——hub 终态快照真清理
+		// （core/sweep.go TerminalRetention=24h），node CleanupAcked 未接入运行循环（SPEC 4.8）
+		// 不自动清理。原双端同文句「任务已归档前保留 24 小时。」退役，两端各自断言：
+		// hub 新句见下方 hub 独有断言组；node 新句见下方 node 断言组。
 		"查看全部任务",
 		"结果还没确认——这个任务结果拿不准，等你核对。",
 		"该任务没有单独的文本答复，输出内容见下方诊断日志与产物。",
@@ -318,6 +480,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		`<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>`, // D7 折叠+沉底灰块
 		"taskErrorNotice(r, needs)", // D5 hub 接入统一错误条
 		`${badge(t.status)}</h2></div>`, // D2 头部同构：badge 入 agent@node 行
+		"终态任务记录保留 24 小时，到期自动清理。", // P0 事实纠错：hub 清理真实存在（core/sweep.go）
 	} {
 		if !strings.Contains(hubJSStr, want) {
 			t.Errorf("hub app.js 应含 %q", want)
@@ -328,7 +491,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 	for _, want := range []string{
 		"taskErrorNotice(res, t.status === 'needs_review')", // D5 node 接入统一错误条
 		`role="dialog" aria-modal="true" aria-labelledby="drawer-title"`, // D1 对齐 hub 壳层基线
-		"任务已归档前保留 24 小时。${button('查看全部任务 →', 'close-drawer', 'link')}",
+		"本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}", // 端上事实分叉（见 P0 注），不得回退 hub 清理口径
 		"button('回表单重新派单', 'reopen-form', 'link')", // node 独有白名单动作保留
 	} {
 		if !strings.Contains(nodeJS, want) {

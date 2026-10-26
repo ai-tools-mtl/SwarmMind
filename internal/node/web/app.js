@@ -156,6 +156,10 @@ const ERRORS = {
 };
 const TERMINAL = new Set(['completed', 'failed', 'needs_review', 'cancelled']);
 const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
+/* ORIGIN_WORDS 任务来源词典（TASK-nav-filter A1 词典同源，SPEC 六.五 文案层单一起源）：
+ * 「hub 下发 | 本机派单」双端逐字节同文——来源徽标、筛选 chip、抽屉来源行唯一出处，
+ * 不得再复制字面量。 */
+const ORIGIN_WORDS = { hub: 'hub 下发', local: '本机派单' };
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -236,19 +240,49 @@ function drawerLogInner(res, raw) {
 }
 /* promptZoneHtml 任务指令分区（t20261026-webfix 新增；t20261026-notify-unify 改动四
  * 提升进本块双端同文——node Ledger Entry.Task 本就持久化完整任务输入，TaskView 投影
- * 后 node 单查端点含 input，双端同构点亮）：stdin（控制台/表单派单走 stdin 语义，
- * 即原始提示词）默认 Markdown 渲染 + 查看原文切换（同 fail 分区 raw 模式，切换态
- * 存各自 S.drawer.promptRaw，切换经 syncDrawerZones 只重写 prompt 分区）；stdin 空
- * 时回退 args 命令行形态（逐参数 code 胶囊保留参数边界）；两者皆空分区省略。底部
- * 「任务输入（原样 JSON）」details（hub 独有白名单）保留完整技术细节，两不误。 */
+ * 后 node 单查端点含 input，双端同构点亮；t20261026-prompt-args-md 重构内容源判定，
+ * 伦哥反馈「任务指令希望支持渲染 md」——Prime 派发的整篇提示词走 input.args，旧
+ * 「stdin 空⇒短命令行参数」假设与真实派发形态不符）：args 形态判据=任一参数自身
+ * 含换行或 args 总长 >300 字符⇒「提示词文本形态」（md 渲染+查看原文切换）；否则
+ * 「短参数形态」（逐参数 code 胶囊保留参数边界）。判据取「参数自身含换行」而非
+ * join 含换行：多参数 join('\n') 恒含换行，会把多参数短命令误判成文本形态、丢逐参
+ * 胶囊。stdin（控制台/表单派单走 stdin 语义，即原始提示词）默认 Markdown 渲染；
+ * stdin+args 并存（旧版 args 被完全忽略的盲区）双小节标题「任务说明（stdin）」
+ * 「命令行参数（args · N 段）」共享一个查看原文切换（raw 态单 pre 全部原文，
+ * stdin:/args: 行前缀同诊断日志先例；切换态存各自 S.drawer.promptRaw，切换经分区
+ * diff 只重写 prompt 分区）；单源任务不显示小节标题（短参数沿用 muted 引言行，
+ * 视觉与现状一致）；两者皆空分区省略。底部「任务输入（原样 JSON）」details（hub
+ * 独有白名单）保留完整技术细节，两不误。
+ * 预览折叠（t20261026-prompt-preview，伦哥反馈「任务指令显示预览，需要时点击全部
+ * 显示」）：任务指令总内容（stdin + args join，现有拼接口径）超过 PROMPT_PREVIEW_MAX
+ * 字符 ⇒ 内容容器折叠预览（限高+底部渐隐遮罩+「展开全部」按钮），≤阈值全显（现状
+ * 形态，无展开按钮）；短参数胶囊形态本就短，走阈值判定前的早退分支不参与折叠。
+ * 展开态存 S.drawer.promptExpanded（与 promptRaw 同模式，S.drawer 随抽屉生命周期
+ * 重置），渲染函数从状态算 HTML——轮询/切换经分区 diff 天然保持（D22 声明式，无
+ * 「重建后 JS 恢复」反模式）；原文态同样折叠（raw 数百行同样长），展开态跨 raw/
+ * 渲染两态共享同一个 promptExpanded；双源折叠作用于整个内容容器（一个按钮控制
+ * 全部小节）。 */
+const PROMPT_PREVIEW_MAX = 1200;   // 折叠判据阈值：约一屏 md 渲染量——超过即预览折叠，未超保持全显（字符数模板可算，无 JS 测量）
 function promptZoneHtml(t) {
   const stdin = t.input?.stdin || '';
   const args = t.input?.args || [];
   if (!stdin && !args.length) return '';
-  if (!stdin) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p><p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  const text = args.join('\n');
+  const argsMd = args.some(a => a.includes('\n')) || text.length > 300;
+  const dual = !!stdin && args.length > 0;
+  const pills = `<p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  if (!stdin && !argsMd) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p>${pills}`;
   const raw = !!S.drawer?.promptRaw;
+  const expanded = !!S.drawer?.promptExpanded;
   const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输入。' : '默认按 Markdown 渲染；需要看原文请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'prompt-raw', 'link')}</div>`;
-  return `<h3>任务指令</h3>${head}${raw ? `<pre>${esc(stdin)}</pre>` : `<div class="md-body">${mdToHtml(stdin) || '<p class="muted">（空）</p>'}</div>`}`;
+  const mdSec = (label, src) => (label ? `<b class="md-log-label">${label}</b>` : '') + `<div class="md-body">${mdToHtml(src) || '<p class="muted">（空）</p>'}</div>`;
+  const argsTitle = dual ? `命令行参数（args · ${args.length} 段）` : '';
+  const argsSec = !args.length ? '' : argsMd ? mdSec(argsTitle, text) : (dual ? `<b class="md-log-label">${argsTitle}</b>` : '') + pills;
+  const body = raw
+    ? `<pre>${esc(dual ? `stdin:\n${stdin}\n\nargs:\n${text}` : stdin || text)}</pre>`
+    : `${stdin ? mdSec(dual ? '任务说明（stdin）' : '', stdin) : ''}${argsSec}`;
+  if (stdin.length + text.length <= PROMPT_PREVIEW_MAX) return `<h3>任务指令</h3>${head}${body}`;
+  return `<h3>任务指令</h3>${head}<div class="prompt-preview${expanded ? ' prompt-open' : ''}">${body}${expanded ? '' : '<div class="prompt-fade"></div>'}</div><div class="prompt-foot">${button(expanded ? '收起' : '展开全部', 'prompt-expand', 'link')}</div>`;
 }
 /* ===== 抽屉答复与日志 shared block end ===== */
 
@@ -284,24 +318,166 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 }
 /* ===== 抽屉分区更新 shared block end ===== */
 
-/* 通知渠道类型与事件订阅（standalone 通知补盲区，2026-10-24；2026-10-26
- * notify-unify 改动二双端同改：独立 feishu 类型并入 webhook 的「消息格式」维度，
- * 与 hub 控制台同词同构——唯 node 不提供 inbox（站内通知为 hub 控制台铃铛专属，
- * 服务端准入同样拒绝）；sms 占位灰显未开放。 */
+/* ===== 通知表单与词典 shared block begin（双端同步维护：通知渠道编辑表单骨架、
+ * 类型/消息格式词典与弹层头部 modalHead 双端逐字节同文，
+ * internal/node/localapi/web_drawer_sync_test.go 抽块比对锁一致性——改本块必须
+ * 两端同改同验。t20261026-notify-polish。）
+ * · 双端一致三层（2026-10-26 伦哥裁决）：本块承载渲染层与文案层；操作逻辑层
+ *   （弹层形态=居中 modal、表单结构、卡片位置）由代码结构承载，不进块内。
+ * · 字段区恒定骨架（webhook 类型）：消息格式 / 推送地址 / 自定义请求头三件恒显
+ *   恒位，切格式只变 label 文本与 disabled，#nf-type-fields 高度不变（零跳动）；
+ *   格式相关说明独立 #nf-hint 槽位（位置恒定，内容随格式切换，不占字段区高度）。
+ * · 类型枚举表参数化：NOTIFY_TYPES 为全集词典；端上可见类型键经
+ *   notifyFormHtml(ch, typeKeys) 传入（hub 缺省=全集；node 传 NOTIFY_TYPE_KEYS
+ *   不含 inbox——站内通知为 hub 铃铛专属，如实口径不在词典上分叉）。
+ * · 飞书格式：headers textarea 恒显但 disabled（协议不支持自定义头），行内说明进
+ *   label；切走再切回经 nfSecFromDom 保留已输入地址与请求头。 ===== */
 const NOTIFY_TYPES = {
   email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
+  inbox: { label: '站内通知', form: '无需配置。终态事件进入顶栏铃铛（只存在内存里，重启后清空）。' },
   sms: { label: '短信', form: '' },
 };
-/* 消息格式词典（webhook 类型专用维度，与 hub 同文）：generic=通用 JSON POST；
- * feishu=飞书自定义机器人文本消息（不带自定义头）。FEISHU_HINT 双端同文。 */
+/* 消息格式词典（webhook 类型专用维度）：generic=通用 JSON POST（结构化载荷+可带
+ * 自定义头）；feishu=飞书自定义机器人文本消息（不带自定义头——飞书机器人不读）。 */
 const NOTIFY_FORMATS = { generic: '通用 JSON', feishu: '飞书机器人' };
+/* 飞书格式 hint（t20261026-webfix 修正口径沿用：桌面端精确路径 + 堵「去开发者后台
+ * 建应用」岔路）。 */
 const FEISHU_HINT = '路径：电脑端进群 → 右上角「···」→ 设置 → 群机器人 → 添加机器人 → 自定义机器人（手机端添加不了）。创建后把 Webhook 地址贴进来——这是群内创建的机器人，不需要去开放平台开发者后台建应用。';
 const NOTIFY_EVENT_OPTS = [
   ['task_final', '全部终态（完成 / 失败 / 等你确认 / 取消）'],
   ['task_failed', '仅失败'],
   ['task_needs_review', '仅等你确认（结果拿不准）'],
 ];
+/* modalHead 弹层头部（id="layer-title" 供对话框 aria-labelledby 指向；× 关闭动作
+ * 双端同词 act=close。× 按钮为内联字面量：双端 button() 助手签名不同（hub 4 参
+ * extra / node 5 参 inner+attr），带 aria-label 的调用无法同文，故不经助手）。 */
+function modalHead(title) {
+  return `<div class="row"><h2 id="layer-title">${title}</h2><button type="button" data-act="close" class="close" aria-label="关闭弹层">×</button></div>`;
+}
+/* notifyTypeOptionsHtml 类型下拉选项（typeKeys=端上可见类型键序，缺省=全集；
+ * sms 在枚举中占位，option disabled 灰显「需接入服务商，暂未开放」）。 */
+function notifyTypeOptionsHtml(type, typeKeys) {
+  return (typeKeys || Object.keys(NOTIFY_TYPES)).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('');
+}
+/* notifyHintHtml 格式相关说明槽内容（独立于字段区：切换不改字段区高度）。 */
+function notifyHintHtml(type, format) {
+  if (type === 'webhook') {
+    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
+    return fmt === 'feishu' ? FEISHU_HINT : NOTIFY_TYPES.webhook.form;
+  }
+  return NOTIFY_TYPES[type]?.form || '';
+}
+/* notifyFormHtml 渠道编辑弹层内容（新建 ch=null；typeKeys=端上可见类型键序）。
+ * 类型/格式切换只局部重绘 #nf-hint 与 #nf-type-fields（nfRepaint），名称与事件
+ * 勾选不被冲掉（局部刷新纪律）。 */
+function notifyFormHtml(ch, typeKeys) {
+  const type = ch?.type || 'webhook';
+  const format = ch?.format || 'generic';
+  const hint = notifyHintHtml(type, format);
+  return `${modalHead(ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道')}
+  <form id="notify-form" class="fields" onsubmit="return false">
+    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
+    <label>渠道类型
+      <select id="nf-type">
+        ${notifyTypeOptionsHtml(type, typeKeys)}
+      </select>
+    </label>
+    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
+    <p class="muted small" id="nf-hint"${hint ? '' : ' hidden'}>${esc(hint)}</p>
+    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, format, ch?.secrets || {})}</div>
+    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
+      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
+        const on = !ch || (ch.events || []).includes(k);
+        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
+      }).join('')}
+    </fieldset>
+    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'close', 'link')}</div>
+  </form>
+  <p class="footer-note">凭证只保存在本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
+}
+/* notifyTypeFieldsHtml 恒定骨架字段区（#nf-type-fields，容器高度切换不变）：
+ * webhook=消息格式/推送地址/自定义请求头三件恒显恒位，切格式仅 label 文本与
+ * headers 的 disabled 变化；飞书格式 headers disabled（协议不支持）。编辑回填：
+ * password 与自定义头的值显示 ****** 占位（保存原样传回 = 不修改，GitHub 式
+ * 语义）；内嵌登录凭证（user:pass@host）的地址整串显示 ******；其余地址类字段
+ * 明文回填可核对。 */
+function notifyTypeFieldsHtml(type, format, sec) {
+  const v = k => esc(String(sec[k] ?? ''));
+  if (type === 'webhook') {
+    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
+    const feishu = fmt === 'feishu';
+    const headers = Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n');
+    return `<label>消息格式<select id="nf-format">
+        ${Object.keys(NOTIFY_FORMATS).map(k => `<option value="${k}"${k === fmt ? ' selected' : ''}>${esc(NOTIFY_FORMATS[k])}</option>`).join('')}
+      </select></label>
+    <label>${feishu ? '飞书机器人 Webhook 地址' : '推送地址'}<input id="nf-url" value="${v('url')}" placeholder="${feishu ? 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx' : 'https://example.com/hook'}" autocomplete="off" spellcheck="false"></label>
+    <label>${feishu ? '自定义请求头（飞书机器人协议不支持自定义请求头）' : '自定义请求头（可选，每行一个「名称: 值」）'}<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false"${feishu ? ' disabled' : ''}>${headers}</textarea></label>`;
+  }
+  if (type === 'email') {
+    return `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
+      <div class="form-grid">
+        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
+        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
+      <div class="form-grid">
+        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
+        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
+      </div>`;
+  }
+  if (type === 'inbox') {
+    return `<div class="notice">站内通知无需配置：任务终态会出现在中心端控制台顶栏的铃铛里。提醒：只存在内存中，hub 重启后清空。</div>`;
+  }
+  return `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
+}
+/* nfRepaint 通知表单局部重绘（D2）：类型/格式切换只写 #nf-hint 与
+ * #nf-type-fields 两个槽位，名称/事件勾选/按钮区不碰；空说明整槽隐藏（不占位）。 */
+function nfRepaint(type, format, sec) {
+  const hint = notifyHintHtml(type, format);
+  const hp = $('#nf-hint');
+  if (hp) { hp.textContent = hint; hp.hidden = !hint; }
+  const box = $('#nf-type-fields');
+  if (box) box.innerHTML = notifyTypeFieldsHtml(type, format, sec);
+}
+/* nfSecFromDom 读当前地址与请求头输入原值（格式切换回填用：切走再切回不丢已
+ * 输入；原样不 trim——回填保真，保存时才收口）。 */
+function nfSecFromDom() {
+  const sec = { url: $('#nf-url')?.value || '' };
+  for (const line of ($('#nf-headers')?.value || '').split('\n')) {
+    const idx = line.indexOf(':');
+    if (idx <= 0) continue;
+    const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
+    if (hname) sec['header.' + hname] = hval;
+  }
+  return sec;
+}
+/* collectNotifyForm 从弹层 DOM 收集请求体；headers 文本经 nfSecFromDom 按行解析
+ * 为 header.<名> 键（地址保存时才 trim 收口）。 */
+function collectNotifyForm() {
+  const id = $('#nf-id')?.value || '';
+  const type = $('#nf-type')?.value || '';
+  const name = $('#nf-name')?.value.trim() || '';
+  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
+  let format = '', secrets = {};
+  if (type === 'webhook') {
+    format = $('#nf-format')?.value || 'generic';
+    secrets = nfSecFromDom();
+    secrets.url = secrets.url.trim();
+  } else if (type === 'email') secrets = {
+    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
+    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
+    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
+  };
+  return { id, type, format, name, events, secrets };
+}
+/* ===== 通知表单与词典 shared block end ===== */
+
+/* 通知渠道词典（类型全集/消息格式/事件订阅）与表单骨架已收进「通知表单与词典
+ * shared block」（上方），双端同文。node 端差异只有可见类型键序（类型枚举表
+ * 参数化，2026-10-26 notify-polish 改动二）：无 inbox——站内通知为 hub 控制台
+ * 铃铛专属，服务端准入同样拒绝（如实口径不破坏）；sms 占位灰显未开放。 */
+const NOTIFY_TYPE_KEYS = ['email', 'webhook', 'sms'];
 
 /* ---------- 全局状态 ---------- */
 const TOKEN_KEY = 'swarmmind_node_token';
@@ -323,6 +499,7 @@ const S = {
   snap: '',                // 轮询数据指纹：未变化不重绘
   drawer: null,            // 打开的任务详情 {id, timer}
   f: { stage: 'idle', target: '', stdin: '', idem: newIdem(), message: '' },   // 派单表单状态机
+  tf: { origin: '' },      // 「我的任务」来源筛选（TASK-nav-filter A1；''=全部/'local'/'hub'）。渲染层过滤已载入条目；生命周期同会话边界复位（resetPrimeState：登出/401/换令牌重置；轮询/翻页/页面往返保留）
   focusForm: false,
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
@@ -354,6 +531,7 @@ function resetPrimeState() {
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
+  S.tf = { origin: '' };   // 来源筛选随会话边界重置（TASK-nav-filter A1 codex 必须修项）
   S.notifyChannels = [];
   S.notifyLoaded = false;
   S.notifyLoading = false;
@@ -495,7 +673,7 @@ async function tryToken(token) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务'], ['wizard', '连接']];
+const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['wizard', '连接']];
 // setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
 const SETUP_PAGES = [['wizard', '连接向导'], ['overview', '本机环境']];
 function route() {
@@ -539,9 +717,11 @@ function timeFull(iso) {
 /* ---------- 布局（shell + 侧栏导航；setup 模式导航裁剪为向导+本机环境） ---------- */
 function layout(content, pages = (S.status?.mode === 'setup' ? SETUP_PAGES : PAGES)) {
   const online = S.status?.online;
-  const nums = ['①', '②', '③', '④'];
-  return `<div class="shell"><aside><div class="workspace"><strong>${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
-  <nav>${pages.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${nums[pages.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
+  /* 导航壳与 hub 同构（TASK-nav-filter B）：navnum 01-04 同格式、aria-label="旅程导航"
+   * + aria-current="page"、workspace 行序 small 在上 strong 在下（与 hub 同构）。 */
+  return `<div class="shell"><aside><div class="workspace"><small class="muted">本机控制台</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">${esc(S.nodeID || 'node')}</strong></div>
+  <nav aria-label="旅程导航">${pages.map(([id, label], i) =>
+    `<button data-go="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
   <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
   <main>${content}</main></div>`;
@@ -568,7 +748,7 @@ function pageView() {
   return overviewPage();
 }
 function gateView() {
-  return `<main><div class="card login"><div class="mark">⌘</div><h1>SwarmMind Node 本地控制台</h1>
+  return `<main><div class="card login"><div class="mark"><img class="brand-logo" src="/logo.svg" alt="SwarmMind" width="64" height="64"></div><h1>SwarmMind Node 本地控制台</h1>
   <p class="muted">本机管理令牌鉴权（Bearer）。令牌来自 node.yaml 的 <code>local_token</code>；未配置时 node 首次启动已生成，见启动日志或 <code>data_dir/local_token</code> 文件。</p>
   <label>本机管理令牌<input id="gate-token" type="password" placeholder="local_token" autocomplete="off"></label>
   ${button('进入控制台', 'gate-enter', 'primary')}
@@ -612,7 +792,7 @@ function overviewPage() {
   if (!S.agents.length) {
     return head + `<section class="card"><h2>三步让本机加入协作网</h2>
       <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
-      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「我的服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
+      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
       <div class="step"><span>3</span><div><b>钦定管家并派单</b><div class="muted">在「本机管家」区钦定一个 agent 担任智行管家，随后即可在本机派单；需要开放给其他机器调用时再打开开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '');
@@ -661,7 +841,7 @@ function primePickView(pa) {
   return `<small class="muted">${pa ? '当前管家将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
-    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
+    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
 }
 /* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段。wired=true（t20261023-62a2
    自动接线）：明示已写入的影子 home 配置路径，零手贴；降级：保留手动粘贴指引。 */
@@ -684,8 +864,8 @@ function recentTasksCard() {
   return `<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2><small>${S.tasksTotal} 条 · 含 hub 下发</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${listStatusBadge(e)}</td></tr>`).join('')}
-  </tbody></table></div><p class="footer-note">点击行查看详情；列表即本机账本全量（含 hub 下发任务），完整清单见「派任务 · 我的任务」。</p>`
-    : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
+  </tbody></table></div><p class="footer-note">点击行查看详情；此处为最近 8 条（含本机派单与 hub 下发），完整清单见「任务」页。</p>`
+    : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
 /* ---------- 能力配置加载（方案 3.5；不进轮询——编辑中状态不被覆盖） ---------- */
@@ -790,15 +970,17 @@ function normalizeProfile(p) {
 
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
-  const head = `<div class="page-head"><div><h1>我的服务</h1>
+  const head = `<div class="page-head"><div><h1>服务</h1>
     <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p></div></div>`;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
   // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
   const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
     <p class="muted">在下方「能力配置」点「＋ 新增 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p></div></section>`;
-  return head + empty + S.agents.map(a => svcCard(a)).join('') +
+  /* 通知卡上移至页头后第一位（2026-10-26 notify-polish 改动四：渠道配置是服务页
+   * 高频入口，不再沉底；空态/agent 服务卡居中，能力配置编辑区沉底）。 */
+  return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +
     (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
-    cfgSection() + notifyCard();
+    cfgSection();
 }
 
 /* ---------- 能力配置编辑区（方案 3.5：yaml.Node round-trip + 热重载分类） ---------- */
@@ -861,8 +1043,8 @@ let cfgEdit = null;    // {idx, snap} 打开中的编辑抽屉；null=无编辑�
 let cfgSaving = false; // 抽屉保存在途：收抽屉一律暂拒（防「取消还原」与在途 PUT 竞态分叉）
 // playDrawerOpen 抽屉入场动画（D1 对齐 hub 层生命周期，2026-10-25 抽屉统一）：内容
 // 已渲染 → 强制一次布局提交初始态 → 下一帧加 .open 触发过渡；层已关/被换后迟到的
-// 帧不得点亮旧层（overlay 已随 innerHTML 清理消失，?. 自然短路）。任务/能力配置/
-// 通知表单三个抽屉同壳同动效家族。
+// 帧不得点亮旧层（overlay 已随 innerHTML 清理消失，?. 自然短路）。任务/能力配置
+// 抽屉与通知编辑 modal 同壳同动效家族（.open 同机制点亮，notify-polish 改动三）。
 function playDrawerOpen() {
   const ov = $('#layer .overlay');
   if (!ov) return;
@@ -1089,92 +1271,9 @@ function notifyChannelCardHtml(ch) {
   </div>`;
 }
 
-/* notifyFormHtml 渠道编辑抽屉（新建 ch=null）。类型切换只重绘凭证字段容器
- *（#nf-type-fields），名称与事件勾选不被冲掉（局部刷新纪律）。 */
-function notifyFormHtml(ch) {
-  const type = ch?.type || 'webhook';
-  const format = ch?.format || 'generic';
-  return `<div class="row"><h2>${ch ? '编辑通知渠道 · ' + esc(ch.name) : '添加通知渠道'}</h2>${button('×', 'nf-close', 'close')}</div>
-  <form id="notify-form" class="fields" onsubmit="return false">
-    <input type="hidden" id="nf-id" value="${esc(ch?.id || '')}">
-    <label>渠道类型
-      <select id="nf-type">
-        ${Object.keys(NOTIFY_TYPES).map(k => `<option value="${k}"${k === type ? ' selected' : ''}${k === 'sms' ? ' disabled title="需接入服务商，暂未开放"' : ''}>${esc(NOTIFY_TYPES[k].label)}${k === 'sms' ? '（暂未开放）' : ''}</option>`).join('')}
-      </select>
-    </label>
-    <label>渠道名称（必填）<input id="nf-name" value="${esc(ch?.name || '')}" placeholder="例如：伦哥的飞书群" maxlength="64" required></label>
-    <div id="nf-type-fields">${notifyTypeFieldsHtml(type, format, ch?.secrets || {})}</div>
-    <fieldset class="nf-events"><legend>什么时候通知（全不勾 = 全部终态都通知）</legend>
-      ${NOTIFY_EVENT_OPTS.map(([k, label]) => {
-        const on = !ch || (ch.events || []).includes(k);
-        return `<label class="checkline"><input type="checkbox" class="nf-event" value="${k}"${on ? ' checked' : ''}> ${esc(label)}</label>`;
-      }).join('')}
-    </fieldset>
-    <div class="actions">${button(ch ? '保存修改' : '创建渠道', 'notify-save', 'primary')}${button('取消', 'nf-close', 'link')}</div>
-  </form>
-  <p class="footer-note">凭证只保存在本机（data_dir/notify_channels.json，0600）；密码与自定义头的值以 ****** 显示，保存原样传回即不修改；自定义头以保存时的提交内容为准——界面上删掉的行就是删掉了。</p>`;
-}
-/* notifyTypeFieldsHtml 按类型与消息格式渲染凭证表单（与 hub 同构，notify-unify
- * 改动二：格式 select 为 webhook 专用维度，切换只重绘本容器且保留已输入地址）。
- * 编辑回填：password 与自定义头的值显示 ****** 占位（保存原样传回 = 不修改，
- * GitHub 式语义）；内嵌登录凭证（user:pass@host）的地址整串显示 ******；其余
- * 地址类字段明文回填可核对；飞书格式（存量迁移渠道）回填格式选中态与地址。 */
-function notifyTypeFieldsHtml(type, format, sec) {
-  const v = k => esc(String(sec[k] ?? ''));
-  let fields = '';
-  if (type === 'webhook') {
-    const fmt = NOTIFY_FORMATS[format] ? format : 'generic';
-    const feishu = fmt === 'feishu';
-    const hint = feishu ? FEISHU_HINT : NOTIFY_TYPES.webhook.form;
-    const addr = feishu
-      ? `<label>飞书机器人 Webhook 地址<input id="nf-url" value="${v('url')}" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" autocomplete="off" spellcheck="false"></label>`
-      : `<label>推送地址<input id="nf-url" value="${v('url')}" placeholder="https://example.com/hook" autocomplete="off" spellcheck="false"></label>
-      <label>自定义请求头（可选，每行一个「名称: 值」）<textarea id="nf-headers" rows="2" placeholder="Authorization: Bearer xxx" spellcheck="false">${Object.keys(sec).filter(k => k.startsWith('header.')).map(k => esc(String(k.slice(7)) + ': ' + sec[k])).join('\n')}</textarea></label>`;
-    fields = `<label>消息格式<select id="nf-format">
-        ${Object.keys(NOTIFY_FORMATS).map(k => `<option value="${k}"${k === fmt ? ' selected' : ''}>${esc(NOTIFY_FORMATS[k])}</option>`).join('')}
-      </select></label>${addr}`;
-    return `${hint ? `<p class="muted small">${esc(hint)}</p>` : ''}${fields}`;
-  }
-  if (type === 'email') {
-    fields = `<label>SMTP 服务器<input id="nf-host" value="${v('host')}" placeholder="smtp.example.com" autocomplete="off" spellcheck="false"></label>
-      <div class="form-grid">
-        <label>端口<input id="nf-port" value="${v('port')}" placeholder="465" inputmode="numeric" autocomplete="off"></label>
-        <label>账号<input id="nf-username" value="${v('username')}" autocomplete="off" spellcheck="false"></label>
-      </div>
-      <label>密码 / 授权码<input id="nf-password" type="password" value="${v('password')}" placeholder="${sec.password ? '保持 ****** 即不修改' : '邮箱授权码'}" autocomplete="new-password"></label>
-      <div class="form-grid">
-        <label>发件人<input id="nf-from" value="${v('from')}" placeholder="alert@example.com" autocomplete="off" spellcheck="false"></label>
-        <label>收件人<input id="nf-to" value="${v('to')}" placeholder="you@example.com" autocomplete="off" spellcheck="false"></label>
-      </div>`;
-  } else {
-    fields = `<div class="notice warn">短信渠道需接入服务商，暂未开放。</div>`;
-  }
-  return `${NOTIFY_TYPES[type]?.form ? `<p class="muted small">${esc(NOTIFY_TYPES[type].form)}</p>` : ''}${fields}`;
-}
-/* collectNotifyForm 从抽屉 DOM 收集请求体；headers 文本按行解析为 header.<名> 键
- * （飞书格式无 headers 输入框，天然不带）。 */
-function collectNotifyForm() {
-  const id = $('#nf-id')?.value || '';
-  const type = $('#nf-type')?.value || '';
-  const name = $('#nf-name')?.value.trim() || '';
-  const events = [...document.querySelectorAll('.nf-event:checked')].map(c => c.value);
-  let format = '', secrets = {};
-  if (type === 'webhook') {
-    format = $('#nf-format')?.value || 'generic';
-    secrets = { url: $('#nf-url')?.value.trim() || '' };
-    for (const line of ($('#nf-headers')?.value || '').split('\n')) {
-      const idx = line.indexOf(':');
-      if (idx <= 0) continue;
-      const hname = line.slice(0, idx).trim(), hval = line.slice(idx + 1).trim();
-      if (hname) secrets['header.' + hname] = hval;
-    }
-  } else if (type === 'email') secrets = {
-    host: $('#nf-host')?.value.trim() || '', port: $('#nf-port')?.value.trim() || '',
-    username: $('#nf-username')?.value.trim() || '', password: $('#nf-password')?.value || '',
-    from: $('#nf-from')?.value.trim() || '', to: $('#nf-to')?.value.trim() || '',
-  };
-  return { id, type, format, name, events, secrets };
-}
+/* notifyFormHtml/notifyTypeFieldsHtml/collectNotifyForm/notifyHintHtml/nfRepaint/
+ * nfSecFromDom 已收进「通知表单与词典 shared block」（双端同文，见上方块内定义）；
+ * node 调用 notifyFormHtml(ch, NOTIFY_TYPE_KEYS) 传入可见类型键序（无 inbox）。 */
 async function saveNotifyChannel() {
   const f = collectNotifyForm();
   if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
@@ -1196,16 +1295,20 @@ async function saveNotifyChannel() {
     }
   } finally { if (btn && $('#notify-form')) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; } }
 }
-/* 通知渠道编辑抽屉基建（与能力配置抽屉同 #layer 家族；遮罩关闭=取消语义）。 */
+/* 通知渠道编辑弹层基建（居中 modal，与 hub openLayerPlain 同形态——双端一致三层
+ * 操作逻辑层，2026-10-26 notify-polish 改动三：右侧抽屉形态退役；遮罩关闭=取消
+ * 语义。无障碍对齐 hub：role=dialog/aria-modal/aria-labelledby(layer-title)/焦点
+ * 移入。仍属 #layer 直清家族（白名单：无 hub 280ms 出场动画与世代机制）。 */
 function openNotifyForm(ch) {
   if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
   if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
-  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><div class="drawer" id="notify-drawer">${notifyFormHtml(ch)}</div></div>`;
+  $('#layer').innerHTML = `<div class="overlay"><section class="modal" id="notify-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${notifyFormHtml(ch, NOTIFY_TYPE_KEYS)}</section></div>`;
+  $('#layer [role=dialog]')?.focus();
   playDrawerOpen();
   $('#layer').addEventListener('click', nfMaskClose); // 具名引用重复注册幂等去重
 }
 function nfMaskClose(e) {
-  if (!$('#notify-drawer')) return; // 抽屉已关后残留监听不动作（与 cfgMaskClose 同机制）
+  if (!$('#notify-modal')) return; // 弹层已关后残留监听不动作（与 cfgMaskClose 同机制）
   if (e.target.classList.contains('overlay')) closeNotifyForm();
 }
 function closeNotifyForm() {
@@ -1253,7 +1356,7 @@ function tasksPage() {
   // 建议修 10（2026-10-22）：standalone 本机主权——本机派单不经 hub，离线/信箱
   // 语义不适用，目录与选中提示不渲染「离线进信箱」误导文案；组网模式维持现状。
   const standalone = S.status?.mode === 'standalone';
-  const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
+  const head = `<div class="page-head"><div><h1>任务</h1>
     <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
   /* 2026-10-23 同步 hub 端口径：下拉项只留名字（描述收进 title），智行管家
    * （zcode-dev）单独 optgroup 分组加前缀，与普通智能体视觉分区 */
@@ -1287,7 +1390,7 @@ function tasksPage() {
     <div class="row"><small class="muted">恢复密钥 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看服务', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}`;
 }
@@ -1297,21 +1400,40 @@ function tasksPage() {
 function listStatusBadge(e) {
   return e.status ? badge(e.status) : '<span class="badge offline" title="账本中已不存在（本机派单历史留痕）">仅存留痕</span>';
 }
-// originBadge 任务来源徽标：本机派单 | hub 下发（词与抽屉头部来源同源）。
+// originBadge 任务来源徽标：词自 ORIGIN_WORDS 词典（shared block 双端同文），不再复制字面量。
 function originBadge(origin) {
-  return `<span class="badge" title="${origin === 'hub' ? 'hub 下发' : '本机派单'}">${origin === 'hub' ? 'hub 下发' : '本机派单'}</span>`;
+  const w = ORIGIN_WORDS[origin === 'hub' ? 'hub' : 'local'];
+  return `<span class="badge" title="${w}">${w}</span>`;
 }
+// originOf 行来源归一（与 taskOrigin 回退同口径）：origin 恒有值；缺省/留痕行按 local
+// 计（本机控制台默认本机语义，hub 任务误归本机只会误导产物指引，反向无此风险）。
+function originOf(e) { return e?.origin === 'hub' ? 'hub' : 'local'; }
+// myTasksCard 任务列表 + 来源筛选（TASK-nav-filter A1）：卡头部三枚 chip（全部/本机
+// 派单/hub 下发，带已载计数；视觉对齐 hub .filters 形态，零计数退灰）。筛选为渲染层
+// 过滤已载入条目（陷阱④：轮询只刷首页、翻页保序并入都在数据层，筛选随每次渲染从
+// 全量已载列表现算，不缓存筛选结果）。零命中出空态+清除筛选，但「加载更早」翻页以
+// 全量载入数计、入口照常（codex 必须修项）。终审必修2：筛选行恒在（不随 all.length
+// 消失——空快照+激活筛选时控件必须在位可清除，S.tf 不自动重置）；空态二分：激活筛选
+// →筛选空态，未激活+真无任务→首次派单空态。终审必修3：footer 口径三数分离——
+// 「命中 X 条；筛选作用于已载入的 N / 共 M 条」（X=rows，N=all，M=tasksTotal）。
 function myTasksCard() {
-  const rows = S.tasks;
-  const more = rows.length < S.tasksTotal;
-  const count = more ? `已载 ${rows.length} / 共 ${S.tasksTotal} 条` : `${S.tasksTotal} 条`;
-  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${count} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  const all = S.tasks;
+  const origin = S.tf.origin;
+  const rows = origin ? all.filter(e => originOf(e) === origin) : all;
+  const cnt = k => k ? all.filter(e => originOf(e) === k).length : all.length;
+  const more = all.length < S.tasksTotal;
+  const loaded = more ? `已载 ${all.length} / 共 ${S.tasksTotal} 条` : `${S.tasksTotal} 条`;
+  const chips = [['', '全部'], ['local', ORIGIN_WORDS.local], ['hub', ORIGIN_WORDS.hub]].map(([k, label]) =>
+    `<button data-act="tf-origin" data-origin="${k}" class="${origin === k ? 'on' : ''}${cnt(k) ? '' : ' zero'}">${esc(label)} ${cnt(k)}</button>`).join('');
+  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  <div class="filters">${chips}</div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${originBadge(e.origin)}</td><td>${listStatusBadge(e)}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`).join('')}
-  </tbody></table></div>
-  ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - rows.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
-  <p class="footer-note">列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>`
-    : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
+  </tbody></table></div>`
+    : origin ? `<div class="empty"><h2>没有符合筛选的任务</h2><p class="muted">当前筛选下已载入的任务无命中；清除筛选，或用下方入口加载更早的任务。</p>${button('清除筛选', 'tf-clear')}</div>`
+    : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}
+  ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - all.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
+  ${(all.length || origin) ? `<p class="footer-note">${origin ? `命中 ${rows.length} 条；筛选作用于已载入的 ${all.length} / 共 ${S.tasksTotal} 条 · ` : ''}列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>` : ''}</section>`;
 }
 
 /* ---------- 派单表单动作 ---------- */
@@ -1650,7 +1772,7 @@ function taskDrawerZones(t) {
   return {
     head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(t.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
     <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
-    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>`,
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${ORIGIN_WORDS[local ? 'local' : 'hub']}</p>`,
     intro: `${t.status === 'needs_review' ? reviewNote : `<div class="notice">${esc(statusIntro)}</div>`}
     ${taskErrorNotice(res, t.status === 'needs_review')}`,
     prompt: promptZoneHtml(t),
@@ -1659,7 +1781,7 @@ function taskDrawerZones(t) {
     artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
     timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
     next: TERMINAL.has(t.status) && t.status !== 'needs_review'
-      ? `<div class="notice">任务已归档前保留 24 小时。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
+      ? `<div class="notice">本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
       : '',
   };
 }
@@ -1752,7 +1874,9 @@ document.addEventListener('click', e => {
         return;
       }
       case 'notify-save': saveNotifyChannel(); return;
-      case 'nf-close': closeNotifyForm(); return;
+      case 'close':   // shared modalHead ×/取消 同词关闭动作（与 hub 同词，notify-polish 改动三）；守护防误清其他层
+        if ($('#notify-modal')) closeNotifyForm();
+        return;
       case 'notify-toggle': toggleNotifyChannel(arg, btn); return;
       case 'notify-test': testNotifyChannel(arg, btn); return;
       case 'notify-del': deleteNotifyChannel(arg, btn.dataset.name || arg); return;
@@ -1782,6 +1906,8 @@ document.addEventListener('click', e => {
       }
       case 'open-task': openDrawer(arg); return;
       case 'tasks-more': loadMoreTasks(); return;
+      case 'tf-origin': S.tf.origin = btn.dataset.origin || ''; render(); return;   // 来源筛选 chip（A1；零命中空态的清除同源）
+      case 'tf-clear': S.tf = { origin: '' }; render(); return;
       case 'reopen-form': closeDrawer(); route(); focusForm(); return;
       case 'close-drawer': closeDrawer(); return;
       case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：状态落 S.drawer 后分区重算
@@ -1793,6 +1919,12 @@ document.addEventListener('click', e => {
       case 'prompt-raw': {   // 任务指令 查看原文/查看渲染 切换（2026-10-26 改动四，与 hub 同机制）
         if (!S.drawer?.task) return;
         S.drawer.promptRaw = !S.drawer.promptRaw;
+        syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
+        return;
+      }
+      case 'prompt-expand': {   // 任务指令 预览折叠 展开/收起（t20261026-prompt-preview，与 hub 同机制：展开态落 S.drawer 后分区重算）
+        if (!S.drawer?.task) return;
+        S.drawer.promptExpanded = !S.drawer.promptExpanded;
         syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
         return;
       }
@@ -1822,19 +1954,18 @@ document.addEventListener('input', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());
 });
-/* 通知渠道抽屉：类型切换只重绘凭证字段容器（#nf-type-fields），名称与事件
- * 勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）；类型切走格式重置通用。
- * 消息格式切换（notify-unify 改动二）同容器重绘，已输入地址随值回填不丢。 */
+/* 通知渠道弹层：类型切换只重绘 #nf-hint 与 #nf-type-fields 两槽（shared
+ * nfRepaint），名称与事件勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）；
+ * 类型切走格式重置通用。消息格式切换同槽重绘，已输入地址与请求头经
+ * nfSecFromDom 回填不丢（t20261026-notify-polish 恒定骨架）。 */
 document.addEventListener('change', e => {
   if (e.target.id === 'notify-also') { saveAlsoNotify(e.target); return; }
   if (e.target.id === 'nf-type') {
-    const box = $('#nf-type-fields');
-    if (box) box.innerHTML = notifyTypeFieldsHtml(e.target.value, 'generic', {});
+    nfRepaint(e.target.value, 'generic', {});
     return;
   }
   if (e.target.id === 'nf-format') {
-    const box = $('#nf-type-fields');
-    if (box) box.innerHTML = notifyTypeFieldsHtml($('#nf-type')?.value || 'webhook', e.target.value, { url: $('#nf-url')?.value || '' });
+    nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());
     return;
   }
 });

@@ -58,7 +58,11 @@ p{margin-bottom:12px}
  * 替代永久 hairline——页顶时顶栏与首屏内容浑然一体。 ---- */
 .topbar{position:sticky;top:0;z-index:20;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid transparent;transition:border-color 300ms ease,box-shadow 300ms ease;padding:14px 28px;display:flex;align-items:center;gap:26px}
 .topbar.scrolled{border-bottom-color:var(--hairline)}
-.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--accent);margin-right:8px}
+.brand{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}
+/* SwarmMind brand: same geometry and sizing on both consoles. */
+.brand-logo{display:block;flex-shrink:0;object-fit:contain}
+.brand .brand-logo{width:30px;height:30px}
+.login .mark .brand-logo{width:64px;height:64px}
 .switcher{display:flex;background:var(--track);padding:4px;border-radius:10px;gap:3px}.switcher button{border:0;background:transparent;height:auto;padding:7px 16px;color:var(--ink-3)}.switcher .selected{background:var(--surface);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .deploy{font-size:11px;max-width:355px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
@@ -67,6 +71,11 @@ p{margin-bottom:12px}
 /* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
+/* t20261026-notify-detail：13px+nowrap 实测依据——侧栏 218px 减三重 padding 后
+ * 文本区仅 125px，「SwarmMind 中心端」14px 加粗需 128px，差 3px 孤字「端」掉行；
+ * 13px 收至 ~119px 放下，nowrap 保证永不孤字换行。node 端同规见 node style.css。 */
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
 nav button:hover{background:rgba(0,0,0,.045)}
@@ -213,6 +222,15 @@ code{color:var(--ink-2)}
 .md-log-label{display:inline-block;font-size:11px;font-family:var(--mono);color:var(--ink-3);background:rgba(0,0,0,.05);border-radius:var(--r-chip);padding:3px 10px;margin:12px 0 8px}
 .md-log pre{margin:0 0 10px}
 /* ===== md 渲染样式 shared block end ===== */
+/* prompt-preview 任务指令预览折叠（t20261026-prompt-preview 双端同文，抽屉共用组
+ * 件样式）：>1200 字符默认折叠——内容容器限高 180px + overflow hidden，底部 60px
+ * 渐隐遮罩渐变到抽屉底色（--surface；md-body 浅灰底与白底的色差在渐隐末端可接受，
+ * 以视觉核查为准），展开态去限高、遮罩不渲染（HTML 层省略）；按钮行右对齐与
+ * md-log-head 原文切换同侧。 */
+.prompt-preview{position:relative;max-height:180px;overflow:hidden}
+.prompt-preview.prompt-open{max-height:none}
+.prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}
+.prompt-foot{margin-top:4px;text-align:right}
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 空状态（草案 B.7） ---- */
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
@@ -360,8 +378,16 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 
 /* ---- 通知中心（P4③ 控制台化升级）：顶栏铃铛 + 站内通知面板 + 渠道卡片 ----
  * 层叠：面板 z-index 30（压过页面内容与 sticky 表头 5，低于弹层 50 / toast 100）；
- * 面板同为玻璃家族（与 topbar 同底色），窄视口贴右缘收宽。 */
-.bell-btn{position:relative;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
+ * 面板不再走玻璃（t20261026-notify-detail）：backdrop-filter 取样以最近的带
+ * blur 祖先为 backdrop root——面板嵌在玻璃 topbar 内，blur 取不到 topbar 之后的
+ * 页面背景，实际完全透明，页面内容（空状态大按钮等）与面板文字叠印。故收实底
+ * rgba(245,245,247,.95) 并去 blur；white-space:normal 必须显式回置：面板嵌在
+ * .top-right（nowrap 防顶栏折行）内，继承 nowrap 曾把 footer-note 顶成单行
+ * 381px，撑出面板横向滚动条（生产实测 scrollWidth 395 > clientWidth 378）。 */
+.bell-btn{position:relative;padding:0;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
+/* padding:0 必须显式重置：全局 button{padding:0 16px} 会吃掉 34px 圆钮内容区，
+ * 18px SVG 被 padding 顶至横向偏移 16px——图标在底纹中明显偏右（t20261026
+ * notify-polish 改动一，生产实测几何：svg 中心与按钮中心偏差须 <1px）。 */
 .bell-btn:hover{background:rgba(0,0,0,.08);color:var(--ink)}
 /* 站内通知 SVG 图标（t20261026-webfix）：铃铛按钮 18px、条目 16px，语义色只走描边
  * （全站四色预算内）；.ni-icon 原 font-size 形态随 emoji 一起退役。 */
@@ -373,13 +399,18 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .ni-svg.st-cancelled{color:var(--ink-3)}
 .ni-svg.st-test{color:var(--accent)}
 .bell-badge{position:absolute;top:-4px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--heat);color:#fff;font-size:10.5px;font-weight:700;line-height:17px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.25)}
-.notify-panel{position:absolute;top:44px;right:0;width:min(380px,92vw);max-height:min(500px,70vh);overflow:auto;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid rgba(0,0,0,.07);border-radius:var(--r-card);box-shadow:0 2px 8px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.14);z-index:30;padding:14px}
+.notify-panel{position:absolute;top:44px;right:0;width:min(380px,92vw);max-height:min(500px,70vh);overflow:auto;background:rgba(245,245,247,.95);white-space:normal;border:1px solid rgba(0,0,0,.07);border-radius:var(--r-card);box-shadow:0 2px 8px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.14);z-index:30;padding:14px}
 /* 设置页页内分区导航（t20261026-webfix）：横向小链接排，与 head 之后自然衔接；
  * link 按钮自带灰 pill hover，不加额外底色。 */
 .page-jump{display:flex;gap:6px;margin:0 0 14px;flex-wrap:wrap}
 .page-jump button{height:28px;padding:0 13px;font-size:var(--fs-small)}
 .notify-panel-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
 .notify-panel-head h3{font-size:13.5px;font-weight:650;margin-right:auto}
+/* 站内通知标题问号提示（纯 CSS tooltip：hover/focus-visible 显示，文案自 footer-note 收纳） */
+.help-dot{position:relative;display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;margin-left:6px;border:1px solid var(--faint);border-radius:50%;color:var(--ink-3);font-size:10px;font-weight:600;line-height:1;cursor:help;vertical-align:1px;user-select:none;flex-shrink:0}
+.help-dot:hover,.help-dot:focus-visible{border-color:var(--ink-3);color:var(--ink)}
+.help-dot::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);left:-8px;z-index:5;width:max-content;max-width:250px;padding:8px 10px;background:var(--ink);color:#fff;font-size:12px;font-weight:400;line-height:1.5;border-radius:var(--r-chip);box-shadow:var(--sh-lift);opacity:0;visibility:hidden;transform:translateY(-4px);transition:opacity .15s ease,transform .15s ease,visibility .15s;pointer-events:none;white-space:normal;text-align:left}
+.help-dot:hover::after,.help-dot:focus-visible::after{opacity:1;visibility:visible;transform:translateY(0)}
 .notify-item{display:flex;gap:10px;padding:9px 10px;border-radius:var(--r-thumb);cursor:pointer;align-items:flex-start}
 .notify-item:hover{background:rgba(0,0,0,.04)}
 .notify-item.unread{background:var(--accent-bg)}
@@ -400,6 +431,17 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-meta{flex-basis:100%;font-size:12px;color:var(--ink-3)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
 .chan-actions button{padding:6px 12px;font-size:12px}
+/* 渠道编辑弹层表单骨架（t20261026-notify-polish 改动二，双端同构）：hub 全局
+ * .fields 是 flex 横排（向导/登录用），通知表单须与 node 控制台同构纵向堆叠——
+ * 字段恒显恒位、切消息格式零跳动（DoD：#nf-type-fields 高度差=0），故本表单
+ * 改 grid，值与 node style.css 的 .fields 覆盖同源；#nf-hint 说明槽去默认下边距
+ * （双端同值，grid gap 8px 已给节奏）；.nf-events 事件字段集从 node 同文收齐
+ * （原 hub 依赖全局 fieldset 重置呈无边框，与 node 有边框盒漂移）。 */
+#notify-form.fields{display:grid;gap:8px}
+#notify-form label{margin:0}
+#nf-hint{margin:0}
+.nf-events{border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:12px 14px;margin:14px 0 4px;display:grid;gap:8px}
+.nf-events legend{font-weight:600;color:var(--ink-2);font-size:var(--fs-small);padding:0 6px}
 /* 启用开关（纯 CSS 滑块，button 承载保持键盘可达） */
 .switch{position:relative;width:38px;height:22px;flex-shrink:0;border:0;border-radius:11px;background:rgba(0,0,0,.16);cursor:pointer;transition:background 180ms ease;padding:0}
 .switch::after{content:'';position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:translate 180ms var(--ease-out-quart)}

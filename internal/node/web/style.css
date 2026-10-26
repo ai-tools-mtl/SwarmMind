@@ -50,12 +50,20 @@ p{margin-bottom:12px}
 .muted,small{color:var(--ink-3)}small{font-size:var(--fs-small)}.small{font-size:var(--fs-small)}
 .eyebrow{font-size:11px;letter-spacing:2px;color:var(--ink-4);font-weight:700;margin-bottom:9px}
 .topbar{position:sticky;top:0;z-index:20;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--hairline);padding:14px 28px;display:flex;align-items:center;gap:26px}
-.brand{font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}.brand b{color:var(--accent);margin-right:8px}
+.brand{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:760;letter-spacing:-.6px;white-space:nowrap}
+/* SwarmMind brand: same geometry and sizing on both consoles. */
+.brand-logo{display:block;flex-shrink:0;object-fit:contain}
+.brand .brand-logo{width:30px;height:30px}
+.login .mark .brand-logo{width:64px;height:64px}
 .deploy{font-size:11px;max-width:420px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
 .workspace{padding:0 13px 24px}.workspace strong{display:block}
+/* t20261026-notify-detail 双端同规：nowrap 防长 nodeID 在 125px 文本区孤字掉行
+ * （hub 端「SwarmMind 中心端」已实测掉行并修，见 hub style.css 同名规则）。 */
+.workspace .workspace-brand{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.workspace-brand .brand-logo{width:24px;height:24px}
 nav{display:grid;gap:7px}
 nav button{text-align:left;border:0;background:transparent;height:auto;border-radius:var(--r-pill);padding:9px 14px;color:var(--ink-3);transition:background var(--dur-hover) ease-out}
 nav button:hover{background:rgba(0,0,0,.045)}
@@ -90,6 +98,9 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .filters button{display:inline-flex;align-items:center;gap:6px;height:auto;border:0;background:rgba(0,0,0,.05);border-radius:var(--r-pill);padding:6px 14px;font-size:12.5px;font-weight:500;color:var(--ink-2)}
 .filters button:hover{background:rgba(0,0,0,.08)}
 .filters button.on{background:var(--ink);color:var(--white);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.16)}
+/* 0 量筛选 chip 退灰；选中态（.on 黑底白字）不降透明——来源筛选 chip 零计数样式与 hub 同文（TASK-nav-filter A1/形态对照表） */
+.filters button.zero{opacity:.55}
+.filters button.zero.on{opacity:1}
 label{display:block;font-size:var(--fs-small);font-weight:600;margin-bottom:6px;color:var(--ink-2)}
 input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid var(--faint);border-radius:var(--r-thumb);padding:10px 12px;color:var(--ink);background:var(--surface)}
 textarea{resize:vertical;min-height:110px}
@@ -177,6 +188,15 @@ code{color:var(--ink-2)}
 .md-log-label{display:inline-block;font-size:11px;font-family:var(--mono);color:var(--ink-3);background:rgba(0,0,0,.05);border-radius:var(--r-chip);padding:3px 10px;margin:12px 0 8px}
 .md-log pre{margin:0 0 10px}
 /* ===== md 渲染样式 shared block end ===== */
+/* prompt-preview 任务指令预览折叠（t20261026-prompt-preview 双端同文，抽屉共用组
+ * 件样式）：>1200 字符默认折叠——内容容器限高 180px + overflow hidden，底部 60px
+ * 渐隐遮罩渐变到抽屉底色（--surface；md-body 浅灰底与白底的色差在渐隐末端可接受，
+ * 以视觉核查为准），展开态去限高、遮罩不渲染（HTML 层省略）；按钮行右对齐与
+ * md-log-head 原文切换同侧。 */
+.prompt-preview{position:relative;max-height:180px;overflow:hidden}
+.prompt-preview.prompt-open{max-height:none}
+.prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}
+.prompt-foot{margin-top:4px;text-align:right}
 /* cmd-args 任务指令 args 形态（2026-10-26 改动四双端同构）：逐参数 code 展示
  *（codex 审查采纳：join 丢参数边界）；code 与行内基线对齐、压 0.92em（SwarmMind
  * 前端规约：中文句中行内 code）。与 hub style.css 同文；在 md 渲染 shared block 外
@@ -188,14 +208,21 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .empty h2{font-size:var(--fs-h2);font-weight:600;letter-spacing:-.01em;color:var(--ink)}
 .empty p{max-width:440px;margin:8px auto 16px;font-size:13.5px;line-height:1.7;color:var(--ink-3)}
 .login{max-width:450px;margin:70px auto}.login .mark{font-size:38px;color:var(--accent);margin-bottom:20px}.login button{width:100%;margin-top:10px}.login label{margin-top:24px}
-.overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px}
+/* 弹层（t20261026-notify-polish 改动三：通知渠道编辑改居中 modal，与 hub 同形态
+ * 同视觉——.modal 宽度/圆角/阴影/入场动效与 .overlay 遮罩淡入自 hub style.css
+ * 同文同步，不发明新样式；node #layer 为直清家族（白名单豁免），无 .closing
+ * 出场路径，故不引入该侧规则）。 */
+.overlay{position:fixed;inset:0;background:var(--scrim);z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;opacity:0;transition:opacity var(--dur-scrim) ease}
+.overlay.open{opacity:1}
+.modal{width:min(920px,94vw);max-height:86vh;overflow:auto;background:var(--surface);padding:28px;border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);opacity:0;transform:translateY(12px) scale(.98);transition:opacity var(--dur-enter) var(--ease-spring),transform var(--dur-enter) var(--ease-spring)}
+.overlay.open .modal{opacity:1;transform:none}
 .drawer-overlay{padding:0;justify-content:flex-end;align-items:stretch}
 .drawer{width:min(700px,96vw);background:var(--surface);overflow:auto;padding:28px 32px;box-shadow:var(--sh-overlay);opacity:0;transform:translateX(48px);transition:transform var(--dur-enter) var(--ease-spring),opacity var(--dur-enter) var(--ease-spring)}
 .overlay.open .drawer{transform:none;opacity:1}
 /* 入场动画只随壳播放一次（openDrawer 下一帧加 .open）；分区刷新不重放（D22）。
  * 减弱动效降级与 hub 同口径（transform 归零、保留透明度过渡）。 */
 @media (prefers-reduced-motion:reduce){
-  .overlay,.drawer{transform:none!important;transition:opacity 200ms ease!important}
+  .overlay,.drawer,.modal{transform:none!important;transition:opacity 200ms ease!important}
 }
 /* 时间线事件流与产物行分隔线：双端同文规则（D14/D15 node 补齐，2026-10-25 抽屉
  * 统一；锁测试 TestWebDrawerComponentStyles 抽行比对，任一端私改即红）。 */
@@ -237,6 +264,9 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * 两列表单栅格 / .checkline 事件勾选行 / .nf-events 事件字段集。 ===== */
 .fields{display:grid;gap:8px}
 .fields label{margin:0}
+/* #nf-hint 格式相关说明槽去默认下边距（t20261026-notify-polish 改动二，与 hub
+ * style.css 同值同补：grid gap 8px 已给节奏，说明随格式切换不占字段区高度）。 */
+#nf-hint{margin:0}
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .form-grid label{margin:0}
 .form-grid .full{grid-column:1/-1}

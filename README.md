@@ -1,5 +1,12 @@
 # SwarmMind
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-github-dark.svg">
+    <img src="assets/brand/logo-github.svg" alt="SwarmMind" width="700">
+  </picture>
+</p>
+
 **SwarmMind 是面向个人自托管场景的跨机器 agent 任务调度与结果管理系统。** 用户通过统一入口调用不同机器上的能力，跟踪任务状态并获取最终答复与产物。节点离线时任务暂存；执行结果不确定时进入待人工核对状态。
 
 典型用途包括 Linux 构建、macOS 代码分析、Windows 文件处理，以及多步骤任务协作。用户可以直接指定执行者，也可以指定一个 agent 担任 **Prime（编排角色，界面显示名为「智行管家」）**，负责拆解任务、派发执行和汇总结果。
@@ -120,7 +127,7 @@ agents:
 
 ### 4. 提交任务并查看结果
 
-管理台「任务派发」选 `mac-mini` → `echo`，提交后到「任务监管」查看。命令行等价操作：
+管理台「派发」选 `mac-mini` → `echo`，提交后到「任务」查看。命令行等价操作：
 
 ```bash
 ./swarmmindctl --hub http://127.0.0.1:8444 --token '<管理令牌>' \
