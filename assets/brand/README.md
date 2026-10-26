@@ -30,4 +30,4 @@
 
 PNG 必须从对应 SVG 渲染，不能从概念提案板截图裁剪。修改 SVG 后同步更新 PNG 并视觉核对透明背景、小尺寸和明暗版；运行资源改动须重建 hub/node，再进行真实页面走查。
 
-本轮验证见 [Logo 接入报告](../../docs/TESTREPORT-logo.md)。
+本轮验证见 [Logo 接入报告](../../docs/archive/TESTREPORT-logo.md)。

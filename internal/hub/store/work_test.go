@@ -3,14 +3,16 @@ package store
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-// TestWorkOldSnapshotCompatible W1 验收 2 的 store 层归一单元：不含任何 Work
-// 字段的旧版快照可加载（normalize 迁移），既有实体逐字段完整、Work map 归一
-// 非 nil 空集、迁移后可正常写入。全链口径（旧快照→真实 CreateWork→重启恢复）
+// TestWorkOldSnapshotCompatible W1 验收 2 的 store 层归一单元（SQLite 迁移后口径
+// 改为「旧 JSON 导入兼容」）：不含任何 Work 字段的旧版快照经 JSON→SQLite 导入可
+// 加载（normalize 迁移），既有实体逐字段完整、Work map 归一非 nil 空集、导入后
+// 可正常写入；旧 json 备份改名。全链口径（旧快照→真实 CreateWork→重启恢复）
 // 由 core 包 TestWorkReloadRoundTrip 覆盖（store 不可反向依赖 core）。
 func TestWorkOldSnapshotCompatible(t *testing.T) {
 	dir := t.TempDir()
@@ -27,7 +29,14 @@ func TestWorkOldSnapshotCompatible(t *testing.T) {
 	}
 	s, err := Open(dir)
 	if err != nil {
-		t.Fatalf("旧快照加载应成功: %v", err)
+		t.Fatalf("旧快照导入应成功: %v", err)
+	}
+	// 旧 json 备份改名（导入语义：原文件不在，恰一个 imported-* 备份）
+	if _, err := os.Stat(dir + "/hub_state.json"); !os.IsNotExist(err) {
+		t.Errorf("导入后旧 json 应已改名: %v", err)
+	}
+	if backups, _ := filepath.Glob(dir + "/hub_state.json.imported-*"); len(backups) != 1 {
+		t.Errorf("应恰一个导入备份: %v", backups)
 	}
 	v := s.View()
 	if v.Nodes["n1"].Epoch != 3 || len(v.Nodes["n1"].Agents) != 1 {

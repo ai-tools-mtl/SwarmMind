@@ -1,6 +1,6 @@
 # Prime 编排设计
 
-> Prime 是已有 agent 承担的任务编排角色，界面显示名为「智行管家」。本文描述角色、权限、编排流程与当前限制；多步执行恢复见 [Work RFC](RFC-work-resume.md)。
+> Prime 是已有 agent 承担的任务编排角色，界面显示名为「智行管家」。本文描述角色、权限、编排流程与当前限制；多步执行恢复见 [Work RFC](archive/RFC-work-resume.md)。
 > 早期方案中的「统筹载体」与 Prime 指同一角色，配置键 `prime_*`、API 路径和 MCP 工具名保持不变。
 
 ## 一、职责

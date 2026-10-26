@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -38,6 +39,10 @@ type cancelTombstones struct {
 
 	mu sync.Mutex
 	m  map[string]time.Time
+
+	// inject 墓碑落盘故障注入（仅包内测试设置，生产恒为 nil）：op+stage 拦截，
+	// 与 Ledger.inject 同风格。
+	inject func(op, stage string) error
 }
 
 // openCancelTombstones 加载（或初始化）墓碑集合；顺带执行一次 TTL 清理（清理
@@ -62,16 +67,23 @@ func openCancelTombstones(dataDir string) (*cancelTombstones, error) {
 	return c, nil
 }
 
-// add 登记墓碑（幂等，重复登记不更新时刻）。顺带 TTL 清理超期墓碑并持久化。
+// add 登记墓碑（幂等，重复登记不更新时刻）。顺带 TTL 清理超期墓碑。
+// 先写后见（2026-10-26 双审缺陷修复）：在副本上构造目标状态，落盘成功才替换
+// 内存 map——persist 失败内存不污染、同键重试不得假成功（旧实现先改内存后写盘，
+// 失败后重试命中内存直接跳过写盘，重启丢墓碑，迟到 offer 可执行已取消任务）。
 func (c *cancelTombstones) add(taskID string, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pruneExpiredLocked(now)
-	if _, ok := c.m[taskID]; ok {
+	next := c.pruneCloneLocked(now)
+	if _, ok := next[taskID]; ok {
 		return nil
 	}
-	c.m[taskID] = now
-	return c.persistLocked()
+	next[taskID] = now
+	if err := c.persistMapLocked("AddCancelTombstone", next); err != nil {
+		return err
+	}
+	c.m = next
+	return nil
 }
 
 // has 报告墓碑是否存在（TTL 内）。
@@ -82,29 +94,54 @@ func (c *cancelTombstones) has(taskID string) bool {
 	return ok
 }
 
-// clear 消费墓碑（幂等：不存在视为已清，不报错）。
+// clear 消费墓碑（幂等：不存在视为已清，不报错）。先写后见同 add：落盘成功
+// 才从内存移除，persist 失败墓碑仍在内存（消费方可重试）。
 func (c *cancelTombstones) clear(taskID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if _, ok := c.m[taskID]; !ok {
 		return nil
 	}
-	delete(c.m, taskID)
-	return c.persistLocked()
+	next := make(map[string]time.Time, len(c.m))
+	maps.Copy(next, c.m)
+	delete(next, taskID)
+	if err := c.persistMapLocked("ClearCancelTombstone", next); err != nil {
+		return err
+	}
+	c.m = next
+	return nil
 }
 
-// cleanup 清理超 TTL 的墓碑（TTL 兜底入口；幂等）。
+// cleanup 清理超 TTL 的墓碑（TTL 兕底入口；幂等）。先写后见同 add。
 func (c *cancelTombstones) cleanup(now time.Time, ttl time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	removed := c.pruneExpiredLocked(now)
-	if !removed {
+	next := c.pruneCloneLocked(now)
+	if len(next) == len(c.m) {
 		return nil
 	}
-	return c.persistLocked()
+	if err := c.persistMapLocked("CleanupCancelTombstones", next); err != nil {
+		return err
+	}
+	c.m = next
+	return nil
 }
 
-// pruneExpiredLocked TTL 清理（须持锁）；报告是否有变化。
+// pruneCloneLocked TTL 清理的纯函数形态（须持锁）：返回剔除超期条目的新副本，
+// 不改 c.m。TTL 基准 TerminalRetention（对应任务即便后到也早过保留期，无需再挡）。
+func (c *cancelTombstones) pruneCloneLocked(now time.Time) map[string]time.Time {
+	next := make(map[string]time.Time, len(c.m))
+	for id, at := range c.m {
+		if at.Add(protocol.TerminalRetention).Before(now) {
+			continue
+		}
+		next[id] = at
+	}
+	return next
+}
+
+// pruneExpiredLocked TTL 清理（须持锁，原地改）；仅供加载路径使用：刚从盘上读出
+// 的集合清理后内存生效，盘上旧样无不一致风险，清理结果随下次成功写入持久化。
 func (c *cancelTombstones) pruneExpiredLocked(now time.Time) bool {
 	changed := false
 	for id, at := range c.m {
@@ -116,9 +153,15 @@ func (c *cancelTombstones) pruneExpiredLocked(now time.Time) bool {
 	return changed
 }
 
-// persistLocked 临时文件+rename 原子落盘（须持锁）。
-func (c *cancelTombstones) persistLocked() error {
-	b, err := json.Marshal(c.m)
+// persistMapLocked 指定集合的临时文件+rename 原子落盘（须持锁）：序列化参数集合
+// 而非 c.m——先写后见纪律的落盘半步，成功后由调用方替换内存。op 供故障注入定位。
+func (c *cancelTombstones) persistMapLocked(op string, m map[string]time.Time) error {
+	if c.inject != nil {
+		if err := c.inject(op, stageBeforeWrite); err != nil {
+			return err
+		}
+	}
+	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

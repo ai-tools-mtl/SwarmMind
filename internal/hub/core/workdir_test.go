@@ -1,12 +1,13 @@
 package core
 
 import (
-	"encoding/json"
-	"os"
+	"database/sql"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite" // stripWorkdirLocks 手术清表用（SQLite 迁移后）
 
 	"github.com/mtl802/swarmmind/internal/node/runner"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -422,10 +423,8 @@ func TestHubRestartLockRebuildFromTasks(t *testing.T) {
 	_ = core1.Close()
 	_ = st1.Close()
 
-	// 手术：从快照剥离 workdir_locks（模拟旧版本快照）
-	if err := stripWorkdirLocks(dir); err != nil {
-		t.Fatalf("剥离快照互斥表: %v", err)
-	}
+	// 手术：从状态库清空 workdir_locks（模拟旧版本快照）
+	stripWorkdirLocks(t, dir)
 
 	st2, err := storeOpen(dir)
 	if err != nil {
@@ -449,23 +448,18 @@ func TestHubRestartLockRebuildFromTasks(t *testing.T) {
 	}
 }
 
-// stripWorkdirLocks 从快照 JSON 剥离 workdir_locks 键（模拟旧版本快照）。
-func stripWorkdirLocks(dir string) error {
-	path := filepath.Join(dir, "hub_state.json")
-	b, err := os.ReadFile(path)
+// stripWorkdirLocks 清空状态库 workdir_locks 表（模拟旧版本快照无锁数据；
+// SQLite 迁移后重启重建测试直接清表，重启时 hub 按任务集自愈补占）。
+func stripWorkdirLocks(t *testing.T, dir string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "hub_state.db"))+"?mode=rw")
 	if err != nil {
-		return err
+		t.Fatalf("打开状态库: %v", err)
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(b, &raw); err != nil {
-		return err
+	defer db.Close()
+	if _, err := db.Exec("DELETE FROM workdir_locks"); err != nil {
+		t.Fatalf("清空 workdir_locks: %v", err)
 	}
-	delete(raw, "workdir_locks")
-	nb, err := json.Marshal(raw)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, nb, 0o644)
 }
 
 // offerIDs 投递顺序断言辅助。

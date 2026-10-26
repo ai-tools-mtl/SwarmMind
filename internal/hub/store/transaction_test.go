@@ -1,10 +1,9 @@
 package store
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -24,18 +23,14 @@ func openTestStore(t *testing.T) *Store {
 	return s
 }
 
-// readDiskState 直接从磁盘读快照（绕过内存），验证落盘内容。
+// readDiskState 直接从磁盘状态库读全量状态（独立连接，绕过内存），验证落盘内容。
 func readDiskState(t *testing.T, s *Store) State {
 	t.Helper()
-	b, err := os.ReadFile(s.path)
+	st, err := ReadSnapshot(filepath.Dir(s.dbPath))
 	if err != nil {
-		t.Fatalf("读快照 %s: %v", s.path, err)
+		t.Fatalf("读状态库 %s: %v", s.dbPath, err)
 	}
-	var st State
-	if err := json.Unmarshal(b, &st); err != nil {
-		t.Fatalf("解析快照: %v", err)
-	}
-	return st
+	return *st
 }
 
 // TestStoreUpdatePublishAndPersist 事务成功路径：内存发布 + 落盘一致。
@@ -183,30 +178,41 @@ func TestStoreMutateRejectNoPublishNoAck(t *testing.T) {
 	}
 }
 
-// TestStoreWriteFailureNoPublishNoAck 写坏目录触发失败：临时文件路径被目录占位后
-// 落盘必败（对任何用户确定失败）→ 断言内存未变、无 Ack；移除障碍后重试成功。
+// TestStoreWriteFailureNoPublishNoAck 底层库句柄关闭触发失败（SQLite 持久层无
+// 每事务临时文件，介质/驱动故障以关闭句柄模拟，对任何平台确定失败）→ 断言内存
+// 未变、无 Ack、盘上无该行；重开句柄（移除障碍）后重试成功。
 func TestStoreWriteFailureNoPublishNoAck(t *testing.T) {
 	s := openTestStore(t)
-	if err := os.Mkdir(s.tmp, 0o755); err != nil {
-		t.Fatalf("占位临时路径: %v", err)
+	if err := s.Update(func(st *State) error {
+		st.Tasks["t0"] = protocol.Task{ID: "t0"}
+		return nil
+	}); err != nil {
+		t.Fatalf("预置 Update: %v", err)
+	}
+	// 模拟存储故障：直接关闭底层库连接（真实 I/O 路径上的确定失败，非注入）
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("关闭底层库: %v", err)
 	}
 	err := s.Update(func(st *State) error {
 		st.Tasks["t9"] = protocol.Task{ID: "t9"}
 		return nil
 	})
 	if err == nil {
-		t.Fatal("写盘失败必须返回错误（不 Ack）")
+		t.Fatal("写库失败必须返回错误（不 Ack）")
 	}
 	if _, ok := s.View().Tasks["t9"]; ok {
 		t.Error("落盘失败不得发布到内存")
 	}
-	if _, err := os.Stat(s.path); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("落盘失败不得产生快照文件: %v", err)
+	if disk := readDiskState(t, s); len(disk.Tasks) != 1 {
+		t.Errorf("落盘失败不得产生任务行: %+v", disk.Tasks)
 	}
 
-	if err := os.Remove(s.tmp); err != nil {
-		t.Fatalf("移除障碍: %v", err)
+	// 移除障碍：重开底层库句柄后重试成功
+	db, err := openDB(s.dbPath)
+	if err != nil {
+		t.Fatalf("重开底层库: %v", err)
 	}
+	s.db = db
 	if err := s.Update(func(st *State) error {
 		st.Tasks["t9"] = protocol.Task{ID: "t9"}
 		return nil
@@ -219,18 +225,23 @@ func TestStoreWriteFailureNoPublishNoAck(t *testing.T) {
 }
 
 // TestStoreInjectionStages 四个预设注入点逐一验证先写后见语义（SPEC 八.2）。
+// after_rename / before_publish 为「盘已提交、内存未发布」崩溃窗口（2026-10-26
+// 复审：diff 模式下内存基准分岔，置毒拒绝后续事务，重开以磁盘为准；JSON 全量
+// 覆写时代靠全量重写自然收敛，该窗口语义已收紧）。
 func TestStoreInjectionStages(t *testing.T) {
-	s := openTestStore(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Update(func(st *State) error {
 		st.Tasks["t1"] = protocol.Task{ID: "t1"}
 		return nil
 	}); err != nil {
 		t.Fatalf("预置 Update: %v", err)
 	}
-	diskBefore, err := os.ReadFile(s.path)
-	if err != nil {
-		t.Fatalf("读快照: %v", err)
-	}
+	diskBefore := readDiskState(t, s)
 	addTask := func(id string) func(*State) error {
 		return func(st *State) error {
 			st.Tasks[id] = protocol.Task{ID: id}
@@ -238,7 +249,7 @@ func TestStoreInjectionStages(t *testing.T) {
 		}
 	}
 
-	// before_write：盘与内存都不变
+	// before_write：盘与内存都不变（普通失败，可直接重试）
 	s.inject = func(stage string) error {
 		if stage == stageBeforeWrite {
 			return errInjected
@@ -251,8 +262,8 @@ func TestStoreInjectionStages(t *testing.T) {
 	if _, ok := s.View().Tasks["t2"]; ok {
 		t.Error("before_write 失败不得发布到内存")
 	}
-	if diskAfter, _ := os.ReadFile(s.path); string(diskAfter) != string(diskBefore) {
-		t.Error("before_write 失败不得落盘")
+	if diskAfter := readDiskState(t, s); len(diskAfter.Tasks) != len(diskBefore.Tasks) {
+		t.Errorf("before_write 失败不得落盘: before=%d after=%d", len(diskBefore.Tasks), len(diskAfter.Tasks))
 	}
 
 	// after_rename：盘已是新状态、内存未发布（模拟「盘成内存败」崩溃窗口）
@@ -271,14 +282,25 @@ func TestStoreInjectionStages(t *testing.T) {
 	if disk := readDiskState(t, s); len(disk.Tasks) != 2 {
 		t.Errorf("after_rename 时磁盘应已含新状态: %+v", disk.Tasks)
 	}
-
-	// 做一次干净事务，让内存重新领先并覆写磁盘，对齐两侧
-	s.inject = nil
-	if err := s.Update(addTask("t2")); err != nil {
-		t.Fatalf("对齐 Update: %v", err)
+	// 置毒：内存基准已与磁盘分岔，后续事务拒绝（防 diff 永久漂移）
+	if err := s.Update(addTask("t9")); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("after_rename 后续事务应被拒（ErrPoisoned）: %v", err)
 	}
+	// 重开：以磁盘为准（t1+t2），后续事务正常
+	if err := s.Close(); err != nil {
+		t.Fatalf("重开前 Close: %v", err)
+	}
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+	if got := s2.View().Tasks; len(got) != 2 || got["t2"].ID != "t2" {
+		t.Fatalf("重开应以磁盘为准（含已提交未发布的 t2）: %+v", got)
+	}
+	s = s2
 
-	// before_publish：表现同 after_rename（盘新、内存未发布）
+	// before_publish：表现同 after_rename（盘新、内存未发布）→ 置毒 + 重开
 	s.inject = func(stage string) error {
 		if stage == stageBeforePublish {
 			return errInjected
@@ -294,8 +316,24 @@ func TestStoreInjectionStages(t *testing.T) {
 	if disk := readDiskState(t, s); len(disk.Tasks) != 3 {
 		t.Errorf("before_publish 时磁盘应已含新状态: %+v", disk.Tasks)
 	}
+	if err := s.Update(addTask("t9")); !errors.Is(err, ErrPoisoned) {
+		t.Fatalf("before_publish 后续事务应被拒（ErrPoisoned）: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("重开前 Close: %v", err)
+	}
+	s3, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	t.Cleanup(func() { _ = s3.Close() })
+	if got := s3.View().Tasks; len(got) != 3 || got["t3"].ID != "t3" {
+		t.Fatalf("重开应以磁盘为准（含已提交未发布的 t3）: %+v", got)
+	}
+	s = s3
 
-	// before_ack：内存已发布但调用方未获 Ack（模拟「发布成、确认丢」）
+	// before_ack：内存已发布但调用方未获 Ack（模拟「发布成、确认丢」）——
+	// 非「盘成内存败」分岔，不置毒，后续事务合法
 	s.inject = nil
 	if err := s.Update(addTask("t3")); err != nil {
 		t.Fatalf("对齐 Update: %v", err)
@@ -313,6 +351,10 @@ func TestStoreInjectionStages(t *testing.T) {
 		t.Error("before_ack 失败时内存应已发布（Ack 丢失≠未发布）")
 	}
 	s.inject = nil
+	// before_ack 后续事务仍可正常提交（不置毒）
+	if err := s.Update(addTask("t5")); err != nil {
+		t.Fatalf("before_ack 后续事务应正常: %v", err)
+	}
 }
 
 // TestStoreCloneIsolation 事务在深拷贝副本上进行：事务内修改不污染先前发布的快照，

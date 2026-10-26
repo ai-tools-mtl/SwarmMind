@@ -11,7 +11,7 @@
 
 典型用途包括 Linux 构建、macOS 代码分析、Windows 文件处理，以及多步骤任务协作。用户可以直接指定执行者，也可以指定一个 agent 担任 **Prime（编排角色，界面显示名为「智行管家」）**，负责拆解任务、派发执行和汇总结果。
 
-Go 实现；hub、node、CLI、MCP 分别构建为独立可执行文件。运行核心服务无需外部数据库或消息队列；实际执行的 agent、CLI 工具及其凭据需在节点上另行准备。
+Go 实现；hub、node、CLI、MCP 分别构建为独立可执行文件。运行核心服务无需外部数据库服务或消息队列——hub 状态存于内嵌 SQLite 单文件库（node 侧为 JSON 账本），随二进制自带零部署；实际执行的 agent、CLI 工具及其凭据需在节点上另行准备。
 
 [快速体验](#快速体验) · [搭建自己的网络](#搭建自己的网络) · [接入 MCP](#接入-mcp) · [架构详解](docs/ARCHITECTURE.md) · [文档导航](docs/README.md)
 
@@ -214,9 +214,9 @@ go test -race ./...
 
 [测试计划](docs/TESTPLAN.md)覆盖 SPEC DoD；[双机验收](docs/DEPLOY-P2.md)需两台真实机器和真实 agent。测试报告有各自的版本和环境，不能视作任意后续工作区的通过证明。
 
-当前开发分支包含 **P5 Work W1–W3 实现**，并已有 [W4 隔离双机验收报告](docs/TESTREPORT-w4-p5.md)。报告适用于其记录的版本与环境；本轮核对发现仓内 B/C 最终关闭证据不完整，见报告附注。该报告不表示当前分支已合入 main 或已部署生产。
+当前开发分支包含 **P5 Work W1–W3 实现**，并已有 [W4 隔离双机验收报告](docs/archive/TESTREPORT-w4-p5.md)。报告适用于其记录的版本与环境；本轮核对发现仓内 B/C 最终关闭证据不完整，见报告附注。该报告不表示当前分支已合入 main 或已部署生产。
 
-**P5.1 D1 派发建议**已加入代码；[D1 测试计划](docs/TESTPLAN-D1-jev.md)仍登记终版真实模型逐场景报告待补录。群聊自动分配、本地 provider 和级联策略仍属后续范围。P4 真实使用观察的完成状态另按[观察期方案](docs/OBSERVATION-P4-plan.md)记录。长期路线见[总方案](docs/PLAN.md)与[产品方向](docs/PRODUCT-DIRECTION-v2.md)。
+**P5.1 D1 派发建议**已加入代码；[D1 测试计划](docs/archive/TESTPLAN-D1-jev.md)仍登记终版真实模型逐场景报告待补录。群聊自动分配、本地 provider 和级联策略仍属后续范围。P4 真实使用观察的完成状态另按[观察期方案](docs/archive/OBSERVATION-P4-plan.md)记录。长期路线见[总方案](docs/PLAN.md)与[产品方向](docs/PRODUCT-DIRECTION-v2.md)。
 
 ## License
 

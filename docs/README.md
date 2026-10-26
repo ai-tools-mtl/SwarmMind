@@ -1,6 +1,6 @@
 # 文档导航
 
-文档按使用说明、设计契约、验证要求和历史记录分类。功能状态以当前源码与有版本信息的验证记录共同判断，不从标题中的阶段编号或旧的「FINAL」标记推断已经发布。
+文档分两区：**活文档区**（docs/ 根，与当前代码同步维护）与**归档区**（docs/archive/，任务书、审查记录、测试报告等过程文档，按原样保存，不随后续改动更新）。功能状态以当前源码与验证记录共同判断，不从标题中的阶段编号或旧的「FINAL」标记推断已经发布。
 
 ## 使用与运维
 
@@ -13,44 +13,28 @@
 | [Prime 配置](../deploy/prime/README.md) | 全网和本机两种编排入口、实际验证方式 |
 | [架构 SVG](assets/architecture.svg) / [Mermaid 图源](assets/architecture.mmd) | 可预览和编辑的系统拓扑 |
 
-## 设计与实施范围
+## 设计契约
 
 | 文档 | 当前定位 |
 |---|---|
-| [SPEC](../SPEC.md) | 协议、接口、可靠性契约与已知实现差异 |
+| [SPEC](../SPEC.md) | 协议、接口、可靠性契约（4.7 持久化事务：hub SQLite + node JSON）与已知实现差异 |
 | [项目计划](PLAN.md) | 技术决策、阶段目标、验收与发布条件 |
 | [产品方向](PRODUCT-DIRECTION-v2.md) | 场景、优先级、术语说明与后续范围 |
 | [交互设计](INTERACTION.md) | 当前页面职责、任务流程与反馈要求 |
 | [Prime 设计](PRIME-DESIGN.md) | 编排职责、重试语义、建议接口与模板差异 |
 | [文件协作](FILE-COLLAB.md) | 已有互斥/依赖/挂载，及尚未实现的 Git 集成 |
 | [群聊设计](GROUP-RFC.md) | 当前 REST/MCP 消息协作与暂缓的完整协议 |
-| [Work RFC](RFC-work-resume.md) | W1–W3 已实现的工作单与 W4 验收范围 |
 | [分配建议 RFC](RFC-jev-dispatch.md) | D1 已实现；终版模型实测待补，D2/D3 规划 |
-| [P4 观察方案](OBSERVATION-P4-plan.md) | 待确认的观察起算、使用量和验收条件 |
 
-截至 2026-10-26，开发分支含 Work W1–W3 与 P5.1 D1。W4 有历史双机报告，其中 B/C 最终关闭的仓内证据不足，见报告核对注。D1 的历史模型样本不等于终版 live 复验完成。P4 观察、合入 main 与生产部署须各自有记录。
-
-## 测试与报告
+## 验证
 
 | 文档 | 范围 |
 |---|---|
-| [TESTPLAN](TESTPLAN.md) | 基础回归及本轮文档专项；不代表所有扩展功能仅由基础用例覆盖 |
-| [前端计划](TESTPLAN-FE.md) | 基础控制台验证，新增 Work 与建议区另见专项 |
-| [W1](TESTPLAN-W1-work.md) / [W2](TESTPLAN-W2-work.md) / [W3](TESTPLAN-W3-work.md) / [W4](TESTPLAN-W4-work.md) | Work 分批用例与当时执行记录 |
-| [任务可见性专项](TESTPLAN-tasks-audit.md) | node 全量执行清单、分页与审计保留待决项 |
-| [D1 专项](TESTPLAN-D1-jev.md) | 建议服务、降级、界面及模型实测待办 |
-| [双机 DoD 11 报告](TESTREPORT-dod11-p4.md) | 报告指定版本与拓扑下的实测，不替代其他版本验收 |
-| [Work W4 报告](TESTREPORT-w4-p5.md) | 原执行者结论及本轮采证核对注 |
-| [2026-10-25 文档报告](TESTREPORT-docs.md) | 上一轮代码与文档状态的记录，不作当前通过证明 |
-| [2026-10-26 文档报告](TESTREPORT-docs-20261026.md) | 本轮措辞、事实、配置、图示与本机回归验收 |
-| [其他历史报告](TESTREPORT.md) | 按原日期、代码版本与环境解读 |
+| [TESTPLAN](TESTPLAN.md) | 基础回归及文档专项；不代表所有扩展功能仅由基础用例覆盖 |
+| [前端计划](TESTPLAN-FE.md) | 控制台走查清单（对照归档原型 dashboard-prototype-final.html） |
 
-## 历史过程材料
+## 归档区（docs/archive/）
 
-`TASK-*`、`REVIEW-*`、`archive/`、`prototypes/` 与 `agentbridge/` 保存任务讨论、评审、原型和特定版本调研。其原始措辞和结果保留为历史证据，不作为当前安装指南或功能清单。报告中的问题已修复、范围已调整或结论缺证时，追加有日期的核对说明，避免改写旧记录为新验证结果。
+任务书（TASK-*）、审查记录（REVIEW-*）、测试报告（TESTREPORT-*）、已执行完毕的阶段性计划与 RFC（TESTPLAN-W1~W4 / TESTPLAN-D1 / TESTPLAN-tasks-audit / RFC-work-resume / OBSERVATION-P4-plan / PLAN-info-convergence）等 51 份过程文档，以及历史原型与走查脚本（prototypes/ 子目录）。归档文档按写入时点的代码版本解读，不反映当前状态；需要追溯时按文件名在 archive 内查找。
 
-验收 PNG 通常被 `.gitignore` 排除，只在报告明确位置时作为本地证据；需要随仓库交付的图示使用 `assets/` 中的 SVG 和文本图源。归档或移动文档时同步修正引用。
-
-## 维护要求
-
-使用准确术语并在首次出现时解释；区分代码实现、测试通过、分支合并与生产部署；配置示例说明前置条件与占位字段。涉及限制、权限、重试和保留期时核对实际调用链，不仅引用函数名或旧规划。源代码标识符和现有界面原文可以保留，说明性正文不使用内部对话、未验证的时长承诺或夸大的成功保证。
+历史验收的机器证据（docs/testing/）与走查截图（docs/prototypes/shots-*，未跟踪）已随 2026-10-26 文档整理移出仓库或保留在本地，结论均沉淀在对应 TESTREPORT/REVIEW 中，原始文件见当时提交的 git 历史。

@@ -162,7 +162,11 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 	if !ok || e.State == ledger.StateFinished {
 		if !ok {
 			if err := s.cfg.Ledger.AddCancelTombstone(p.TaskID); err != nil {
-				log.Printf("[node] 取消墓碑落盘失败 task=%s: %v", p.TaskID, err)
+				// 墓碑落盘失败：不发取消 ack——闭环确认必须以持久化为前提
+				//（2026-10-26 双审缺陷修复）。hub 至少一次取消重发会携帧重试；
+				// 若 ack 掉，重启后墓碑缺失，迟到 offer 必执行已取消任务。
+				log.Printf("[node] 取消墓碑落盘失败，待取消重发重试 task=%s: %v", p.TaskID, err)
+				return
 			}
 			log.Printf("[node] 取消命中未入账任务，落墓碑防后到 offer 执行 task=%s", p.TaskID)
 		} else if e.ResultAcked {
@@ -207,8 +211,17 @@ func (s *Service) handleTaskCancel(env *protocol.Envelope) {
 		FinishedAt: protocol.NowUTC(),
 	}
 	if err := s.cfg.Ledger.MarkFinished(p.TaskID, res); err != nil {
-		log.Printf("[node] 取消落盘未生效（先到终态为准）task=%s: %v", p.TaskID, err)
-		s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
+		if errors.Is(err, ledger.ErrWrongState) {
+			// 先到终态为准（幂等收敛，SPEC 4.3）：终态已由先到者落盘，回执由
+			// 重发链路闭合，此处回幂等 ack 正确。
+			log.Printf("[node] 取消落盘命中既有终态（先到为准）task=%s: %v", p.TaskID, err)
+			s.sendRef(protocol.MsgTaskCancelled, p.TaskID)
+			return
+		}
+		// 落盘失败（磁盘等）：终态未落上，不发确认——ack 掉则 hub 视取消闭环，
+		// 重启后丢失 cancelled 终态（2026-10-26 双审缺陷修复）。hub 至少一次
+		// 取消重发携帧重试，与本函数上方重臂失败只跳过发送的口径一致。
+		log.Printf("[node] 取消终态落盘失败，待取消重发重试 task=%s: %v", p.TaskID, err)
 		return
 	}
 	s.notifyTerminal(p.TaskID) // 首次落终态即通知（standalone 补盲区）

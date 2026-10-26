@@ -28,19 +28,15 @@ func workCreateReq(goal string) WorkCreateRequest {
 	}
 }
 
-// readDiskWorkState 读盘上快照（绕过内存视图；验收「落盘一致/零污染」口径用。
-// 文件名取 store 包落盘约定 hub_state.json）。
+// readDiskWorkState 读盘上状态（绕过内存视图；验收「落盘一致/零污染」口径用。
+// SQLite 迁移后经 store.ReadSnapshot 只读连接+读事务取全量）。
 func readDiskWorkState(t *testing.T, dir string) store.State {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, "hub_state.json"))
+	st, err := store.ReadSnapshot(dir)
 	if err != nil {
 		t.Fatalf("读快照: %v", err)
 	}
-	var st store.State
-	if err := json.Unmarshal(b, &st); err != nil {
-		t.Fatalf("解析快照: %v", err)
-	}
-	return st
+	return *st
 }
 
 // reopenHub 重启（Close → 同目录 Open → 新 Core），返回新基座（W1 验收 1/2/4
@@ -399,13 +395,19 @@ func TestWorkCreateWriteFailureNotPublished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打开 store: %v", err)
 	}
+	// SQLite 迁移后写失败注入走 store 注入钩子（旧手法：占位临时文件路径，
+	// SQLite/WAL 无半截文件窗口，事务原子性由引擎保证）。注入仅拦 CreateWork
+	// 的持久化段：启动自愈事务已完成，后续首个 before_write 即本次建单。
+	st.SetInjectForTest(func(stage string) error {
+		if stage == "before_write" {
+			return errors.New("注入: 持久化失败")
+		}
+		return nil
+	})
+	t.Cleanup(func() { st.SetInjectForTest(nil) })
 	c, err := New(Config{Store: st, Transport: transport.NewBus().Endpoint("hub"), SweepInterval: 0})
 	if err != nil {
 		t.Fatalf("构造 core: %v", err)
-	}
-	tmpPath := filepath.Join(dir, "hub_state.json.tmp") // store 落盘临时写路径约定
-	if err := os.Mkdir(tmpPath, 0o755); err != nil {
-		t.Fatalf("占位临时路径: %v", err)
 	}
 	w, dup, err := c.CreateWork(workCreateReq("写失败不发布"), "admin")
 	if err == nil {
@@ -421,18 +423,13 @@ func TestWorkCreateWriteFailureNotPublished(t *testing.T) {
 		t.Errorf("落盘失败内存零残留: works=%d idems=%d", len(got.Works), len(got.WorkIdems))
 	}
 	// 盘上零污染：快照（可能含 core 启动自愈事务写入的既有内容）不得出现该
-	// Work 或指纹（New 时已有快照文件，断言口径为内容不含失败单）
+	// Work 或指纹（New 时已有库文件，断言口径为内容不含失败单）
 	if disk := readDiskWorkState(t, dir); len(disk.Works) != 0 || len(disk.WorkIdems) != 0 {
 		t.Errorf("落盘失败快照零污染: works=%+v idems=%+v", disk.Works, disk.WorkIdems)
 	}
-	if ents, err := os.ReadDir(tmpPath); err != nil || len(ents) != 0 {
-		t.Errorf("临时写路径应无半截文件: ents=%v err=%v", ents, err)
-	}
 
-	// 移除障碍重试 → 成功、内存盘一致
-	if err := os.Remove(tmpPath); err != nil {
-		t.Fatalf("移除障碍: %v", err)
-	}
+	// 解除注入重试 → 成功、内存盘一致
+	st.SetInjectForTest(nil)
 	w2, dup, err := c.CreateWork(workCreateReq("写失败不发布"), "admin")
 	if err != nil || dup || w2 == nil {
 		t.Fatalf("障碍移除后重试应成功: err=%v dup=%v", err, dup)

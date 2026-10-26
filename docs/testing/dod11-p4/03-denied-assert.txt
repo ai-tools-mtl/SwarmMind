@@ -1,3 +1,0 @@
-status: failed
-error: policy_denied
-✅ 断言通过: failed + policy_denied
