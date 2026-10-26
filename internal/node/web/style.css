@@ -98,6 +98,9 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .filters button{display:inline-flex;align-items:center;gap:6px;height:auto;border:0;background:rgba(0,0,0,.05);border-radius:var(--r-pill);padding:6px 14px;font-size:12.5px;font-weight:500;color:var(--ink-2)}
 .filters button:hover{background:rgba(0,0,0,.08)}
 .filters button.on{background:var(--ink);color:var(--white);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.16)}
+/* 0 量筛选 chip 退灰；选中态（.on 黑底白字）不降透明——来源筛选 chip 零计数样式与 hub 同文（TASK-nav-filter A1/形态对照表） */
+.filters button.zero{opacity:.55}
+.filters button.zero.on{opacity:1}
 label{display:block;font-size:var(--fs-small);font-weight:600;margin-bottom:6px;color:var(--ink-2)}
 input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid var(--faint);border-radius:var(--r-thumb);padding:10px 12px;color:var(--ink);background:var(--surface)}
 textarea{resize:vertical;min-height:110px}
@@ -185,6 +188,15 @@ code{color:var(--ink-2)}
 .md-log-label{display:inline-block;font-size:11px;font-family:var(--mono);color:var(--ink-3);background:rgba(0,0,0,.05);border-radius:var(--r-chip);padding:3px 10px;margin:12px 0 8px}
 .md-log pre{margin:0 0 10px}
 /* ===== md 渲染样式 shared block end ===== */
+/* prompt-preview 任务指令预览折叠（t20261026-prompt-preview 双端同文，抽屉共用组
+ * 件样式）：>1200 字符默认折叠——内容容器限高 180px + overflow hidden，底部 60px
+ * 渐隐遮罩渐变到抽屉底色（--surface；md-body 浅灰底与白底的色差在渐隐末端可接受，
+ * 以视觉核查为准），展开态去限高、遮罩不渲染（HTML 层省略）；按钮行右对齐与
+ * md-log-head 原文切换同侧。 */
+.prompt-preview{position:relative;max-height:180px;overflow:hidden}
+.prompt-preview.prompt-open{max-height:none}
+.prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}
+.prompt-foot{margin-top:4px;text-align:right}
 /* cmd-args 任务指令 args 形态（2026-10-26 改动四双端同构）：逐参数 code 展示
  *（codex 审查采纳：join 丢参数边界）；code 与行内基线对齐、压 0.92em（SwarmMind
  * 前端规约：中文句中行内 code）。与 hub style.css 同文；在 md 渲染 shared block 外

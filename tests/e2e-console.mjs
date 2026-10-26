@@ -49,6 +49,16 @@ async function main() {
     record('E02', '密码登录进入总览', true);
   }
 
+  // TC-E-NAV 导航统一（TASK-nav-filter B）：aside 内定位一律用结构化选择器
+  //（aside nav button[data-page=…]），词表逐项断言（:has-text("任务") 会宽泛命中，
+  // codex 必须修项）；aria-current 指向当前页。
+  const HUB_NAV = ['总览', '机器', '任务', '派发', '工作单', '群聊', '策略容量', '设置'];
+  const hubNav = (await page.locator('aside nav button').allTextContents())
+    .map(s => s.replace(/^0\d/, '').replace(/\s*\(\d+\)$/, '').trim());
+  record('E-NAV', 'hub 导航词表：8 项名称与顺序', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));
+  const curNav = ((await page.locator('aside nav button[aria-current="page"]').textContent()) || '').replace(/^0\d/, '').trim();
+  record('E-NAV2', 'hub 导航 aria-current 指向当前页（总览）', curNav === '总览', curNav);
+
   // ---------- 总览页 ----------
   // TC-E03 统计卡与中心端状态
   await page.waitForSelector('text=中心端状态');
@@ -61,16 +71,17 @@ async function main() {
   record('E04', '总览：状态分布下钻 chips（八态：七态+取消后新增 cancelled）', chips === 8, `实际 ${chips}`);
 
   // ---------- 节点接入页 ----------
-  await page.click('button:has-text("节点接入")');
-  await page.waitForSelector('text=已登记节点');
+  await page.click('aside nav button[data-page="nodes"]'); // E05 结构化定位（总览入口现词「＋ 添加机器」，「节点接入」为旧文案断言漂移，顺修
+  await page.waitForSelector('text=已登记机器'); // 现词（旧「已登记节点」为既有漂移，顺修）
   const bodyText = await page.textContent('body');
   const hasMac = bodyText.includes('mac-mini'), hasBaidu = bodyText.includes('baidu-node');
   const onlineCount = (bodyText.match(/在线/g) || []).length;
   record('E05', '节点接入：双节点在列且在线', hasMac && hasBaidu && onlineCount >= 2);
 
-  // TC-E06 接入向导 4 步走通（2026-10-22 向导重构后适配）：
+  // TC-E06 接入向导 4 步走通（2026-10-22 向导重构后适配；2026-10-26 nav-filter 验收顺修——
+  // 「生成接入配置」为更早期流程的过时断言，现流程：机器页「添加机器」开向导 Step1）
   // Step1 命名 → Step2 token 生成与登记片段 → Step3 部署方式 → Step4 关闭
-  await page.click('button:has-text("生成接入配置")');
+  await page.click('button:has-text("添加机器")');
   await page.waitForSelector('#enroll-id');
   await page.fill('#enroll-id', 'e2e-drill');
   await page.click('[data-act="enroll-next1"]');
@@ -84,11 +95,47 @@ async function main() {
   await page.click('[data-act="enroll-later"]');
   await page.waitForSelector('#enroll-id', { state: 'detached' });
 
-  // ---------- 任务监管页 ----------
-  await page.click('aside button:has-text("任务监管")');
+  // ---------- 任务页（导航定位用结构化选择器：aside nav button[data-page]） ----------
+  await page.click('aside nav button[data-page="tasks"]');
   await page.waitForSelector('th:has-text("提交时间")', { timeout: 15000 }); // 任务表头唯一，option 不会误匹配
   const taskRows = await page.locator('tr[data-task]').count();
-  record('E07', '任务监管：历史任务列表渲染', taskRows >= 1, `行数 ${taskRows}`);
+  record('E07', '任务：历史任务列表渲染', taskRows >= 1, `行数 ${taskRows}`);
+
+  // TC-E20 目标机器筛选（TASK-nav-filter A2）：选项来自快照去重；选中后行全部命中
+  // 该机器；清除筛选后 select 回「全部机器」。导出与批量共用 filteredTasks（同源）。
+  const nodeVals = await page.evaluate(() => {
+    const sel = document.querySelector('select[data-f="node"]');
+    return sel ? [...sel.options].map(o => o.value).filter(Boolean) : [];
+  });
+  if (nodeVals.length) {
+    await page.selectOption('select[data-f="node"]', nodeVals[0]);
+    await page.waitForTimeout(300);
+    const rowNodes = await page.evaluate(() =>
+      [...document.querySelectorAll('tr[data-task] td:nth-child(2)')].map(td => td.textContent.trim()));
+    const allHit = rowNodes.length > 0 && rowNodes.every(t => t === nodeVals[0]);
+    record('E20', '目标机器筛选：行全部命中所选机器（含导出同源过滤）', allHit, `机器 ${nodeVals[0]} 行 ${rowNodes.length}`);
+  // 清除路径 A（非空筛选态真实用户路径）：select 改回「全部机器」，行数恢复
+  await page.selectOption('select[data-f="node"]', '');
+  await page.waitForTimeout(300);
+  const restoredRows = await page.locator('tr[data-task]').count();
+  const clearedVal = await page.evaluate(() => document.querySelector('select[data-f="node"]')?.value === '');
+  record('E20b', '清除路径 A：select 改回「全部机器」，列表恢复', clearedVal && restoredRows === taskRows, `行 ${restoredRows}/${taskRows}`);
+  // 清除路径 B（零命中空态，clear-filters 按钮的设计场景）：搜不存在 ID → 空态点清除 → 全部恢复
+  await page.fill('input[data-f="trace"]', 'no-such-trace-id');
+  await page.waitForTimeout(400);
+  const emptyCleared = await page.locator('[data-act="clear-filters"]').count();
+  if (emptyCleared) {
+    await page.click('[data-act="clear-filters"]');
+    await page.waitForTimeout(300);
+    const afterClear = await page.locator('tr[data-task]').count();
+    const traceCleared = await page.evaluate(() => document.querySelector('input[data-f="trace"]')?.value === '');
+    record('E20c', '清除路径 B：零命中空态点「清除筛选」，trace 与列表全恢复', traceCleared && afterClear === taskRows, `行 ${afterClear}/${taskRows}`);
+  } else {
+    record('E20c', '清除路径 B：零命中空态清除按钮', false, '空态未出现 clear-filters 按钮');
+  }
+  } else {
+    record('E20', '目标机器筛选：行全部命中所选机器（含导出同源过滤）', true, '快照无目标机器（跳过）');
+  }
 
   // TC-E08 任务详情抽屉（最终答复/产物/时间线区块）
   if (taskRows >= 1) {
@@ -101,7 +148,7 @@ async function main() {
   }
 
   // ---------- 运维控制页：真实派单（机器优先两级选择）----------
-  await page.click('button:has-text("任务派发")');
+  await page.click('aside nav button[data-page="control"]');
   await page.waitForSelector('#ctrl-node');
   const nodeOptions = await page.locator('#ctrl-node option').count();
   const agentDisabledBefore = await page.locator('#ctrl-agent').isDisabled();
@@ -140,7 +187,7 @@ async function main() {
       const o = [...sel.options].find(x => x.value);
       return o ? { v: o.value, t: o.textContent } : null;
     });
-    const pinnedOk = !!firstReal && firstReal.v.includes('zcode-dev') && firstReal.t.includes('统筹 ·');
+    const pinnedOk = !!firstReal && firstReal.v.includes('zcode-dev') && firstReal.t.includes('智行管家 ·'); // 置顶标记现词（旧「统筹 ·」为既有漂移，顺修）
     await page.selectOption('#ctrl-agent', firstReal.v);
     await page.waitForTimeout(300);
     const phOn = await page.getAttribute('#ctrl-stdin', 'placeholder');
@@ -189,7 +236,7 @@ async function main() {
   await page.keyboard.press('Escape');
 
   // TC-E19 失败任务：失败原因（进程错误输出）前置可见（不再折叠）
-  await page.click('aside button:has-text("任务监管")');
+  await page.click('aside nav button[data-page="tasks"]');
   await page.waitForSelector('th:has-text("提交时间")');
   // 从 API 找一个 stderr 非空的失败任务（超时类失败无 stderr，不适用本断言）
   const stderrTask = await page.evaluate(async () => {
@@ -209,13 +256,13 @@ async function main() {
   }
 
   // ---------- 策略容量页 ----------
-  await page.click('aside button:has-text("策略容量")');
-  await page.waitForSelector('text=信箱条数', { timeout: 15000 }); // 策略页独有首行
+  await page.click('aside nav button[data-page="policy"]');
+  await page.waitForSelector('text=离线暂存条数', { timeout: 15000 }); // 策略页独有首行（旧「信箱条数」为既有漂移，顺修）
   const policyRows = await page.locator('table tbody tr').count();
   record('E12', '策略容量：额度表渲染', policyRows >= 8, `行数 ${policyRows}`);
 
   // ---------- 设置页：账户信息 + 令牌 ----------
-  await page.click('button:has-text("设置")');
+  await page.click('aside nav button[data-page="tokens"]');
   await page.waitForSelector('text=账户信息');
   let acctOk = false;
   try {

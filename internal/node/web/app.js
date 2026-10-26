@@ -156,6 +156,10 @@ const ERRORS = {
 };
 const TERMINAL = new Set(['completed', 'failed', 'needs_review', 'cancelled']);
 const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记失败' };
+/* ORIGIN_WORDS 任务来源词典（TASK-nav-filter A1 词典同源，SPEC 六.五 文案层单一起源）：
+ * 「hub 下发 | 本机派单」双端逐字节同文——来源徽标、筛选 chip、抽屉来源行唯一出处，
+ * 不得再复制字面量。 */
+const ORIGIN_WORDS = { hub: 'hub 下发', local: '本机派单' };
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -248,7 +252,17 @@ function drawerLogInner(res, raw) {
  * stdin:/args: 行前缀同诊断日志先例；切换态存各自 S.drawer.promptRaw，切换经分区
  * diff 只重写 prompt 分区）；单源任务不显示小节标题（短参数沿用 muted 引言行，
  * 视觉与现状一致）；两者皆空分区省略。底部「任务输入（原样 JSON）」details（hub
- * 独有白名单）保留完整技术细节，两不误。 */
+ * 独有白名单）保留完整技术细节，两不误。
+ * 预览折叠（t20261026-prompt-preview，伦哥反馈「任务指令显示预览，需要时点击全部
+ * 显示」）：任务指令总内容（stdin + args join，现有拼接口径）超过 PROMPT_PREVIEW_MAX
+ * 字符 ⇒ 内容容器折叠预览（限高+底部渐隐遮罩+「展开全部」按钮），≤阈值全显（现状
+ * 形态，无展开按钮）；短参数胶囊形态本就短，走阈值判定前的早退分支不参与折叠。
+ * 展开态存 S.drawer.promptExpanded（与 promptRaw 同模式，S.drawer 随抽屉生命周期
+ * 重置），渲染函数从状态算 HTML——轮询/切换经分区 diff 天然保持（D22 声明式，无
+ * 「重建后 JS 恢复」反模式）；原文态同样折叠（raw 数百行同样长），展开态跨 raw/
+ * 渲染两态共享同一个 promptExpanded；双源折叠作用于整个内容容器（一个按钮控制
+ * 全部小节）。 */
+const PROMPT_PREVIEW_MAX = 1200;   // 折叠判据阈值：约一屏 md 渲染量——超过即预览折叠，未超保持全显（字符数模板可算，无 JS 测量）
 function promptZoneHtml(t) {
   const stdin = t.input?.stdin || '';
   const args = t.input?.args || [];
@@ -259,12 +273,16 @@ function promptZoneHtml(t) {
   const pills = `<p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
   if (!stdin && !argsMd) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p>${pills}`;
   const raw = !!S.drawer?.promptRaw;
+  const expanded = !!S.drawer?.promptExpanded;
   const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输入。' : '默认按 Markdown 渲染；需要看原文请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'prompt-raw', 'link')}</div>`;
-  if (raw) return `<h3>任务指令</h3>${head}<pre>${esc(dual ? `stdin:\n${stdin}\n\nargs:\n${text}` : stdin || text)}</pre>`;
   const mdSec = (label, src) => (label ? `<b class="md-log-label">${label}</b>` : '') + `<div class="md-body">${mdToHtml(src) || '<p class="muted">（空）</p>'}</div>`;
   const argsTitle = dual ? `命令行参数（args · ${args.length} 段）` : '';
   const argsSec = !args.length ? '' : argsMd ? mdSec(argsTitle, text) : (dual ? `<b class="md-log-label">${argsTitle}</b>` : '') + pills;
-  return `<h3>任务指令</h3>${head}${stdin ? mdSec(dual ? '任务说明（stdin）' : '', stdin) : ''}${argsSec}`;
+  const body = raw
+    ? `<pre>${esc(dual ? `stdin:\n${stdin}\n\nargs:\n${text}` : stdin || text)}</pre>`
+    : `${stdin ? mdSec(dual ? '任务说明（stdin）' : '', stdin) : ''}${argsSec}`;
+  if (stdin.length + text.length <= PROMPT_PREVIEW_MAX) return `<h3>任务指令</h3>${head}${body}`;
+  return `<h3>任务指令</h3>${head}<div class="prompt-preview${expanded ? ' prompt-open' : ''}">${body}${expanded ? '' : '<div class="prompt-fade"></div>'}</div><div class="prompt-foot">${button(expanded ? '收起' : '展开全部', 'prompt-expand', 'link')}</div>`;
 }
 /* ===== 抽屉答复与日志 shared block end ===== */
 
@@ -481,6 +499,7 @@ const S = {
   snap: '',                // 轮询数据指纹：未变化不重绘
   drawer: null,            // 打开的任务详情 {id, timer}
   f: { stage: 'idle', target: '', stdin: '', idem: newIdem(), message: '' },   // 派单表单状态机
+  tf: { origin: '' },      // 「我的任务」来源筛选（TASK-nav-filter A1；''=全部/'local'/'hub'）。渲染层过滤已载入条目；生命周期同会话边界复位（resetPrimeState：登出/401/换令牌重置；轮询/翻页/页面往返保留）
   focusForm: false,
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
@@ -512,6 +531,7 @@ function resetPrimeState() {
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
+  S.tf = { origin: '' };   // 来源筛选随会话边界重置（TASK-nav-filter A1 codex 必须修项）
   S.notifyChannels = [];
   S.notifyLoaded = false;
   S.notifyLoading = false;
@@ -653,7 +673,7 @@ async function tryToken(token) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '我的服务'], ['tasks', '派任务·我的任务'], ['wizard', '连接']];
+const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['wizard', '连接']];
 // setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
 const SETUP_PAGES = [['wizard', '连接向导'], ['overview', '本机环境']];
 function route() {
@@ -697,9 +717,11 @@ function timeFull(iso) {
 /* ---------- 布局（shell + 侧栏导航；setup 模式导航裁剪为向导+本机环境） ---------- */
 function layout(content, pages = (S.status?.mode === 'setup' ? SETUP_PAGES : PAGES)) {
   const online = S.status?.online;
-  const nums = ['①', '②', '③', '④'];
-  return `<div class="shell"><aside><div class="workspace"><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">${esc(S.nodeID || 'node')}</strong><small class="muted">本机控制台</small></div>
-  <nav>${pages.map(([id, label]) => `<button data-go="${id}" class="${S.page === id ? 'active' : ''}"><span class="navnum">${nums[pages.findIndex(p => p[0] === id)] || ''}</span>${label}</button>`).join('')}</nav>
+  /* 导航壳与 hub 同构（TASK-nav-filter B）：navnum 01-04 同格式、aria-label="旅程导航"
+   * + aria-current="page"、workspace 行序 small 在上 strong 在下（与 hub 同构）。 */
+  return `<div class="shell"><aside><div class="workspace"><small class="muted">本机控制台</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">${esc(S.nodeID || 'node')}</strong></div>
+  <nav aria-label="旅程导航">${pages.map(([id, label], i) =>
+    `<button data-go="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
   <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
   <main>${content}</main></div>`;
@@ -770,7 +792,7 @@ function overviewPage() {
   if (!S.agents.length) {
     return head + `<section class="card"><h2>三步让本机加入协作网</h2>
       <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
-      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「我的服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
+      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
       <div class="step"><span>3</span><div><b>钦定管家并派单</b><div class="muted">在「本机管家」区钦定一个 agent 担任智行管家，随后即可在本机派单；需要开放给其他机器调用时再打开开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '');
@@ -819,7 +841,7 @@ function primePickView(pa) {
   return `<small class="muted">${pa ? '当前管家将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
-    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「我的服务 → 能力配置」登记并重启 node。</p>${button('去看我的服务', 'go-services', '')}</div>`}`;
+    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
 }
 /* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段。wired=true（t20261023-62a2
    自动接线）：明示已写入的影子 home 配置路径，零手贴；降级：保留手动粘贴指引。 */
@@ -842,8 +864,8 @@ function recentTasksCard() {
   return `<section class="card spaced"><div class="row"><h2>最近任务（本机执行过的）</h2><small>${S.tasksTotal} 条 · 含 hub 下发</small></div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务</th><th>状态</th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}<small>${esc(e.task_id)}</small></td><td>${esc((e.idem_key || '—')).slice(0, 24)}</td><td>${listStatusBadge(e)}</td></tr>`).join('')}
-  </tbody></table></div><p class="footer-note">点击行查看详情；列表即本机账本全量（含 hub 下发任务），完整清单见「派任务 · 我的任务」。</p>`
-    : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「派任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
+  </tbody></table></div><p class="footer-note">点击行查看详情；列表即本机账本全量（含 hub 下发任务），完整清单见「任务」页。</p>`
+    : `<div class="empty"><h2>还没有执行过任务</h2><p class="muted">去「任务」选一个本机服务，描述要做的事即可；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'go-tasks', 'primary')}</div>`}</section>`;
 }
 
 /* ---------- 能力配置加载（方案 3.5；不进轮询——编辑中状态不被覆盖） ---------- */
@@ -948,7 +970,7 @@ function normalizeProfile(p) {
 
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
-  const head = `<div class="page-head"><div><h1>我的服务</h1>
+  const head = `<div class="page-head"><div><h1>服务</h1>
     <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p></div></div>`;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
   // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
@@ -1334,7 +1356,7 @@ function tasksPage() {
   // 建议修 10（2026-10-22）：standalone 本机主权——本机派单不经 hub，离线/信箱
   // 语义不适用，目录与选中提示不渲染「离线进信箱」误导文案；组网模式维持现状。
   const standalone = S.status?.mode === 'standalone';
-  const head = `<div class="page-head"><div><h1>派任务 · 我的任务</h1>
+  const head = `<div class="page-head"><div><h1>任务</h1>
     <p class="muted">从本机服务选目标 → 一段话描述要做的事 → 提交；结果在这里跟踪与取回。</p></div></div>`;
   /* 2026-10-23 同步 hub 端口径：下拉项只留名字（描述收进 title），智行管家
    * （zcode-dev）单独 optgroup 分组加前缀，与普通智能体视觉分区 */
@@ -1368,7 +1390,7 @@ function tasksPage() {
     <div class="row"><small class="muted">恢复密钥 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「我的服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看我的服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看服务', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}`;
 }
@@ -1378,20 +1400,36 @@ function tasksPage() {
 function listStatusBadge(e) {
   return e.status ? badge(e.status) : '<span class="badge offline" title="账本中已不存在（本机派单历史留痕）">仅存留痕</span>';
 }
-// originBadge 任务来源徽标：本机派单 | hub 下发（词与抽屉头部来源同源）。
+// originBadge 任务来源徽标：词自 ORIGIN_WORDS 词典（shared block 双端同文），不再复制字面量。
 function originBadge(origin) {
-  return `<span class="badge" title="${origin === 'hub' ? 'hub 下发' : '本机派单'}">${origin === 'hub' ? 'hub 下发' : '本机派单'}</span>`;
+  const w = ORIGIN_WORDS[origin === 'hub' ? 'hub' : 'local'];
+  return `<span class="badge" title="${w}">${w}</span>`;
 }
+// originOf 行来源归一（与 taskOrigin 回退同口径）：origin 恒有值；缺省/留痕行按 local
+// 计（本机控制台默认本机语义，hub 任务误归本机只会误导产物指引，反向无此风险）。
+function originOf(e) { return e?.origin === 'hub' ? 'hub' : 'local'; }
+// myTasksCard 任务列表 + 来源筛选（TASK-nav-filter A1）：卡头部三枚 chip（全部/本机
+// 派单/hub 下发，带已载计数；视觉对齐 hub .filters 形态，零计数退灰）。筛选为渲染层
+// 过滤已载入条目（陷阱④：轮询只刷首页、翻页保序并入都在数据层，筛选随每次渲染从
+// 全量已载列表现算，不缓存筛选结果）。零命中出空态+清除筛选，但「加载更早」翻页以
+// 全量载入数计、入口照常（codex 必须修项）；footer-note 筛选激活时追加作用域说明。
 function myTasksCard() {
-  const rows = S.tasks;
-  const more = rows.length < S.tasksTotal;
-  const count = more ? `已载 ${rows.length} / 共 ${S.tasksTotal} 条` : `${S.tasksTotal} 条`;
-  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${count} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  const all = S.tasks;
+  const origin = S.tf.origin;
+  const rows = origin ? all.filter(e => originOf(e) === origin) : all;
+  const cnt = k => k ? all.filter(e => originOf(e) === k).length : all.length;
+  const more = all.length < S.tasksTotal;
+  const loaded = more ? `已载 ${all.length} / 共 ${S.tasksTotal} 条` : `${S.tasksTotal} 条`;
+  const chips = [['', '全部'], ['local', ORIGIN_WORDS.local], ['hub', ORIGIN_WORDS.hub]].map(([k, label]) =>
+    `<button data-act="tf-origin" data-origin="${k}" class="${origin === k ? 'on' : ''}${cnt(k) ? '' : ' zero'}">${esc(label)} ${cnt(k)}</button>`).join('');
+  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  ${all.length ? `<div class="filters">${chips}</div>
   ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>任务号</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td><code>${esc(e.task_id)}</code></td><td>${originBadge(e.origin)}</td><td>${listStatusBadge(e)}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`).join('')}
-  </tbody></table></div>
-  ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - rows.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
-  <p class="footer-note">列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>`
+  </tbody></table></div>`
+    : `<div class="empty"><h2>没有符合筛选的任务</h2><p class="muted">当前筛选下已载入的任务无命中；清除筛选，或用下方入口加载更早的任务。</p>${button('清除筛选', 'tf-clear')}</div>`}
+  ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - all.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
+  <p class="footer-note">${origin ? `筛选作用于已载入的 ${rows.length} / ${all.length} 条 · ` : ''}列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>`
     : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}</section>`;
 }
 
@@ -1731,7 +1769,7 @@ function taskDrawerZones(t) {
   return {
     head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(t.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
     <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
-    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${local ? '本机派单' : 'hub 下发'}</p>`,
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${ORIGIN_WORDS[local ? 'local' : 'hub']}</p>`,
     intro: `${t.status === 'needs_review' ? reviewNote : `<div class="notice">${esc(statusIntro)}</div>`}
     ${taskErrorNotice(res, t.status === 'needs_review')}`,
     prompt: promptZoneHtml(t),
@@ -1865,6 +1903,8 @@ document.addEventListener('click', e => {
       }
       case 'open-task': openDrawer(arg); return;
       case 'tasks-more': loadMoreTasks(); return;
+      case 'tf-origin': S.tf.origin = btn.dataset.origin || ''; render(); return;   // 来源筛选 chip（A1；零命中空态的清除同源）
+      case 'tf-clear': S.tf = { origin: '' }; render(); return;
       case 'reopen-form': closeDrawer(); route(); focusForm(); return;
       case 'close-drawer': closeDrawer(); return;
       case 'log-raw': {   // 诊断日志 查看原文/查看渲染 切换：状态落 S.drawer 后分区重算
@@ -1876,6 +1916,12 @@ document.addEventListener('click', e => {
       case 'prompt-raw': {   // 任务指令 查看原文/查看渲染 切换（2026-10-26 改动四，与 hub 同机制）
         if (!S.drawer?.task) return;
         S.drawer.promptRaw = !S.drawer.promptRaw;
+        syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
+        return;
+      }
+      case 'prompt-expand': {   // 任务指令 预览折叠 展开/收起（t20261026-prompt-preview，与 hub 同机制：展开态落 S.drawer 后分区重算）
+        if (!S.drawer?.task) return;
+        S.drawer.promptExpanded = !S.drawer.promptExpanded;
         syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
         return;
       }

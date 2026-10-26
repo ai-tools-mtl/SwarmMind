@@ -112,7 +112,10 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文；
 	// 2026-10-26 prompt-args-md 重构：args 形态判据分流——任一参数含换行或总长 >300
 	// 字符⇒提示词文本形态 md 渲染+原文切换，否则短参数逐参 code 胶囊；stdin+args 并存
-	// 双小节标题共享一个原文切换；单源不显示小节标题；皆空省略。判据行为边界由
+	// 双小节标题共享一个原文切换；单源不显示小节标题；皆空省略；2026-10-26
+	// prompt-preview 预览折叠——总内容 >PROMPT_PREVIEW_MAX(1200) 字符折叠预览
+	//（prompt-preview 容器+prompt-fade 渐隐遮罩+「展开全部」/「收起」切换），展开态存
+	// S.drawer.promptExpanded 从状态算 HTML（D22）。判据行为边界由
 	// TestWebPromptZoneShapeBehavior 经 node 实测，此处只锁双端同文的文案/挂点行）
 	for _, want := range []string{
 		"function mdAnswer(text) {",
@@ -133,6 +136,11 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 		"任务说明（stdin）",
 		"命令行参数（args · ${args.length} 段）",
 		"'当前为原始输入。'",
+		"const PROMPT_PREVIEW_MAX = 1200;",
+		"'prompt-expand'",
+		`<div class="prompt-preview${expanded ? ' prompt-open' : ''}">`,
+		`'<div class="prompt-fade"></div>'`,
+		"expanded ? '收起' : '展开全部'",
 	} {
 		if !strings.Contains(logBlk, want) {
 			t.Errorf("抽屉答复与日志 shared block 应含 %q", want)
@@ -314,8 +322,9 @@ func TestWebNotifyFormSharedBlock(t *testing.T) {
 }
 
 // TestWebDrawerComponentStyles 抽屉共用组件样式双端一致锁（SPEC 六.五 第一/二条）：
-// .timeline 事件流（左轨圆点+needs_review 热点）与 .artifact 产物行分隔线为双端同文
-// 规则——node 补齐后抽壳比对，任一端私改即红。
+// .timeline 事件流（左轨圆点+needs_review 热点）、.artifact 产物行分隔线与
+// .prompt-preview 任务指令预览折叠（t20261026-prompt-preview：限高+渐隐遮罩+按钮行）
+// 为双端同文规则——node 补齐后抽壳比对，任一端私改即红。
 func TestWebDrawerComponentStyles(t *testing.T) {
 	bus := transport.NewBus()
 	svc := newService(t, bus.Endpoint("nodeA"))
@@ -355,6 +364,10 @@ func TestWebDrawerComponentStyles(t *testing.T) {
 		".timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}",
 		".timeline li.hl:before{background:var(--heat)}",
 		".artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}",
+		".prompt-preview{position:relative;max-height:180px;overflow:hidden}",
+		".prompt-preview.prompt-open{max-height:none}",
+		".prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}",
+		".prompt-foot{margin-top:4px;text-align:right}",
 	}
 	for _, r := range rules {
 		if !strings.Contains(nodeCSS, r) {

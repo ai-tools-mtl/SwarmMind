@@ -15,9 +15,11 @@ import (
 )
 
 // TestWebPromptZoneShapeBehavior 任务指令分区形态判据行为锁（t20261026-prompt-args-md，
-// docs/TASK-prompt-args-md-20261026.md DoD）。web_drawer_sync_test 的 shared block
+// docs/TASK-prompt-args-md-20261026.md DoD；t20261026-prompt-preview 预览折叠判据同锁）。
+// web_drawer_sync_test 的 shared block
 // 字符串锁只保「双端同文」不保「行为正确」——args 形态判据边界（换行/300 字符阈值/
-// 双源/单源）、esc 转义纪律、原文切换态稳定在此经 node 子进程加载真实 embed 资产抽块
+// 双源/单源）、预览折叠判据边界（1200 字符阈值/展开收起态从状态算/原文态联动共享/短
+// 内容不折叠）、esc 转义纪律、原文切换态稳定在此经 node 子进程加载真实 embed 资产抽块
 // 求值实测（先例：internal/hub/web/dispatch_test.go TestConsoleDispatchSuggestFingerprint；
 // node 不可得环境自动 skip，TestWebDrawerSharedBlocks 关键行源码锁仍常驻兜底）。
 // 抽块经 sharedBlock 双端逐字节比对——hub 侧一致性由该锁承载，行为断言跑 node 侧一份
@@ -76,7 +78,7 @@ func TestWebPromptZoneShapeBehavior(t *testing.T) {
 	// 容纳 Go 原始字面量；shared block 经参数注入。sharedBlock 抽块起点在注释体内、
 	// 不含开头 /*，组装时补回使其成合法 JS 注释）。*/
 	harness := escLine + `
-const S = { drawer: { promptRaw: false } };
+const S = { drawer: { promptRaw: false, promptExpanded: false } };
 function button(label, act, cls) { return '<button data-act="' + act + '" class="' + (cls || '') + '">' + label + '</button>'; }
 /*` + mdBlk + "\n/*" + dictBlk + "\n/*" + logBlk + "\n" + promptZoneHarnessDriver
 
@@ -98,6 +100,11 @@ function button(label, act, cls) { return '<button data-act="' + act + '" class=
 		"both-empty-omit",          // 皆空分区省略
 		"esc-discipline",           // 不可信面：md 形态与原文态均无 HTML 直通
 		"toggle-state-stable",      // 切换态由调用方持有：同态产出一致（分区 diff 跳过写 DOM）
+		"fold-default-over-threshold", // 判据三（t20261026-prompt-preview）：>1200 字符默认折叠（容器+遮罩+展开按钮）
+		"fold-boundary-at-threshold",  // 判据三边界：恰 1200 全显现状形态；1201 折叠；双源合并计长
+		"fold-expand-collapse-cycle",  // 展开态从状态算 HTML：prompt-open+收起+无遮罩，收起回折叠
+		"fold-raw-shares-expand",      // 原文态同样折叠，展开态跨 raw/渲染共享
+		"fold-short-no-preview",       // 短内容（<1200）无折叠无按钮（现状形态）
 	}
 	cmd := exec.Command(nodeBin, append([]string{file}, scenarios...)...)
 	var out bytes.Buffer
@@ -215,6 +222,74 @@ const SCENARIOS = {
     ok(promptZoneHtml(t).includes('当前为原始输入。'), 'promptRaw 由调用方持有，函数不重置');
     S.drawer.promptRaw = false;
     ok(!promptZoneHtml(t).includes('当前为原始输入。'), '切回渲染态');
+  },
+  'fold-default-over-threshold': () => {
+    S.drawer.promptRaw = false;
+    S.drawer.promptExpanded = false;
+    const long = '# 长提示词\n\n' + '内容行。'.repeat(300);
+    const html = promptZoneHtml({ input: { stdin: '', args: [long] } });
+    ok(html.includes('<div class="prompt-preview">'), '默认折叠容器（无 prompt-open 类）');
+    ok(html.includes('<div class="prompt-fade"></div>'), '折叠态底部渐隐遮罩在场');
+    ok(html.includes('data-act="prompt-expand"'), '展开按钮（prompt-expand 动作）');
+    ok(html.includes('>展开全部</button>'), '按钮文案「展开全部」');
+    ok(!html.includes('>收起</button>'), '折叠态不出现「收起」');
+    ok(html.includes('<h1 class="md-h md-h1">长提示词</h1>'), '折叠容器内仍走 md 渲染（形式不变只加折叠层）');
+    ok(html.includes('data-act="prompt-raw"'), '原文切换保留');
+  },
+  'fold-boundary-at-threshold': () => {
+    S.drawer.promptRaw = false;
+    S.drawer.promptExpanded = false;
+    const body = 'a'.repeat(1200);
+    const at = promptZoneHtml({ input: { stdin: '', args: [body] } });
+    ok(!at.includes('prompt-preview') && !at.includes('prompt-fade') && !at.includes('prompt-expand'), '恰 1200 字符全显（现状形态，无折叠无按钮）');
+    const over = promptZoneHtml({ input: { stdin: '', args: [body + 'b'] } });
+    ok(over.includes('<div class="prompt-preview">') && over.includes('data-act="prompt-expand"'), '1201 字符默认折叠');
+    const dual = promptZoneHtml({ input: { stdin: 'x'.repeat(700), args: ['y'.repeat(700)] } });
+    ok(dual.includes('<div class="prompt-preview">'), 'stdin+args 合并计长超阈值即折叠');
+    ok((dual.match(/prompt-expand/g) || []).length === 1, '双源折叠一个按钮控制全部');
+    ok(dual.includes('任务说明（stdin）') && dual.includes('命令行参数（args · 1 段）'), '双源小节结构不变');
+  },
+  'fold-expand-collapse-cycle': () => {
+    S.drawer.promptRaw = false;
+    const long = '# 长提示词\n\n' + '内容行。'.repeat(300);
+    const t = { input: { stdin: '', args: [long] } };
+    S.drawer.promptExpanded = true;
+    const open = promptZoneHtml(t);
+    ok(open.includes('prompt-preview prompt-open'), '展开态容器带 prompt-open');
+    ok(!open.includes('prompt-fade'), '展开态遮罩不渲染');
+    ok(open.includes('data-act="prompt-expand"'), '展开态仍有切换按钮');
+    ok(open.includes('>收起</button>') && !open.includes('>展开全部</button>'), '按钮文案变「收起」');
+    S.drawer.promptExpanded = false;
+    const folded = promptZoneHtml(t);
+    ok(folded.includes('<div class="prompt-preview">') && folded.includes('prompt-fade'), '收起回折叠态');
+    ok(folded === promptZoneHtml(t), '同态产出一致（展开态从状态算 HTML，轮询 diff 可跳过）');
+  },
+  'fold-raw-shares-expand': () => {
+    S.drawer.promptRaw = true;
+    S.drawer.promptExpanded = false;
+    const long = '# 长提示词\n\n' + '内容行。'.repeat(300);
+    const t = { input: { stdin: '', args: [long] } };
+    const rawFolded = promptZoneHtml(t);
+    ok(rawFolded.includes('<div class="prompt-preview">') && rawFolded.includes('<pre>') && rawFolded.includes('prompt-fade'), '原文态同样折叠（pre 在折叠容器内）');
+    S.drawer.promptExpanded = true;
+    const rawOpen = promptZoneHtml(t);
+    ok(rawOpen.includes('prompt-preview prompt-open') && rawOpen.includes('<pre>') && !rawOpen.includes('prompt-fade'), '原文态展开全显');
+    S.drawer.promptRaw = false;
+    const renderOpen = promptZoneHtml(t);
+    ok(renderOpen.includes('prompt-preview prompt-open'), '展开态跨 raw/渲染共享同一个 promptExpanded');
+    S.drawer.promptExpanded = false;
+    ok(promptZoneHtml(t).includes('<div class="prompt-preview">'), '复位回折叠');
+  },
+  'fold-short-no-preview': () => {
+    S.drawer.promptRaw = false;
+    S.drawer.promptExpanded = false;
+    const html = promptZoneHtml({ input: { stdin: '', args: ['# 部署提示词\n\n**目标**：短文本'] } });
+    ok(!html.includes('prompt-preview') && !html.includes('prompt-fade'), '短内容无折叠容器无遮罩');
+    ok(!html.includes('prompt-expand'), '短内容无展开按钮（现状形态）');
+    S.drawer.promptRaw = true;
+    const rawHtml = promptZoneHtml({ input: { stdin: '# 说明', args: ['--flag', 'v'] } });
+    S.drawer.promptRaw = false;
+    ok(!rawHtml.includes('prompt-preview') && !rawHtml.includes('prompt-expand'), '短内容原文态同样不折叠');
   },
 };
 const names = process.argv.slice(2);
