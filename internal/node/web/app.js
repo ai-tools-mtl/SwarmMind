@@ -236,19 +236,35 @@ function drawerLogInner(res, raw) {
 }
 /* promptZoneHtml 任务指令分区（t20261026-webfix 新增；t20261026-notify-unify 改动四
  * 提升进本块双端同文——node Ledger Entry.Task 本就持久化完整任务输入，TaskView 投影
- * 后 node 单查端点含 input，双端同构点亮）：stdin（控制台/表单派单走 stdin 语义，
- * 即原始提示词）默认 Markdown 渲染 + 查看原文切换（同 fail 分区 raw 模式，切换态
- * 存各自 S.drawer.promptRaw，切换经 syncDrawerZones 只重写 prompt 分区）；stdin 空
- * 时回退 args 命令行形态（逐参数 code 胶囊保留参数边界）；两者皆空分区省略。底部
- * 「任务输入（原样 JSON）」details（hub 独有白名单）保留完整技术细节，两不误。 */
+ * 后 node 单查端点含 input，双端同构点亮；t20261026-prompt-args-md 重构内容源判定，
+ * 伦哥反馈「任务指令希望支持渲染 md」——Prime 派发的整篇提示词走 input.args，旧
+ * 「stdin 空⇒短命令行参数」假设与真实派发形态不符）：args 形态判据=任一参数自身
+ * 含换行或 args 总长 >300 字符⇒「提示词文本形态」（md 渲染+查看原文切换）；否则
+ * 「短参数形态」（逐参数 code 胶囊保留参数边界）。判据取「参数自身含换行」而非
+ * join 含换行：多参数 join('\n') 恒含换行，会把多参数短命令误判成文本形态、丢逐参
+ * 胶囊。stdin（控制台/表单派单走 stdin 语义，即原始提示词）默认 Markdown 渲染；
+ * stdin+args 并存（旧版 args 被完全忽略的盲区）双小节标题「任务说明（stdin）」
+ * 「命令行参数（args · N 段）」共享一个查看原文切换（raw 态单 pre 全部原文，
+ * stdin:/args: 行前缀同诊断日志先例；切换态存各自 S.drawer.promptRaw，切换经分区
+ * diff 只重写 prompt 分区）；单源任务不显示小节标题（短参数沿用 muted 引言行，
+ * 视觉与现状一致）；两者皆空分区省略。底部「任务输入（原样 JSON）」details（hub
+ * 独有白名单）保留完整技术细节，两不误。 */
 function promptZoneHtml(t) {
   const stdin = t.input?.stdin || '';
   const args = t.input?.args || [];
   if (!stdin && !args.length) return '';
-  if (!stdin) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p><p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  const text = args.join('\n');
+  const argsMd = args.some(a => a.includes('\n')) || text.length > 300;
+  const dual = !!stdin && args.length > 0;
+  const pills = `<p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  if (!stdin && !argsMd) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p>${pills}`;
   const raw = !!S.drawer?.promptRaw;
   const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输入。' : '默认按 Markdown 渲染；需要看原文请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'prompt-raw', 'link')}</div>`;
-  return `<h3>任务指令</h3>${head}${raw ? `<pre>${esc(stdin)}</pre>` : `<div class="md-body">${mdToHtml(stdin) || '<p class="muted">（空）</p>'}</div>`}`;
+  if (raw) return `<h3>任务指令</h3>${head}<pre>${esc(dual ? `stdin:\n${stdin}\n\nargs:\n${text}` : stdin || text)}</pre>`;
+  const mdSec = (label, src) => (label ? `<b class="md-log-label">${label}</b>` : '') + `<div class="md-body">${mdToHtml(src) || '<p class="muted">（空）</p>'}</div>`;
+  const argsTitle = dual ? `命令行参数（args · ${args.length} 段）` : '';
+  const argsSec = !args.length ? '' : argsMd ? mdSec(argsTitle, text) : (dual ? `<b class="md-log-label">${argsTitle}</b>` : '') + pills;
+  return `<h3>任务指令</h3>${head}${stdin ? mdSec(dual ? '任务说明（stdin）' : '', stdin) : ''}${argsSec}`;
 }
 /* ===== 抽屉答复与日志 shared block end ===== */
 

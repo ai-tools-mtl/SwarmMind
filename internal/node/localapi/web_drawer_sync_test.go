@@ -109,8 +109,11 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 	// 答复与日志：mdAnswer 白底主角+（空）兜底；诊断日志恒两段+空段（空）+单 pre 双段原文
 	// （D8/D10/D11/D12 统一口径全部锁在本块内，两端同文即同行为）；drawerAnswerHtml
 	// D9 状态优先——终态判定先行，cancelled+result=null（后端合法态）不得落「尚未到终态」；
-	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文）——
-	// stdin 优先 md 渲染+原文切换、空回退 args 逐参数 code、皆空省略
+	// promptZoneHtml 任务指令分区（2026-10-26 notify-unify 改动四提升双端同文；
+	// 2026-10-26 prompt-args-md 重构：args 形态判据分流——任一参数含换行或总长 >300
+	// 字符⇒提示词文本形态 md 渲染+原文切换，否则短参数逐参 code 胶囊；stdin+args 并存
+	// 双小节标题共享一个原文切换；单源不显示小节标题；皆空省略。判据行为边界由
+	// TestWebPromptZoneShapeBehavior 经 node 实测，此处只锁双端同文的文案/挂点行）
 	for _, want := range []string{
 		"function mdAnswer(text) {",
 		"function drawerAnswerHtml(t, res, needs) {",
@@ -127,6 +130,9 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 		"'prompt-raw'",
 		"本任务以命令行参数下达（逐参数展示，保留边界）：",
 		"任务指令",
+		"任务说明（stdin）",
+		"命令行参数（args · ${args.length} 段）",
+		"'当前为原始输入。'",
 	} {
 		if !strings.Contains(logBlk, want) {
 			t.Errorf("抽屉答复与日志 shared block 应含 %q", want)
