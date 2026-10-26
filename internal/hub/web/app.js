@@ -338,7 +338,7 @@ function drawerLogInner(res, raw) {
  * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
  * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
  * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+const DRAWER_ZONES = ['head', 'intro', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -374,7 +374,7 @@ const GROUP_KINDS = { user: '用户', agent: '智能体', system: '系统' };
 /* 通知渠道词典（P4③ 控制台化）：类型徽标文案 + 表单提示 + 事件订阅勾选。
  * sms 在枚举中占位（option disabled 灰显「需接入服务商，暂未开放」）。 */
 const NOTIFY_TYPES = {
-  feishu: { label: '飞书机器人', form: '在飞书群里添加「自定义机器人」后，把 webhook 地址贴进来（群设置 → 群机器人 → 添加）。' },
+  feishu: { label: '飞书机器人', form: '路径：电脑端进群 → 右上角「···」→ 设置 → 群机器人 → 添加机器人 → 自定义机器人（手机端添加不了）。创建后把 Webhook 地址贴进来——这是群内创建的机器人，不需要去开放平台开发者后台建应用。' },
   email: { label: '邮件', form: '需要 SMTP 服务器、端口、账号、密码。端口 465=TLS 直连，587=STARTTLS；明文端口（25）不发送认证。' },
   webhook: { label: 'Webhook', form: '任意能收 JSON POST 的 HTTP 地址；可选自定义请求头（每行一个「名称: 值」）。' },
   inbox: { label: '站内通知', form: '无需配置。终态事件进入顶栏铃铛（只存在内存里，重启后清空）。' },
@@ -385,7 +385,20 @@ const NOTIFY_EVENT_OPTS = [
   ['task_failed', '仅失败'],
   ['task_needs_review', '仅等你确认（结果拿不准）'],
 ];
-const INBOX_ICONS = { completed: '✅', failed: '❌', needs_review: '⚠️', cancelled: '🚫' };
+/* 站内通知条目图标（t20261026-webfix：emoji ✅❌⚠️🚫 跨平台渲染不一致且与灰阶工具
+ * 视觉不符，换 stroke=currentColor 线性 SVG；语义色只走描边，全站四色预算内，
+ * 未知状态回退 completed 勾形而非乱码）。 */
+const INBOX_SVG = {
+  completed: '<circle cx="12" cy="12" r="10"/><path d="m8.5 12.2 2.4 2.4 4.6-5"/>',
+  failed: '<circle cx="12" cy="12" r="10"/><path d="m9 9 6 6M15 9l-6 6"/>',
+  needs_review: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
+  cancelled: '<circle cx="12" cy="12" r="10"/><path d="m5.6 5.6 12.8 12.8"/>',
+  test: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+};
+function inboxIcon(status) {
+  const body = INBOX_SVG[status] || INBOX_SVG.completed;
+  return `<svg class="ni-svg st-${status}" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+}
 
 /* ---------- 全局状态 ---------- */
 const S = {
@@ -1508,7 +1521,7 @@ function syncDrawer(force = false) {
   playLayerOpen(layer);
   layer.querySelector('.drawer')?.focus();   // 焦点入层仅首次打开（P0.6）
 }
-/* syncDrawerZones 以 S.drawer.task 重算分区并 diff 写入（轮询同步与 log-raw/fail-raw
+/* syncDrawerZones 以 S.drawer.task 重算分区并 diff 写入（轮询同步与 log-raw/fail-raw/prompt-raw
  * 切换共用；仅内容变化的分区重写，details 开合经 drawerZoneSwap 回放保持）。
  * 分区应用后必跑 applyDrawerFormState：核对表单区节点恒定（阶段 D 必须修 3），
  * 草稿/busy 属状态驱动属性写入，不在分区模板里。 */
@@ -1549,7 +1562,9 @@ function modalHead(title) {
 }
 /* drawerZones 任务抽屉分区内容（D22 稳定 DOM：壳由 drawerShellHtml 建一次，本函数
  * 只产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
- * 层级（e821bf8，SPEC 六.五 第二条）：介绍条 → 失败原因（hub 独有白名单）→ 最终
+ * 层级（e821bf8，SPEC 六.五 第二条）：介绍条 → 任务指令（t20261026-webfix 新增，
+ * 伦哥反馈「派发任务看不到原始提示词」；hub 独有：node Ledger 无输入投影）→ 失败
+ * 原因（hub 独有白名单）→ 最终
  * 答复（白底浮起主角）→ 诊断日志（折叠配角）→ 产物 → 任务输入（details 折叠沉底，
  * hub 独有白名单）→ 时间线 → 人工核对（hub 独有白名单）→ 归档/下一步。头部/文案/
  * 时间口径与 node 同构（D2/D3/D17/D21）。 */
@@ -1568,6 +1583,7 @@ function drawerZones(t) {
     <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>`,
     intro: `<div class="${needs ? 'notice warn' : 'notice'}">${intro}</div>
     ${taskErrorNotice(r, needs)}`,
+    prompt: promptZoneHtml(t),
     fail: r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : '',
     answer: drawerAnswerHtml(t, r, needs),
     logs: r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
@@ -1586,6 +1602,21 @@ function drawerZones(t) {
  * 抽屉统一，D8/D10/D11/D12）；failInner 失败原因的「默认 md 渲染 + 查看原文切换」
  * 为 hub 独有分区（白名单）：切换态存 S.drawer.failRaw，切换经 syncDrawerZones 只
  * 重写 fail 分区，details 开合与阅读位置不被冲掉。原文视图沿用任务书前的 pre 形态。 */
+/* promptZoneHtml 任务指令分区（t20261026-webfix，伦哥反馈「派发任务看不到原始提示
+ * 词」）：stdin（控制台/表单派单走 stdin 语义，即原始提示词）默认 Markdown 渲染 +
+ * 查看原文切换（同 fail 分区 raw 模式，切换态 S.drawer.promptRaw）；stdin 空时回退
+ * args 命令行形态；两者皆空分区省略。hub 独有分区：node Ledger 数据源无任务输入
+ * 投影，node 端同分区恒空（DRAWER_ZONES 双端同文含 prompt，node zones 不产此键）。
+ * 底部「任务输入（原样 JSON）」details 保留完整技术细节（args/stdin/env），两不误。 */
+function promptZoneHtml(t) {
+  const stdin = t.input?.stdin || '';
+  const args = t.input?.args || [];
+  if (!stdin && !args.length) return '';
+  if (!stdin) return `<h3>任务指令</h3><p class="muted small">本任务以命令行参数下达（逐参数展示，保留边界）：</p><p class="cmd-args">${args.map(a => `<code>${esc(a)}</code>`).join(' ')}</p>`;
+  const raw = !!S.drawer?.promptRaw;
+  const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输入。' : '默认按 Markdown 渲染；需要看原文请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'prompt-raw', 'link')}</div>`;
+  return `<h3>任务指令</h3>${head}${raw ? `<pre>${esc(stdin)}</pre>` : `<div class="md-body">${mdToHtml(stdin) || '<p class="muted">（空）</p>'}</div>`}`;
+}
 function failInner(t) {
   const raw = !!S.drawer?.failRaw;
   const head = `<div class="md-log-head"><span class="muted small">${raw ? '当前为原始输出。' : '默认按 Markdown 渲染；进程原始输出请切原文。'}</span>${button(raw ? '查看渲染' : '查看原文', 'fail-raw', 'link')}</div>`;
@@ -2041,7 +2072,11 @@ function tokenListHtml() {
 function tokensPage() {
   const nt = S.newToken;
   return head('设置', '账户信息与访问令牌：日常用密码登录，令牌只给脚本和其他设备用。')
-  + `<section class="card"><h2>账户信息</h2>
+  /* 页内导航（t20261026-webfix，伦哥反馈「令牌较多时不知道通知入口位置」）：三区块
+   * 重排为 账户 → 通知 → 令牌（通知是高频入口不再沉底）+ 页内跳转；scrollIntoView
+   * 实现，禁 hash 锚点（hash 路由是 #/xxx 形态，会撞路由）。 */
+  + `<nav class="page-jump" aria-label="设置页分区导航">${button('账户信息', 'jump-to', 'link', 'data-target="sec-account"')}${button('通知', 'jump-to', 'link', 'data-target="sec-notify"')}${button('访问令牌', 'jump-to', 'link', 'data-target="sec-tokens"')}</nav>`
+  + `<section class="card" id="sec-account"><h2>账户信息</h2>
     <div id="account-info">${accountInfoHtml()}</div>
     <form id="account-form" class="fields" onsubmit="return false">
       <label>当前密码（验证身份）<input id="acc-cur" type="password" autocomplete="current-password" required></label>
@@ -2050,24 +2085,25 @@ function tokensPage() {
       <div class="actions" style="align-self:end">${button('保存修改', 'account-update', 'primary')}</div>
     </form>
     <p class="footer-note">忘记密码？用 hub 配置里的管理令牌登录（登录页切换到「恢复通道」），在令牌登录态下本页同样可改。</p></section>`
+  /* 通知区块（P4③ 控制台化；t20261026-webfix 挪至账户后令牌前）：D2 模式——进页
+   * 即渲染容器，loadNotifyChannels 只更新 #notify-section 子树，表单区与令牌区
+   * 不被触碰（局部刷新纪律）。 */
+  + `<section class="card spaced" id="sec-notify"><div class="row"><h2>通知</h2>${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div>
+    <p class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时主动给你发消息：飞书、邮件、自建 webhook，或就在本控制台（顶栏铃铛）。</p>
+    <div id="notify-section" class="spaced">${notifySectionHtml()}</div>
+    <p class="footer-note">多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。</p></section>`
   + (nt ? `<section class="card spaced"><h2>令牌已创建</h2>
     <div class="notice warn"><b>请立即保存</b>：明文只显示这一次，关闭后无法再查看。</div>
     <pre id="new-token-plain" style="user-select:all">${esc(nt.token)}</pre>
     <div class="actions">${button('复制令牌', 'copy-token', 'primary')}${button('我已保存，关闭', 'token-done', 'link')}</div>
     <p class="footer-note">名称：${esc(nt.name)} · 前缀：${esc(nt.prefix)}…</p></section>` : '')
-  + `<section class="card spaced"><div class="row"><h2>已创建的令牌</h2></div>
+  + `<section class="card spaced" id="sec-tokens"><div class="row"><h2>已创建的令牌</h2></div>
     <form id="token-form" class="fields">
       <label>用途名称（必填）<input id="token-name" placeholder="例如：运维台电脑 · 只读巡检" required maxlength="64"></label>
       <div class="actions" style="align-self:end"><button class="primary" type="submit">生成新令牌</button></div>
     </form>
     <div id="token-list" class="spaced">${tokenListHtml()}</div>
-    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`
-  /* 通知区块（P4③ 控制台化）：D2 模式——进页即渲染容器，loadNotifyChannels
-   * 只更新 #notify-section 子树，表单区与令牌区不被触碰（局部刷新纪律）。 */
-  + `<section class="card spaced"><div class="row"><h2>通知</h2>${button('＋ 添加通知渠道', 'notify-add', 'primary')}</div>
-    <p class="muted">任务到达终态（完成 / 失败 / 拿不准 / 取消）时主动给你发消息：飞书、邮件、自建 webhook，或就在本控制台（顶栏铃铛）。</p>
-    <div id="notify-section" class="spaced">${notifySectionHtml()}</div>
-    <p class="footer-note">多渠道并存，同一条终态会广播给所有启用且订阅了该事件的渠道；投递失败自动重试 3 次，绝不影响任务本身。</p></section>`;
+    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
 }
 async function submitToken(form) {
   const name = $('#token-name')?.value.trim();
@@ -2265,7 +2301,7 @@ function bellPanelHtml() {
     ${items.length ? button(items.some(i => !i.read) ? '全部已读' : '已全部读过', 'inbox-read-all', 'link') : ''}</div>
     ${items.length ? items.map(i => `
       <div class="notify-item${i.read ? '' : ' unread'}" data-act="inbox-read" data-id="${esc(i.id)}" data-read="${i.read ? '1' : ''}" role="button" tabindex="0">
-        <span class="ni-icon" aria-hidden="true">${i.test ? '🔔' : (INBOX_ICONS[i.status] || '📄')}</span>
+        <span class="ni-icon" aria-hidden="true">${i.test ? inboxIcon('test') : inboxIcon(i.status)}</span>
         <span class="ni-body">
           <span class="ni-title">${i.test ? '测试消息 · 通知渠道已就绪' : esc(inboxTitle(i))}</span>
           <span class="ni-desc">${esc(inboxDesc(i))}</span>
@@ -2758,6 +2794,9 @@ const ACT = {
   detail: b => { closeLayer(); openTask(b.dataset.id); },
   'go-tasks': () => go('tasks'),
   'go-review-queue': () => go('tasks', 'needs_review'),
+  /* 页内分区跳转（t20261026-webfix）：scrollIntoView 平滑滚动，禁 hash 锚点
+   * （hash 路由是 #/xxx 形态，锚点会撞路由）。 */
+  'jump-to': b => document.getElementById(b.dataset.target)?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
   /* ---------- 工作单（P5 W3）：查看与三写动作（接管/续派/处置，无手工建单） ---------- */
   'work-open': b => openWork(b.dataset.id),
   'work-takeover': async () => {
@@ -3195,6 +3234,11 @@ const ACT = {
   'fail-raw': () => {
     if (!S.drawer) return;
     S.drawer.failRaw = !S.drawer.failRaw;
+    syncDrawerZones();
+  },
+  'prompt-raw': () => {
+    if (!S.drawer) return;
+    S.drawer.promptRaw = !S.drawer.promptRaw;
     syncDrawerZones();
   },
   'drawer-refresh': async b => {

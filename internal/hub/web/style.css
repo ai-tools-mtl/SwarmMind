@@ -90,7 +90,11 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .metric.heat{color:var(--heat)}
 /* .card 供「中心端状态/需要你关注」等非兄弟区块继续使用；登录页 .login 复用。
  * 相邻卡片间距改显式 .spaced（原 .card+.card 相邻选择器废除）。 */
-.card{background:var(--surface);border:0;border-radius:var(--r-card);padding:23px;box-shadow:var(--sh-card)}
+.card{background:var(--surface);border:0;border-radius:var(--r-card);padding:23px;box-shadow:var(--sh-card);scroll-margin-top:70px}
+/* cmd-args 任务指令 args 形态：逐参数 code 展示（codex 审查采纳：join 丢参数边界）；
+ * code 与行内基线对齐、压 0.92em（SwarmMind 前端规约：中文句中行内 code）。 */
+.cmd-args{margin:4px 0 0}
+.cmd-args code{font-size:.92em;vertical-align:baseline;background:rgba(0,0,0,.04);border-radius:var(--r-chip);padding:2px 7px;white-space:nowrap}
 .row{display:flex;align-items:center;justify-content:space-between;gap:14px}.stack{display:grid;gap:13px}.spaced{margin-top:22px}
 /* ---- notice（草案 B.8）：默认灰底；warn=heat 频道（标题着 heat）；紫 notice 已删 ---- */
 .notice{padding:13px 16px;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);color:var(--ink-2)}
@@ -357,10 +361,23 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 通知中心（P4③ 控制台化升级）：顶栏铃铛 + 站内通知面板 + 渠道卡片 ----
  * 层叠：面板 z-index 30（压过页面内容与 sticky 表头 5，低于弹层 50 / toast 100）；
  * 面板同为玻璃家族（与 topbar 同底色），窄视口贴右缘收宽。 */
-.bell-btn{position:relative;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;font-size:15px;cursor:pointer;transition:background 160ms ease}
-.bell-btn:hover{background:rgba(0,0,0,.08)}
+.bell-btn{position:relative;border:0;background:rgba(0,0,0,.045);border-radius:var(--r-pill);width:34px;height:34px;display:grid;place-items:center;cursor:pointer;color:var(--ink-2);transition:background 160ms ease}
+.bell-btn:hover{background:rgba(0,0,0,.08);color:var(--ink)}
+/* 站内通知 SVG 图标（t20261026-webfix）：铃铛按钮 18px、条目 16px，语义色只走描边
+ * （全站四色预算内）；.ni-icon 原 font-size 形态随 emoji 一起退役。 */
+.bell-btn svg{display:block}
+.ni-icon .ni-svg{display:block;margin-top:1px}
+.ni-svg.st-completed{color:var(--live-ink)}
+.ni-svg.st-failed{color:var(--danger)}
+.ni-svg.st-needs_review{color:var(--heat)}
+.ni-svg.st-cancelled{color:var(--ink-3)}
+.ni-svg.st-test{color:var(--accent)}
 .bell-badge{position:absolute;top:-4px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:var(--heat);color:#fff;font-size:10.5px;font-weight:700;line-height:17px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 .notify-panel{position:absolute;top:44px;right:0;width:min(380px,92vw);max-height:min(500px,70vh);overflow:auto;background:var(--glass-bg);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border:1px solid rgba(0,0,0,.07);border-radius:var(--r-card);box-shadow:0 2px 8px rgba(0,0,0,.08),0 16px 40px rgba(0,0,0,.14);z-index:30;padding:14px}
+/* 设置页页内分区导航（t20261026-webfix）：横向小链接排，与 head 之后自然衔接；
+ * link 按钮自带灰 pill hover，不加额外底色。 */
+.page-jump{display:flex;gap:6px;margin:0 0 14px;flex-wrap:wrap}
+.page-jump button{height:28px;padding:0 13px;font-size:var(--fs-small)}
 .notify-panel-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
 .notify-panel-head h3{font-size:13.5px;font-weight:650;margin-right:auto}
 .notify-item{display:flex;gap:10px;padding:9px 10px;border-radius:var(--r-thumb);cursor:pointer;align-items:flex-start}

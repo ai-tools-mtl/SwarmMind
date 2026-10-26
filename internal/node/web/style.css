@@ -210,6 +210,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * .mini-stat.spaced 组合规则保住统筹卡 22px 下推；hub 端 mini-stat 无卡内节奏
  * 需求暂不同步（其唯一用点不带 spaced）。 */
 .mini-stat{display:flex;gap:18px;margin:9px 0}.mini-stat.spaced{margin-top:22px}.mini-stat b{display:block;font-size:22px;font-variant-numeric:tabular-nums}.mini-stat small{color:var(--ink-3)}
+/* ledger-line 总览恢复卡账本计数条（t20261026-webfix：替换旧「诊断：账本计数」
+ * details 折叠+裸大数字形态，伦哥 2026-10-26 反馈换展示形式——中文标签一行常显，
+ * 数字 tabular-nums 加粗，零值不加告警色，卡内节奏与 .metric 同 9px） */
+.ledger-line{margin:9px 0 0;color:var(--ink-3);font-size:var(--fs-small)}.ledger-line b{color:var(--ink-2);font-weight:600;font-variant-numeric:tabular-nums}
 .step{display:flex;gap:13px;align-items:flex-start;margin-bottom:12px}.step>span{border-radius:50%;background:var(--accent-bg);color:var(--accent);width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
 .warn-text{color:var(--heat)}
 /* 开关（exposed toggle）：pill 形态，on=蓝 off=灰 */
