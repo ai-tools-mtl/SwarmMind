@@ -832,6 +832,8 @@ func CardsFromProfiles(profiles []protocol.ExecProfile) []protocol.AgentCard {
 			ProtocolVer:    1,
 			WorkspaceID:    agentid.WorkspaceID(p.Workdir),
 			Exposed:        p.Exposed,
+			AllowArgs:      p.AllowArgs, // 输入语义声明（SPEC 4.9）：控制台/调用方据此呈现传参面
+			StdinToArg:     p.StdinToArg,
 		})
 	}
 	return cards

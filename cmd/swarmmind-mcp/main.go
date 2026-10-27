@@ -432,6 +432,8 @@ func toolAgents() (string, error) {
 				Name        string `json:"name"`
 				Description string `json:"description"`
 				Kind        string `json:"kind"`
+				AllowArgs   bool   `json:"allow_args"`   // 输入语义声明（maturity-dispatch-args-ux）：true=可携 args
+				StdinToArg  bool   `json:"stdin_to_arg"` // true=描述经 stdin 转单个尾参（仅当未填 args）
 			} `json:"card"`
 		} `json:"directory"`
 	}
@@ -445,7 +447,15 @@ func toolAgents() (string, error) {
 		if desc == "" {
 			desc = "（无描述）"
 		}
-		fmt.Fprintf(&b, "%s @ %s：%.120s\n", d.Card.Name, d.NodeID, desc)
+		// 输入语义一句话（与 hub 控制台参数区口径一致）：调用方据此决定 args 还是 stdin。
+		sem := "仅 stdin"
+		if d.Card.AllowArgs {
+			sem = "可带 args"
+		}
+		if d.Card.StdinToArg {
+			sem += " · 描述可转尾参（仅未填 args 时）"
+		}
+		fmt.Fprintf(&b, "%s @ %s：%.120s\n  输入语义：%s\n", d.Card.Name, d.NodeID, desc, sem)
 	}
 	return b.String(), nil
 }
@@ -1118,20 +1128,21 @@ func (b nodeBackend) toolAgents() (string, error) {
 	if code != 200 {
 		return "", nodeAPIErr(code, data)
 	}
-	var out struct {
-		NodeID string `json:"node_id"`
-		Agents []struct {
-			Name       string   `json:"name"`
-			Kind       string   `json:"kind"`
-			Command    string   `json:"command"`
-			TimeoutSec int      `json:"timeout_sec"`
-			AllowArgs  bool     `json:"allow_args"`
-			AllowEnv   []string `json:"allow_env"`
-			Desc       string   `json:"description"`
-			Exposed    bool     `json:"exposed"`
-			TodayTasks int      `json:"today_tasks"`
-		} `json:"agents"`
-	}
+		var out struct {
+			NodeID string `json:"node_id"`
+			Agents []struct {
+				Name       string   `json:"name"`
+				Kind       string   `json:"kind"`
+				Command    string   `json:"command"`
+				TimeoutSec int      `json:"timeout_sec"`
+				AllowArgs  bool     `json:"allow_args"`
+				StdinToArg bool     `json:"stdin_to_arg"`
+				AllowEnv   []string `json:"allow_env"`
+				Desc       string   `json:"description"`
+				Exposed    bool     `json:"exposed"`
+				TodayTasks int      `json:"today_tasks"`
+			} `json:"agents"`
+		}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
 	}
@@ -1149,8 +1160,16 @@ func (b nodeBackend) toolAgents() (string, error) {
 		if a.Exposed {
 			vis = "网内可调用"
 		}
-		fmt.Fprintf(&bld, "%s（%s，%s）：%.120s\n  command %s · 超时 %ds · 今日已执行 %d 次\n",
-			a.Name, a.Kind, vis, desc, a.Command, a.TimeoutSec, a.TodayTasks)
+		// 输入语义一句话（与 hub 目录工具口径一致；本机视图取 ExecProfile 原始字段）。
+		sem := "仅 stdin"
+		if a.AllowArgs {
+			sem = "可带 args"
+		}
+		if a.StdinToArg {
+			sem += " · 描述可转尾参（仅未填 args 时）"
+		}
+		fmt.Fprintf(&bld, "%s（%s，%s）：%.120s\n  command %s · 超时 %ds · 输入语义：%s · 今日已执行 %d 次\n",
+			a.Name, a.Kind, vis, desc, a.Command, a.TimeoutSec, sem, a.TodayTasks)
 	}
 	return bld.String(), nil
 }

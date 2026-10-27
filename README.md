@@ -129,7 +129,9 @@ agents:
 
 ### 4. 提交任务并查看结果
 
-管理台「派发」选 `mac-mini` → `echo`，提交后到「任务」查看。命令行等价操作：
+管理台「派发」选 `mac-mini` → `echo`。示例配置的 echo 开放了任务参数（`allow_args: true`），在**「命令行参数」区填一行 `hello`**（一行一个参数，空行忽略；参数按字面量传递，不做 shell 引号处理），提交后到「任务」页查看：任务 `completed`，答复为 `hello`。未开放参数的能力没有参数输入区，任务描述经 stdin 传递——`echo` 不读 stdin，这类能力请改用参数或换 `cat` 类工具承接描述。
+
+命令行等价操作：
 
 ```bash
 ./swarmmindctl --hub http://127.0.0.1:8444 --token '<管理令牌>' \
@@ -145,6 +147,8 @@ CLI 的 `--token` 使用管理令牌，CLI 会登录换取会话 cookie。脚本
 ### 5. 接入自己的 agent
 
 把 `echo` 换成目标机器上已安装工具的**绝对路径**，设置已有的 `workdir`、固定参数 `agent_args`、超时和授权项；agent 所需的 HOME/配置目录由 `config_home` 指定。node 不继承启动进程的完整环境变量，依赖的 PATH、语言或其他变量需显式配置。
+
+两个输入语义开关决定网页派单怎么喂内容：`allow_args: true` 开放任务参数（派发页出现「命令行参数」输入区，一行一个）；`stdin_to_arg: true` 把任务描述整体转为单个命令行尾参——适合 `zcode -p` 这类「旗标后必须接提示词参数」、不吃 stdin 的 CLI（不加此开关，控制台/表单的描述走 stdin，此类 agent 会因缺参打印 usage 退出）。两者可同时开启：填了参数时描述仍走 stdin，未填参数时描述转尾参。
 
 任务输出文件写到自动注入的 `$SWARM_OUTPUTS_DIR`，结束后登记产物。依赖任务可用 `depends_on` 声明上游，系统在执行前准备输入。详见[文件协作设计](docs/FILE-COLLAB.md)与[架构详解](docs/ARCHITECTURE.md)。
 

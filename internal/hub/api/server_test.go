@@ -614,10 +614,18 @@ func TestDirectory(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("directory 应 200, got %d", code)
 	}
-	// 不含 ExecProfile 字段（SPEC 六/六.五：执行配置不出本机）
-	for _, leak := range []string{`"workdir"`, `"command"`, `"agent_args"`, `"allow_env"`, `"allow_args"`, `"timeout_sec"`, `"config_home"`} {
+	// 不含 ExecProfile 字段（SPEC 六/六.五：执行配置不出本机）。allow_args/stdin_to_arg
+	// 自 maturity-dispatch-args-ux 起为能力卡输入语义声明（SPEC 4.9，同 Exposed/
+	// PermissionMode 一类的卡上布尔声明），不属泄漏；其余执行配置键仍禁。
+	for _, leak := range []string{`"workdir"`, `"command"`, `"agent_args"`, `"allow_env"`, `"timeout_sec"`, `"config_home"`} {
 		if strings.Contains(string(out), leak) {
 			t.Fatalf("directory 响应泄漏 ExecProfile 字段 %s: %s", leak, out)
+		}
+	}
+	// 输入语义声明键必须在场且为布尔（目录消费方据 Win 呈现传参面，maturity-dispatch-args-ux）。
+	for _, key := range []string{`"allow_args":false`, `"stdin_to_arg":false`} {
+		if !strings.Contains(string(out), key) {
+			t.Fatalf("directory 能力卡缺输入语义声明 %s: %s", key, out)
 		}
 	}
 	var dir struct {

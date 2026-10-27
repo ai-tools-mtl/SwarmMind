@@ -642,7 +642,7 @@ function freshControl() {
   /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
    * 列表置顶的「统筹 · zcode-dev」项即统筹模式（2026-10-23 伦哥定案）。
    * suggest 派发建议状态（P5.1 D1）：{busy, sugg(REST 应答|null), note(无建议人话原因|'')} */
-  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', idem: newIdem(), message: '', unknownPending: false, batch: null, suggest: { busy: false, sugg: null, note: '', goal: '' } };
+  return { view: 'form', stage: 'idle', node: '', agent: '', stdin: '', args: '', idem: newIdem(), message: '', unknownPending: false, batch: null, suggest: { busy: false, sugg: null, note: '', goal: '' } };
 }
 function newIdem() {
   return 'ctrl-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
@@ -1917,6 +1917,15 @@ function applyDrawerFormState() {
 /* 任务描述占位文案：普通/管家两态共用常量——选中智行管家切 STDIN_PH_PRIME，选普通恢复。 */
 const STDIN_PH = '用自然语言描述要做什么。编码智能体会读取这段描述并执行；工具脚本则把它作为附加说明。\n例如：在 demo 目录创建一个 Python 脚本，输出当前时间。';
 const STDIN_PH_PRIME = '描述复合目标：智行管家会把目标拆解为多个子任务，派发网内其他智能体并行执行，收集结果并汇总报告；它本身不执行具体子任务。例如：检查两台机器的磁盘占用并汇总对比报告';
+/* 参数输入区常量（maturity-dispatch-args-ux）：args 字面量语义（一行一个参数，
+ * 不做 shell 引号剥离/通配展开——含引号的参数就是字面含引号），与任务详情
+ * 「任务指令」逐参数展示的既有语义一致。 */
+const ARGS_PH = '每行一个参数，空行忽略；含空格的一行就是单个参数。\n例：--verbose';
+const ARGS_HINT = '参数按字面量逐个传给命令：不切空格、不剥引号、不做通配展开；行首尾空白原样保留，空行与纯空白行忽略。';
+/* 混跑降级口径（codex R2 必修①）：false 含旧卡缺字段的呈现值——「未声明接受」
+ * 而非「不接受」，不把未知宣称为不接受参数；括注给出混跑期传参出路（SPEC 六.五）。 */
+const ARGS_NONE_NOTE = '该能力未声明接受任务参数，内容将经 stdin 传递（如能力实际支持，请经 CLI/REST 以 args 传递或升级节点）';
+const STDIN_TO_ARG_NOTE = '描述将作为命令行参数传递给该能力';
 const PRIME_AGENT_KEY = 'zcode-dev';   // 回退约定：未指定时按能力名含此串识别统筹（向后兼容）
 /* isPrimeDir 智行管家判定（2026-10-23 伦哥定案：网页指定取代硬编码）：
  * 有指定 → 目录条目精确匹配 (node_id, agent_name)；未指定 → 回退名字约定。
@@ -1926,12 +1935,60 @@ function isPrimeDir(d) {
   if (S.prime) return d.node_id === S.prime.node_id && d.card.name === S.prime.agent_name;
   return d.card.name.includes(PRIME_AGENT_KEY);
 }
+/* ctrlCard 派发页当前选中的目录条目：null=未选齐/已下架/目录异常（能力卡不可得
+ * 一律回退现状呈现，不阻塞派发）。stdinPlaceholder 与参数输入区共用此口径。 */
+function ctrlCard(node, agent) {
+  return node && agent ? S.directory.find(x => x.node_id === node && x.card.name === agent) || null : null;
+}
 /* stdinPlaceholder 派单页任务描述占位：按 (node, agent) 对应目录项 isPrimeDir 选
  * 统筹/普通文案——change 联动与整页重绘共用此口径，选非 zcode-dev 名字的统筹
  * 载体时提示不再错位，重绘后也不固定回落普通文案。查无目录项（未选齐/已下架）按普通处理。 */
 function stdinPlaceholder(node, agent) {
-  const d = node && agent ? S.directory.find(x => x.node_id === node && x.card.name === agent) : null;
-  return isPrimeDir(d) ? STDIN_PH_PRIME : STDIN_PH;
+  return isPrimeDir(ctrlCard(node, agent)) ? STDIN_PH_PRIME : STDIN_PH;
+}
+/* parseCtrlArgs 参数区文本 → REST input.args：一行一个参数（行内空格保留=单参数，
+ * 避免 shell 空格切分边界）。空行/纯空白行忽略——仅以空白判断过滤，非空行保留
+ * 原文含首尾空白（codex 审查必修①：trim 会改写用户参数，违背字面量传递；首尾
+ * 空白属参数内容，到达执行端必须与输入一致）。不切空格、不剥引号、不做通配展开。 */
+function parseCtrlArgs(text) {
+  return String(text || '').split('\n').filter(l => l.trim().length > 0);
+}
+/* argsZoneHtml 派发页参数输入区：按选中能力卡呈现输入语义（字段以目录 API 实际
+ * 返回为准，前端不硬编码能力属性）——allow_args=true → 「命令行参数」textarea；
+ * false/旧版卡无字段 → 无输入框+说明文案；stdin_to_arg=true 附加提示（描述经
+ * stdin 转尾参，仅当未填参数时生效）。能力卡不可得或智行管家模式（描述经
+ * primeArgs 走 args，参数由统筹机制管理）不渲染参数区，回退现状仅描述输入。 */
+function argsZoneHtml(C) {
+  const d = ctrlCard(C.node, C.agent);
+  if (!d || isPrimeDir(d)) return '';
+  const conv = d.card.stdin_to_arg ? `；${esc(STDIN_TO_ARG_NOTE)}（仅当未填命令行参数时生效）` : '';
+  if (d.card.allow_args) {
+    const convHint = d.card.stdin_to_arg ? ` ${esc(STDIN_TO_ARG_NOTE)}（仅当未填命令行参数时生效）。` : '';
+    return `<label class="spaced">命令行参数（一行一个参数，空行忽略）<textarea id="ctrl-args" rows="3" placeholder="${esc(ARGS_PH)}">${esc(C.args || '')}</textarea></label>
+    <small class="muted">${esc(ARGS_HINT)}${convHint}</small>`;
+  }
+  return `<div class="spaced"><small class="muted">${esc(ARGS_NONE_NOTE)}${conv}。</small></div>`;
+}
+/* persistCtrlDrafts 把参数区在编草稿落 S.C（切换执行者/提交/整页重绘前调用）：
+ * textarea 缺席（allow_args=false 能力）时保留既有 C.args——切回参数型能力草稿不丢。 */
+function persistCtrlDrafts() {
+  const ta = $('#ctrl-args');
+  if (ta) S.C.args = ta.value;
+}
+/* paintArgsZone 参数输入区局部更新唯一入口（D22 纪律，paintSuggestLine 同款）：
+ * 切换执行者只重写 #ctrl-args-zone 容器内部，不整页/整表重建——任务描述 textarea
+ * 与恢复密钥的 DOM 原样保持（焦点/光标/选择不丢）。选择从两级下拉 DOM 直读，
+ * 不依赖事件监听器先后序。内容与现状相同则不碰 DOM（codex 审查建议⑤：机器与
+ * 智能体两次联动同区重绘时第二次为空操作；textarea 打字只改 value 不改分区
+ * innerHTML，不会误触发重建）。已切页/非表单视图静默丢弃。 */
+function paintArgsZone() {
+  if (S.page !== 'control' || S.C.view !== 'form') return;
+  persistCtrlDrafts();
+  const zone = $('#ctrl-args-zone');
+  if (!zone) return;
+  const html = argsZoneHtml({ node: $('#ctrl-node')?.value || '', agent: $('#ctrl-agent')?.value || '', args: S.C.args });
+  if (zone.innerHTML === html) return;
+  zone.innerHTML = html;
 }
 /* suggestLineHtml 派发建议区（P5.1 D1，RFC-jev-dispatch：决策是建议非必经）五态：
  * 入口（未问过）→ 思考中 → 有建议（「建议派给 X（本地决策模型）」一键采纳，title
@@ -1977,6 +2034,7 @@ function controlPage() {
     ${orchLineHtml()}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在机器的 node.yaml 里把能力开放出去（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(stdinPlaceholder(C.node, C.agent))}">${esc(C.stdin)}</textarea></label>
+    <div id="ctrl-args-zone" data-zone="ctrl-args">${argsZoneHtml(C)}</div>
     <div class="row spaced" id="ctrl-suggest-line">${suggestLineHtml(C)}</div>
     <label>恢复密钥（自动生成 · 用于中断后安全重试，不会重复执行）<input readonly value="${esc(C.idem)}"></label>
     </fieldset>
@@ -2198,8 +2256,10 @@ async function submitControl() {
   const agentName = $('#ctrl-agent')?.value || '';
   if (!node) { toast('请先选择执行机器'); return; }
   if (!agentName) { toast('请先选择该机器上的执行智能体'); return; }
-  const prime = (() => { const d = S.directory.find(x => x.node_id === node && x.card.name === agentName); return d ? isPrimeDir(d) : false; })();   // 选中统筹载体即统筹模式（网页指定优先，未指定回退名字约定）
+  const d = ctrlCard(node, agentName);
+  const prime = isPrimeDir(d);   // 选中统筹载体即统筹模式（网页指定优先，未指定回退名字约定；能力卡不可得按普通处理）
   C.stdin = $('#ctrl-stdin').value;
+  persistCtrlDrafts();   // 参数区在编草稿落 C.args（锁定态重绘后同键重试仍取到）
   if (prime && !C.stdin.trim()) { toast('统筹需要填写任务描述（复合目标）'); return; }
   C.node = node; C.agent = agentName;
   C.unknownPending = false;
@@ -2210,7 +2270,10 @@ async function submitControl() {
     targets: [node],   // 两级选择：target_node=所选机器、target_agent=所选智能体，不再按能力反查节点
     input: prime
       ? { args: [primeArgs(C.stdin)], stdin: '' }   // 提示词走 args，stdin 置空
-      : { args: [], stdin: C.stdin || '全网健康巡检：输出本机 agent、连接与资源健康摘要。' },
+      /* 参数输入区映射（maturity-dispatch-args-ux）：仅能力卡 allow_args=true 且非统筹
+       * 载体时逐行映射（字面量）；false/旧版卡/卡不可得一律空数组（node 侧越权 args
+       * 会 policy_denied，前端不预发注定被拒的请求）。 */
+      : { args: d && d.card.allow_args ? parseCtrlArgs(C.args) : [], stdin: C.stdin || '全网健康巡检：输出本机 agent、连接与资源健康摘要。' },
     idem_key: C.idem,
   };
   if (prime) body.trace_id = 'prime-' + Date.now();
@@ -3673,6 +3736,7 @@ function bindEvents() {
         paintSuggestLine();
       }
     }
+    if (e.target.id === 'ctrl-args') S.C.args = e.target.value;   // 参数区草稿镜像（整页重绘回填数据源）
   });
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
@@ -3689,14 +3753,6 @@ function bindEvents() {
       nfRepaint($('#nf-type')?.value || 'webhook', e.target.value, nfSecFromDom());
       return;
     }
-    /* 派单页选中统筹载体时切换任务描述占位为复合目标提示；选普通智能体恢复。
-     * 口径与徽标/提交一致：按 (当前 ctrl-node, 所选 agent) 查 S.directory 后走
-     * isPrimeDir 判定（网页指定优先、名字约定回退），不按名字硬编码（P2-7）。 */
-    if (e.target.id === 'ctrl-agent') {
-      const ta = $('#ctrl-stdin');
-      if (ta) ta.placeholder = stdinPlaceholder($('#ctrl-node')?.value || '', e.target.value);
-      return;
-    }
     /* 工作单抽屉续派表单：步骤切换联动执行者预填（P5 W3）。 */
     if (e.target.id === 'wa-step') workStepPicked();
   });
@@ -3706,9 +3762,15 @@ function bindEvents() {
   bindAgentPicker(document, info => {
     if (info.prefix === 'ctrl' && info.node !== undefined) {
       S.C.node = info.node; S.C.agent = info.agent || '';
-      /* 机器切换联动同样刷新占位（与 agent 切换同口径）：跨机同名智能体保留选中时占位不残留旧判定。 */
+      /* 机器/智能体切换统一走此回调（codex 审查建议⑤合并刷新入口：组件 agent 分支
+       * 亦回调 {prefix:'ctrl'}，原 change 专用分支与之同次切换双重刷新已删）。
+       * 占位两态切换（P2-7）：选统筹载体切复合目标文案、普通能力恢复；跨机同名
+       * 智能体保留选中时占位不残留旧判定。参数输入区（maturity-dispatch-args-ux）
+       * 随选中能力卡局部更新：只重写 #ctrl-args-zone，任务描述与恢复密钥 DOM 原样
+       * 保持（D22 表单纪律），paintArgsZone 内容无变化自动跳过。 */
       const ta = $('#ctrl-stdin');
       if (ta) ta.placeholder = stdinPlaceholder(S.C.node, S.C.agent);
+      paintArgsZone();
     }
   });
   document.addEventListener('keydown', e => {

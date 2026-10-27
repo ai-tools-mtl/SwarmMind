@@ -115,12 +115,13 @@ for tag, (nid, token), port in zip(("a", "b"), pairs[:2], (8445, 8446)):
     d = root / tag
     for sub in ("data", "w", "other", "home"):
         (d / sub).mkdir(parents=True, exist_ok=True)
-    def profile(name, command, args=True, timeout=120, workdir="w"):
+    def profile(name, command, args=True, timeout=120, workdir="w", s2a=False):
         return {
             "name": name, "kind": "cli", "command": command,
             "workdir": str(d / workdir), "config_home": str(d / "home"),
             "agent_args": [], "timeout_sec": timeout,
             "allow_args": args, "allow_env": ["TMPDIR"],
+            "stdin_to_arg": s2a,
             "description": "SwarmMind 功能验收专用服务",
             "permission_mode": "test-fixture", "exposed": True,
         }
@@ -140,6 +141,7 @@ for tag, (nid, token), port in zip(("a", "b"), pairs[:2], (8445, 8446)):
             profile("qa-cat", "/bin/cat", args=False),
             profile("qa-timeout", "/bin/sh", timeout=1),
             profile("qa-other", "/bin/sh", workdir="other"),
+            profile("qa-conv", "/bin/echo", s2a=True),
         ],
     }
     (d / "node.yaml").write_text(yaml.safe_dump(nc))
@@ -221,7 +223,8 @@ login() {
     "$HUB/api/v1/login" > "$T/login.json"
 }
 request() {
-  local node="$1" agent="$2" stdin="${3:-}" args="${4:-[]}" env="${5:-{}}"
+  local node="$1" agent="$2" stdin="${3:-}" args="${4:-[]}" env="${5:-}"
+  [[ -n "$env" ]] || env='{}'   # 默认空对象须走空串+显式赋值（bash 会把 ${5:-{}} 解析为默认值 '{' + 字面 '}'：显式传 {} 时实得 '{}}'，jq 拒绝）
   local key="${6:-}"
   jq -nc --arg n "$node" --arg a "$agent" --arg s "$stdin" \
     --argjson args "$args" --argjson env "$env" --arg k "$key" \
@@ -233,7 +236,10 @@ submit() {
   jq -er '.task_id' "$T/$ID.body"
 }
 wait_task() {
-  local tid="$1" wanted="$2" limit="${3:-30}" stop=$((SECONDS+limit))
+  # limit 与 stop 必须分两条 local 声明：同一命令的全部词先于 local 赋值展开，
+  # 同行引用 limit 在 set -u 下报 unbound variable。
+  local tid="$1" wanted="$2" limit="${3:-30}"
+  local stop=$((SECONDS+limit))
   while (( SECONDS < stop )); do
     api 200 GET "/api/v1/tasks/$tid"
     cp "$T/$ID.body" "$T/task.$tid.json"
@@ -298,7 +304,8 @@ stop_hub() {
   done
 }
 mcp() {
-  local method="$1" params="${2:-{}}"
+  local method="$1" params="${2:-}"
+  [[ -n "$params" ]] || params='{}'   # 默认空对象写法同 request（${2:-{}} 显式传参会得 '{...}}'）
   {
     printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"functional-test","version":"1"}}}'
     printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -309,7 +316,9 @@ mcp() {
   jq -ce 'select(.id==2)' "$T/$ID.rpc" > "$T/$ID.mcp"
 }
 tool() {
-  mcp tools/call "$(jq -nc --arg n "$1" --argjson a "${2:-{}}" \
+  local args="${2:-}"
+  [[ -n "$args" ]] || args='{}'
+  mcp tools/call "$(jq -nc --arg n "$1" --argjson a "$args" \
     '{name:$n,arguments:$a}')"
 }
 mcheck() { jq -e "$1" "$T/$ID.mcp"; }
@@ -487,7 +496,7 @@ login
 
 | 编号 | 模块 | 前置条件 | 步骤 | 期望结果 | 优先级 |
 |---|---|---|---|---|---|
-| TC-09 | 节点、能力与目录 | 两测试节点在线 | `api 200 GET /api/v1/nodes`；`jq -e --arg a "$N1" --arg b "$N2" 'any(.nodes[];.node_id==$a and .online and .epoch>=1) and any(.nodes[];.node_id==$b and .online) and all(.nodes[];.inflight>=0 and .inflight<=8)' "$T/$ID.body"`；`api 200 GET /api/v1/agents`；`check '.agents\|length>0'`；`! grep -Eq '"(command|workdir|agent_args|config_home|allow_env|allow_args)"[[:space:]]*:' "$T/$ID.body"`；`api 200 GET /api/v1/directory`；`check 'all(.directory[];.card.exposed==true and .card.input_mode=="prompt_text" and .card.output_mode=="answer+artifacts" and .card.interactive==false)'` | 节点在线/epoch/窗口字段正确；目录只含已暴露 AgentCard；ExecProfile 不出本机 | P0 冒烟 |
+| TC-09 | 节点、能力与目录 | 两测试节点在线 | `api 200 GET /api/v1/nodes`；`jq -e --arg a "$N1" --arg b "$N2" 'any(.nodes[];.node_id==$a and .online and .epoch>=1) and any(.nodes[];.node_id==$b and .online) and all(.nodes[];.inflight>=0 and .inflight<=8)' "$T/$ID.body"`；`api 200 GET /api/v1/agents`；`check '.agents\|length>0'`；`! grep -Eq '"(command\|workdir\|agent_args\|timeout_sec\|allow_env\|config_home)"[[:space:]]*:' "$T/$ID.body"`；`check 'all(.agents[];(.card.allow_args\|type=="boolean") and (.card.stdin_to_arg\|type=="boolean"))'`；`api 200 GET /api/v1/directory`；`check 'all(.directory[];.card.exposed==true and .card.input_mode=="prompt_text" and .card.output_mode=="answer+artifacts" and .card.interactive==false and (.card.allow_args\|type=="boolean") and (.card.stdin_to_arg\|type=="boolean"))'` | 节点在线/epoch/窗口字段正确；目录只含已暴露 AgentCard；本机执行细节不出本机（禁键集=command/workdir/agent_args/timeout_sec/allow_env/config_home，与 internal/node/service/card_input_semantics_test.go 泄漏名单一致；输入语义声明 allow_args/stdin_to_arg 必须在场且为布尔，SPEC 六.五投影口径） | P0 冒烟 |
 | TC-10 | REST 派单完整链路 | TC-09 | `export ECHO="$(submit "$N1" qa-echo '' '["SWARM_ECHO_OK"]' '{}' 'echo-main')"`；`wait_task "$ECHO" completed 5`；`check '.result.status=="completed" and .result.exit_code==0 and .result.final_answer=="SWARM_ECHO_OK\n" and .submitted_by=="admin" and (.trace_id\|length)>0'` | 202 后 5 秒内完成；FinalAnswer 正确；自报身份被覆盖为 admin；可获得 trace_id | P0 冒烟 |
 | TC-11 | 任务幂等与冲突 | TC-10 | `api 200 POST /api/v1/tasks "$(request "$N1" qa-echo '' '["SWARM_ECHO_OK"]' '{}' echo-main)"`；`jq -e --arg id "$ECHO" '.dup==true and .task_id==$id' "$T/$ID.body"`；`api 409 POST /api/v1/tasks "$(request "$N1" qa-echo '' '["CHANGED"]' '{}' echo-main)"`；`check '.error=="conflict"'` | 同键同内容返回原 ID；同键不同内容 409；不新建执行 | P0 冒烟 |
 | TC-12 | 任务列表与不存在 ID | TC-10 | `api 200 GET /api/v1/tasks`；`jq -e --arg id "$ECHO" 'any(.tasks[];.id==$id) and ([.tasks[].created_at]==([.tasks[].created_at]\|sort\|reverse))' "$T/$ID.body"`；`api 404 GET /api/v1/tasks/t-not-exist`；`check '.error=="task_not_found"'` | 全量列表含任务，按创建时间倒序；不存在任务准确返回 404 | P1 核心 |
@@ -1377,3 +1386,77 @@ printf 'EVIDENCE_DIR=%s\n' "$T"
 
 ### 渲染行为锁（go test 常驻，不依赖部署实例）
 - `go test ./internal/node/localapi/ -run 'TestWebNavFilterStructure|TestWebTaskFilterBehavior'`：双端导航词表/navnum/aria/workspace 结构锁、blankFilters 七字段与五处重建点锁、ORIGIN_WORDS 词典单源锁；myTasksCard 渲染过滤行为锁（chip 计数/留痕归 local/零命中翻页不阻断/空快照激活筛选全程可清除/与派单表单互不干扰）+ footer 口径三数分离（rows/all/total 互异分页场景）+ hub filteredTasks 交集与选项生命周期。
+
+## 增补批次（2026-10-27：派发页参数输入，maturity-dispatch-args-ux 专项）
+
+前置：TC-02/TC-09 已过（已登录、两节点在线、目录断言）；「浏览器执行器」依赖已安装；测试节点 fixture 含 qa-echo（allow_args=true）、qa-cat（allow_args=false）、qa-conv（allow_args=true+stdin_to_arg=true）。行为级单测锁：`go test ./internal/hub/web/ -run 'TestConsoleDispatch'`（args-zone-modes / args-submit-mapping 场景含首尾空白边界断言，本组用例为浏览器级端到端）。
+
+### TC-DSP-01 参数输入区三态呈现、局部更新与字面量边界（hub 模式）
+
+```bash
+begin TC-DSP-01
+ui hub control '
+// 三态之一 allow_args=true（qa-echo）：输入区在场并声明字面量语义
+// 两级下拉机械口径：先选机器（#ctrl-node option 值=node_id），agent 选项值=裸能力名（#ctrl-agent）
+await page.locator("#ctrl-node").selectOption(E.N1);
+await page.locator("#ctrl-agent").selectOption("qa-echo");
+await expect(page.locator("#ctrl-args-zone textarea#ctrl-args")).toBeVisible();
+await expect(page.locator("#ctrl-args-zone")).toContainText("一行一个参数");
+await expect(page.locator("#ctrl-args-zone")).toContainText("字面量");
+await page.locator("#ctrl-stdin").fill("DSP 前置描述");
+// D22 局部更新：给任务描述 DOM 打标记，后续切换执行者后标记仍在=整页未重建
+await page.evaluate(() => { document.querySelector("#ctrl-stdin").__dsp = 1; });
+// 三态之二 allow_args=false（qa-cat）：无输入框+说明文案；任务描述 DOM 原样、草稿保留
+await page.locator("#ctrl-agent").selectOption("qa-cat");
+await expect(page.locator("#ctrl-args-zone textarea")).toHaveCount(0);
+await expect(page.locator("#ctrl-args-zone")).toContainText("该能力未声明接受任务参数，内容将经 stdin 传递（如能力实际支持，请经 CLI/REST 以 args 传递或升级节点）");
+assert.ok(await page.evaluate(() => document.querySelector("#ctrl-stdin").__dsp === 1), "切换执行者不得整页重建（#ctrl-stdin DOM 身份保持）");
+assert.equal(await page.locator("#ctrl-stdin").inputValue(), "DSP 前置描述");
+// 三态之三 双开（qa-conv）：参数输入区与 stdin_to_arg 转换提示并存
+await page.locator("#ctrl-agent").selectOption("qa-conv");
+await expect(page.locator("#ctrl-args-zone textarea#ctrl-args")).toBeVisible();
+await expect(page.locator("#ctrl-args-zone")).toContainText("描述将作为命令行参数传递给该能力");
+// 字面量边界提交：捕获批次应答拿任务号（首尾空白行原样、空行/纯空白行忽略）
+let taskId = "";
+await page.route("**/api/v1/control-operations", async route => {
+  if (route.request().method() !== "POST") return route.continue();
+  const response = await route.fetch();
+  const j = await response.json();
+  taskId = j.items[0].task_id;
+  await route.fulfill({ response });   // 先 fulfill 后 dispose：dispose 先行会让 fulfill 拿到已释放的应答（disposed 错误）
+  await response.dispose();
+});
+await page.locator("#ctrl-agent").selectOption("qa-echo");
+await page.locator("#ctrl-stdin").fill("DSP 边界描述（走 stdin）");
+await page.locator("#ctrl-args").fill("  hello world  \n\n\t\n--verbose");
+await page.locator("#control-form button[type=submit]").click();
+await expect(page.locator("h1")).toContainText("批次报告");
+assert.ok(taskId.length > 0, "批次应答应含 task_id");
+console.log("DSP_TASK=" + taskId);
+'
+DSP_TASK="$(sed -n 's/^DSP_TASK=//p' "$T/$ID.ui.log" | head -1)"
+test -n "$DSP_TASK"
+# 落库输入逐字核对：首尾空白保留（["  hello world  ","--verbose"]）、空行/纯空白行被忽略、描述走 stdin
+api 200 GET "/api/v1/tasks/$DSP_TASK"
+jq -e --arg t "DSP 边界描述（走 stdin）" '.input.args == ["  hello world  ", "--verbose"] and .input.stdin == $t' "$T/$ID.body"
+# 执行端到端：echo 收到的参数与输入区所见逐字一致（字面量传递闭环）
+wait_task "$DSP_TASK" completed 5
+# 期望值按 /bin/echo 真实行为推：参数以单空格 join——"  hello world  "（首尾各两空格）
+# + join 空格 + "--verbose" = world 与 --verbose 间恰三个空格（od -c 实测非笔误）
+check '.result.final_answer == "  hello world   --verbose\n"'
+pass
+```
+
+### TC-DSP-02 stdin_to_arg 转换端到端与目录声明一致（REST+目录）
+
+```bash
+begin TC-DSP-02
+# qa-conv（/bin/echo，stdin_to_arg=true）经 stdin 派单：描述整体转单个尾参，echo 原样回显
+D="$(submit "$N1" qa-conv 'DSP_CONV_OK' '[]' '{}')"
+wait_task "$D" completed 5
+check '.result.final_answer=="DSP_CONV_OK\n"'
+# 目录声明与 fixture 一致：qa-conv 双开（allow_args=true + stdin_to_arg=true）
+api 200 GET /api/v1/directory
+jq -e --arg n "$N1" 'any(.directory[]; .node_id==$n and .card.name=="qa-conv" and .card.allow_args==true and .card.stdin_to_arg==true)' "$T/$ID.body"
+pass
+```

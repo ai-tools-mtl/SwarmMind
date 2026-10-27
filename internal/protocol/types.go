@@ -42,6 +42,22 @@ type AgentCard struct {
 	// Exposed 接入开关（主权在 node）：false=执行准入关闭（新任务 404 agent_not_exposed）；
 	// 注册表保留一条审计记录（名称/下线时间，不含能力详情）。
 	Exposed bool `json:"exposed"`
+	// AllowArgs 任务参数授权声明（maturity-dispatch-args-ux）：映射 ExecProfile.AllowArgs，
+	// 调用方据此选择传参方式（true=可携 args；false=带非空 args 将 policy_denied）。
+	// 输入语义属能力声明而非本机执行细节，故进 Card（Hub 目录/控制台据此呈现输入面）。
+	// 注意：本字段声明的 false 才代表 node 实际拒绝；旧版 node 缺字段解码出的 false
+	// 语义见 StdinToArg 注（混跑降级）。
+	AllowArgs bool `json:"allow_args"`
+	// StdinToArg 输入语义转换声明（同上批次）：映射 ExecProfile.StdinToArg；true=
+	// 任务 Args 为空且 stdin 非空时 stdin 整体转单个尾参。控制台据此提示「描述将
+	// 作为命令行参数传递」。混跑降级口径（旧版二进制实跑实证：解码双向兼容，
+	// 能力发现降级）：旧版 node 的 Card 无此二字段，新版解码为零值 false——该 false
+	// 只是「字段缺失」的呈现值，不代表 node 实际配置（旧 node 自身 ExecProfile 可能
+	// allow_args=true，携 args 的任务照常执行成功），不得把未知宣称为不接受参数；
+	// 旧版 hub 解码则丢弃未知字段（目录不展示），新 node 携 args 派发经既有
+	// TaskInput.Args 透传照常执行。混跑期建议先升 node（或同步升级）；需传参的
+	// 任务以 CLI/REST 直派，不受目录呈现影响。
+	StdinToArg bool `json:"stdin_to_arg"`
 }
 
 // ExecProfile 本机执行配置（永不离开本机；SPEC 4.9）。

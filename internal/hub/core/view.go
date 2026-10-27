@@ -8,8 +8,8 @@ import (
 
 // 管理面目录视图（GET /api/v1/agents、GET /api/v1/nodes 数据源，SPEC 六）。
 
-// AgentEntry 能力目录单条：对外能力声明（AgentCard，绝不包含 ExecProfile 字段，
-// SPEC 六）+ 归属与在线状态。
+// AgentEntry 能力目录单条：对外能力声明（AgentCard，不含本机执行细节、公开声明
+// 投影 allow_args/stdin_to_arg 除外，SPEC 六）+ 归属与在线状态。
 type AgentEntry struct {
 	Card   protocol.AgentCard `json:"card"`
 	NodeID string             `json:"node_id"`
@@ -28,7 +28,9 @@ type NodeEntry struct {
 }
 
 // DirectoryEntry 发现目录单条（SPEC 六.五：GET /api/v1/directory）：exposed=true
-// 的 AgentCard + 归属 node 与在线状态；AgentCard 本体不含 ExecProfile 字段。
+// 的 AgentCard + 归属 node 与在线状态；卡不包含本机执行细节
+// （command/workdir/agent_args/timeout_sec/allow_env/config_home）——公开声明投影
+// （如 allow_args/stdin_to_arg）除外，同 SPEC 六 /api/v1/agents 行口径。
 type DirectoryEntry struct {
 	Card   protocol.AgentCard `json:"card"`
 	NodeID string             `json:"node_id"`

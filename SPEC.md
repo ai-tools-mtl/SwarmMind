@@ -235,6 +235,8 @@ type AgentCard struct {
     PermissionMode string   `json:"permission_mode"`   // 映射 agent 自带权限机制（如 codex sandbox 模式），调用方知情
     ProtocolVer    int      `json:"protocol_ver"`      // 适配器协议版本
     Exposed        bool     `json:"exposed"`           // 接入开关（主权在 node）：false=执行准入关闭（新任务 404 agent_not_exposed）；注册表保留一条审计记录（名称/下线时间，不含能力详情）
+    AllowArgs      bool     `json:"allow_args"`        // 任务参数授权声明（maturity-dispatch-args-ux）：映射 ExecProfile.AllowArgs；false=带非空 args 将 policy_denied。输入语义属能力声明而非本机执行细节，故进 Card（控制台/调用方据此呈现传参面）
+    StdinToArg     bool     `json:"stdin_to_arg"`      // 输入语义转换声明：映射 ExecProfile.StdinToArg；true=任务 Args 为空且 stdin 非空时 stdin 整体转单个尾参。旧版 node 上报的 Card 无此二字段，解码为零值 false——该 false 仅为「字段缺失」的呈现值，不代表 node 实际配置；只影响派发页参数输入面呈现、不阻塞派发，不得把未知宣称为不接受参数（混跑降级口径见六.五）
 }
 
 // ExecProfile 本机执行配置（永不离开本机）
@@ -481,7 +483,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 |---|---|---|---|
 | POST | /api/v1/tasks | `{target_node, target_agent, input, submitted_by, idem_key?, depends_on?}` | 202 `{task_id, trace_id}`；幂等命中 200 同 task_id + `dup:true`；同键不同内容 409；依赖声明不合法 400 `invalid_dependency`（4.12）；信箱满 503 `mailbox_full`；目标不存在 404；超限 400 |
 | GET | /api/v1/tasks/{id} | - | 200 Task（含状态/结果/needs_review） |
-| GET | /api/v1/agents | - | `{agents:[{card, node_id, online}]}`；card=AgentCard，**绝不包含 ExecProfile 字段**（执行配置不出本机） |
+| GET | /api/v1/agents | - | `{agents:[{card, node_id, online}]}`；card=AgentCard，**不包含本机执行细节（command/workdir/agent_args/timeout_sec/allow_env/config_home）**——公开声明投影（如 allow_args/stdin_to_arg）除外（执行配置不出本机） |
 | GET | /api/v1/nodes | - | `{nodes:[{node_id, online, epoch, inflight}]}` |
 | GET | /api/v1/tasks/{id}/artifacts/{index} | - | 200 产物内容（hub 经 artifact_fetch/artifact_data 中继到执行 node 取回；超时 30s → 504） |
 | POST | /api/v1/tasks/{id}/cancel | `{reason?}` | 202 取消已受理（hub 置 cancelled 终态 + 下发 task_cancel，node 结果异步回传）；幂等命中 200；已终态（completed/failed/needs_review）409 `not_cancellable`；不存在 404。管理面能力，**不设 MCP 工具**（取消保留给人工管理员，agent 不可互删任务） |
@@ -536,8 +538,19 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 
 ### 发现与目录
 
-- `GET /api/v1/directory`：全网 exposed=true 的 AgentCard 列表（不含 ExecProfile）——中心端独有，node 不代理此接口（node 无全网视图）；跨机能力发现经 hub（MCP swarmmind_agents / A2A）发起
+- `GET /api/v1/directory`：全网 exposed=true 的 AgentCard 列表（不含本机执行细节，公开声明投影除外，同上表 `/api/v1/agents` 行口径）——中心端独有，node 不代理此接口（node 无全网视图）；跨机能力发现经 hub（MCP swarmmind_agents / A2A）发起
 - node 本地 API 无目录代理（hub_api_url/hub_api_token 已废除，旧配置字段忽略）；node `GET /api/v1/agents` 仅返回本机能力列表，全网目录唯 hub 可查
+
+### 派发页参数输入（maturity-dispatch-args-ux，2026-10-27）
+
+- **能力卡携带输入语义**（SPEC 4.9 扩展）：AgentCard 增 `allow_args`/`stdin_to_arg`，node 由 ExecProfile 原样映射经 card_update/注册上报。**混跑降级口径**（旧版二进制实跑实证：解码双向兼容，能力发现降级）——新 hub+旧 node：旧卡无此二字段，解码为零值 false；该 false 仅是「字段缺失」的呈现值，**不代表 node 实际配置**（旧 node 自身 ExecProfile 可能 `allow_args: true`，携 args 的任务照常执行成功），派发页按 false 呈现只影响参数输入面呈现、不阻塞派发；旧 hub+新 node：旧 hub 解码丢弃未知字段，目录不展示（旧前端本也无参数输入区），携 args 派发经既有 `input.args` 照常透传、新 node 按实际配置校验后执行成功。**不得把未知宣称为不接受参数**；混跑期建议先升 node（或同步升级），需传参的任务以 CLI/REST 直派（args 透传不受目录呈现影响）
+- **hub 派发页按选中能力卡呈现输入语义**（`internal/hub/web/app.js` 参数输入区）：
+  - `allow_args=true`：「命令行参数」输入区，**一行一个参数**（行内空格保留=单参数，避免 shell 空格切分边界），空行/纯空白行忽略（仅以空白判断过滤，非空行保留原文含首尾空白）；提交映射 REST `input.args` 数组，**字面量传递**——不做 shell 引号剥离、不做通配展开、不改写参数内容，含引号的参数就是字面含引号（与任务详情「任务指令」逐参数展示的既有语义一致）
+  - `allow_args=false`（含旧卡缺字段的呈现值，混跑口径见上条）：无参数输入框，显示说明「该能力未声明接受任务参数，内容将经 stdin 传递（如能力实际支持，请经 CLI/REST 以 args 传递或升级节点）」——「未声明接受」而非「不接受」，不把未知宣称为不接受参数；前端提交恒空 `args`；是否拒绝带参任务由 node 按其实际 ExecProfile 裁决（呈现值 false 不构成拒绝依据：旧卡缺字段时携 args 任务照常执行成功；新卡真 false 时 REST 强行带非空 args 仍被 node 侧 runner 拒绝，policy_denied 既有行为不变）
+  - `stdin_to_arg=true`：附加提示「描述将作为命令行参数传递给该能力（仅当未填命令行参数时生效）」——独立于 allow_args 呈现（转换不绕参数白名单，双开合法）
+  - 能力卡不可得（未选齐/目录异常/能力下架）与智行管家模式不渲染参数区，回退现状仅描述输入，不阻塞派发（管家描述经 primeArgs 走 args，参数由统筹机制管理）
+  - 切换执行者只局部更新参数输入区（`#ctrl-args-zone` 分区，D22 表单纪律），任务描述与恢复密钥 DOM 原样保持；参数草稿跨切换/整页重绘保留
+- **node 控制台不提供参数输入区**：既有本机派单表单保持仅任务描述（stdin 语义），本批范围裁决不引入（登记入白名单下条）；node 本地 API `POST /api/v1/tasks` 本身透传 `input.args`（校验与 runner 策略与 hub 路径同源），后续补齐 UI 无需端点改动
 
 ### 提交身份
 
@@ -592,7 +605,10 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    群聊页专属，node badge 不取词）、**工作单视图（P5 W3：#/works 列表/详情抽屉/接管/续派/处置与
    WORK_STATES 词典，hub 编排面专属——node 无 hub 全网工作单数据源，node 控制台不提供）**、**派单页
    派发建议区（P5.1 D1：「获取派发建议/建议派给 X（本地决策模型）一键采纳/重新获取」建议四态——决策
-   服务 hub 内嵌，node 无 hub 全网候选目录，node 派单页不提供）**；node 执行者独有——产物本机绝对路径指引、回表单重新派单、来源
+   服务 hub 内嵌，node 无 hub 全网候选目录，node 派单页不提供）**、**派发页参数输入区（maturity-dispatch-args-ux：
+   hub 按 allow_args/stdin_to_arg 呈现命令行参数输入与语义提示——本批范围裁决 hub 先行，node 本机派单
+   表单保持仅描述（stdin 语义）；node 本地 API 已透传 input.args，属范围裁决而非端点能力差异，后续补齐
+   时本项撤销）**；node 执行者独有——产物本机绝对路径指引、回表单重新派单、来源
    （本机派单/hub 下发）标注、抽屉/弹层关闭直清（无 hub 的 280ms 出场动画：node #layer 为任务/能力
    配置抽屉与通知编辑弹层共用的直清家族——通知编辑已于 2026-10-26 notify-polish 改动三改居中 modal
    与 hub 同形态，仅关闭生命周期仍直清，让位路径要求立即清场，未引入 hub layerGen 世代机制前豁免，
@@ -629,7 +645,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 | MCP 工具 | REST 映射 | 说明 |
 |---|---|---|
 | swarmmind_nodes | GET /api/v1/nodes | 在线节点与负载 |
-| swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面） |
+| swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面）；每行附输入语义一句话——「可带 args / 仅 stdin · 描述可转尾参（仅未填 args 时）」（allow_args/stdin_to_arg 投影，调用方据此选择 args 或 stdin 传参；混跑降级口径见六.五派发页参数输入节） |
 | swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id/depends_on 透传，幂等重派、任期追踪与任务依赖 P4.3；work_ref/step_seq/prime_term 三参成组绑定工作单步骤，P5 W2——同键重试不新增尝试，任务清理后同键重放命中去重证据不重新执行） |
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
 | swarmmind_wait | （轮询 status） | 等到终态；needs_review 为终态并明确提示需人工核对 |

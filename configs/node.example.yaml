@@ -24,7 +24,8 @@ agents:
     config_home: ""                     # 空 = data_dir/home；agent 配置/凭证目录（HOME 指此，与 workdir 分离）
     agent_args: []                      # 固定附加参数（如 codex: [--sandbox, read-only]），任务不可改
     timeout_sec: 30
-    allow_args: true                    # 授权任务传命令行参数（false 时非空 args → policy_denied 拒绝执行）
+    allow_args: true                    # 授权任务传命令行参数（false 时非空 args → policy_denied 拒绝执行；控制台按此决定是否显示参数输入区）
+    stdin_to_arg: false                 # true=任务描述整体转单个尾参（适合 zcode -p 等「旗标后必须接提示词」、不吃 stdin 的 CLI；仅当任务未带 args 时生效）
     allow_env: ["TMPDIR"]               # 允许任务覆盖的环境变量键；默认 []；"PATH" 需显式列出，"*" 全开
     description: 回声测试（把产物写入 $SWARM_OUTPUTS_DIR，结束后自动登记为 Artifacts）  # 显示在全网能力目录里的一句话
     permission_mode: no-shell           # 对 agent 自带权限机制的说明，展示在能力卡上

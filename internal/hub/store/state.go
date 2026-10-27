@@ -22,7 +22,8 @@ type PrimeDesignation struct {
 type NodeRecord struct {
 	// Epoch 注册代次：首次注册成功=1，此后每次新连接注册成功原子 +1 并随快照持久化。
 	Epoch int64 `json:"epoch"`
-	// Agents 最近一次上报的能力表（AgentCard 全量；绝不包含 ExecProfile 字段）。
+	// Agents 最近一次上报的能力表（AgentCard 全量；不含本机执行细节，公开声明投影
+	// allow_args/stdin_to_arg 除外）。
 	Agents []protocol.AgentCard `json:"agents"`
 }
 

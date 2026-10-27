@@ -107,8 +107,42 @@ function __hs_reset() {
   ];
   S.C = freshControl();
   __hs_getEl('#ctrl-stdin').value = '';
+  __hs_getEl('#ctrl-args').value = '';
   __hs_getEl('#ctrl-suggest-line').innerHTML = '';
   __hs_calls.length = 0; __hs_pending.length = 0; __hs_hook = null;
+}
+/* __hs_reset_args 参数输入区场景基线（maturity-dispatch-args-ux）：目录含三类能力卡
+ * ——echo（allow_args=true）、report（无 allow_args 字段=旧卡 false 语义，stdin_to_arg=
+ * true 验证转换提示独立于授权）、tool（allow_args=true+stdin_to_arg=true）、
+ * zcode-dev（统筹载体，名字约定回退判定）。 */
+function __hs_reset_args() {
+  __hs_reset();
+  S.directory = [
+    { node_id: 'n1', online: true, inflight: 0, card: { name: 'echo', description: '回声测试', kind: 'cli', exposed: true, allow_args: true } },
+    { node_id: 'n1', online: true, inflight: 0, card: { name: 'report', description: '报告生成', kind: 'cli', exposed: true, stdin_to_arg: true } },
+    { node_id: 'n2', online: true, inflight: 0, card: { name: 'tool', description: '工具型', kind: 'cli', exposed: true, allow_args: true, stdin_to_arg: true } },
+    { node_id: 'n1', online: true, inflight: 0, card: { name: 'zcode-dev', description: '统筹载体', kind: 'cli', exposed: true, allow_args: true } },
+  ];
+}
+/* __hs_pickAgent 派发 change 事件选执行者：target 同时携带 id 与 data-picker 两形态
+ *（真实 select 两者的并有），一次派发同时驱动 ctrl-agent 专属分支与 bindAgentPicker
+ * 联动（后者经 onChange 持久化 S.C.node/agent）。 */
+function __hs_pickAgent(node, agent) {
+  __hs_getEl('#ctrl-node').value = node;
+  const t = __hs_getEl('#ctrl-agent');
+  t.value = agent;
+  t.dataset = { picker: 'agent', pickerPrefix: 'ctrl' };
+  __hs_handlers.change.forEach(fn => fn({ target: t }));
+}
+/* __hs_typeArgs 参数区输入：写 DOM 后派发真实 input 委托。 */
+function __hs_typeArgs(value) {
+  const ta = __hs_getEl('#ctrl-args');
+  ta.value = value;
+  __hs_handlers.input.forEach(fn => fn({ target: ta }));
+}
+/* __hs_submitForm 派发表单 submit 委托（submitControl 读两级下拉/描述/参数区真形）。 */
+function __hs_submitForm() {
+  __hs_handlers.submit.forEach(fn => fn({ target: { id: 'control-form' }, preventDefault() {} }));
 }
 function __hs_assert(cond, msg) { if (!cond) throw new Error('断言失败：' + msg + '；建议区现状：' + __hs_line().slice(0, 200)); }
 /* __hs_noTypelessButton：渲染产物里零缺 type 属性的 <button>——表单内缺省 submit，
@@ -215,6 +249,86 @@ async function __hs_scn_button_no_submit() {
   }
 }
 
+/* 场景五 args-zone-modes 参数输入区三态呈现与局部更新（maturity-dispatch-args-ux）：
+ * allow_args=true 出参数输入区；false/旧卡无字段出说明文案；stdin_to_arg=true 出
+ * 转换提示（独立于参数授权）；切换执行者只重写 #ctrl-args-zone（任务描述占位同步
+ * 两态切换），参数草稿跨切换保留；能力卡不可得回退空区不阻塞；统筹载体不出现参数区。 */
+async function __hs_scn_args_zone_modes() {
+  __hs_reset_args();
+  const zone = () => __hs_getEl('#ctrl-args-zone').innerHTML;
+  __hs_pickAgent('n1', 'echo');
+  __hs_assert(zone().includes('命令行参数') && zone().includes('<textarea id="ctrl-args"'), 'allow_args=true 应出现命令行参数输入区');
+  __hs_assert(zone().includes('字面量'), '参数区应声明字面量语义（不做 shell 解析）');
+  __hs_typeArgs('hello world\n\na b\n   ');
+  __hs_assert(S.C.args === 'hello world\n\na b\n   ', '参数草稿应镜像到 S.C.args（整页重绘数据源）');
+  __hs_pickAgent('n1', 'report');   // 无 allow_args 字段（旧卡）+stdin_to_arg=true
+  __hs_assert(!zone().includes('<textarea'), 'allow_args=false/旧卡不得出现参数输入框');
+  __hs_assert(zone().includes('该能力未声明接受任务参数，内容将经 stdin 传递（如能力实际支持，请经 CLI/REST 以 args 传递或升级节点）'), '应显示说明文案（未声明≠不接受，混跑降级口径）');
+  __hs_assert(zone().includes('描述将作为命令行参数传递给该能力'), 'stdin_to_arg=true 应附加转换提示（独立于参数授权）');
+  __hs_assert(S.C.args === 'hello world\n\na b\n   ', '切到无参数能力草稿不丢（切回参数型能力可恢复）');
+  __hs_assert(__hs_getEl('#ctrl-stdin').placeholder === STDIN_PH, '普通能力占位=普通文案');
+  __hs_pickAgent('n2', 'tool');   // allow_args=true+stdin_to_arg=true：输入区+转换提示并存
+  __hs_assert(zone().includes('<textarea id="ctrl-args"') && zone().includes('hello world'), '切回参数型能力：输入区重建且草稿回填');
+  __hs_assert(zone().includes('描述将作为命令行参数传递给该能力'), '双开能力应同时出现参数输入区与转换提示');
+  __hs_pickAgent('n1', 'zcode-dev');   // 统筹载体（名字约定回退判定）
+  __hs_assert(zone() === '', '统筹载体不出现参数区（描述经 primeArgs 走 args，参数由统筹机制管理）');
+  __hs_assert(__hs_getEl('#ctrl-stdin').placeholder === STDIN_PH_PRIME, '选中统筹载体占位切复合目标文案（两态切换既有语义保持）');
+  __hs_pickAgent('n1', 'echo');
+  __hs_assert(__hs_getEl('#ctrl-stdin').placeholder === STDIN_PH, '切回普通能力占位恢复普通文案（两态切换）');
+  __hs_assert(zone().includes('命令行参数'), '切回参数型能力输入区恢复');
+  __hs_pickAgent('n1', 'ghost-agent');   // 能力卡不可得（目录无此条目）
+  __hs_assert(zone() === '', '能力卡不可得回退现状（不渲染参数区、不阻塞派发）');
+  __hs_pickAgent('n1', 'echo');
+  __hs_assert(zone().includes('<textarea id="ctrl-args"'), '从未选状态切回参数型能力输入区恢复');
+}
+
+/* 场景六 args-submit-mapping 提交映射行为锁：逐行映射+空行/纯空白行忽略（仅空白
+ * 判断，非空行保留原文含首尾空白——codex 审查必修①边界：trim 会改写用户参数）
+ * +行内空格保留=单参数（字面量）；allow_args=false 能力即使 C.args 有残留也发空
+ * 数组（不预发注定 policy_denied 的请求）；统筹载体提交语义不回归（args=[提示词+
+ * 目标]、stdin 空）。 */
+async function __hs_scn_args_submit_mapping() {
+  __hs_reset_args();
+  __hs_pickAgent('n1', 'echo');
+  __hs_type('echo 任务的描述正文（走 stdin）');
+  __hs_typeArgs('hello world\n\n  a b  \n\t\n--verbose');
+  __hs_hook = rec => rec.path === '/api/v1/control-operations'
+    ? Promise.resolve(__hs_ok({ batch_id: 'b-args', status: 'complete', items: [{ target: 'n1', task_id: 't-args' }] }))
+    : Promise.resolve(__hs_ok({}));
+  __hs_submitForm();
+  await __hs_settle();
+  const sent = __hs_calls.find(c => c.path === '/api/v1/control-operations' && c.method === 'POST');
+  __hs_assert(!!sent, '表单提交应 POST control-operations');
+  const body = JSON.parse(sent.body);
+  __hs_assert(JSON.stringify(body.input.args) === JSON.stringify(['hello world', '  a b  ', '--verbose']),
+    '参数应逐行映射：空行/纯空白行忽略，非空行保留原文含首尾空白（  a b  原样到达）、行内空格保留=单参数；实得：' + JSON.stringify(body.input.args));
+  __hs_assert(body.input.stdin === 'echo 任务的描述正文（走 stdin）', '描述应走 stdin 语义');
+  __hs_assert(body.agent === 'echo' && JSON.stringify(body.targets) === JSON.stringify(['n1']), '目标选择不变');
+
+  __hs_reset_args();
+  __hs_pickAgent('n1', 'echo');
+  __hs_typeArgs('hello world');   // 先在参数型能力上留下草稿
+  __hs_pickAgent('n1', 'report'); // 切到无参数能力：C.args 保留残留（切回不丢的代价）
+  __hs_assert(S.C.args === 'hello world', '前置：切走后 C.args 有残留（真实序列构造）');
+  __hs_type('report 描述');
+  __hs_submitForm();
+  await __hs_settle();
+  const sent2 = __hs_calls.filter(c => c.path === '/api/v1/control-operations').pop();
+  const body2 = JSON.parse(sent2.body);
+  __hs_assert(JSON.stringify(body2.input.args) === JSON.stringify([]), 'allow_args=false 能力提交 args 必为空数组（不预发注定 policy_denied 的请求，状态残留不得带出）');
+
+  __hs_reset_args();
+  __hs_pickAgent('n1', 'zcode-dev');
+  __hs_type('检查两台机器磁盘占用并汇总');
+  __hs_submitForm();
+  await __hs_settle();
+  const sent3 = __hs_calls.filter(c => c.path === '/api/v1/control-operations').pop();
+  const body3 = JSON.parse(sent3.body);
+  __hs_assert(Array.isArray(body3.input.args) && body3.input.args.length === 1
+    && body3.input.args[0].includes('检查两台机器磁盘占用并汇总'), '统筹载体提交 args=[提示词+目标] 既有语义不回归');
+  __hs_assert(body3.input.stdin === '', '统筹载体提交 stdin 置空既有语义不回归');
+}
+
 /* 场景注册：Go 侧逐场景调用并要求逐条 PASS（断言抛错 → node 非零退出）。 */
 globalThis.__hs_run = async name => {
   const scn = {
@@ -222,6 +336,8 @@ globalThis.__hs_run = async name => {
     'late-response': __hs_scn_late_response,
     'adopt-reject': __hs_scn_adopt_reject,
     'button-no-submit': __hs_scn_button_no_submit,
+    'args-zone-modes': __hs_scn_args_zone_modes,
+    'args-submit-mapping': __hs_scn_args_submit_mapping,
   }[name];
   if (!scn) throw new Error('未知场景 ' + name);
   await scn();
