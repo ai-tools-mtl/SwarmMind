@@ -194,6 +194,18 @@ hub `data_dir` 的 `hub_cert.pem` / `hub_key.pem` 丢失后重启会再生新证
 
 若手头有 hub 证书备份，把 `hub_cert.pem` / `hub_key.pem` 还原回 hub `data_dir` 即可——指纹与 node 已信任记录一致，node 无需任何操作。这也是把证书列入备份清单的价值。
 
+## 发布与构建
+
+发布产物清单**单源**于 [scripts/release.sh](../scripts/release.sh)：`make release` 与 CI 发布 job 都消费它，产物清单变更只改脚本一处（Makefile/CI 禁止手写 GOOS 构建行）。
+
+```bash
+make release              # 完整发布包：先 embed-nodes（内嵌 node 注入同版本号），再交叉构建 dist/
+bash scripts/release.sh   # 仅构建矩阵产物到 dist/（不跑 embed-nodes；日常快验用，完整发布一律 make release）
+```
+
+- 版本号同源 `git describe --tags --always --dirty`，四件套与内嵌 node 全部注入；产物 `--version` 显示 `dev` 即版本未注入，应拒绝发布。
+- CI：`v*` tag 推送自动发布；手动触发仅验证构建不上传。手动入口：GitHub 仓库页 Actions → CI → Run workflow（workflow 须已合入默认分支后才可选），或 `gh workflow run ci --ref <分支>`。
+
 ## 常见问题
 
 | 现象 | 检查与下一步 |

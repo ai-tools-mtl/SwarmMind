@@ -8,7 +8,7 @@ BINARY_NAME := swarmmind
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS     := -s -w -X main.version=$(VERSION)
 
-PLATFORMS := linux/amd64 linux/arm64 darwin/arm64 windows/amd64
+# 发布矩阵单源：清单在 scripts/release.sh（Makefile release 与 CI 共用），勿在此手写 GOOS 构建行。
 
 .PHONY: build test race vet fmt release clean
 
@@ -41,23 +41,16 @@ embed-nodes:
 	for t in $(NODE_TARGETS); do \
 	  os=$${t%%-*}; arch=$${t##*-}; ext=""; \
 	  if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
-	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /tmp/swarmmind-node-embed$$ext ./cmd/node || exit 1; \
+	  GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o /tmp/swarmmind-node-embed$$ext ./cmd/node || exit 1; \
 	  gzip -9 -c /tmp/swarmmind-node-embed$$ext > $(EMBED_DIR)/node-$$t.gz || exit 1; \
 	  [ -s $(EMBED_DIR)/node-$$t.gz ] || { echo "embed 失败：node-$$t.gz 为空" >&2; exit 1; }; \
 	  rm -f /tmp/swarmmind-node-embed$$ext; \
 	  echo "embedded node-$$t.gz $$(du -h $(EMBED_DIR)/node-$$t.gz | cut -f1)"; \
 	done
 
-## release: 四平台交叉构建到 dist/（linux hub/node、macOS node、Windows node/ctl）
+## release: 发布矩阵交叉构建到 dist/（清单单源于 scripts/release.sh，先跑 embed-nodes 注版本）
 release: embed-nodes
-	@mkdir -p dist
-	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-hub-linux-amd64 ./cmd/hub
-	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-linux-amd64 ./cmd/node
-	GOOS=darwin GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-macos-arm64 ./cmd/node
-	GOOS=windows GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-node-windows-amd64.exe ./cmd/node
-	GOOS=windows GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmindctl-windows-amd64.exe ./cmd/swarmmindctl
-	GOOS=linux GOARCH=amd64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-mcp-linux-amd64 ./cmd/swarmmind-mcp
-	GOOS=darwin GOARCH=arm64 go build -ldflags '$(LDFLAGS)' -o dist/swarmmind-mcp-macos-arm64 ./cmd/swarmmind-mcp
+	@bash scripts/release.sh dist
 	@ls -la dist/
 
 clean:
@@ -70,7 +63,7 @@ HUB_KEY   ?= /Users/tl.m/Downloads/Mac2026.pem
 HUB_SRC   ?= /opt/swarmmind-src
 
 deploy-hub: embed-nodes
-	@$(MAKE) -s release GOOS=linux
+	@$(MAKE) -s release
 	git bundle create /tmp/swarmmind.bundle main
 	scp -i $(HUB_KEY) /tmp/swarmmind.bundle $(HUB_SSH):/tmp/swarmmind.bundle
 	ssh -i $(HUB_KEY) $(HUB_SSH) 'mkdir -p /tmp/swarmmind-embedded'
