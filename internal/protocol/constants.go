@@ -1,6 +1,9 @@
 package protocol
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // 运行常量（SPEC 4.6 全表 + 4.9 编码后预算），hub/node 共享。
 const (
@@ -25,7 +28,15 @@ const (
 
 	// TaskRetention 任务离线保留时长（expire_at = CreatedAt+7d；到期非终态 → failed/error=expired）。
 	TaskRetention = 7 * 24 * time.Hour
-	// TerminalRetention 终态保留时长：hub 快照 24h 后清理终态任务；node 账本 result_acked 条目 24h 后清理。
+	// TerminalRetention 终态保留时长**默认值**（maturity-retention-config 起可配，
+	// hub.yaml / node.yaml `terminal_retention`，两侧经 ParseTerminalRetention
+	// 同源解析）：hub 快照默认 24h 后清理终态任务（Sweep 第 5 阶段）；node 账本
+	// result_acked 条目默认 24h 后清理（CleanupAcked，1 分钟周期接线）。0 = 永不
+	// 自动清理（写 0s；yaml 裸写数字 0 或字符串 "0" 同样生效——yaml.v3 标量转换
+	// 落成字符串 "0"，ParseDuration 对字面 0 免单位）；正值最小粒度 1 秒（亚秒值
+	// 拒绝启动：生效值经 terminal_retention_sec 按整秒下发，亚秒整除失真为 0 会
+	// 被误读成「不自动清理」而实际照删）。保留期同时是幂等去重窗口（SPEC 4.5：
+	// idem 与任务同生命周期）。
 	TerminalRetention = 24 * time.Hour
 	// WorkdirQueueWait workdir 互斥排队等待上限（P1.5/SPEC 4.10）：submitted 任务自创建
 	// 起排队超过此时长仍未获得派发 → failed（error=workdir_busy_timeout）。hub 侧计时
@@ -45,7 +56,8 @@ const (
 	MailboxQuota = 100
 	// MailboxByteBudget 每 node 信箱字节预算（submitted 任务体字节和，8MiB）。
 	MailboxByteBudget = 8 << 20
-	// StorageBudget hub 任务存储全局字节预算（256MiB，含终态 24h 保留）；超则拒新提交 503 storage_full。
+	// StorageBudget hub 任务存储全局字节预算（256MiB，含终态保留——默认 24h，
+	// terminal_retention 可配）；超则拒新提交 503 storage_full。
 	StorageBudget = 256 << 20
 	// DeliveryWindow 每 node 投递窗口（已投递未开始 = offered+acknowledged 计数，8）；超则暂停出队。
 	DeliveryWindow = 8
@@ -61,6 +73,34 @@ const (
 	// MaxArtifacts 单任务产物条数上限（8 条且仅存引用）。
 	MaxArtifacts = 8
 )
+
+// ParseTerminalRetention 解析 terminal_retention 配置值（hub.yaml 与 node.yaml
+// 同名字段共用此实现，两侧零漂移；maturity-retention-config）：
+//   - 空串 = 未配置 → 回落 TerminalRetention 默认（老配置文件零改动行为不变）；
+//   - "0s" / 字符串 "0" / yaml 裸写数字 0（yaml.v3 标量转换落成字符串 "0"，Go
+//     ParseDuration 对字面 0 免单位）→ 0 = 永不自动清理（显式语义，三种写法等价）；
+//   - 正值 = 保留时长（time.ParseDuration 语法：30m / 24h / 720h；除字面 0 外
+//     无单位值 ParseDuration 报错）。最小粒度 1 秒：非零正值 <1s（如 500ms）拒绝
+//     ——生效值经 terminal_retention_sec 以整秒下发（前端保留期文案数据源），
+//     亚秒值整除后失真为 0，会被展示成「不自动清理」而清理实际照跑；
+//   - 负数 / 亚秒 / 无法解析 = 返回错误，调用方拒绝启动并打印人话报错（对齐
+//     insecure_loopback 的严格风格，不静默回退默认值掩盖笔误）。
+func ParseTerminalRetention(s string) (time.Duration, error) {
+	if s == "" {
+		return TerminalRetention, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("terminal_retention %q 无法解析（%v）：须为带单位的时长，如 30m / 24h / 720h；永不自动清理请写 0s", s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("terminal_retention %q 为负数：不接受（保留期不能为负；永不自动清理请写 0s）", s)
+	}
+	if d > 0 && d < time.Second {
+		return 0, fmt.Errorf("terminal_retention %q 不足 1 秒：不接受（保留期最小粒度 1 秒——生效值按整秒下发与展示，亚秒值会被误读成不清理而实际照删；永不自动清理请写 0s）", s)
+	}
+	return d, nil
+}
 
 // 协议/结果错误码：err 帧 ErrInfo.Code 与 TaskResult.Error 的约定取值（出处见各注释）。
 const (

@@ -164,7 +164,7 @@ submitted → offered → acknowledged → running → completed | failed | need
 | offer → task_ack | node 账本 accepted 已持久化 | hub 30s 后回退 submitted 重推 |
 | task_result → result_ack | hub 终态已持久化 | node 账本 finished 未 acked，重连后重发 |
 
-幂等规则：idem_key 作用域为 hub 全局，与任务同生命周期（过期/清理同步删除）；同键同内容 → 返回原 task_id + dup=true；同键不同内容 → 409 conflict。**提交流程顺序固定：鉴权 → idem 查重（命中即返回，不做配额检查）→ 依赖准入校验（4.12，P4.3）→ 容量/字节预检 → 持久化（单写事务内全部重检）→ Ack**。保证同键重试在信箱满时仍能取回原 task_id（且旧提交的幂等重试不因依赖此后被清理而失败——依赖准入位于 idem 查重之后）。
+幂等规则：idem_key 作用域为 hub 全局，与任务同生命周期（过期/终态保留期清理同步删除——**保留期即幂等去重窗口**，maturity-retention-config：终态保留 `terminal_retention` 可配（默认 24h，`0s`=永不清理），延长保留=延长去重，记录清理后同键重提返回新任务属设计语义而非缺陷——**本句限定普通任务**；工作单绑定任务清理后同键重放命中工作单去重证据（尝试登记的内容指纹，4.12 绑定派发）不重新执行、响应 `task_gone`，详见 4.12 与六.五 W2）；同键同内容 → 返回原 task_id + dup=true；同键不同内容 → 409 conflict。**提交流程顺序固定：鉴权 → idem 查重（命中即返回，不做配额检查）→ 依赖准入校验（4.12，P4.3）→ 容量/字节预检 → 持久化（单写事务内全部重检）→ Ack**。保证同键重试在信箱满时仍能取回原 task_id（且旧提交的幂等重试不因依赖此后被清理而失败——依赖准入位于 idem 查重之后）。
 重复消息去重后必须重放对应 Ack（见 4.3 收敛表），禁止静默丢弃导致确认悬挂。
 
 **结果重传与终止条件（node 侧）**：账本 finished 未 acked 的结果在每次重连成功后立即重发，此后每 60s 重发一次；收到 result_ack → 停止；收到 result_conflict 或任务已 expired 终态拒绝 → 停止重传，账本标记 `closed`（冲突审计日志保留），不删除记录。
@@ -184,10 +184,10 @@ submitted → offered → acknowledged → running → completed | failed | need
 | 信箱配额 | 100 条/node（计 submitted 状态），出队转 offered 即释放；offered 超时回退 submitted 时若配额已满仍回队（重投预留，允许短暂超额，不丢已确认任务）；满则 503 + `mailbox_full` |
 | stdout/stderr tail | 64KiB |
 | 任务离线保留 | 7 天（expire_at 到期非终态 → failed/error=expired） |
-| 终态保留 | hub 终态任务 24h 后清理；node 已实现 CleanupAcked（按 first_acked_at+24h），但当前未接入运行循环，不能视作自动清理已生效，审计保留策略待确定 |
+| 终态保留 | 默认 24h，**可配**（hub.yaml / node.yaml `terminal_retention`，两侧经 ParseTerminalRetention 同源解析：空=默认、`0s`=永不自动清理（yaml 裸写数字 0 同样生效，标量转换）、亚秒（<1s，最小粒度 1 秒）/负数/非法值拒绝启动并给人话报错；maturity-retention-config）。hub 终态任务超期 Sweep 第 5 阶段清理；node CleanupAcked 已接入 service 运行循环（1 分钟固定周期，只清 result_acked 条目，按 first_acked_at 起算，重复/重启不重置；未 acked 条目不清——结果重发与去重证据依赖账本）。保留期即幂等去重窗口（4.5） |
 | node 执行并发 | 2（可配） |
 | 信箱字节预算 | 每 node 8MiB（submitted 任务体字节和），超则 503 `mailbox_full` |
-| hub 任务存储全局字节预算 | 256MiB（含终态 24h 保留），超则拒新提交 503 `storage_full`；部署声明：2核2G 云机目标为低负载（≤5 node 且预算内），满配（20 node×100 条×1MiB≈2GiB）不承诺 |
+| hub 任务存储全局字节预算 | 256MiB（含终态保留——默认 24h，`terminal_retention` 可配），超则拒新提交 503 `storage_full`；部署声明：2核2G 云机目标为低负载（≤5 node 且预算内），满配（20 node×100 条×1MiB≈2GiB）不承诺 |
 
 ### 4.7 持久化事务（hub store 为 SQLite；node ledger 保持 JSON，同模式同纪律）
 
@@ -214,8 +214,8 @@ submitted → offered → acknowledged → running → completed | failed | need
 - accepted（未 started）：检查任务 expire_at——已过期 → 不执行，写 finished（status=failed，error=expired）并回传；未过期 → 进入本地调度执行；
 - started 未 finished：执行结果不确定 → 写 finished，status=`needs_review`，error=`node_restarted_midway`，回传；**禁止自动重新执行**；
 - finished 且未 acked：重发 task_result 直至 result_ack。
-已实现的 CleanupAcked 可按 first_acked_at+24h 清理 result_acked 条目，但当前未在运行循环调用；该时间是清理契约而非已生效的自动审计保留期。needs_review 是独立终态：查询可见、语义为「执行结果不确定，需人工核对」，协议与展示层不得折叠为 failed（防止调用方误自动重提）。
-**产物隔离与保留**：产物目录按任务隔离（outputs/<task_id>/），进程结束后 runner 冻结产物清单（登记后新增文件不追认）；原设计要求以 result_ack 后 24h 作为产物保留窗口，但当前没有相应的自动文件回收接线；文件实际可取还取决于源文件、账本、节点可达与 hub 任务记录，不能据保留期保证一直可取；artifact_fetch 取回时 node 校验 SHA-256 与登记一致，不一致回 err(artifact_mismatch)。
+CleanupAcked 已接入 service 运行循环（maturity-retention-config，消除「清理函数从未接线」已知差异）：1 分钟固定周期清理 result_acked 超 `terminal_retention`（node.yaml，默认 24h；`0s`=永不清理）的条目；期限基准 first_acked_at（重复 Ack 不更新、重启不重置）；无超期条目零写盘（周期常态零 IO）。未 acked 条目不参与清理（结果重发链路与去重证据依赖账本，红线不得放宽）；closed 冲突审计记录保留不删。needs_review 是独立终态：查询可见、语义为「执行结果不确定，需人工核对」，协议与展示层不得折叠为 failed（防止调用方误自动重提）。
+**产物隔离与保留**：产物目录按任务隔离（outputs/<task_id>/），进程结束后 runner 冻结产物清单（登记后新增文件不追认）；原设计要求以 result_ack 后保留期（默认 24h，`terminal_retention` 可配）作为产物保留窗口，但当前没有相应的自动文件回收接线（账本条目清理≠产物文件回收）；文件实际可取还取决于源文件、账本、节点可达与 hub 任务记录，不能据保留期保证一直可取；artifact_fetch 取回时 node 校验 SHA-256 与登记一致，不一致回 err(artifact_mismatch)。
 
 ### 4.9 核心数据结构 Schema（完整字段表，实现以此为准）
 
@@ -424,6 +424,7 @@ register_token: token-for-mac-mini      # 每 node 独立，与 node_id 绑定
 hub_pubkey_fp: ""                       # SPKI SHA-256；空则 TOFU 记录首连
 concurrency: 2
 data_dir: data
+terminal_retention: 24h                 # 账本 result_acked 条目保留时长（maturity-retention-config）：30m/24h/720h 等（最小粒度 1 秒）；0s=永不自动清理（裸写数字 0 同样生效，yaml 标量转换）；空=默认 24h；亚秒/负数/非法值拒绝启动。保留期即幂等去重窗口（4.5），未确认条目不受影响
 base_env:                               # 执行环境基线：不继承 daemon 进程环境
   PATH: /usr/bin:/bin
   TMPDIR: /tmp
@@ -464,6 +465,7 @@ nodes:                            # 每 node 独立 token，绑定 node_id
   mac-mini: token-for-mac-mini
   win-box: token-for-win-box
 data_dir: data
+terminal_retention: 24h           # 终态任务保留时长（maturity-retention-config）：30m/24h/720h 等（最小粒度 1 秒）；0s=永不自动清理（裸写数字 0 同样生效，yaml 标量转换）；空=默认 24h；亚秒/负数/非法值拒绝启动。生效值随登录响应/账户视图下发 terminal_retention_sec（前端保留期文案数据源）
 ```
 
 insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`；部署模式为 `wss://` + 证书指纹。
@@ -495,7 +497,7 @@ insecure_loopback=true 时 node 侧 hub_url 应为 `ws://127.0.0.1:8443/ws/node`
 
 ### node 本地 API（本机派发/查询入口，V0）
 
-node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks` 走 `SubmitLocalDirect` 在本机账本接受并执行，不要求经 hub 转发；`GET /api/v1/tasks/{id}` 根据本机执行记录与任务来源返回结果或相应指引。调用须通过本机凭据鉴权，编排入口还受 prime_agent/prime_token 规则约束。target_node 只能是本机 node_id，跨机任务统一经 hub 入口提交。`GET /api/v1/local/tasks` 返回本机现存账本任务（含 hub 下发）并合并提交留痕，支持 limit/offset/total：默认 200、上限 1000，非法参数 400，超出 limit 上限按 1000 截取。该清单不代表永久历史；自动账本清理尚未接入，保留策略另行确认。旧 node 会话 task_submit/task_query 协议仍受上一段归属约束，不等于当前本机直执行 API 的实现路径。`GET /api/v1/local/status` 应答附 `server_version`（值 = 二进制构建版本，`-X main.version` 注入，与 node `--version` 同源；本机控制台页脚数据源，与 hub 管理台页脚同构——main 末尾纯文本 `v<版本号>`）。
+node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks` 走 `SubmitLocalDirect` 在本机账本接受并执行，不要求经 hub 转发；`GET /api/v1/tasks/{id}` 根据本机执行记录与任务来源返回结果或相应指引。调用须通过本机凭据鉴权，编排入口还受 prime_agent/prime_token 规则约束。target_node 只能是本机 node_id，跨机任务统一经 hub 入口提交。`GET /api/v1/local/tasks` 返回本机现存账本任务（含 hub 下发）并合并提交留痕，支持 limit/offset/total：默认 200、上限 1000，非法参数 400，超出 limit 上限按 1000 截取。该清单不代表永久历史；已确认（result_acked）条目超 `terminal_retention`（默认 24h，`0s`=永不清理）由 service 运行循环周期清理（4.8）。旧 node 会话 task_submit/task_query 协议仍受上一段归属约束，不等于当前本机直执行 API 的实现路径。`GET /api/v1/local/status` 应答附 `server_version`（值 = 二进制构建版本，`-X main.version` 注入，与 node `--version` 同源；本机控制台页脚数据源，与 hub 管理台页脚同构——main 末尾纯文本 `v<版本号>`）与 `terminal_retention_sec`（账本终态保留生效秒数 = node.yaml `terminal_retention` 解析值；`0`=永不自动清理；maturity-retention-config）。
 
 **通知渠道管理（2026-10-24 standalone 补盲区；2026-10-26 伦哥裁决「同时通知」起三模式全装配）**：**node 三模式（standalone/networked/setup）全部装配本机渠道存储与分发器**（cmd/node notifyDispatcherFor，2026-10-26 取代「networked 归 hub 不装配」旧裁决）——standalone 本机通知即唯一通知（开关不参与门控）；networked 下 hub 渠道照常通知（hub core 终态旁路），node 在本机任务终态（`MarkFinished` 首次落终态 + `NotifyRecoveredTerminal` 恢复旁路，去重锚点在账本）时按「同时通知」开关决定本机渠道是否**跟发**：`data_dir/notify_settings.json` `{also_notify: bool}` 默认 true（跟发；本机未配渠道自然静默零副作用）、false=本机静默 hub 一份照发；每次终态读盘不缓存（开关运行时即时生效，简单正确优先）；setup 无任务不触达。开关端点：`GET|PUT /api/v1/local/notify/settings`（local_token，与渠道端点同鉴权）。触发挂钩在 node service 终态落账本点（`MarkFinished` 成功 = 首次落终态，账本先到为准天然去重；覆盖正常完成/过期/取消/关闭中断/墓碑收口全部路径，`internal/node/service/notify.go`）。渠道配置存 `data_dir/notify_channels.json`（与 hub 同一 JSON 存储形态：internal/notify.ChannelStore + internal/settings.Store 原子写）。**渠道模型（2026-10-26 notify-unify 改动二，双端同构）**：独立 feishu 类型并入 webhook 的「消息格式」维度——`Channel.Format`（generic=通用 JSON POST+可带自定义头 / feishu=飞书机器人文本消息+无自定义头，空=generic）；新渠道不可再建独立 feishu 类型（准入明确报错指路），存量 feishu 渠道**载入时自动归一**（`migrateLegacyFeishu`：Type=feishu → Type=webhook + Format=feishu + Secrets url 键，内存态即时生效、落盘落新形态、幂等）——升级生产已配飞书渠道无缝继续工作；hub.yaml legacy 导入同样直接落新形态，**node.yaml 不设 notify 段**——控制台 CRUD 要求运行时可改即时生效（node.yaml 编辑走「应用并重启」流程），node 为全新能力无存量配置需兼容（hub 的 YAML legacy 导入是为存量用户付的兼容成本，node 不重复背），凭证放 data_dir（0600，与 local_token/prime_token 同域）也更符合本仓安全纪律。端点组：`GET|POST /api/v1/local/notify/channels`、`PUT|DELETE /api/v1/local/notify/channels/{id}`、`POST /api/v1/local/notify/channels/{id}/test`（列表脱敏/创建/更新占位保留/删除/发测试），全部仅 local_token 可调（主人管理面，六.六豁免⑧）；inbox 类型 node 侧准入即拒绝（站内通知为 hub 控制台铃铛专属，node 控制台无铃铛动线）；Dispatcher 未装配时端点组 503 降级（2026-10-26 起三模式全装配，守卫仅剩防御意义）。安全红线同 hub：读响应脱敏（Channel.Masked）、占位保留更新、投递/展示分离（原始 URL 投递、错误路径剥 path/query/userinfo）、日志不泄凭证、SMTP 全链路 deadline。控制台入口「服务 → 通知」（status.notify_available 门控，三模式装配后恒可用；networked 卡片头部带「同时通知」toggle，standalone 隐藏——语义不存在）。
 
@@ -507,6 +509,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 
 - hub 配置新增 `admin_token`；`POST /api/v1/login {"token":"..."}` → 200 + `Set-Cookie: swarmmind_session=...`（HttpOnly；V0 会话内存态，hub 重启需重登）
 - **服务端版本可见（maturity-version-var）**：登录成功响应（令牌与密码两路）与登录态账户视图（`GET /api/v1/auth/account` 已登录分支）附 `server_version` 字段（值 = 二进制构建版本，Makefile `-X main.version` 注入 git describe，未注入为 `dev`；与 hub `--version` 同源）——控制台页脚数据源，禁止硬编码进 embed JS 资产；未认证分支仅返回 `{initialized}`，不向未认证方披露版本号
+- **终态保留可见与数据驱动（maturity-retention-config）**：同面三响应（令牌登录/密码登录/登录态账户视图）附 `terminal_retention_sec` 字段（秒；读 `Core.TerminalRetention()`——hub.yaml `terminal_retention` 唯一真相，Sweep 清理行为与暴露值同源；未认证分支不返回，同 server_version 口径）——任务列表 footer/归档 toast/抽屉/策略容量/撤机器弹窗等保留期文案全部数据驱动（`retentionClause()`/`retentionText()`，`0` 渲染「不自动清理」），禁止硬编码回 24h；node 本机控制台保留说明为如实静态句（默认 24h 可配口径，status 端点同步下发 `terminal_retention_sec`）
 - 任务、目录、Work、通知等管理 API 要求有效会话 cookie 或 Bearer PAT，否则 401。登录、账户初始化/状态和 A2A 发现卡等显式入口有各自访问规则，路由以 `internal/hub/api/server.go` 为准；admin_token 用于换取会话，不能直接作为 Bearer。
 - 中心端「控制能力」实现澄清：hub 不内嵌执行体；控制操作（全网巡检等）= 管理员从中心端向任意 node 的巡检类 agent 派发正式任务（走现有全链），hub 保持登记处与控制面，服务执行始终在 node 侧
 
@@ -528,7 +531,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 - 绑定派发（P5 W2，走 `POST /api/v1/tasks` 携 `work_ref`+`step_seq`+`prime_term` 三参）：任务落库+尝试登记+步骤回写+work 状态推进+attempt_recorded 事件**单事务原子**（绑定校验失败整体拒绝零发布；盖章后按盖章体重检体积与容量——绑定字段计入口径，任何失败 mutate 错误整体回滚）；响应附 `work:{work_id,step_seq,attempt_seq,attempt_ref,outcome,task_gone?}`（活任务 dup 重放同形附原尝试定位）。三参成组（缺 `work_ref` 只带其余两参 → 400 `invalid_request`，core 入口统一把关，不静默落为普通任务）。错误码：404 `work_not_found`、409 `work_term_conflict`（旧任期写入拒绝）、409 `work_no_term`（未建立任期须先接管）、409 `work_step_locked`（done/skipped 步骤再派）、409 `conflict`（同键不同内容/绑定）。幂等语义：同键同内容重放 dup 命中原任务不新增尝试；换 work/换步骤/换内容同键 409（绑定与内容入指纹，区别于群引用「换群=新任务」）；prime_term 不入指纹（换任期同键重放命中 dup）；任务终态保留期清理后同键重放命中**工作单去重证据**（尝试登记落盘的提交内容指纹 ContentHash/BaseContentHash，含提交主体=身份边界——知 work+键+步骤的他方不得冒领原 task_id；跨 Work 键复用由证据指纹兜底 409）不重新执行，响应 `task_gone:true`；回执补拉先于依赖准入与容量检查（依赖已清理/信箱与全局预算满不挡回执）
 - 终态回写（P5 W2）：任务首落终态（result/cancel/sweep 三路径）同事务回写 `attempt.outcome`+`step.status`（映射：completed→done/done；failed→failed/failed；needs_review→needs_review/needs_review；cancelled→cancelled/failed），非 done 终局 work.status=blocked；枚举在 RFC 二.1 基础上扩展 needs_review/cancelled（SPEC 4.8 不折叠+任务清理后可解释终局），superseded 预留。「任务已终态而尝试未回填」窗口由启动恢复扫描补记（hub 重启自愈，恢复事件可查）
 - 收集/关闭（P5 W3；审查修订 2026-10-25）：`POST /api/v1/works/{id}/collect {"prime_term","report","outcome"?}` → 200 `{"work":{...},"dup"?}`（单事务终态闭合）。校验序：report 必填（空 400 `invalid_request`）→ 404 `work_not_found` → 终态回执幂等（prime_term/report/outcome 与落库三同源 → 200+`dup:true` 零写入零事件，响应丢失重试安全；任一不同 → 409 `work_closed`）→ 409 `work_no_term`（先接管）→ 409 `work_term_conflict`（收集是编排写入，旧任期拒绝）→ 409 `work_steps_open`（**收束门：全部步骤终态且全部尝试收束才可收集**——W2 允许同步骤并发尝试，步骤呈 done 不代表执行收束，在途尝试同样拒绝并指明尝试号；outcome=abandoned 下 pending 不算开步，**未派发步骤随关闭同事务记为 skipped**——needs_review 阻断禁重跑/上游失败未补救时下游 pending 永不到终态，放弃剩余步骤是唯一出口）→ 409 `work_steps_not_done`（outcome 缺省/done 要求全部步骤 done，存在 failed/needs_review/skipped → 拒绝并列出，**部分报告不误关闭**；指路 outcome=abandoned）。成功：status 落 done/abandoned、closed_at/expires_at=now/now+30d、report 落库、collect 事件（by=自报任期、principal=服务端主体；abandoned 附跳过步骤 step_updated 事件）；**关闭后迟到的任务结果不回写**（终态回写与恢复扫描对 done/abandoned 单零写入——防御迟到/异常数据改写 30 天存档）；blocked 单恒有出口（续派补救→done 或处置 abandoned——无死环）；终态后派发/接管/收集三写入口全闭（`work_closed`）；skipped 不计入完成关闭。collecting 状态保留枚举、V0 无写入路径（collect 单事务直达终态）；superseded 仍无写入触发器
-- 读档注解（P5 W3）：`GET /api/v1/works/{id}` 响应 work 对象增 `tasks_gone`（尝试绑定任务已过 24h 保留期清理的 ID 列表；仅读档路径计算，写入路径响应不携带）——任务清理后工作单仍是可解释执行记忆（步骤/尝试 outcome+幂等键+内容指纹/事件/报告全量在）；列表摘要增 `done_steps`（完成步骤数）
+- 读档注解（P5 W3）：`GET /api/v1/works/{id}` 响应 work 对象增 `tasks_gone`（尝试绑定任务已过保留期清理的 ID 列表；仅读档路径计算，写入路径响应不携带）——任务清理后工作单仍是可解释执行记忆（步骤/尝试 outcome+幂等键+内容指纹/事件/报告全量在）；列表摘要增 `done_steps`（完成步骤数）
 - 接管语义：接管为 CAS（expected_term 代校验）+ takeover 事件入账（by=新任期自报、principal=服务端验证主体分开存储）；原请求重放（expected=旧任期、new=当前任期且账本最近一条接管事件同源同主体）→ 200+`dup:true` 成功回执零写入，他方同参写入按 409 不误认 dup；任期标签为调用方自选字符串，**历史使用过的标签不得复用**（409，防 ABA 旧任期重新放行——接管须换新标签）；绑定派发须带 prime_term 且与落库任期严格相等（事件 by=自报任期、principal=提交链服务端已验证主体——REST 提交=鉴权中间件解析主体（admin 会话/`pat:<令牌名>`）、node 帧=会话 node_id）；恢复扫描按任务终态落盘顺序补写（同步骤多尝试以最后事实为准，与活路径 last-writer-wins 同序）
 - `GET /api/v1/works` → 200 `{works:[{id,goal,prime_term?,status,steps,attempts,created_at,closed_at?}]}`（摘要，新建在前）
 - `GET /api/v1/works/{id}?since_events=N` → 200 `{"work":{含 steps/attempts/events},"pruned_before_events"}`：事件只返 seq>N 升序增量，`pruned_before_events` 为滚动裁剪已丢事件最大 seq（现存最旧 Seq-1，同群消息 `pruned_before_seq` 口径；事件滚动保留最新 200 条，EventSeq 单调不回退）；未知 id 404 `work_not_found`
@@ -618,10 +621,14 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    决定形态」的合法差异（机器多值 vs 来源二值+全部），不豁免其他维度的同构要求；来源
    词典 ORIGIN_WORDS（`hub 下发 | 本机派单`）收进「抽屉展示词典 shared block」双端
    逐字节同文（渲染层/文案层单一起源）。**任务抽屉归档区期限说明按端上事实分叉**
-   （2026-10-26 P0 事实纠错入档）：hub=「终态任务记录保留 24 小时，到期自动清理」
-   （core/sweep.go TerminalRetention 真实清理），node=「本机账本保留此次记录（当前
-   无自动清理）」（CleanupAcked 已实现未接入运行循环，SPEC 4.8）——同位文案按端上
-   能力如实表达，不属漂移（web_drawer_sync_test 双端各自断言锁固化）。同批导航统一只动导航壳（词表/顺序/navnum
+   （2026-10-26 P0 事实纠错入档；maturity-retention-config 更新口径）：两端清理均已
+   真实接线且保留期各自配置——hub=数据驱动模板「终态任务记录${retentionClause()}」
+   （Sweep 第 5 阶段按 hub.yaml terminal_retention 真实清理，读 terminal_retention_sec
+   下发值，禁止回退写死 24h），node=「本机账本保留此次记录（已确认结果超保留期自动
+   清理：默认 24 小时，node.yaml terminal_retention 可配；0s=永不清理）」（CleanupAcked
+   已接入 service 运行循环，SPEC 4.8）——hub 管终态快照、node 管账本 result_acked
+   条目，同位文案按端上事实如实表达，不属漂移（web_drawer_sync_test 双端各自断言锁
+   固化；旧口径 hub 写死 24h、node「当前无自动清理」均已退役，不得回退）。同批导航统一只动导航壳（词表/顺序/navnum
    格式/aria/workspace 行序）与筛选行，「同构」要求不据此扩大解释为任务页整页重做。
 7. **变更纪律**：任何一端改动抽屉组装层或共用组件（badge/notice/时间线/产物行/日志区/时间工具），必须
    对照本节评估另一端并同步；一致性锁测试随改动同步更新，禁止删除断言以规避失败（旧接入断言同步更新、不双轨）；
@@ -644,7 +651,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 
 | MCP 工具 | REST 映射 | 说明 |
 |---|---|---|
-| swarmmind_nodes | GET /api/v1/nodes | 在线节点与负载 |
+| swarmmind_nodes | GET /api/v1/nodes（hub）/ GET /api/v1/local/status（node） | 在线节点与负载（node 模式=本机单条）；输出附终态保留生效值人话行（maturity-retention-config：hub 终态任务保留 / node 账本终态保留，读 terminal_retention_sec，0 渲染「不自动清理」，规则 15） |
 | swarmmind_agents | GET /api/v1/directory | 全网能力目录（可调用面）；每行附输入语义一句话——「可带 args / 仅 stdin · 描述可转尾参（仅未填 args 时）」（allow_args/stdin_to_arg 投影，调用方据此选择 args 或 stdin 传参；混跑降级口径见六.五派发页参数输入节） |
 | swarmmind_submit | POST /api/v1/tasks | 派任务（submitted_by=mcp；支持 idem_key/trace_id/depends_on 透传，幂等重派、任期追踪与任务依赖 P4.3；work_ref/step_seq/prime_term 三参成组绑定工作单步骤，P5 W2——同键重试不新增尝试，任务清理后同键重放命中去重证据不重新执行） |
 | swarmmind_status | GET /api/v1/tasks/{id} | 查状态与结果（不等待） |
@@ -700,6 +707,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 12. **P5 Work W3 收集关闭+接口补全同步声明（2026-10-25，W3 批）**：收集/关闭+清理补全（RFC-work-resume W3 行）。本表补 `swarmmind_work_collect` 一行（hub-only，node 模式不装配）；`swarmmind_work_get` 返回体透传 `tasks_gone` 读档注解、`swarmmind_work_list` 透传 `done_steps`（展示字段，不构成新工具）；工具输出与 REST 详情全量对齐（work_get 附收集报告/幂等键/尝试引用/双指纹/盖章时刻，任务清理后 agent 经 MCP 读得回执行摘要与原键）。收集/关闭/清理契约见六.五「工作单」节（回执幂等、部分报告不误关闭、终态三写入口全闭、Sweep 30 天保留清理）。Prime 提示词同批增补「工作单（多步工作的断点续管）」节（internal/hub/web/app.js PRIME_PROMPT 与 deploy/prime/PRIME.md 两处一致，web 包测试锁工具名引用 ⊆ 实际装配集+双处同文；幂等键规范含工作单命名空间维度与接管重放口径）——提示词为行为约定，不构成接口面变更。管理台工作单视图为 hub 控制台人工操作面（六.五白名单入档），无 MCP 对应物（MCP 工具面即 agent 侧全部合法能力）。
 13. **P5.1 D1 派发建议同步声明（2026-10-26）**：`POST /api/v1/dispatch-suggest` 与 `swarmmind_dispatch_suggest` 同批交付，hub 模式专属。当前 D1 provider 为 llm-as-jev，使用配置的 LLM 服务；本地 provider 和群聊自动派发未实现。请求提供 goal/step_desc，候选由 hub 的在线且开放能力目录构造。未启用服务：公共 REST 返回 HTTP 200 + `suggestion:null` + `degraded:true`；无候选或模型判断均不适合：200 + `suggestion:null` + `degraded:false`，note 说明原因；已启用 provider 的请求/解析/超时/越权目标失败：200 + `suggestion:null` + `degraded:true`。仅请求体非法 400，鉴权失败 401；无建议不影响普通任务提交。上游原始错误只进入日志，响应返回概括类别。概率覆盖全部候选并归一化，缺失值按规则补齐，不代表已证明统计校准或实际成功率。密钥来源依次为配置、GLM_API_KEY 与 Prime HOME provider 配置。管理台采纳只回填目标选择，描述变化后建议失效；当前固定来源标签「本地决策模型」不能当作本地部署证明。真实模型终版逐场景复验待补录，详见 TESTPLAN-D1-jev。
 14. **版本可见同步声明（maturity-version-var，2026-10-27）**：MCP initialize 应答 `serverInfo.version` 由硬编码 `"0.1.1"` 改为二进制构建版本变量（Makefile `-X main.version` 注入 git describe，未注入为 `dev`），与 swarmmind-mcp `--version` 输出同源；协议版本 `protocolVersion` 与工具面零变化（serverInfo.version 为元数据语义修正，不构成破坏性变更，工具映射表不补行）。四件套 `--version`（打印 `<程序名> <版本号>` 后 exit 0）为进程自身元数据入口，非管理面 REST 能力，不触发 MCP 同步规则。
+15. **终态保留可见同步声明（maturity-retention-config，2026-10-27）**：终态保留可配（4.6/4.8）后保留生效值经 MCP 可见——`GET /api/v1/nodes` 应答增顶层 `terminal_retention_sec`（hub 终态任务保留生效秒数，读 `Core.TerminalRetention()`，与登录响应/账户视图同源同值；该端点仍受鉴权保护，未认证不可见口径不变），node 模式经既有 `GET /api/v1/local/status` 同名字段（node.yaml terminal_retention）。两状态类只读端点的 additive 字段扩展不新增工具：`swarmmind_nodes`（hub/node 两模式）输出各附保留人话行（「24 小时」/「不自动清理」，retentionHuman 与前端 retentionText 同词），本表 `swarmmind_nodes` 行已同步；进程内实测锁 cmd/swarmmind-mcp/retention_passthrough_test.go（假 hub 两形态+真 localapi 全装配各一条）。配置侧 ParseTerminalRetention 拒亚秒（最小粒度 1 秒）保证整秒字段无失真——亚秒值整除秒后为 0 会被误读成「不自动清理」而实际照删（R2 必修①）。
 
 ## 七、验证标准（DoD 十一条）
 

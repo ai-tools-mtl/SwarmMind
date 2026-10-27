@@ -119,6 +119,11 @@ type localStatus struct {
 	// 正常构造恒 true；判定随装配态而非模式硬编码——控制台据此决定是否渲染
 	// 「通知」区块）。
 	NotifyAvailable bool `json:"notify_available"`
+	// TerminalRetentionSec 账本终态保留时长生效值（秒；node.yaml terminal_retention
+	// 经 protocol.ParseTerminalRetention 解析，service.TerminalRetention() 读侧，
+	// maturity-retention-config）。0 = 永不自动清理（terminal_retention: 0s 显式
+	// 语义）；默认 86400（24h）。Service 未装配（旧测试构造方）回落协议默认。
+	TerminalRetentionSec int `json:"terminal_retention_sec"`
 	// Ledger 账本三态计数（accepted/started/finished，SPEC 4.8）。
 	Ledger map[string]int `json:"ledger"`
 }
@@ -134,6 +139,11 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 		Epoch:           s.epoch(),
 		NotifyAvailable: s.cfg.Notify != nil,
 		Ledger:          s.ledgerCounts(),
+	}
+	if s.cfg.Service != nil {
+		st.TerminalRetentionSec = int(s.cfg.Service.TerminalRetention() / time.Second)
+	} else {
+		st.TerminalRetentionSec = int(protocol.TerminalRetention / time.Second) // 未装配回落默认（旧构造方不感知）
 	}
 	if s.cfg.LastRegisteredAt != nil {
 		if at, ok := s.cfg.LastRegisteredAt(); ok {

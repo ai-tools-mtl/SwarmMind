@@ -7,6 +7,7 @@ nodes:                            # 每台节点一行：node_id → 接入令�
   win-box: token-for-win-box
 admin_token: ""                   # 管理台登录令牌（浏览器登录与 swarmmindctl --token 用）；留空则启动时自动生成存 data_dir/admin_token
 data_dir: data
+terminal_retention: 24h           # 终态任务保留时长（30m/24h/720h 等，须带单位，最小粒度 1 秒——不足 1 秒拒绝启动）。到期由 hub 自动清理终态任务记录；0s = 永不自动清理（裸写数字 0 或字符串 "0" 同样表示永不自动清理，yaml 标量转换）。注意：保留期同时是幂等去重窗口——记录被清理后同一幂等键重提会作为新任务执行（不再返回原任务）
 notify:                           # 【旧版兼容入口】任务终态 IM 通知——日常配置请用管理台「设置 → 通知」（可视化多渠道：飞书/邮件/webhook/站内，运行时可改，凭证存 data_dir/notify_channels.json）
   webhook_url: ""                 # 本段仅在「启动时渠道存储为空」被一次性导入为一个通知渠道（幂等，只导一次）；导入后本段不再生效，改这里无效
   format: raw                     # raw→导入为通用 webhook 渠道（结构化 JSON）；feishu→导入为飞书机器人渠道（简短结果摘要）

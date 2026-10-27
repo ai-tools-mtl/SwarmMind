@@ -52,6 +52,11 @@ type nodeConfig struct {
 	DataDir       string                  `yaml:"data_dir"`
 	BaseEnv       map[string]string       `yaml:"base_env"`
 	Agents        []localapi.AgentProfile `yaml:"agents"`
+	// TerminalRetention 账本 result_acked 条目保留时长（maturity-retention-config）：
+	// 字符串 duration（30m/24h/720h），经 protocol.ParseTerminalRetention 解析；
+	// 空 = 默认 24h；0s（含 yaml 裸写数字 0，标量转换）= 永不自动清理；正值最小
+	// 粒度 1 秒（亚秒拒绝启动）；保留期即幂等去重窗口（SPEC 4.5/4.6）。
+	TerminalRetention string `yaml:"terminal_retention"`
 }
 
 // version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
@@ -154,6 +159,14 @@ func run(cfgPath, dataDirOverride string) error {
 	if err := localapi.ValidateListen(cfg.LocalListen); err != nil {
 		return err // node 不监听任何公网端口（SPEC 二，代码强制）
 	}
+	// 账本终态保留（maturity-retention-config）：非法值拒绝启动并给人话报错
+	//（对齐 insecure_loopback 的严格风格，不静默回退掩盖笔误）；setup 模式
+	// 无配置走默认（空串回落 24h），向导落盘后可配。
+	retention, err := protocol.ParseTerminalRetention(cfg.TerminalRetention)
+	if err != nil {
+		return err
+	}
+	log.Printf("[node] 终态保留 terminal_retention=%s（默认 24h；0s=永不自动清理；保留期即幂等去重窗口）", retention)
 	// 身份与连接必填项按形态校验：setup 无配置不校验（向导落盘后重启获得身份）；
 	// standalone 仅 node_id（hub_url/register_token 不连 hub 即无意义）；组网三元组齐全。
 	switch mode {
@@ -311,6 +324,9 @@ func run(cfgPath, dataDirOverride string) error {
 		// 跟发），standalone 直连（本机通知即唯一通知）；nil dispatcher 仍须返回
 		// 真 nil 接口（typed-nil 会使 Notifier==nil 判空失效，见 serviceNotifier）。
 		Notifier: serviceNotifier(disp, mode, cfg.DataDir),
+		// 账本终态保留（maturity-retention-config）：ParseTerminalRetention 解析值
+		// 注入，service.cleanupLoop 周期清 result_acked 超期条目（SPEC 4.6/4.8）。
+		TerminalRetention: &retention,
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；

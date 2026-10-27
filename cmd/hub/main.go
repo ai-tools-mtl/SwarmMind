@@ -41,6 +41,11 @@ type hubConfig struct {
 	Nodes      map[string]string `yaml:"nodes"`       // node_id → register_token
 	AdminToken string            `yaml:"admin_token"` // 管理面登录令牌（空则生成存 data_dir/admin_token）
 	DataDir    string            `yaml:"data_dir"`    // 默认 data
+	// TerminalRetention 终态任务保留时长（maturity-retention-config）：字符串
+	// duration（30m/24h/720h），经 protocol.ParseTerminalRetention 解析；空 =
+	// 默认 24h；0s（含 yaml 裸写数字 0，标量转换）= 永不自动清理；正值最小粒度
+	// 1 秒（亚秒拒绝启动）；保留期即幂等去重窗口（SPEC 4.5/4.6）。
+	TerminalRetention string `yaml:"terminal_retention"`
 	Notify     struct {
 		WebhookURL string `yaml:"webhook_url"` // 旧版任务终态通知 webhook（兼容入口：启动时一次性导入为通知渠道）
 		Format     string `yaml:"format"`      // raw（默认）| feishu（导入时映射渠道类型）
@@ -97,6 +102,14 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	if cfg.APIListen == "" {
 		cfg.APIListen = "127.0.0.1:8444"
 	}
+	// 终态保留（maturity-retention-config）：非法值拒绝启动并给人话报错（对齐
+	// insecure_loopback 的严格风格，不静默回退掩盖笔误）。生效值随 Core 注入并
+	// 经管理面登录响应/账户视图下发 terminal_retention_sec（前端保留期文案数据源）。
+	retention, err := protocol.ParseTerminalRetention(cfg.TerminalRetention)
+	if err != nil {
+		return err
+	}
+	log.Printf("[hub] 终态保留 terminal_retention=%s（默认 24h；0s=永不自动清理；保留期即幂等去重窗口）", retention)
 
 	// 管理面（api_listen）：Loop 5 已实现登录制（admin_token），绑定地址放开为可配置；
 	// 非回环绑定时打印明文 HTTP 警告（P3 收尾项：反代 TLS）。完全无 token 的配置仍
@@ -185,6 +198,10 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		Store:     st,
 		Transport: mgr,
 		Notifier:  notifier,
+		// 终态保留（maturity-retention-config）：hub.yaml terminal_retention 解析值
+		// 注入 Sweep 第 5 阶段（0 = 永不自动清理）；nil 字段会回落协议默认，
+		// 这里恒传配置生效值（hub.yaml 唯一真相）。
+		TerminalRetention: &retention,
 		// 群聊闭环（GROUP-RFC）：任务终态自动回流引用它的群（幂等由群存储的
 		// 已回流集合保证）；失败只记日志，不影响任务状态机。
 		OnTaskTerminal: func(t protocol.Task) {

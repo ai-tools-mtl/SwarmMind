@@ -426,9 +426,11 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		"诊断日志（stdout / stderr 尾部）",
 		"最多保留各 64KiB。",
 		// P0 事实纠错（2026-10-26）：归档期限文案按端上事实分叉——hub 终态快照真清理
-		// （core/sweep.go TerminalRetention=24h），node CleanupAcked 未接入运行循环（SPEC 4.8）
-		// 不自动清理。原双端同文句「任务已归档前保留 24 小时。」退役，两端各自断言：
-		// hub 新句见下方 hub 独有断言组；node 新句见下方 node 断言组。
+		// （core/sweep.go），node 账本清理原未接线；maturity-retention-config 起 node
+		// CleanupAcked 已接入运行循环（service.cleanupLoop，node.yaml terminal_retention），
+		// 两端均真实清理、文案各自断言：hub 数据驱动模板（retentionClause，见下方 hub
+		// 断言组）；node 如实静态句（见下方 node 断言组）。原双端同文句「任务已归档前
+		// 保留 24 小时。」维持退役。
 		"查看全部任务",
 		"结果还没确认——这个任务结果拿不准，等你核对。",
 		"该任务没有单独的文本答复，输出内容见下方诊断日志与产物。",
@@ -480,7 +482,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 		`<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>`, // D7 折叠+沉底灰块
 		"taskErrorNotice(r, needs)", // D5 hub 接入统一错误条
 		`${badge(t.status)}</h2></div>`, // D2 头部同构：badge 入 agent@node 行
-		"终态任务记录保留 24 小时，到期自动清理。", // P0 事实纠错：hub 清理真实存在（core/sweep.go）
+		"终态任务记录${retentionClause()}${retentionDisabled() ? '。' : '，到期自动清理。'}", // P0 事实纠错+retention-config：hub 清理真实存在且数据驱动（terminal_retention_sec，禁止回退写死 24h）
 	} {
 		if !strings.Contains(hubJSStr, want) {
 			t.Errorf("hub app.js 应含 %q", want)
@@ -491,7 +493,7 @@ func TestWebDrawerUnifiedCopyStructure(t *testing.T) {
 	for _, want := range []string{
 		"taskErrorNotice(res, t.status === 'needs_review')", // D5 node 接入统一错误条
 		`role="dialog" aria-modal="true" aria-labelledby="drawer-title"`, // D1 对齐 hub 壳层基线
-		"本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}", // 端上事实分叉（见 P0 注），不得回退 hub 清理口径
+		"本机账本保留此次记录（已确认结果超保留期自动清理：默认 24 小时，node.yaml terminal_retention 可配；0s=永不清理）。${button('查看全部任务 →', 'close-drawer', 'link')}", // 端上事实分叉（见 P0 注+retention-config）：CleanupAcked 已接线，旧「当前无自动清理」失实退役，不得回退
 		"button('回表单重新派单', 'reopen-form', 'link')", // node 独有白名单动作保留
 	} {
 		if !strings.Contains(nodeJS, want) {

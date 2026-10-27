@@ -137,7 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
 	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
-	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest)) // 派发建议（P5.1 D1）
+	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest))            // 派发建议（P5.1 D1）
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）
 	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))                               // 指定/撤销（agent_name 空 = 撤销）
 	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                          // 群聊 MVP（GROUP-RFC 六）
@@ -197,7 +197,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // 回环明文 HTTP：无 Secure 属性（部署随 TLS 一起设计）
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version, "terminal_retention_sec": s.terminalRetentionSec()})
+}
+
+// terminalRetentionSec 终态保留生效值（秒；maturity-retention-config）：读
+// Core.TerminalRetention()——hub.yaml terminal_retention 是唯一真相，Sweep
+// 清理行为与暴露值同源。随登录响应/登录态账户视图下发（与 server_version
+// 同面），前端保留期文案数据源；未认证分支不返回（保留期不对未认证方披露，
+// 同 server_version 口径）。Core 未装配（旧构造方/测试）回落协议默认。
+func (s *Server) terminalRetentionSec() int {
+	if s.cfg.Core == nil {
+		return int(protocol.TerminalRetention / time.Second)
+	}
+	return int(s.cfg.Core.TerminalRetention() / time.Second)
 }
 
 // authPrincipalKey 请求上下文键：auth 中间件解析出的服务端验证主体。
@@ -267,7 +279,7 @@ func newSessionID() (string, error) {
 // ---------- 五端点（SPEC 六表格） ----------
 
 // hubSubmitRequest POST /api/v1/tasks 请求体：TaskSubmitRequest 全字段平铺解码
-//（含 group_ref——管理面扩展，GROUP-RFC 转任务闭环；协议帧 task_submit 不携带，
+// （含 group_ref——管理面扩展，GROUP-RFC 转任务闭环；协议帧 task_submit 不携带，
 // node 间提交恒空。字段已在 protocol.TaskSubmitRequest 上，嵌入后直接平铺）。
 type hubSubmitRequest struct {
 	protocol.TaskSubmitRequest
@@ -423,9 +435,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"agents": s.cfg.Core.ListAgents()})
 }
 
-// handleNodes GET /api/v1/nodes：节点总览。
+// handleNodes GET /api/v1/nodes：节点总览。应答附顶层 terminal_retention_sec
+// （终态保留生效秒数，terminalRetentionSec() 同源——Sweep 清理行为与暴露值一致；
+// maturity-retention-config R2 必修④：MCP swarmmind_nodes 透传数据源，与登录
+// 响应/账户视图同值；六.六规则 15）。
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"nodes": s.cfg.Core.ListNodes()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"nodes":                  s.cfg.Core.ListNodes(),
+		"terminal_retention_sec": s.terminalRetentionSec(),
+	})
 }
 
 // ---------- P3 增补端点（SPEC 六.五） ----------

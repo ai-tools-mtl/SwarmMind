@@ -1788,7 +1788,7 @@ function taskDrawerZones(t) {
     artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
     timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
     next: TERMINAL.has(t.status) && t.status !== 'needs_review'
-      ? `<div class="notice">本机账本保留此次记录（当前无自动清理）。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
+      ? `<div class="notice">本机账本保留此次记录（已确认结果超保留期自动清理：默认 24 小时，node.yaml terminal_retention 可配；0s=永不清理）。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
       : '',
   };
 }

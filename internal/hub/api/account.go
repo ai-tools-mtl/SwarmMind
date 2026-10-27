@@ -314,9 +314,9 @@ func hexVal(c byte) (byte, bool) {
 
 // handleAccountStatus GET /api/v1/auth/account：账户状态。
 // 未登录（无有效会话）：仅返回 {initialized}（登录页判断用，不泄漏用户名，
-// 也不返回 server_version——版本号不对未认证方披露）；
-// 已登录：返回完整账户信息 + server_version（控制台页脚数据源，会话恢复时
-// 前端经此端点取版本）。
+// 也不返回 server_version / terminal_retention_sec——版本号与保留期不对未认证方披露）；
+// 已登录：返回完整账户信息 + server_version + terminal_retention_sec（控制台
+// 页脚与保留期文案数据源，会话恢复时前端经此端点取值）。
 func (s *Server) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 		s.mu.Lock()
@@ -325,6 +325,7 @@ func (s *Server) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
 		if ok && time.Now().UTC().Before(exp) {
 			v := s.accounts.view()
 			v["server_version"] = s.cfg.Version
+			v["terminal_retention_sec"] = s.terminalRetentionSec() // 登录态账户视图同面下发（会话恢复时前端经此取保留期，maturity-retention-config）
 			writeJSON(w, http.StatusOK, v)
 			return
 		}
@@ -397,7 +398,7 @@ func (s *Server) handleLoginPassword(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL / time.Second),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version, "terminal_retention_sec": s.terminalRetentionSec()})
 }
 
 // handleAccountUpdate POST /api/v1/auth/account/update：改用户名/改密码（密码验证）。

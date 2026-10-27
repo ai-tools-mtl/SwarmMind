@@ -55,6 +55,12 @@ type Config struct {
 	// Notifier 任务终态通知钩子（standalone 通知补盲区，notify.go；可选依赖，
 	// nil=禁用——networked 模式通知归 hub，装配方在 standalone 之外不传）。
 	Notifier TerminalNotifier
+	// TerminalRetention 账本 result_acked 条目保留时长（maturity-retention-config，
+	// node.yaml terminal_retention 经 protocol.ParseTerminalRetention 解析注入）：
+	// nil = protocol.TerminalRetention 默认（既有构造方零改动行为不变）；0 = 永不
+	// 自动清理（terminal_retention: 0s）；清理语义红线：仅清 result_acked 条目
+	// （未 ack 不清——结果重发链路与去重证据依赖账本，SPEC 4.5/4.6/4.8）。
+	TerminalRetention *time.Duration
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -88,6 +94,11 @@ type Service struct {
 	muExec  sync.RWMutex
 	runners map[string]Runner
 	roots   map[string]string
+
+	// terminalRetention 账本终态保留时长（New 时从 cfg.TerminalRetention 解析落定：
+	// nil → protocol.TerminalRetention；0 = 永不清理）。TerminalRetention() 读侧，
+	// localapi status 端点据此下发生效值。
+	terminalRetention time.Duration
 
 	// remoteRes 跨机取回解析器（P4④/SPEC 4.12；nil = 禁用——standalone/setup
 	// 无 hub。EnableRemoteInputs 装配期一次性置位，与执行期读取同 muExec 互斥，
@@ -126,20 +137,25 @@ func New(cfg Config, tr transport.Transport) *Service {
 	if cfg.InputPrepareTimeout <= 0 {
 		cfg.InputPrepareTimeout = inputs.DefaultTimeout
 	}
+	retention := protocol.TerminalRetention
+	if cfg.TerminalRetention != nil {
+		retention = *cfg.TerminalRetention
+	}
 	ctx, stop := context.WithCancel(context.Background())
 	s := &Service{
-		cfg:         cfg,
-		tr:          tr,
-		sem:         make(chan struct{}, cfg.Concurrency),
-		ctx:         ctx,
-		stop:        stop,
-		resendKick:  make(chan struct{}, 1),
-		cancels:     make(map[string]*cancelEntry),
-		remoteWaits: make(map[string]chan *protocol.Envelope),
-		wsByAgent:   make(map[string]string, len(cfg.ArtifactRoots)),
-		wsLocks:     newWsMutex(),
-		runners:     cfg.Runners,
-		roots:       cfg.ArtifactRoots,
+		cfg:               cfg,
+		tr:                tr,
+		sem:               make(chan struct{}, cfg.Concurrency),
+		ctx:               ctx,
+		stop:              stop,
+		resendKick:        make(chan struct{}, 1),
+		terminalRetention: retention,
+		cancels:           make(map[string]*cancelEntry),
+		remoteWaits:       make(map[string]chan *protocol.Envelope),
+		wsByAgent:         make(map[string]string, len(cfg.ArtifactRoots)),
+		wsLocks:           newWsMutex(),
+		runners:           cfg.Runners,
+		roots:             cfg.ArtifactRoots,
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -168,9 +184,10 @@ func New(cfg Config, tr transport.Transport) *Service {
 		}
 	}
 	tr.Subscribe(s.HandleFrame)
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.resendWorker()
 	go s.resendLoop()
+	go s.cleanupLoop()
 	return s
 }
 
@@ -595,6 +612,44 @@ func (s *Service) resendLoop() {
 			return
 		case <-tk.C:
 			s.ResendPendingAsync()
+		}
+	}
+}
+
+// TerminalRetention 账本终态保留时长生效值（New 时落定；0 = 永不自动清理）。
+// 本机 status 端点据此下发 terminal_retention_sec（node.yaml 是唯一真相，清理
+// 行为与暴露值同源）。
+func (s *Service) TerminalRetention() time.Duration { return s.terminalRetention }
+
+// cleanupInterval 账本终态清理周期（调度节拍，非协议常量）：正确性只依赖
+// terminal_retention 配置值，节拍只影响清理时延；1 分钟固定，不做配置面
+//（maturity-retention-config 任务书纪律：避免配置膨胀）。var 仅为测试缩短
+// 节拍（真实短等待锁接线，不引入配置面）。
+var cleanupInterval = time.Minute
+
+// cleanupLoop 账本 result_acked 条目周期清理（SPEC 4.8 CleanupAcked 接线，
+// maturity-retention-config——消除「清理函数从未接入运行循环」已知差异）：
+// 固定 1 分钟节拍调用 ledger.CleanupAcked。清理语义红线不动：仅清 result_acked
+// 且超保留期的条目（未 ack 不清——结果重发链路与去重证据依赖账本，SPEC 4.5）；
+// retention=0（terminal_retention: 0s）永不清理；无超期条目时 CleanupAcked
+// 零写盘早退（周期到点常态零 IO）。
+func (s *Service) cleanupLoop() {
+	defer s.wg.Done()
+	tk := time.NewTicker(cleanupInterval)
+	defer tk.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-tk.C:
+			n, err := s.cfg.Ledger.CleanupAcked(protocol.NowUTC(), s.terminalRetention)
+			if err != nil {
+				log.Printf("[node] 账本终态清理失败: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("[node] 账本终态清理：已确认结果条目 %d 条（超保留期 %s）", n, s.terminalRetention)
+			}
 		}
 	}
 }

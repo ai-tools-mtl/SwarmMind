@@ -35,7 +35,8 @@ var (
 )
 
 // sweepInterval 后台清扫周期。调度节拍（非协议常量）：正确性只依赖
-// protocol.OfferAckTimeout / TaskRetention / TerminalRetention，节拍只影响时延。
+// protocol.OfferAckTimeout / TaskRetention / 终态保留时长（cfg.TerminalRetention，
+// 默认 protocol.TerminalRetention），节拍只影响时延。
 const sweepInterval = time.Second
 
 // SubmitAck 提交确认（HTTP 返回值；node 会话提交方另收 submit_ack 帧）。
@@ -60,6 +61,11 @@ type Config struct {
 	Transport transport.Transport
 	// Now 时钟源，nil = protocol.NowUTC（测试注入假时钟）。
 	Now func() time.Time
+	// TerminalRetention 终态保留时长（Sweep 第 5 阶段终态清理窗口，
+	// maturity-retention-config）：nil = protocol.TerminalRetention 默认（既有
+	// 构造方零改动行为不变）；0 = 永不自动清理（hub.yaml terminal_retention: 0s）；
+	// 正值 = 配置时长。保留期同时是幂等去重窗口（SPEC 4.5 idem 与任务同生命周期）。
+	TerminalRetention *time.Duration
 	// RelayFetchTimeout node 发起的产物取回中继应答预算（P4④跨机取回；0 =
 	// relayFetchTimeout 30s。测试注入短预算）。
 	RelayFetchTimeout time.Duration
@@ -84,6 +90,10 @@ type Core struct {
 	now        func() time.Time
 	onTerminal func(protocol.Task)
 	notifier   TerminalNotifier
+
+	// terminalRetention 终态保留时长（New 时从 cfg.TerminalRetention 解析落定：
+	// nil → protocol.TerminalRetention；0 = 永不清理）。TerminalRetention() 读侧。
+	terminalRetention time.Duration
 
 	// 在线会话表（会话层经 SetOnline 维护；V0 内存 transport 下注册即在线）。
 	mu     sync.Mutex
@@ -124,18 +134,23 @@ func New(cfg Config) (*Core, error) {
 	if now == nil {
 		now = protocol.NowUTC
 	}
+	retention := protocol.TerminalRetention
+	if cfg.TerminalRetention != nil {
+		retention = *cfg.TerminalRetention
+	}
 	c := &Core{
-		st:         cfg.Store,
-		tr:         cfg.Transport,
-		now:        now,
-		onTerminal: cfg.OnTaskTerminal,
-		notifier:   cfg.Notifier,
-		online:     make(map[string]bool),
-		sizes:      make(map[string]int64),
-		fetches:    make(map[string]*fetchWaiter),
-		relayFetch: cfg.RelayFetchTimeout,
-		sweepStop:  make(chan struct{}),
-		sweepDone:  make(chan struct{}),
+		st:                cfg.Store,
+		tr:                cfg.Transport,
+		now:               now,
+		onTerminal:        cfg.OnTaskTerminal,
+		notifier:          cfg.Notifier,
+		terminalRetention: retention,
+		online:            make(map[string]bool),
+		sizes:             make(map[string]int64),
+		fetches:           make(map[string]*fetchWaiter),
+		relayFetch:        cfg.RelayFetchTimeout,
+		sweepStop:         make(chan struct{}),
+		sweepDone:         make(chan struct{}),
 	}
 	for _, t := range cfg.Store.View().Tasks {
 		tt := t
@@ -196,6 +211,11 @@ func (c *Core) sweepLoop(interval time.Duration) {
 		}
 	}
 }
+
+// TerminalRetention 终态保留时长生效值（New 时落定；0 = 永不自动清理）。管理面
+// 经此向登录响应/账户视图下发 terminal_retention_sec（前端保留期文案数据源，
+// 与 server_version 同面下发）；hub.yaml 是唯一真相，Core 行为与暴露值同源。
+func (c *Core) TerminalRetention() time.Duration { return c.terminalRetention }
 
 // RegisterNode 登记节点能力表（会话层 register 事务的等价物；V0 由装配方直接
 // 调用）。随快照持久化，hub 重启后能力表恢复（DoD 7）。epoch 计数归会话层，
@@ -326,7 +346,7 @@ func (c *Core) sizeOf(taskID string) int64 {
 	return c.sizes[taskID]
 }
 
-// totalBytes 存储全局任务体字节和（含终态 24h 保留，SPEC 4.6）。
+// totalBytes 存储全局任务体字节和（含终态保留——默认 24h，terminal_retention 可配，SPEC 4.6）。
 func (c *Core) totalBytes() int64 {
 	c.szMu.Lock()
 	defer c.szMu.Unlock()

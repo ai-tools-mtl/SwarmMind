@@ -21,8 +21,10 @@ import (
 //  4. 依赖门控兜底复评（P4.3/SPEC 4.12）：blocked 的 submitted 任务全量复评——
 //     防御终态事务处的事件丢失（理论上单事务原子复评无丢失窗口，兜底未知路径）；
 //     解除阻塞即随本轮 dispatch；
-//  5. 终态清理：终态超 TerminalRetention（24h）从快照删除（idem 索引派生自任务，
-//     同步失效——SPEC 4.5「与任务同生命周期清理」）；
+//  5. 终态清理：终态超 terminal_retention（c.terminalRetention，默认 24h 可配；
+//     0 = 永不自动清理）从快照删除（idem 索引派生自任务，同步失效——SPEC 4.5
+//     「与任务同生命周期清理」；清理后同键重提返回新任务属设计语义：保留期即
+//     幂等去重窗口）；
 //  6. 终态 Work 清理（P5 W3/RFC 六.3）：done/abandoned 过 ExpiresAt（关闭+30 天）
 //     整单删除并同步清除建单幂等指纹映射；未完成 Work 不清理。
 //
@@ -116,9 +118,10 @@ func (c *Core) Sweep() {
 						reDispatch[d.TargetNode] = true
 					}
 				}
-			case t.Status.Terminal() &&
-				now.Sub(t.UpdatedAt) >= protocol.TerminalRetention:
-				// 终态保留 24h 后从快照清理（idem 派生索引同步失效）
+			case t.Status.Terminal() && c.terminalRetention > 0 &&
+				now.Sub(t.UpdatedAt) >= c.terminalRetention:
+				// 终态超保留期从快照清理（idem 派生索引同步失效）；0 = 永不清理，
+				// 本 case 恒不命中（terminal_retention: 0s 显式语义）
 				delete(st.Tasks, id)
 				releaseWorkdirLock(st, t.TargetNode, id) // 防御（不变量下不命中）
 				mailbox.Remove(st, t.TargetNode, id)     // 防御（不变量下不命中）

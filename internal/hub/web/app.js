@@ -598,6 +598,7 @@ const S = {
   authed: false,
   expAt: 0,                    // 登录应答 expires_in 推算；服务端 401 为权威兜底
   serverVersion: '',           // 服务端版本（登录响应/登录态账户视图 server_version；页脚数据源，TASK-maturity-version-var）
+  retentionSec: null,          // 终态保留秒数（登录响应/登录态账户视图 terminal_retention_sec；保留期文案数据源，TASK-maturity-retention-config；null=未取到呈现默认 24h）
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
   works: [],                   // 工作单列表摘要（P5 W3，hub 编排面）
@@ -982,6 +983,32 @@ function setServerVersion(v) {
   if (el) { el.textContent = 'v' + v; el.hidden = false; }
 }
 
+/* ---------- 终态保留文案（TASK-maturity-retention-config） ----------
+ * retentionText / retentionClause / retentionDisabled：终态保留时长的文案层，
+ * 值来自管理面 API terminal_retention_sec——本 hub 配置值如实呈现（hub.yaml
+ * terminal_retention 是唯一真相，禁止硬编码回 24h 宣称协议常量）。取值前/取值
+ * 失败回落默认呈现（embed 资产与 hub 同二进制下发，正常路径登录响应必含值；
+ * 会话恢复路径 boot 内 await 补取后才渲染页面）。0 = 不自动清理（hub.yaml
+ * terminal_retention: 0s 显式语义，文案不含「保留」字样）。 */
+function retentionText() {
+  const s = S.retentionSec;
+  if (s === null || s === undefined || !(s >= 0)) return '24 小时';   // 未取到：按默认 24h 呈现
+  if (s === 0) return '不自动清理';
+  if (s % 3600 === 0) return (s / 3600) + ' 小时';
+  if (s % 60 === 0) return (s / 60) + ' 分钟';
+  return s + ' 秒';
+}
+/* retentionClause 句中形态：正值「保留 X」；0「不自动清理」（语义自足，不带「保留」）。
+ * 用法：「终态任务${retentionClause()}」→ 保留 24 小时 / 不自动清理。 */
+function retentionClause() {
+  return S.retentionSec === 0 ? '不自动清理' : `保留 ${retentionText()}`;
+}
+function retentionDisabled() { return S.retentionSec === 0; }
+function setRetentionSec(v) {
+  if (v === null || v === undefined || !(v >= 0)) return;   // 非法/缺失不落态，保持既有呈现
+  S.retentionSec = v;
+}
+
 /* ---------- 通用小件 ---------- */
 function button(label, act, cls = '', extra = '') { return `<button data-act="${act}" class="${cls}" ${extra}>${label}</button>`; }
 function head(title, desc, action = '') {
@@ -1086,6 +1113,7 @@ async function doPasswordLogin(u, p) {
       S.loginGen++;
       S.expAt = Date.now() + (d.expires_in || 86400) * 1000;
       setServerVersion(d.server_version);
+      setRetentionSec(d.terminal_retention_sec);
       S.C = freshControl();
       try { await loadAll(); } catch { }
       location.hash = '#/overview';
@@ -1112,6 +1140,7 @@ async function doLogin(form) {
       S.loginGen++;
       S.expAt = Date.now() + (r.data?.expires_in || 86400) * 1000;
       setServerVersion(r.data?.server_version);
+      setRetentionSec(r.data?.terminal_retention_sec);
       S.C = freshControl();
       S.f = blankFilters();
       try { await loadAll(); } catch { }
@@ -1610,7 +1639,7 @@ function tasksPage() {
     </div>
     </details>
     ${list.length ? taskTable(list) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`}
-    <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务保留 24 小时，重要结果请及时导出。</p></section>`;
+    <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务${retentionClause()}，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
   return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>目标机器</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
@@ -1644,7 +1673,7 @@ function openTask(id) {
         if (i >= 0) S.tasks[i] = r.data; else S.tasks.unshift(r.data);
         if (alive) { S.drawer = { id, task: r.data }; syncDrawer(true); }
       } else if (alive) {
-        toast('该任务已归档（终态保留 24 小时），无法查看详情');
+        toast(`该任务已归档（终态${retentionClause()}），无法查看详情`);
       }
     }).catch(() => { if (seqAtReq === S.drawerQuerySeq && !S.drawer && S.layerGen === genAtReq) toast('查询失败：网络异常，请稍后重试'); });
     return;
@@ -1849,7 +1878,7 @@ function drawerZones(t) {
     input: `<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre></details>`,
     timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
     review: reviewSection(t),
-    next: `${terminal(t.status) && !needs ? `<div class="notice">终态任务记录保留 24 小时，到期自动清理。${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
+    next: `${terminal(t.status) && !needs ? `<div class="notice">终态任务记录${retentionClause()}${retentionDisabled() ? '。' : '，到期自动清理。'}${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
     <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`,
   };
 }
@@ -2309,11 +2338,11 @@ function policyPage() {
   const rows = [
     ['离线暂存条数', '100 条 / node', '已提交（submitted）计数，投递即释放'],
     ['离线暂存字节预算', '8 MiB / node', '超额拒收：503 mailbox_full'],
-    ['Hub 任务存储', '256 MiB 全局', '含终态 24h 保留；超则 503 storage_full'],
+    ['Hub 任务存储', '256 MiB 全局', `含终态保留（${retentionText()}）；超则 503 storage_full`],
     ['单消息', '1 MiB', '完整 JSON 信封编码后计量'],
     ['投递窗口', '8 / node', '已投递+已接收（offered+acknowledged）的计数'],
     ['任务离线保留', '7 天', '到期未终态 → failed / expired'],
-    ['终态 / 产物保留', '24h', '产物自结果确认起计时'],
+    ['终态 / 产物保留', retentionText(), 'hub 终态记录自终态起算（hub.yaml terminal_retention）；node 账本条目自结果确认起算（node.yaml 同名配置）；产物文件留存取决于执行机，无自动回收'],
     ['执行并发', '默认 2 / node', '由 node 本机配置'],
     ['单产物原始大小', '≤ 640 KiB', '最多 8 条引用，SHA-256 校验'],
     ['协议版本', 'v1', '不兼容版本拒绝连接'],
@@ -2322,7 +2351,7 @@ function policyPage() {
     + `<div class="notice warn">高危变更走 hub 配置文件（hub.yaml）并重启；执行配置由各 node 本机主人管理，本页无写入操作。</div>
     <section class="card spaced"><table><thead><tr><th>策略</th><th>当前值</th><th>说明</th></tr></thead>
     <tbody>${rows.map(r => `<tr>${r.map(v => `<td>${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>
-    <p class="footer-note">低负载部署目标 ≤ 5 node；此页数据取自协议常量（SPEC 4.6），非运行时快照。</p></section>`;
+    <p class="footer-note">低负载部署目标 ≤ 5 node；此页数据取自协议常量（SPEC 4.6）与本 hub 配置生效值（终态 / 产物保留行，terminal_retention_sec），非运行时快照。</p></section>`;
 }
 
 /* ---------- 访问令牌（GitHub 式 PAT） ----------
@@ -3357,7 +3386,7 @@ const ACT = {
   revoke: b => openLayerPlain(`${modalHead('如何撤下机器 · ' + esc(b.dataset.node))}<div class="notice">当前版本没有在线撤下机器的能力；要让 <b>${esc(b.dataset.node)}</b> 退出协作网，请由管理员直接修改 hub 配置文件后重启 hub。</div><div class="enroll-rows spaced">
   <div class="enroll-row"><code>编辑 hub.yaml → 删除 nodes: 段中 ${esc(b.dataset.node)} 那一行</code><small>该机器的身份与令牌随之失效</small></div>
   <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后机器列表不再出现该机器</small></div>
-  </div><div class="notice warn">撤下前该机器在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态 24 小时）继续可查。</div><div class="actions spaced">${button('我知道了，返回机器列表', 'close', 'link')}</div>`, true),
+  </div><div class="notice warn">撤下前该机器在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态${retentionClause()}）继续可查。</div><div class="actions spaced">${button('我知道了，返回机器列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
   'prime-manage': () => {
     /* 指定智行管家弹层（2026-10-23 伦哥定案：网页配置取代改配置文件）：
@@ -3495,13 +3524,13 @@ const ACT = {
        * 以层世代判定归属，世代已变（关/换任务）只落快照，不重开层不顶替现会话 */
       if (S.drawer && S.drawer.id === r.data.id && S.layerGen === genAtReq) { S.drawer.task = r.data; syncDrawer(true); toast('详情已刷新'); }
     } else if (S.drawer?.id === id && S.layerGen === genAtReq) {
-      toast(r && r.code === 404 ? '该任务已归档（终态保留 24 小时）' : '刷新失败：' + (r ? errLine(r.data) : '网络异常'));
+      toast(r && r.code === 404 ? (retentionDisabled() ? '该任务已不在任务列表中' : `该任务已归档（终态${retentionClause()}）`) : '刷新失败：' + (r ? errLine(r.data) : '网络异常'));
     }
   },
   export: () => {
     const list = filteredTasks();
     exportJSON(list, 'swarmmind-tasks.json');
-    toast(`已导出 ${list.length} 条 · 终态保留 24h，请及时归档 —— 下一步：继续监管或核对`);
+    toast(`已导出 ${list.length} 条 · 终态${retentionClause()}${retentionDisabled() ? '' : '，请及时归档'} —— 下一步：继续监管或核对`);
   },
   'export-one': b => {
     const t = S.tasks.find(x => x.id === b.dataset.id) || S.drawer?.task;
@@ -3844,9 +3873,11 @@ async function init() {
     S.authed = true;
     S.loginGen++;
     /* 会话恢复（cookie 命中，未经登录响应）：经登录态账户视图补取 server_version
-     * 点亮页脚（fire-and-forget，失败静默——版本展示缺失不影响功能）。 */
-    fetch('/api/v1/auth/account', { credentials: 'same-origin' })
-      .then(r => r.json()).then(d => setServerVersion(d?.server_version)).catch(() => {});
+     * 与 terminal_retention_sec（await——保留期文案在 loadAll/route 渲染前必须
+     * 落态，fire-and-forget 会让首屏页面按默认 24h 渲染后不纠正；失败静默——
+     * 展示缺失不影响功能，回落默认呈现）。 */
+    await fetch('/api/v1/auth/account', { credentials: 'same-origin' })
+      .then(r => r.json()).then(d => { setServerVersion(d?.server_version); setRetentionSec(d?.terminal_retention_sec); }).catch(() => {});
     await loadAll();
     refreshInbox();   // 登录态恢复：立即拉一次站内未读（后续随 5s 轮询）
   } catch (e) { /* 未登录 / 网络故障：登录页兜底 */ }

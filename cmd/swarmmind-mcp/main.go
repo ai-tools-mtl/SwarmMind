@@ -64,7 +64,7 @@ var (
 
 // version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
 // 未注入时为 dev）。--version 与 initialize 应答 serverInfo.version 同源
-//（取代原硬编码 0.1.1，SPEC 六.六声明 14）。
+// （取代原硬编码 0.1.1，SPEC 六.六声明 14）。
 var version = "dev"
 
 // StartLux-Decision 云端决策配置（main 启动时读环境变量；startluxClient 为带
@@ -208,7 +208,7 @@ func (nodeBackend) initResult() map[string]any {
 // 为 hub 专属——决策服务在 hub 内嵌，node 无此能力，不静默降级）。
 func (nodeBackend) tools() []toolDef {
 	return []toolDef{
-		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机统筹、hub 连接与执行账本三态计数", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机统筹、hub 连接、执行账本三态计数与账本终态保留生效值", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看本机可用能力（agent 目录）：本机提供哪些可调用的 agent、各自描述与今日执行次数", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（接入即统筹：本机编排，需 SWARM_NODE_PRIME_TOKEN；返回 403 prime_required 即统筹未钦定或凭证不符）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
 			"agent":    toolStr("目标 agent 名（swarmmind_agents 可查；只能是本机 agent）"),
@@ -280,7 +280,7 @@ func toolWorkSteps(desc string) map[string]any {
 
 func tools() []toolDef {
 	return []toolDef{
-		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点：哪些机器在线、各有多少进行中任务", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点与 hub 终态保留生效值：哪些机器在线、各有多少进行中任务、终态任务记录保留多久", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群。传 work_ref+step_seq+prime_term 三参可把任务绑定到工作单步骤（断点接管的正式执行记录；同键重试不新增尝试）", InputSchema: toolObj(map[string]any{
 			"node_id":    toolStr("目标节点 ID（swarmmind_nodes 可查）"),
@@ -395,7 +395,8 @@ func toolNodes() (string, error) {
 		return "", fmt.Errorf("hub 返回 %d: %s", code, truncate(data))
 	}
 	var out struct {
-		Nodes []struct {
+		TerminalRetentionSec int `json:"terminal_retention_sec"` // hub 终态任务保留生效秒数（maturity-retention-config，六.六规则 15）
+		Nodes                []struct {
 			NodeID   string `json:"node_id"`
 			Online   bool   `json:"online"`
 			Epoch    int    `json:"epoch"`
@@ -403,6 +404,8 @@ func toolNodes() (string, error) {
 		} `json:"nodes"`
 	}
 	_ = json.Unmarshal(data, &out)
+	retention := fmt.Sprintf("hub 终态任务保留：%s（terminal_retention_sec=%d，0=永不自动清理）",
+		retentionHuman(out.TerminalRetentionSec), out.TerminalRetentionSec)
 	var b strings.Builder
 	for _, nd := range out.Nodes {
 		st := "离线"
@@ -412,9 +415,27 @@ func toolNodes() (string, error) {
 		fmt.Fprintf(&b, "%s：%s（进行中 %d）\n", nd.NodeID, st, nd.Inflight)
 	}
 	if b.Len() == 0 {
-		return "网内还没有节点接入。", nil
+		return "网内还没有节点接入。\n" + retention, nil
 	}
-	return b.String(), nil
+	return b.String() + retention, nil
+}
+
+// retentionHuman 终态保留秒数的人话形态（hub/node 两后端共用，maturity-retention-config）：
+// 0（含负值防御）=「不自动清理」；正值整除退阶（小时/分钟，无「天」档）——与前端
+// retentionText 同词（双端文案同源，internal/hub/web/app.js）；其余原样秒。配置侧
+// ParseTerminalRetention 已拒亚秒（最小粒度 1 秒），整秒口径无失真。
+func retentionHuman(sec int) string {
+	if sec <= 0 {
+		return "不自动清理"
+	}
+	switch {
+	case sec%3600 == 0:
+		return fmt.Sprintf("%d 小时", sec/3600)
+	case sec%60 == 0:
+		return fmt.Sprintf("%d 分钟", sec/60)
+	default:
+		return fmt.Sprintf("%d 秒", sec)
+	}
 }
 
 func toolAgents() (string, error) {
@@ -872,7 +893,9 @@ func taskStatus(taskID string) (string, bool, error) {
 		return "查询失败：" + err.Error(), false, nil
 	}
 	if code == 404 {
-		return "任务不存在或已归档（终态保留 24 小时）。", true, nil
+		// 保留期可配（maturity-retention-config）：MCP 为 hub 的 REST 客户端，
+		// 不缓存配置值——文案如实给出默认值与配置指路，不硬编码宣称唯一时长。
+		return "任务不存在或已归档（终态任务保留期满后清理；默认 24 小时，可经 hub.yaml terminal_retention 配置）。", true, nil
 	}
 	if code != 200 {
 		return fmt.Sprintf("hub 返回 %d: %s", code, truncate(data)), true, nil
@@ -1088,12 +1111,13 @@ func (b nodeBackend) toolNodes() (string, error) {
 		return "", nodeAPIErr(code, data)
 	}
 	var st struct {
-		NodeID     string         `json:"node_id"`
-		Mode       string         `json:"mode"`
-		PrimeAgent string         `json:"prime_agent"`
-		Online     bool           `json:"online"`
-		Epoch      int64          `json:"epoch"`
-		Ledger     map[string]int `json:"ledger"`
+		NodeID               string         `json:"node_id"`
+		Mode                 string         `json:"mode"`
+		PrimeAgent           string         `json:"prime_agent"`
+		Online               bool           `json:"online"`
+		Epoch                int64          `json:"epoch"`
+		TerminalRetentionSec int            `json:"terminal_retention_sec"` // 账本终态保留生效秒数（node.yaml terminal_retention，maturity-retention-config，六.六规则 15）
+		Ledger               map[string]int `json:"ledger"`
 	}
 	if err := json.Unmarshal(data, &st); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
@@ -1113,8 +1137,10 @@ func (b nodeBackend) toolNodes() (string, error) {
 	} else {
 		bld.WriteString("本机统筹：未钦定（编排接口未激活，submit 将 403 prime_required）\n")
 	}
-	fmt.Fprintf(&bld, "执行账本三态：accepted %d / started %d / finished %d",
+	fmt.Fprintf(&bld, "执行账本三态：accepted %d / started %d / finished %d\n",
 		st.Ledger["accepted"], st.Ledger["started"], st.Ledger["finished"])
+	fmt.Fprintf(&bld, "账本终态保留：%s（terminal_retention_sec=%d，0=永不自动清理）",
+		retentionHuman(st.TerminalRetentionSec), st.TerminalRetentionSec)
 	return bld.String(), nil
 }
 
@@ -1128,21 +1154,21 @@ func (b nodeBackend) toolAgents() (string, error) {
 	if code != 200 {
 		return "", nodeAPIErr(code, data)
 	}
-		var out struct {
-			NodeID string `json:"node_id"`
-			Agents []struct {
-				Name       string   `json:"name"`
-				Kind       string   `json:"kind"`
-				Command    string   `json:"command"`
-				TimeoutSec int      `json:"timeout_sec"`
-				AllowArgs  bool     `json:"allow_args"`
-				StdinToArg bool     `json:"stdin_to_arg"`
-				AllowEnv   []string `json:"allow_env"`
-				Desc       string   `json:"description"`
-				Exposed    bool     `json:"exposed"`
-				TodayTasks int      `json:"today_tasks"`
-			} `json:"agents"`
-		}
+	var out struct {
+		NodeID string `json:"node_id"`
+		Agents []struct {
+			Name       string   `json:"name"`
+			Kind       string   `json:"kind"`
+			Command    string   `json:"command"`
+			TimeoutSec int      `json:"timeout_sec"`
+			AllowArgs  bool     `json:"allow_args"`
+			StdinToArg bool     `json:"stdin_to_arg"`
+			AllowEnv   []string `json:"allow_env"`
+			Desc       string   `json:"description"`
+			Exposed    bool     `json:"exposed"`
+			TodayTasks int      `json:"today_tasks"`
+		} `json:"agents"`
+	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
 	}

@@ -6,6 +6,7 @@ local_listen: 127.0.0.1:8445            # 本机控制台/API，只监听回环�
 local_token: ""                         # 本机 API 管理令牌（Bearer）；留空则启动时自动生成存 data_dir/local_token（本机控制台登录用同一令牌）
 concurrency: 2
 data_dir: data
+terminal_retention: 24h                 # 本机账本「已确认结果」条目保留时长（30m/24h/720h 等，须带单位，最小粒度 1 秒——不足 1 秒拒绝启动）。到期自动清理；0s = 永不自动清理（裸写数字 0 或字符串 "0" 同样表示永不自动清理，yaml 标量转换）。注意：只清已确认（result_acked）条目，未确认结果的重发与审计记录不受影响
 # 注意：data_dir/agents-state.json 由本机控制台的 exposed 开关自动维护（覆盖下方
 # agents 的 exposed 基线，重启保持），勿手工编辑；改配置基线请改本文件并重启 node。
 base_env:                               # 任务执行环境基线：不继承 node 进程的环境变量

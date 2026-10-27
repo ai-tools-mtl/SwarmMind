@@ -239,7 +239,7 @@ func TestLedgerCleanupAcked(t *testing.T) {
 		t.Fatalf("MarkFinished: %v", err)
 	}
 
-	n, err := l.CleanupAcked(now)
+	n, err := l.CleanupAcked(now, protocol.TerminalRetention)
 	if err != nil {
 		t.Fatalf("CleanupAcked: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestLedgerCleanupAcked(t *testing.T) {
 	if err := l.MarkResultAcked("t-just-acked"); err != nil {
 		t.Fatalf("重复 Ack 应幂等成功: %v", err)
 	}
-	if n, err := l.CleanupAcked(now); err != nil || n != 1 {
+	if n, err := l.CleanupAcked(now, protocol.TerminalRetention); err != nil || n != 1 {
 		t.Errorf("重复 Ack 不得重置窗口：应清理 1 条，实际 n=%d err=%v", n, err)
 	}
 	if _, ok := l.Get("t-just-acked"); ok {
@@ -301,7 +301,7 @@ func TestLedgerAckRetentionAcrossRestart(t *testing.T) {
 	if !ok || !e.ResultAcked || !e.FirstAckedAt.Equal(now.Add(-25*time.Hour)) {
 		t.Fatalf("first_acked_at 应持久化且重启不重置: ok=%v %+v", ok, e)
 	}
-	n, err := l2.CleanupAcked(now)
+	n, err := l2.CleanupAcked(now, protocol.TerminalRetention)
 	if err != nil {
 		t.Fatalf("CleanupAcked: %v", err)
 	}
@@ -310,6 +310,71 @@ func TestLedgerAckRetentionAcrossRestart(t *testing.T) {
 	}
 	if _, ok := l2.Get("t-1"); ok {
 		t.Error("首次确认满 24h 的条目重启后应被清理")
+	}
+}
+
+// TestLedgerCleanupAckedRetentionConfig 保留期参数化（maturity-retention-config）：
+//   - retention=0（terminal_retention: 0s）永不清理——超期 acked 条目原样保留；
+//   - 短值（1m）：超窗 acked 条目清理，超窗未 acked 条目保留（去重红线：只清
+//     result_acked，未确认结果的重发链路依赖账本）；
+//   - 无超期条目零写盘：盘上 mtime 不变（周期到点常态零 IO）。
+func TestLedgerCleanupAckedRetentionConfig(t *testing.T) {
+	dir := t.TempDir()
+	l, _ := mustOpen(t, dir)
+	now := protocol.NowUTC()
+	old := now.Add(-2 * time.Hour)
+
+	// 超窗已 acked（retention=1m 应清理）
+	if err := l.Accept(sampleTask("t-acked-old", now.Add(time.Hour))); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := l.MarkFinished("t-acked-old", protocol.TaskResult{Status: protocol.ResultCompleted, FinishedAt: old}); err != nil {
+		t.Fatalf("MarkFinished: %v", err)
+	}
+	ackAt(t, l, "t-acked-old", old)
+	// 超窗未 acked（红线：任何保留期下都不得清理）
+	if err := l.Accept(sampleTask("t-unacked-old", now.Add(time.Hour))); err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if err := l.MarkFinished("t-unacked-old", protocol.TaskResult{Status: protocol.ResultFailed, FinishedAt: old}); err != nil {
+		t.Fatalf("MarkFinished: %v", err)
+	}
+
+	// 0 = 永不清理：超窗 acked 条目原样保留
+	if n, err := l.CleanupAcked(now, 0); err != nil || n != 0 {
+		t.Fatalf("retention=0 应零清理: n=%d err=%v", n, err)
+	}
+	if _, ok := l.Get("t-acked-old"); !ok {
+		t.Error("retention=0 时超窗 acked 条目不应被清理（永不自动清理语义）")
+	}
+
+	// 短值 1m：超窗 acked 清理、超窗未 acked 保留
+	if n, err := l.CleanupAcked(now, time.Minute); err != nil || n != 1 {
+		t.Fatalf("retention=1m 应清理 1 条: n=%d err=%v", n, err)
+	}
+	if _, ok := l.Get("t-acked-old"); ok {
+		t.Error("retention=1m 超窗 acked 条目应被清理")
+	}
+	if _, ok := l.Get("t-unacked-old"); !ok {
+		t.Error("超窗未 acked 条目不得清理（去重红线：只清 result_acked）")
+	}
+
+	// 零写盘：无超期条目时周期调用不落盘（ledger.json mtime 不变）
+	ledgerPath := filepath.Join(dir, ledgerFileName)
+	before, err := os.Stat(ledgerPath)
+	if err != nil {
+		t.Fatalf("stat ledger: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond) // 保证 mtime 分辨率可辨
+	if n, err := l.CleanupAcked(now, time.Minute); err != nil || n != 0 {
+		t.Fatalf("无超期条目应零清理: n=%d err=%v", n, err)
+	}
+	after, err := os.Stat(ledgerPath)
+	if err != nil {
+		t.Fatalf("stat ledger: %v", err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Error("无超期条目时 CleanupAcked 不应落盘（零写盘早退）")
 	}
 }
 

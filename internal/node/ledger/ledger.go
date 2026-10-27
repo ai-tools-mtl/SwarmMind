@@ -104,8 +104,9 @@ type Entry struct {
 	// ResultAcked hub 已确认终态持久化（收到 result_ack 置位）。local 任务落终态
 	// 即自确认（结果消费方就是本机账本，落盘即送达；见 MarkFinished）。
 	ResultAcked bool `json:"result_acked"`
-	// FirstAckedAt 首次收到 result_ack 的时刻（UTC）。仅在未 acked→acked 迁移时写入一次，
-	// 重复 Ack 不更新：终态保留 24h 从首次确认起算，重复确认不重置窗口（SPEC 4.6）。
+// FirstAckedAt 首次收到 result_ack 的时刻（UTC）。仅在未 acked→acked 迁移时写入一次，
+// 重复 Ack 不更新：终态保留（默认 24h，terminal_retention 可配）从首次确认起算，
+// 重复确认不重置窗口（SPEC 4.6）。
 	FirstAckedAt time.Time `json:"first_acked_at"`
 	// Closed 重传终止标记（SPEC 4.5）：task_result 被 hub 拒收（result_conflict /
 	// expired 终态拒绝）后置位并持久化，停止重发；记录保留作冲突审计，不删除、不参与清理。
@@ -389,7 +390,8 @@ func (l *Ledger) MarkStarted(taskID string) error {
 //
 // local 来源条目落终态即自确认（ResultAcked=true，方案 3.2）：结果消费方就是
 // 本机账本，落盘即送达——不经 hub 确认，天然退出重发队列（切换组网后不成批
-// 推 hub），终态 24h 清理（CleanupAcked）同样按 first_acked_at 起算收敛。
+// 推 hub），终态超保留期清理（CleanupAcked，默认 24h 可配）同样按
+// first_acked_at 起算收敛。
 func (l *Ledger) MarkFinished(taskID string, res protocol.TaskResult) error {
 	return l.updateOp("MarkFinished", func(m map[string]Entry) error {
 		e, ok := m[taskID]
@@ -462,19 +464,38 @@ func (l *Ledger) MarkResendClosed(taskID string) error {
 	})
 }
 
-// CleanupAcked 清理 result_acked 超 TerminalRetention 的条目（SPEC 4.6/4.8：
-// node 账本 result_acked 条目 24h 后清理）。期限基准为首次确认时刻 first_acked_at
+// CleanupAcked 清理 result_acked 超保留期的条目（SPEC 4.6/4.8；maturity-
+// retention-config 起保留期由调用方注入：node.yaml terminal_retention 解析值，
+// 默认 protocol.TerminalRetention）。期限基准为首次确认时刻 first_acked_at
 // （不从完成时刻起算；重复 Ack 不更新、重启不重置，零值防御性跳过）。
 // closed 条目未被 ack、不在清理范围（SPEC 4.5：冲突审计记录保留）。
-// 返回清理条数；由 node 主循环周期性调用（后续 Loop 接线）。
-func (l *Ledger) CleanupAcked(now time.Time) (int, error) {
+// retention ≤ 0 不清理（0 = 永不自动清理，terminal_retention: 0s 显式语义；
+// 负值配置层已拒，防御同口径）。返回清理条数；由 service 运行循环 1 分钟周期
+// 调用（接线见 service.cleanupLoop）。无超期条目时快照预检早退、不进写事务
+//（周期到点常态零写盘，不引入无谓 IO）。
+func (l *Ledger) CleanupAcked(now time.Time, retention time.Duration) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	// 零写盘快查（View 快照只读，发布后不可变）：无候选条目直接返回。
+	overdue := false
+	for _, e := range l.View() {
+		if e.ResultAcked && e.Result != nil && !e.FirstAckedAt.IsZero() &&
+			e.FirstAckedAt.Add(retention).Before(now) {
+			overdue = true
+			break
+		}
+	}
+	if !overdue {
+		return 0, nil
+	}
 	removed := 0
 	err := l.updateOp("CleanupAcked", func(m map[string]Entry) error {
 		for id, e := range m {
 			if !e.ResultAcked || e.Result == nil || e.FirstAckedAt.IsZero() {
 				continue
 			}
-			if e.FirstAckedAt.Add(protocol.TerminalRetention).Before(now) {
+			if e.FirstAckedAt.Add(retention).Before(now) {
 				delete(m, id)
 				removed++
 			}
