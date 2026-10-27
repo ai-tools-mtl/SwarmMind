@@ -105,11 +105,14 @@ type localStatus struct {
 	NodeID string `json:"node_id"`
 	// Mode 运行形态（setup|standalone|networked，方案 3.1 三态）。
 	Mode string `json:"mode"`
+	// ServerVersion 二进制版本（cmd/node -X main.version 注入；本机控制台
+	// 页脚数据源，与 swarmmind-node --version 同源）。
+	ServerVersion string `json:"server_version"`
 	// PrimeAgent 本机唯一总理声明（node.yaml prime_agent；空 = 未钦定，
 	// 编排接口未激活——控制台据此展示「本机总理：〈名〉」或提示，方案 3.2.1）。
-	PrimeAgent string         `json:"prime_agent"`
-	Online     bool           `json:"online"`
-	Epoch      int64          `json:"epoch"`
+	PrimeAgent string `json:"prime_agent"`
+	Online     bool   `json:"online"`
+	Epoch      int64  `json:"epoch"`
 	// LastSyncAt 最近一次注册成功时刻（最近同步）；从未注册为 null。
 	LastSyncAt *time.Time `json:"last_sync_at"`
 	// NotifyAvailable 通知渠道管理面可用（2026-10-26 起三模式全装配 Dispatcher，
@@ -125,6 +128,7 @@ func (s *Server) handleLocalStatus(w http.ResponseWriter, r *http.Request) {
 	st := localStatus{
 		NodeID:          s.cfg.NodeID,
 		Mode:            s.mode(),
+		ServerVersion:   s.cfg.Version,
 		PrimeAgent:      s.primeAgent(),
 		Online:          s.online(),
 		Epoch:           s.epoch(),

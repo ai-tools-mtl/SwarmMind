@@ -34,6 +34,10 @@ const (
 	loginBodyLimit = 1 << 16
 )
 
+// version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
+// 未注入时为 dev）。--version 打印后退出。
+var version = "dev"
+
 func main() {
 	args := os.Args[1:]
 	// 全局旗标可置于子命令前（swarmmindctl --hub URL --token TOK submit …）：
@@ -49,6 +53,9 @@ func main() {
 			return v
 		}
 		switch args[0] {
+		case "--version", "-version":
+			fmt.Printf("swarmmindctl %s\n", version)
+			os.Exit(0)
 		case "--hub", "-hub":
 			preHub = take()
 		case "--token", "-token":
@@ -92,6 +99,7 @@ func usage() {
   --hub URL    管理面地址（默认 %s）
   --token TOK  管理令牌（缺省读环境变量 %s）
   --json       以原始 JSON 输出（默认人话摘要）
+  --version    打印版本号后退出
 `, defaultHub, tokenEnvVar)
 }
 

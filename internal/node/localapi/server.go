@@ -54,6 +54,9 @@ type Config struct {
 	NodeID string
 	// Mode 运行形态（setup|standalone|networked；状态展示用，空 = networked）。
 	Mode string
+	// Version 二进制版本（cmd/node 经 -X main.version 注入；本机控制台页脚
+	// 数据源，随 GET /api/v1/local/status 应答 server_version 字段下发）。
+	Version string
 	// Service node 任务服务（本地直执行的数据面）。
 	Service *service.Service
 	// Agents 本机 agent 运行时状态（Loop 7：exposed 开关真相源，YAML 基线 +

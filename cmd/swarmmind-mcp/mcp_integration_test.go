@@ -394,13 +394,46 @@ func TestHubToolListRegression(t *testing.T) {
 	}
 }
 
+// TestInitializeServerInfoVersionLock serverInfo.version 变量锁（codex 审查建议修，
+// TASK-maturity-version-var 回归）：hub/node 两 backend 的 initialize 应答
+// serverInfo.version 必须取自包级 version 变量（--version 与 -X main.version 注入
+// 同源），禁止回退硬编码字面量（原始缺陷：两处硬编码 "0.1.1"）。
+func TestInitializeServerInfoVersionLock(t *testing.T) {
+	const ver = "mat-test-001"
+	old := version
+	version = ver
+	t.Cleanup(func() { version = old })
+
+	wantName := map[string]string{"hub": "swarmmind", "node": "swarmmind-node"}
+	backends := map[string]backend{"hub": hubBackend{}, "node": nodeBackend{}}
+	for name, bd := range backends {
+		init := bd.initResult()
+		si, ok := init["serverInfo"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s initialize 应答缺 serverInfo: %v", name, init)
+		}
+		if si["name"] != wantName[name] {
+			t.Fatalf("%s serverInfo.name 应为 %q, got %v", name, wantName[name], si["name"])
+		}
+		if si["version"] != ver {
+			t.Fatalf("%s serverInfo.version 应随包级 version 变量（注入 %q）, got %v", name, ver, si["version"])
+		}
+	}
+}
+
 /* ---------- 子进程级：真二进制 stdio 握手 ---------- */
 
-// buildMCPBinary 编译当前包为可执行文件（子进程测试用）。
-func buildMCPBinary(t *testing.T) string {
+// buildMCPBinary 编译当前包为可执行文件（子进程测试用）；可变长传 -ldflags 参数
+//（版本注入链测试用）。
+func buildMCPBinary(t *testing.T, ldflags ...string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "swarmmind-mcp")
-	cmd := exec.Command("go", "build", "-o", bin, ".")
+	args := []string{"build"}
+	if len(ldflags) > 0 {
+		args = append(args, "-ldflags", strings.Join(ldflags, " "))
+	}
+	args = append(args, "-o", bin, ".")
+	cmd := exec.Command("go", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build 失败: %v\n%s", err, out)
 	}
@@ -505,6 +538,68 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	resp = next(3)
 	if !bytes.Contains(resp.Result, []byte("nodeA")) || !bytes.Contains(resp.Result, []byte("本机统筹：echo")) {
 		t.Fatalf("tools/call nodes 应答不符: %s", resp.Result)
+	}
+
+	// 优雅收尾：关 stdin → 循环自然退出
+	stdin.Close()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("子进程未随 stdin 关闭退出")
+	}
+}
+
+// TestSubprocessInitializeVersionInjection -X main.version 注入链端到端锁
+// （TASK-maturity-version-var 回归）：go build -ldflags "-X main.version=…" 后
+// initialize 应答 serverInfo.version 必须为注入值——锁 Makefile LDFLAGS 真实生效
+//（原始缺陷形态：main 包无 version 变量，链接器静默忽略 -X 无任何报错）。
+func TestSubprocessInitializeVersionInjection(t *testing.T) {
+	const ver = "mat-test-002"
+	bin := buildMCPBinary(t, "-X main.version="+ver)
+
+	cmd := exec.Command(bin)
+	cmd.Env = os.Environ() // 默认 hub 模式：initialize 应答不触网，无需任何配置
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		stdin.Close()
+		_ = cmd.Wait()
+	})
+
+	w := bufio.NewWriter(stdin)
+	r := bufio.NewScanner(stdout)
+	r.Buffer(make([]byte, 0, 1<<20), 4<<20)
+	writeRPC(w, 1, "initialize", map[string]any{})
+	if !r.Scan() {
+		t.Fatalf("子进程无 initialize 应答: %v", r.Err())
+	}
+	var resp mcpResp
+	if err := json.Unmarshal(r.Bytes(), &resp); err != nil {
+		t.Fatalf("initialize 应答行非法: %v: %s", err, r.Bytes())
+	}
+	var initRes struct {
+		ServerInfo struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"serverInfo"`
+	}
+	if err := json.Unmarshal(resp.Result, &initRes); err != nil {
+		t.Fatalf("initialize 应答解析失败: %v: %s", err, resp.Result)
+	}
+	if initRes.ServerInfo.Version != ver {
+		t.Fatalf("serverInfo.version 应为 -X 注入值 %q, got %q", ver, initRes.ServerInfo.Version)
 	}
 
 	// 优雅收尾：关 stdin → 循环自然退出

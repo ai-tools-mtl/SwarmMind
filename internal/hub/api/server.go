@@ -65,6 +65,10 @@ type Config struct {
 	// Decision 派发建议决策服务（P5.1 D1，RFC-jev-dispatch）；nil/未启用时端点
 	// 恒 200 + suggestion:null（决策是建议非必经，不阻塞派单，RFC 三）。
 	Decision *decision.Service
+	// Version 二进制版本（cmd/hub 经 -X main.version 注入；管理台页脚数据源）。
+	// 随登录成功响应与登录态账户视图下发 server_version 字段；未认证分支不返回
+	//（版本号不对未认证方披露）。
+	Version string
 }
 
 // NodeEntryConfig 节点接入入口描述（cmd/hub 从 hub 配置推导：协议 + node_listen）。
@@ -193,7 +197,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, // 回环明文 HTTP：无 Secure 属性（部署随 TLS 一起设计）
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version})
 }
 
 // authPrincipalKey 请求上下文键：auth 中间件解析出的服务端验证主体。

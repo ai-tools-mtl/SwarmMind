@@ -313,15 +313,19 @@ func hexVal(c byte) (byte, bool) {
 /* ---------- HTTP 端点 ---------- */
 
 // handleAccountStatus GET /api/v1/auth/account：账户状态。
-// 未登录（无有效会话）：仅返回 {initialized}（登录页判断用，不泄漏用户名）；
-// 已登录：返回完整账户信息。
+// 未登录（无有效会话）：仅返回 {initialized}（登录页判断用，不泄漏用户名，
+// 也不返回 server_version——版本号不对未认证方披露）；
+// 已登录：返回完整账户信息 + server_version（控制台页脚数据源，会话恢复时
+// 前端经此端点取版本）。
 func (s *Server) handleAccountStatus(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
 		s.mu.Lock()
 		exp, ok := s.sessions[c.Value]
 		s.mu.Unlock()
 		if ok && time.Now().UTC().Before(exp) {
-			writeJSON(w, http.StatusOK, s.accounts.view())
+			v := s.accounts.view()
+			v["server_version"] = s.cfg.Version
+			writeJSON(w, http.StatusOK, v)
 			return
 		}
 	}
@@ -393,7 +397,7 @@ func (s *Server) handleLoginPassword(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(sessionTTL / time.Second),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "expires_in": int(sessionTTL / time.Second), "server_version": s.cfg.Version})
 }
 
 // handleAccountUpdate POST /api/v1/auth/account/update：改用户名/改密码（密码验证）。

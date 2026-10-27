@@ -62,6 +62,11 @@ var (
 	client   = &http.Client{Timeout: 35 * time.Second}
 )
 
+// version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
+// 未注入时为 dev）。--version 与 initialize 应答 serverInfo.version 同源
+//（取代原硬编码 0.1.1，SPEC 六.六声明 14）。
+var version = "dev"
+
 // StartLux-Decision 云端决策配置（main 启动时读环境变量；startluxClient 为带
 // 独立超时的客户端——不用 hub client，L0 超时预算与 hub 调用互不牵连）。
 var (
@@ -165,7 +170,7 @@ func (hubBackend) initResult() map[string]any {
 	return map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "swarmmind", "version": "0.1.1"},
+		"serverInfo":      map[string]any{"name": "swarmmind", "version": version},
 	}
 }
 
@@ -192,7 +197,7 @@ func (nodeBackend) initResult() map[string]any {
 	return map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": "0.1.1"},
+		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": version},
 		"instructions": "SwarmMind 本机编排入口（接入即统筹：本机编排）。工具只作用于本机节点：" +
 			"全部工具共用统筹凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。",
@@ -2497,6 +2502,12 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 /* ---------- stdio 主循环 ---------- */
 
 func main() {
+	// --version（任务书 maturity-version-var）：stdio 协议启动前打印版本即退出，
+	// 不污染 JSON-RPC 通道。
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		fmt.Printf("swarmmind-mcp %s\n", version)
+		return
+	}
 	// 装配分发（方案 3.4）：SWARM_TARGET 选 backend——hub（默认，完全向后兼容）
 	// 或 node（本机编排入口）；非法值启动即报错退出并列出合法值，绝不静默回退 hub。
 	var bd backend

@@ -55,18 +55,29 @@ type hubConfig struct {
 	} `yaml:"decision"` // 派发建议决策服务（P5.1 D1，RFC-jev-dispatch）：决策是建议非必经，未启用/失败均不阻塞派单
 }
 
+// version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
+// 未注入时为 dev）。--version、启动日志、管理台页脚（管理面 server_version
+// 字段）三处同源。
+var version = "dev"
+
 func main() {
 	cfgPath := flag.String("config", "configs/hub.example.yaml", "配置文件路径（yaml）")
 	dataDir := flag.String("data-dir", "", "覆盖配置中的 data_dir")
 	listen := flag.String("listen", "", "覆盖配置中的 node_listen")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Printf("hub %s\n", version)
+		return
+	}
 	if err := run(*cfgPath, *dataDir, *listen); err != nil {
 		log.Fatalf("[hub] %v", err)
 	}
 }
 
 func run(cfgPath, dataDirOverride, listenOverride string) error {
+	log.Printf("[hub] 版本 %s", version)
 	cfg, err := loadConfig(cfgPath)
 	if err != nil {
 		return err
@@ -227,6 +238,7 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
 		Notify:    notifier,
 		Decision:  decisionSvc,
+		Version:   version, // 管理台页脚 server_version 数据源（登录响应/登录态账户视图下发）
 		NodeEntry: &api.NodeEntryConfig{Scheme: nodeScheme, Listen: cfg.NodeListen},
 		Enroll: &api.EnrollConfig{
 			SourceDir: envDefault("SWARM_SOURCE_DIR", "/opt/swarmmind-src"),

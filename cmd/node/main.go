@@ -54,6 +54,10 @@ type nodeConfig struct {
 	Agents        []localapi.AgentProfile `yaml:"agents"`
 }
 
+// version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
+// 未注入时为 dev）。--version 与本机 API status 端点 server_version 同源。
+var version = "dev"
+
 func main() {
 	// service 子命令（P4② Windows 服务化：install/remove/start/stop/status；
 	// 非 Windows 报错指引 systemd/launchd）
@@ -65,7 +69,13 @@ func main() {
 	}
 	cfgPath := flag.String("config", "configs/node.example.yaml", "配置文件路径（yaml；不存在则进 setup 模式）")
 	dataDir := flag.String("data-dir", "", "覆盖配置中的 data_dir")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("swarmmind-node %s\n", version)
+		return
+	}
 
 	// SCM 拉起（Windows 服务上下文）：进服务主循环，复用下方 run() 全路径；
 	// 前台/非 Windows 恒返回 false，行为零变化。
@@ -368,6 +378,7 @@ func run(cfgPath, dataDirOverride string) error {
 	localCfg := localapi.Config{
 		NodeID:     cfg.NodeID,
 		Mode:       mode,
+		Version:    version, // 本机控制台页脚 server_version 数据源（status 端点下发）
 		Setup:      mode == localapi.ModeSetup,
 		Service:    svc,
 		Agents:     agentState,

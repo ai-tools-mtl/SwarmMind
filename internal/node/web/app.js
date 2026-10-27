@@ -724,7 +724,14 @@ function layout(content, pages = (S.status?.mode === 'setup' ? SETUP_PAGES : PAG
     `<button data-go="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${label}</button>`).join('')}</nav>
   <div class="aside-bottom">连接 hub：${online ? '<span class="badge online">在线</span>' : '<span class="badge offline">离线</span>'}<br>
   <span style="opacity:.75">本机控制台<br>仅本机可访问</span></div></aside>
-  <main>${content}</main></div>`;
+  <main>${content}${versionFoot()}</main></div>`;
+}
+/* versionFoot 页脚版本（TASK-maturity-version-var，与 hub 管理台同构：main 末尾
+ * 纯文本 v<版本号>，复用 footer-note 样式；值来自本机 API status 端点
+ * server_version 字段——禁止硬编码进本资产。未取到前不渲染）。 */
+function versionFoot() {
+  const v = S.status?.server_version;
+  return v ? `<p class="footer-note" id="server-version">v${esc(v)}</p>` : '';
 }
 
 /* ---------- 渲染 ---------- */

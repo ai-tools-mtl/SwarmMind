@@ -597,6 +597,7 @@ function inboxIcon(status) {
 const S = {
   authed: false,
   expAt: 0,                    // 登录应答 expires_in 推算；服务端 401 为权威兜底
+  serverVersion: '',           // 服务端版本（登录响应/登录态账户视图 server_version；页脚数据源，TASK-maturity-version-var）
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
   works: [],                   // 工作单列表摘要（P5 W3，hub 编排面）
@@ -966,7 +967,19 @@ function shell(inner) {
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
     `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
   <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各台机器本机</div>
-  </aside><main id="main">${inner}</main></div>`;
+  </aside><main id="main">${inner}${versionFoot()}</main></div>`;
+}
+/* versionFoot 页脚版本（TASK-maturity-version-var，双端同构：main 末尾纯文本
+ * v<版本号>，复用 footer-note 样式；值来自管理面 API server_version 字段——
+ * 禁止硬编码进本资产。未取到前占位隐藏，取到后经 setServerVersion 原位点亮）。 */
+function versionFoot() {
+  return `<p class="footer-note" id="server-version"${S.serverVersion ? '' : ' hidden'}>${S.serverVersion ? 'v' + esc(S.serverVersion) : ''}</p>`;
+}
+function setServerVersion(v) {
+  if (!v || S.serverVersion === v) return;
+  S.serverVersion = v;
+  const el = document.getElementById('server-version');   // 在途直更：省一次整页 render（同顶栏新鲜度小字通道）
+  if (el) { el.textContent = 'v' + v; el.hidden = false; }
 }
 
 /* ---------- 通用小件 ---------- */
@@ -1066,11 +1079,13 @@ async function doPasswordLogin(u, p) {
   const fb = $('#login-feedback') || { innerHTML: '' };
   try {
     const r = await fetch('/api/v1/auth/login-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: p }) });
+    const d = await r.json().catch(() => ({}));
     if (r.status === 200) {
       S.authed = true;
       loginPageRendered = true;   // 登录成功即账户已初始化（P0 修正：setup/登录后不重置，退出后误回「首次使用」表单，实测 E2E E01 路径必现）
       S.loginGen++;
-      S.expAt = Date.now() + 86400 * 1000;
+      S.expAt = Date.now() + (d.expires_in || 86400) * 1000;
+      setServerVersion(d.server_version);
       S.C = freshControl();
       try { await loadAll(); } catch { }
       location.hash = '#/overview';
@@ -1078,7 +1093,6 @@ async function doPasswordLogin(u, p) {
       toast('登录成功 · 已进入总览');
       return;
     }
-    const d = await r.json().catch(() => ({}));
     fb.innerHTML = warnNotice('登录失败 · ' + esc(d.error || r.status), esc(d.message || '用户名或密码错误'));
   } catch { fb.innerHTML = warnNotice('网络异常', '请稍后重试'); }
 }
@@ -1097,6 +1111,7 @@ async function doLogin(form) {
       loginPageRendered = null;
       S.loginGen++;
       S.expAt = Date.now() + (r.data?.expires_in || 86400) * 1000;
+      setServerVersion(r.data?.server_version);
       S.C = freshControl();
       S.f = blankFilters();
       try { await loadAll(); } catch { }
@@ -3766,6 +3781,10 @@ async function init() {
     await api('GET', '/api/v1/nodes');
     S.authed = true;
     S.loginGen++;
+    /* 会话恢复（cookie 命中，未经登录响应）：经登录态账户视图补取 server_version
+     * 点亮页脚（fire-and-forget，失败静默——版本展示缺失不影响功能）。 */
+    fetch('/api/v1/auth/account', { credentials: 'same-origin' })
+      .then(r => r.json()).then(d => setServerVersion(d?.server_version)).catch(() => {});
     await loadAll();
     refreshInbox();   // 登录态恢复：立即拉一次站内未读（后续随 5s 轮询）
   } catch (e) { /* 未登录 / 网络故障：登录页兜底 */ }
