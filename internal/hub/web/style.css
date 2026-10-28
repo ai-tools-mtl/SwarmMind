@@ -117,6 +117,11 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .notice{padding:13px 16px;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);color:var(--ink-2)}
 .notice.warn{background:var(--heat-bg)}
 .notice.warn b{color:var(--heat)}
+/* 错误就地留痕（FE-POLISH 轮2 A3，双端同值）：danger 语义错误条——失败发生在哪个
+ * 表单就留在该表单顶部（人话原因+重试指引），toast 可同时短报；语义色不扩编
+ * （danger 家族既有变量）。 */
+.notice.danger{background:var(--danger-bg);border:1px solid var(--danger-line);color:var(--ink-2)}
+.notice.danger b{color:var(--danger)}
 .enroll-ok{padding:13px 16px;background:var(--live-bg);border:0;border-radius:var(--r-thumb);color:var(--live-ink)}
 .enroll-ok p{margin:6px 0 10px;color:var(--live-ink)}
 /* ---- 状态 badge（草案 B.2/A.2）：灰阶化。视觉档位数 < 状态数是故意的——
@@ -466,7 +471,9 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-deli{flex-basis:100%;font-size:12.5px;color:var(--ink-3);overflow-wrap:anywhere}
 .chan-deli.deli-fail{color:var(--danger)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
-.chan-actions button{padding:6px 12px;font-size:12px}
+/* 渠道操作尺寸（FE-POLISH 轮2 A1-4，与 node style.css 同值收口）：原 12px/6-12
+ * 漂移自 node 12.5px/4-10——同组件同字号同 padding，按实际可点区域验收。 */
+.chan-actions button{font-size:12.5px;height:auto;padding:4px 10px}
 /* 渠道编辑弹层表单骨架（t20261026-notify-polish 改动二，双端同构）：hub 全局
  * .fields 是 flex 横排（向导/登录用），通知表单须与 node 控制台同构纵向堆叠——
  * 字段恒显恒位、切消息格式零跳动（DoD：#nf-type-fields 高度差=0），故本表单

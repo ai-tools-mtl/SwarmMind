@@ -77,8 +77,10 @@ func TestWebCfgEditDrawer(t *testing.T) {
 		`case 'cfg-del': {`,
 		`if (cfgSaving) return; // 保存 PUT 在途禁删`,
 		`if (!cfgEdit) return;`,
-		// 抽屉基建复用任务详情抽屉家族（同一 #layer/overlay/drawer 结构）
-		"<div class=\"overlay drawer-overlay\"><div class=\"drawer\" id=\"cfg-drawer\">",
+		// 抽屉基建复用任务详情抽屉家族（同一 #layer/overlay/drawer 结构；
+		// FE-POLISH 轮2 A2 键盘基线：升级 role=dialog/aria-labelledby/tabindex=-1
+		// 与任务抽屉同无障碍形态，h2 挂 id="layer-title" 供 aria 指向）
+		`<section class="drawer" id="cfg-drawer" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">`,
 		// 标题口径
 		`编辑 agent · `,
 		// 底部操作条三键 + 右上 ×：取消（ghost/默认档）｜删除此 agent（danger 危险

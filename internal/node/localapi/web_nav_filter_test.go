@@ -147,7 +147,7 @@ func TestWebNavFilterStructure(t *testing.T) {
 			t.Errorf("%s app.js navnum 应为 01-0N 同格式", src.side)
 		}
 		if !strings.Contains(src.js, `<div class="workspace"><small`) ||
-			strings.Index(src.js, `<div class="workspace"><small`) > strings.Index(src.js, `<strong class="workspace-brand">`) {
+			strings.Index(src.js, `<strong class="workspace-brand"`) < strings.Index(src.js, `<div class="workspace"><small`) {
 			t.Errorf("%s app.js workspace 行序应为 small 在上、strong 在下（与 hub 同构）", src.side)
 		}
 	}
@@ -257,9 +257,12 @@ func TestWebTaskFilterBehavior(t *testing.T) {
 		nodeFns += "\n" + extractTopFunc(t, nodeJS, marker)
 	}
 	nodeHarness := escLine + `
-const S = { tasks: [], tasksTotal: 0, tasksMoreBusy: false, tf: { origin: '' }, f: { stage: 'idle', target: '', stdin: '草稿', idem: 'x', message: '' } };
+const S = { tasks: [], tasksTotal: 0, tasksMoreBusy: false, tf: { origin: '' }, f: { stage: 'idle', target: '', stdin: '草稿', idem: 'x', message: '' }, status: {}, loadError: '' };
 function timeShort() { return '12:00:00'; }
 function button(label, act, cls, inner) { return '<button data-act="' + act + '"' + (inner ? ' ' + inner : '') + '>' + label + '</button>'; }
+/* FE-POLISH 轮2 A4 五态占位桩（场景 load-failed-state 断言真实分支走向） */
+function listLoadingBox(label) { return '<div class="empty">loading-' + label + '</div>'; }
+function listErrorBox(act, label) { return '<div class="empty">error-' + label + '-retry:' + act + '</div>'; }
 /*` + dictBlk + nodeFns + "\n" + nodeFilterDriver
 
 	// ---- hub 侧 harness：抽取的纯函数（blankFilters/taskNodeOptions/filteredTasks）
@@ -309,6 +312,7 @@ function button(label, act, cls, inner) { return '<button data-act="' + act + '"
 		"empty-snapshot-filter-flow", // 空快照+激活筛选：筛选行在位可清除、不自动重置、新任务解锁全程（终审必修2）
 		"chips-zero-gray",      // 零计数 chip 带退灰类、不禁用
 		"tf-form-independent",  // S.tf 筛选与派单表单 S.f 草稿互不干扰；清除回全量
+		"load-failed-state",    // A4 五态：失败可重试不冒充空、无 status 加载中、恢复后回归真空态
 	})
 	run("nav_filter_hub.js", []string{
 		"blank-shape",          // blankFilters 七字段全空
@@ -424,6 +428,20 @@ const SCENARIOS = {
     ok(myTasksCard() === before, '派单表单 S.f 变化不影响来源筛选渲染');
     S.tf = { origin: '' };
     ok(count(myTasksCard(), /data-task=/g) === 3, '清除筛选回全量');
+  },
+  'load-failed-state': () => {
+    // A4 五态（FE-POLISH 轮2）：加载失败不冒充空列表；无 status=加载中；恢复后真空态回归
+    base();
+    S.tasks = []; S.tasksTotal = 0; S.tf = { origin: '' };
+    S.loadError = '本机 API 暂不可达'; S.status = null;
+    const errHtml = myTasksCard();
+    ok(errHtml.includes('error-任务列表') && errHtml.includes('retry:reload-all'), '失败态：错误占位+重试入口在位');
+    ok(!errHtml.includes('本机还没有执行过任务'), '失败不得冒充「还没有任务」真空态');
+    S.loadError = '';
+    const loadHtml = myTasksCard();
+    ok(loadHtml.includes('loading-任务列表') && !loadHtml.includes('本机还没有执行过任务'), '无 status 且无任务：加载中，同样不冒充空');
+    S.status = {};
+    ok(myTasksCard().includes('本机还没有执行过任务') && myTasksCard().includes('data-act="focus-form"'), '恢复后真空态回归（含派单下一步指引）');
   },
 };
 for (const name of process.argv.slice(2)) { SCENARIOS[name](); console.log('PASS ' + name); }

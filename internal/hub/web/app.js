@@ -664,6 +664,7 @@ const S = {
   acctError: '',               // 账户信息加载失败信息
   newToken: null,              // 刚创建的令牌明文（仅展示一次）
   groups: [],                  // 群聊列表（GROUP-RFC 六）
+  groupsFresh: { ok: null, at: 0 },   // 群列表加载态（A4 五态）：null=未拉过（加载中）；false=最近一次失败
   groupMsgCounts: {},          // group_id → 消息数（列表端点不返回，进群聊页时补拉计数）
   groupId: '',                 // hash 路由 #/groups/{id} 的群 ID；空为群列表视图
   groupView: null,             // 群详情消息缓存 {id, lastSeq, msgs[]}；lastSeq 是增量拉取锚点
@@ -891,11 +892,14 @@ function sortDirectoryStable(list) {
 /* ---------- 群聊数据加载（GROUP-RFC 六）：进群聊页时拉取（同 tokens 页模式） ---------- */
 async function loadGroups() {
   const r = await api('GET', '/api/v1/groups').catch(() => null);
-  if (!r || r.code !== 200) {
-    if (r && r.code === 503) S.groupsOff = true;   // hub 未接线群存储
+  if (!r) { S.groupsFresh = { ok: false, at: Date.now() }; return; }   // 网络失败：失败态可重试（A4）
+  if (r.code !== 200) {
+    if (r.code === 503) S.groupsOff = true;   // hub 未接线群存储（「未开放」业务专态，非失败）
+    S.groupsFresh = { ok: false, at: Date.now() };
     return;
   }
   S.groupsOff = false;
+  S.groupsFresh = { ok: true, at: Date.now() };
   S.groups = (r.data?.groups || []).slice().sort(byGroupCreatedDesc);
   /* 列表端点不返回消息数：按群并发补拉一次计数。seq 自 1 单调递增且消息
    * 只追加不删除，末条 seq 即消息总数。 */
@@ -1103,6 +1107,16 @@ function toast(msg) {
   t.classList.add('show');
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.classList.remove('show'); }, 3400);
 }
+/* formError 错误就地留痕（FE-POLISH 轮2 A3）：错误发生在哪个表单就留在该表单顶部
+ *（notice.danger 条：人话原因+重试指引），toast 可同时短报——长错误读不完、关闭
+ * 提示后找不到原因的问题就地解决。bodyHtml 由调用方拼装（errLine 已转义可直入）；
+ * 同表单重复失败先摘旧条再插（不叠条）；草稿一律不清（I04 口径）。 */
+function formError(title, bodyHtml) {
+  const f = $('#notify-form');
+  if (!f) return;
+  $('#notify-form-error')?.remove();
+  f.insertAdjacentHTML('afterbegin', `<div class="notice danger" id="notify-form-error" role="alert"><b>${esc(title)}</b> · ${bodyHtml}</div>`);
+}
 /* busyBtn/idleBtn 写动作进行时样板（FE-POLISH B6，2026-10-29）：「disabled+换文案」
  * 手工模式散布十余处，恢复文案全靠各处手写——已有一处真 bug（doLogin 失败恢复把
  * 「用令牌登录」写成「进入 Hub 中心端 →」）。助手锁宽防抖（进行时文案长短变化不抖
@@ -1126,6 +1140,27 @@ function idleBtn(btn) {
 }
 function terminal(st) { return TERMINAL.has(st); }   // 终态集来自抽屉展示词典 shared block
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
+/* ---------- 列表五态判定（FE-POLISH 轮2 A4） ----------
+ * 「加载中」「空（真的没有）」「加载失败（可重试）」三态区分——加载失败不再冒充
+ * 空列表（codex V07）：S.fresh[name] 无 at=首次加载未落定；at 有而 ok=false=最近
+ * 一轮失败（旧数据保留展示+顶部陈旧提示；无旧数据则失败空态+重试钮）；ok=true 且
+ * 空=真空态（给下一步指引）。「无权限/未开放」为业务专态（hub 群聊 503 groupsOff
+ * 已有专态；hub 管理面登录制无权限降级面），「目标离线」在派单页禁选与机器页徽标
+ * 承担——五态各自落到语义成立的页面上，不造假对称。 */
+function listState(name) {
+  const f = S.fresh[name];
+  if (!f || !f.at) return 'loading';
+  return f.ok ? 'ok' : 'error';
+}
+function listLoadingBox(label) {
+  return `<div class="empty"><h2>正在加载${esc(label)}…</h2><p class="muted">正在从中心端读取；这一步只读、不产生任何变更，几秒内自动就绪。</p></div>`;
+}
+function listErrorBox(res, label) {
+  return `<div class="empty"><h2>${esc(label)}加载失败</h2><p class="muted">最近一次读取没有成功（网络或服务端异常），不是没有数据。可以点重试，也可以等轮询自动恢复。</p>${button('重试', 'reload-res', '', `data-res="${esc(res)}"`)}</div>`;
+}
+function listStaleBar(res, label) {
+  return `<div class="notice warn" style="margin-bottom:14px"><b>${esc(label)}暂时读不到最新数据</b>：下方是最后一次成功加载的快照（可能已过期）；网络恢复后轮询自动刷新，也可点${button('重试', 'reload-res', 'link', `data-res="${esc(res)}"`)}。</div>`;
+}
 /* pendingReviewCount 待办口径（FE-POLISH P0-1「核对完待办不减」，2026-10-29）：
  * 人工核对只写 Review 记录、协议状态保持 needs_review（core.RecordReview 不改终态），
  * 旧口径按 status 全数计入——核对完待办永远挂着。新口径=「needs_review 且无 review
@@ -1304,7 +1339,10 @@ function overviewPage() {
 function nodesPage() {
   return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
-    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
+    ${listState('nodes') === 'error' && !S.nodes.length ? listErrorBox('nodes', '机器列表')
+    : listState('nodes') === 'loading' && !S.nodes.length ? listLoadingBox('机器列表')
+    : (listState('nodes') === 'error' ? listStaleBar('nodes', '机器列表') : '')
+      + (S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
     ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
       return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${caps.length ? caps.map(d => {
@@ -1313,7 +1351,7 @@ function nodesPage() {
     }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台机器（只读说明）"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
-    : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`}
+    : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`)}
     <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定；离线不会终止已在执行的任务。</p></section>`;
 }
 /* ---------- 添加机器向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
@@ -1756,7 +1794,10 @@ function tasksPage() {
       <label>提交时间 · 至（UTC）<input type="datetime-local" data-f="to" value="${esc(S.f.to)}"></label>
     </div>
     </details>
-    ${list.length ? taskTable(list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)) + pagerHtml('tasks', page, pages, list.length) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`}
+    ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
+    : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
+    : (listState('tasks') === 'error' ? listStaleBar('tasks', '任务列表') : '')
+      + (list.length ? taskTable(list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)) + pagerHtml('tasks', page, pages, list.length) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`)}
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务${retentionClause()}，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
@@ -2659,7 +2700,7 @@ function notifyChannelCardHtml(ch) {
   return `<div class="chan-card${ch.enabled ? '' : ' off'}">
     <div class="chan-main">
       <button type="button" class="switch${ch.enabled ? ' on' : ''}" data-act="notify-toggle" data-id="${esc(ch.id)}" data-enabled="${ch.enabled ? '1' : ''}" aria-label="${ch.enabled ? '停用' : '启用'} ${esc(ch.name)}" title="${ch.enabled ? '点击停用' : '点击启用'}"></button>
-      <span class="badge orch">${esc(label)}</span>
+      <span class="badge">${esc(label)}</span>   <!-- FE-POLISH 轮2 A1-3：渠道类型徽标统一灰阶（badge orch 是统筹角色专属语义色，普通渠道类型不借用；与 node 同形态） -->
       <span class="chan-name">${esc(ch.name)}</span>
     </div>
     <div class="chan-actions">
@@ -2677,7 +2718,7 @@ function notifyChannelCardHtml(ch) {
  * hub 调用 notifyFormHtml(ch) 不传 typeKeys = 全集类型键（含站内通知）。 */
 async function saveNotifyChannel() {
   const f = collectNotifyForm();
-  if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
+  if (!f.name) { formError('请先填写渠道名称', '渠道名称必填；其余已填内容全部保留。'); toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
   const editing = !!f.id;
   if (S.busy.has('notify-save')) return;
   S.busy.add('notify-save');
@@ -2695,6 +2736,9 @@ async function saveNotifyChannel() {
       paintNotifySection();
       toast(editing ? '渠道已更新' : '渠道已创建 · 点「发测试」验证一下');
     } else {
+      /* A3 错误就地留痕：失败条留在表单顶部（草稿不清、可改后原钮重试），toast 只短报。 */
+      formError(editing ? '保存失败' : '创建失败',
+        (r ? errLine(r.data) : '网络异常 · 未收到服务器应答，结果未知') + '。已填内容全部保留，修正后可原按钮重试。');
       toast((editing ? '保存失败' : '创建失败') + '：' + (r ? errLine(r.data) : '网络异常'));
     }
   } finally {
@@ -2790,6 +2834,8 @@ function groupListPage() {
     + (S.groupsOff ? `<div class="notice warn spaced"><b>群聊功能未启用</b>：当前 hub 未接线群存储，请联系管理员升级 hub 配置。</div>` : '')
     + `<section class="card${S.groupsOff ? ' spaced' : ''}">
     ${S.groups.length ? `<div class="group-list">${S.groups.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(groupCard).join('')}</div>` + pagerHtml('groups', page, pages, S.groups.length)
+    : S.groupsFresh.ok === false ? listErrorBox('groups', '群聊列表')
+    : !S.groupsFresh.at ? listLoadingBox('群聊列表')
     : `<div class="empty"><h2>还没有协作群</h2><p class="muted">创建一个群，把协作目标和成员智能体拉进来讨论；代理发言默认上限 20 轮，用尽后等待人工决策。</p>${S.groupsOff ? '' : button('＋ 新建协作群', 'group-new', 'primary')}</div>`}
     ${S.groups.length ? `<p class="footer-note">${S.groups.length} 个群 · 时间为 UTC · 群结束后时间线保留、只读。</p>` : ''}</section>`;
 }
@@ -3269,6 +3315,17 @@ const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
   fchip: b => { S.f.status = b.dataset.fchip || ''; S.pages.tasks = 1; render(); },
   'clear-filters': () => { S.f = blankFilters(); S.pages.tasks = 1; render(); toast('已清除筛选'); },
+  /* reload-res 列表加载失败就地重试（A4 五态）：tasks/nodes 走整轮 loadAll（单资源
+   * 失败保留旧快照，重试成功即恢复）；groups 走 loadGroups（不进 5s 轮询，只有本钮）。 */
+  'reload-res': b => {
+    if (b.dataset.res === 'groups') {
+      toast('正在重新加载群聊…');
+      loadGroups().then(() => { if (S.page === 'groups') render(); });
+      return;
+    }
+    toast('正在重新加载…');
+    loadAll().then(() => render()).catch(() => render());
+  },
   /* pager 通用翻页（v4 试用反馈三）：设置页走子树局部刷新（D2 表单保护，不整页
    * 重绘），其余列表页走既有 render()（页级无输入态，重绘安全）。 */
   pager: b => {
@@ -4006,8 +4063,12 @@ function bindEvents() {
     }
     const tr = e.target.closest?.('tr[data-task]');
     if (tr && e.target === tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openTask(tr.dataset.task); }
-    /* 站内通知条目（role=button）键盘可达：Enter/Space 等价点击（标已读）。 */
-    const ni = e.target.closest?.('.notify-item[data-act]');
+  /* A1-10（FE-POLISH 轮2）：工作单行键盘可达——行有 tabindex 却只有任务行键盘
+   * 处理（codex I01 漂移项），Enter/Space 等价点击与 tr[data-task] 同分支补齐。 */
+  const trw = e.target.closest?.('tr[data-work]');
+  if (trw && e.target === trw && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openWork(trw.dataset.work); }
+  /* 站内通知条目（role=button）键盘可达：Enter/Space 等价点击（标已读）。 */
+  const ni = e.target.closest?.('.notify-item[data-act]');
     if (ni && (e.key === 'Enter' || e.key === ' ')) {
       e.preventDefault();
       const fn = ACT[ni.dataset.act];
