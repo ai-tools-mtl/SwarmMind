@@ -186,6 +186,15 @@ function permissionNote(mode) {
 function permLabel(mode) {
   return `权限：${permissionNote(mode)}`;
 }
+/* summarizeTask 任务列表人话摘要（FE-POLISH 轮2 H11，双端同文）：列表主列给
+ * 「能力名+一句摘要」，摘要=任务描述首行截断（stdin 优先，args 首参兜底——
+ * Prime 提示词形态 args[0] 首行即标题）；两者皆空如实留空（不由 ID 猜）。
+ * 完整 ID/trace 收详情。数据面事实：hub 任务列表响应含 input 字段可算摘要；
+ * node 列表响应（taskListItem）不含输入字段——node 端如实不渲染摘要行。 */
+function summarizeTask(t) {
+  const src = String(t?.input?.stdin || (t?.input?.args || [])[0] || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  return src.slice(0, 48) + (src.length > 48 ? '…' : '');
+}
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -310,6 +319,17 @@ function promptZoneHtml(t) {
   if (stdin.length + text.length <= PROMPT_PREVIEW_MAX) return `<h3>任务指令</h3>${head}${body}`;
   return `<h3>任务指令</h3>${head}<div class="prompt-preview${expanded ? ' prompt-open' : ''}">${body}${expanded ? '' : '<div class="prompt-fade"></div>'}</div><div class="prompt-foot">${button(expanded ? '收起' : '展开全部', 'prompt-expand', 'link')}</div>`;
 }
+/* fmtSize 字节数 → 易读大小（FE-POLISH 轮2 H15 产物行，双端同文）：产物行前置
+ * 文件名+易读大小（如 1.2 MB）；完整路径/原始字节数/SHA 交由各端产物行详情折叠
+ * 承载（hub 行内取回按钮 / node 本机路径指引为 SPEC 六.五白名单差异）。 */
+function fmtSize(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + ' B';
+  const units = ['KB', 'MB', 'GB'];
+  let v = b, u = -1;
+  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
+  return (v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + units[u];
+}
 /* ===== 抽屉答复与日志 shared block end ===== */
 
 /* ===== 抽屉分区更新 shared block begin ===== */
@@ -319,10 +339,12 @@ function promptZoneHtml(t) {
  * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
  * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
  * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
- * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
- * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
- * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'related', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+ * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉，FE-POLISH
+ * 轮2 H13 五段化定序：指令→事实与下一步→结果与可取文件→异常核查→折叠证据；
+ * evidence 段承载身份 trace/提交人/恢复密钥与证据段头）；同机制其他长驻视图
+ *（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25 双端同改同验，
+ * SPEC 六.五 分区更新机制单一来源）。 */
+const DRAWER_ZONES = ['head', 'prompt', 'intro', 'related', 'answer', 'artifacts', 'fail', 'review', 'evidence', 'input', 'logs', 'timeline', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -1896,11 +1918,15 @@ function syncDrawerZones() {
 }
 
 // taskDrawerZones 任务抽屉分区内容（D22：壳由 drawerShellHtml 建一次，本函数只
-// 产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
-// 层级（e821bf8，SPEC 六.五 第二条）与 hub 同构：介绍条 → 任务指令（2026-10-26
-// 改动四 shared block 提升，TaskView 含 Input 双端同构点亮）→ 最终答复（白底浮起
-// 主角）→ 诊断日志（折叠配角）→ 产物 → 时间线 → 归档/下一步；fail/input/review
-// 三分区为 hub 独有白名单，node 恒空。头部/文案/时间口径与 hub 同源（D2/D17/D18/D21）。
+// 产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序为
+// FE-POLISH 轮2 H13 五段化（与 hub 同序，SPEC 六.五 第二条）：①我让它做什么
+//（prompt）→ ②当前事实与下一步（状态介绍/核对指引+失败时「回表单重新派单」行动
+// 按钮，intro）→ ③结果与可取文件（最终答复+产物，answer/artifacts）→ ④异常核查
+//（fail/review 两分区为 hub 独有白名单，node 恒空零占位）→ ⑤折叠证据（段头身份行
+// trace/提交人/创建/恢复密钥/来源 + 诊断日志/时间线 details 默认收起，evidence/
+// logs/timeline）→ 归档/下一步（next）。头部只留标题与 agent@node+状态徽标，
+// 身份技术态沉到证据段；来源标注随行（node 白名单：产物本机路径指引的判定依据）。
+// 头部/文案/时间口径与 hub 同源（D2/D17/D18/D21）。
 function taskDrawerZones(t) {
   const res = t.result;
   // 双路径语义（功能性修复 7）：本机任务（origin=local，本机账本真相源）产物区
@@ -1930,30 +1956,36 @@ function taskDrawerZones(t) {
     local ? '<br>本控制台暂不支持登记核对结论，请人工核查实际结果，并到 hub 管理台登记。' : '<br>核对结论请到 hub 管理台登记。'}</div>`;
   return {
     head: `<div class="row"><h2 id="drawer-title">任务详情 · ${esc(t.id)}</h2>${button('×', 'close-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
-    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
-    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${ORIGIN_WORDS[local ? 'local' : 'hub']}</p>`,
+    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>`,
     intro: `${t.status === 'needs_review' ? reviewNote : `<div class="notice">${esc(statusIntro)}</div>`}
-    ${taskErrorNotice(res, t.status === 'needs_review')}`,
+    ${taskErrorNotice(res, t.status === 'needs_review')}
+    ${t.status === 'failed' ? `<div class="actions spaced">${button('回表单重新派单', 'reopen-form', 'link')}</div>` : ''}`,
     prompt: promptZoneHtml(t),
     answer: drawerAnswerHtml(t, res, t.status === 'needs_review'),
-    logs: res && (res.stdout_tail || res.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${drawerLogInner(res, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
     artifacts: `<h3>产物文件</h3>${artifactsHtml(t)}${artifactNote}`,
-    timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
+    evidence: `<h3 class="spaced">证据与记录</h3>
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')} · 恢复密钥 ${esc(t.idem || '—')} · 来源 ${ORIGIN_WORDS[local ? 'local' : 'hub']}</p>
+    <p class="muted small">下方完整证据（诊断日志 / 时间线）默认折叠——普通成功任务不用展开；需要核对异常时再打开。</p>`,
+    logs: res && (res.stdout_tail || res.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="log-wrap">${drawerLogInner(res, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
+    timeline: `<details class="spaced"><summary>时间线（受理 / 执行 / 终态事件）</summary>${drawerTimelineHtml(t)}</details>`,
     next: TERMINAL.has(t.status) && t.status !== 'needs_review'
-      ? `<div class="notice">本机账本保留此次记录（已确认结果超保留期自动清理：默认 24 小时，node.yaml terminal_retention 可配；0s=永不清理）。${button('查看全部任务 →', 'close-drawer', 'link')}${t.status === 'failed' ? button('回表单重新派单', 'reopen-form', 'link') : ''}</div>`
+      ? `<div class="notice">本机账本保留此次记录（已确认结果超保留期自动清理：默认 24 小时，node.yaml terminal_retention 可配；0s=永不清理）。${button('查看全部任务 →', 'close-drawer', 'link')}</div>`
       : '',
   };
 }
 
 // artifactsHtml 产物区（D13/D14 统一：恒渲染 + 空态文案双端同文；标题「产物文件」
-// 同文。行内形态差异为 SPEC 六.五 白名单——node 本机绝对路径指引，hub 行内取回按钮）。
+// 同文。H15（FE-POLISH 轮2）：前置文件名+易读大小（fmtSize shared）；完整路径/
+// 原始字节/SHA 收进行内 details。行内形态差异为 SPEC 六.五 白名单——node 本机
+// 绝对路径指引进详情折叠，无取回按钮（本机直接打开）。）
 function artifactsHtml(t) {
   const arts = t.result?.artifacts || [];
   if (!arts.length) return '<p class="muted">暂无已登记产物。中断任务不推断存在可交付产物。</p>';
   const local = taskOrigin(t.id) === 'local';
   const agent = S.agents.find(x => x.name === t.target_agent);
   const absPath = a => (agent?.workdir ? agent.workdir.replace(/\/+$/, '') + '/' : '') + a.path;
-  return arts.map(a => `<div class="artifact"><code>${esc(a.path)}</code> <small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}</small></div>`).join('');
+  return arts.map(a => `<div class="artifact"><b>${esc(String(a.path).split('/').pop() || a.path)}</b> <small class="artifact-size">${fmtSize(a.size)}</small>
+  <details class="artifact-detail"><summary>完整路径与校验</summary><small>路径 <code>${esc(a.path)}</code>${local && agent?.workdir ? `<br>本机绝对路径：<code>${esc(absPath(a))}</code>` : ''}<br>sha256 <code>${esc(String(a.sha256 || '—'))}</code> · 原始 ${a.size} 字节</small></details></div>`).join('');
 }
 
 /* ---------- 复制诊断信息 ---------- */

@@ -276,6 +276,12 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}
 .timeline li.hl:before{background:var(--heat)}
 .artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
+/* H15 产物行详情折叠（FE-POLISH 轮2，与 hub 同值）：行内 details 不吃全局 details
+ * 的 border-top/margin（产物行已有分隔线）；文件名+易读大小主行，完整路径/SHA/
+ * 本机绝对路径（node 白名单指引）沉折叠。 */
+.artifact .artifact-detail{border-top:0;padding-top:4px;margin:6px 0 0}
+.artifact .artifact-detail summary{font-size:var(--fs-small);color:var(--ink-3);font-weight:500}
+.artifact-size{color:var(--ink-3)}
 .close{font-size:20px;height:auto;padding:2px 10px;background:transparent;color:var(--ink-3)}
 .close:hover{background:rgba(0,0,0,.05);color:var(--ink)}
 /* toast（FE-POLISH B3，2026-10-29）：移植 hub .show 双向过渡——进 320ms spring /

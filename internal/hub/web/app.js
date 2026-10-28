@@ -278,6 +278,15 @@ function permissionNote(mode) {
 function permLabel(mode) {
   return `权限：${permissionNote(mode)}`;
 }
+/* summarizeTask 任务列表人话摘要（FE-POLISH 轮2 H11，双端同文）：列表主列给
+ * 「能力名+一句摘要」，摘要=任务描述首行截断（stdin 优先，args 首参兜底——
+ * Prime 提示词形态 args[0] 首行即标题）；两者皆空如实留空（不由 ID 猜）。
+ * 完整 ID/trace 收详情。数据面事实：hub 任务列表响应含 input 字段可算摘要；
+ * node 列表响应（taskListItem）不含输入字段——node 端如实不渲染摘要行。 */
+function summarizeTask(t) {
+  const src = String(t?.input?.stdin || (t?.input?.args || [])[0] || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  return src.slice(0, 48) + (src.length > 48 ? '…' : '');
+}
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -402,6 +411,17 @@ function promptZoneHtml(t) {
   if (stdin.length + text.length <= PROMPT_PREVIEW_MAX) return `<h3>任务指令</h3>${head}${body}`;
   return `<h3>任务指令</h3>${head}<div class="prompt-preview${expanded ? ' prompt-open' : ''}">${body}${expanded ? '' : '<div class="prompt-fade"></div>'}</div><div class="prompt-foot">${button(expanded ? '收起' : '展开全部', 'prompt-expand', 'link')}</div>`;
 }
+/* fmtSize 字节数 → 易读大小（FE-POLISH 轮2 H15 产物行，双端同文）：产物行前置
+ * 文件名+易读大小（如 1.2 MB）；完整路径/原始字节数/SHA 交由各端产物行详情折叠
+ * 承载（hub 行内取回按钮 / node 本机路径指引为 SPEC 六.五白名单差异）。 */
+function fmtSize(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + ' B';
+  const units = ['KB', 'MB', 'GB'];
+  let v = b, u = -1;
+  do { v /= 1024; u++; } while (v >= 1024 && u < units.length - 1);
+  return (v >= 100 ? Math.round(v) : v.toFixed(1)) + ' ' + units[u];
+}
 /* ===== 抽屉答复与日志 shared block end ===== */
 
 /* ===== 抽屉分区更新 shared block begin ===== */
@@ -411,10 +431,12 @@ function promptZoneHtml(t) {
  * 焦点、滚动位置随未动分区自然保持）；drawerZoneSwap 替换分区时按序回放 details
  * 开合态（内容变化不收回用户展开）。迟到防护在各自数据通路（hub 层世代/抽屉生命
  * 周期，node drawerSeq/drawerReqSeq），本块只做「缓存对不上才写」最后一道；入场
- * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
- * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
- * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'related', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+ * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉，FE-POLISH
+ * 轮2 H13 五段化定序：指令→事实与下一步→结果与可取文件→异常核查→折叠证据；
+ * evidence 段承载身份 trace/提交人/恢复密钥与证据段头）；同机制其他长驻视图
+ *（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25 双端同改同验，
+ * SPEC 六.五 分区更新机制单一来源）。 */
+const DRAWER_ZONES = ['head', 'prompt', 'intro', 'related', 'answer', 'artifacts', 'fail', 'review', 'evidence', 'input', 'logs', 'timeline', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -1425,6 +1447,21 @@ function enrollGo(step) {
 function enrollStopWait() {
   if (ENROLL?.timer) { clearInterval(ENROLL.timer); ENROLL.timer = null; }
 }
+/* enrollStateLine 接入状态行（FE-POLISH 轮2 H07）：三态前置——「尚未登记→等待
+ * 连接→已连接」，用户在任何一步都能回答「这台机器现在到哪了」。数据源=S.nodes
+ * 快照（Step1-3 为打开时刻快照；Step4 的实时等待由 enrollWaitTick 承担）。 */
+function enrollStateLine() {
+  const reg = !!ENROLL.id && S.nodes.some(n => n.node_id === ENROLL.id);
+  const online = !!ENROLL.id && S.nodes.some(n => n.node_id === ENROLL.id && n.online);
+  const [cls, title, sub] = online
+    ? ['ok', '已连接', `机器 ${esc(ENROLL.id)} 已连上 hub，出现在机器列表，可直接派发`]
+    : ENROLL.step === 4
+      ? ['wait', '等待连接', `正在等 ${esc(ENROLL.id)} 连上 hub（每 3 秒一查，上限 60 秒）`]
+      : reg
+        ? ['wait', '已登记 · 机器尚未连接', 'hub 侧配置已就位；机器侧启动并连上 hub 后本行变「已连接」']
+        : ['todo', '尚未登记', '完成下面步骤：hub 侧登记 → 机器侧安装配置 → 连接后出现在机器列表'];
+  return `<div class="enroll-state enroll-${cls}"><span class="dot"></span><div><b>${title}</b><small>${sub}</small></div></div>`;
+}
 const ENROLL_STEPS = ['机器身份', 'hub 侧登记', '安装配置', '等待上线'];
 function enrollHtml() {
   const bar = ENROLL_STEPS.map((name, i) => {
@@ -1436,6 +1473,7 @@ function enrollHtml() {
   }).join('');
   const body = [enrollStep1, enrollStep2, enrollStep3, enrollStep4][ENROLL.step - 1]();
   return `${modalHead('添加一台新机器 · 分步向导')}
+  ${enrollStateLine()}
   <div class="wiz-steps">${bar}</div>
   ${body}
   <p class="footer-note">机器连接成功后出现在机器列表；添加是否成功以列表在线状态为准。控制类身份须经管理员批准，禁止机器自报提权。</p>`;
@@ -1485,7 +1523,7 @@ function enrollStep2() {
   return `<div class="notice warn">这台机器的令牌已在本页<b>本地生成</b>（不经过网络，安全性等同手动 <code>openssl rand -hex 32</code>）——<b>只显示这一次</b>，请立即复制保存。</div>
   <div class="enroll-token-row spaced"><code>${esc(ENROLL.token)}</code>${button('复制令牌', 'enroll-copy-token')}</div>
   <small class="muted">64 位随机令牌 · 关闭弹层后无法再查看，只能重新生成重贴。</small>
-  <h3 class="spaced">把这两行加进服务器上的 hub.yaml（一分钟）</h3>
+  <h3 class="spaced">把这两行加进服务器上的 hub.yaml（一分钟）<span class="badge">进阶</span></h3>
   <div class="enroll-rows">
   <div class="enroll-row"><code>nodes:</code><small>hub.yaml 已有 nodes: 段时跳过本行，只粘贴下一行到段内</small></div>
   <div class="enroll-row"><code>  ${esc(ENROLL.id)}: ${esc(ENROLL.token)}</code><small>新机器一行登记，令牌就是这台机器的准入凭证</small></div>
@@ -1537,7 +1575,7 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/com.swarmmind.node.plist`
 const ENROLL_MODES = [
   ['bundle', '一键部署包（推荐）', '下载 zip：二进制 + node.yaml + 安装脚本，解压一条命令装好'],
   ['docker', 'Docker 挂载部署', '生成含 Dockerfile 与 docker-compose.yml 的构建包（二进制打进镜像，无需公共仓库）'],
-  ['manual', '手动复制配置', '自己放置二进制：复制 node.yaml 全文与分系统启动命令'],
+  ['manual', '手动复制配置（进阶）', '自己放置二进制：复制 node.yaml 全文与分系统启动命令（推荐优先用上方连接串/部署包）'],
 ];
 const ENROLL_PLATS = {
   bundle: [['linux-amd64', 'Linux amd64'], ['linux-arm64', 'Linux arm64'], ['darwin-arm64', 'macOS Apple Silicon'], ['darwin-amd64', 'macOS Intel']],
@@ -1821,15 +1859,17 @@ function tasksPage() {
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务${retentionClause()}，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
-  return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>目标机器</th><th>状态</th><th>提交方</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
-  ${list.map(t => `<tr data-task="${esc(t.id)}" tabindex="0" aria-label="查看任务 ${esc(t.id)}">
-    <td class="task-title"><strong>${esc(t.target_agent)}</strong><small>${esc(t.id)}</small></td>
+  /* H11 任务列表人话摘要（FE-POLISH 轮2）：主列「能力名+一句摘要」（summarizeTask
+   * shared——stdin 优先 args 首参兜底，皆空如实留空）；完整 ID 收详情（抽屉标题与
+   * 证据段可复制），提交方列收详情（高级筛选按提交方过滤的能力保留）。 */
+  return `<div class="table-wrap"><table><thead><tr><th>任务</th><th>目标机器</th><th>状态</th><th>提交时间（UTC）</th><th>操作</th></tr></thead><tbody>
+  ${list.map(t => { const sum = summarizeTask(t); return `<tr data-task="${esc(t.id)}" tabindex="0" aria-label="查看任务 ${esc(t.id)}">
+    <td class="task-title"><strong>${esc(t.target_agent)}</strong>${sum ? `<small class="task-sum">${esc(sum)}</small>` : ''}</td>
     <td>${esc(t.target_node)}</td>
     <td>${badge(t.status)}${t.result?.error ? `<small class="help" title="${esc(ERRORS[t.result.error] || '执行中断，等你确认')}">ⓘ</small>` : ''}${t.review ? '<small>已核对</small>' : ''}</td>
-    <td>${esc(t.submitted_by)}</td>
     <td><small>${esc(fmtTime(t.created_at))}</small></td>
     <td class="table-action">${t.status === 'needs_review' && !t.review ? button('去核对', 'detail', 'link', `data-id="${esc(t.id)}"`) : button('查看 →', 'detail', 'link', `data-id="${esc(t.id)}"`)}</td>
-  </tr>`).join('')}</tbody></table></div>`;
+  </tr>`; }).join('')}</tbody></table></div>`;
 }
 
 /* ---------- 任务抽屉（详情 + 核对 + 产物 + 时间线） ---------- */
@@ -2025,13 +2065,15 @@ function closeLayer(restoreFocus = false) {
   }, LAYER_CLEAR_MS);
 }
 /* drawerZones 任务抽屉分区内容（D22 稳定 DOM：壳由 drawerShellHtml 建一次，本函数
- * 只产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序与材质
- * 层级（e821bf8，SPEC 六.五 第二条）：介绍条 → 任务指令（t20261026-webfix 新增，
- * 2026-10-26 改动四提升 shared block 双端同文，node 同分区点亮）→ 失败
- * 原因（hub 独有白名单）→ 最终
- * 答复（白底浮起主角）→ 诊断日志（折叠配角）→ 产物 → 任务输入（details 折叠沉底，
- * hub 独有白名单）→ 时间线 → 人工核对（hub 独有白名单）→ 归档/下一步。头部/文案/
- * 时间口径与 node 同构（D2/D3/D17/D21）。 */
+ * 只产出各分区 HTML，经 drawerZonesApply 与缓存 diff 后局部写入）。区块次序为
+ * FE-POLISH 轮2 H13 五段化（SPEC 六.五 第二条同步更新）：①我让它做什么（指令
+ * 预览，prompt）→ ②当前事实与下一步（状态介绍+错误通知+进行时行动按钮「取消任务」，
+ * intro/related）→ ③结果与可取文件（最终答复+产物，answer/artifacts）→ ④异常核查
+ * （失败原因+人工核对，fail/review，hub 独有白名单——异常任务在此前置呈现，普通
+ * 任务两分区为空零占位）→ ⑤折叠证据（段头身份行 trace/提交人/创建/恢复密钥 +
+ * 任务输入原样 JSON/诊断日志/时间线三 details 默认收起，evidence/input/logs/
+ * timeline）→ 归档/下一步（next，导出与保留期说明）。头部只留标题与 agent@node+
+ * 状态徽标，身份技术态沉到证据段（H13「完整 ID/trace 收详情」）。 */
 function drawerZones(t) {
   const needs = t.status === 'needs_review';
   const r = t.result;
@@ -2043,27 +2085,30 @@ function drawerZones(t) {
     : '任务仍在进行，抽屉每 5 秒自动刷新。';
   return {
     head: `${modalHead('任务详情 · ' + esc(t.id))}
-    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>
-    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>`,
+    <div class="row"><h2>${esc(t.target_agent)} @ ${esc(t.target_node)} ${badge(t.status)}</h2></div>`,
+    prompt: promptZoneHtml(t),
     intro: `<div class="${needs ? 'notice warn' : 'notice'}">${intro}</div>
-    ${taskErrorNotice(r, needs)}`,
+    ${taskErrorNotice(r, needs)}
+    ${!TERMINAL.has(t.status) ? `<div class="actions spaced">${button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`)}</div>` : ''}`,
     related: Array.isArray(t.related_works) && t.related_works.length
       ? `<h3>拆解工作单（${t.related_works.length}）</h3>
       ${t.related_works.map(w => `<div class="artifact row"><div><b>${esc(w.id)}</b> ${workBadge(w.status)}<br><small>${esc(w.goal)}</small><br><small>步骤进度 ${w.done_steps || 0}/${w.steps || 0}</small></div>${button('查看', 'work-jump', 'link', `data-work="${esc(w.id)}"`)}</div>`).join('')}
       <p class="footer-note">统筹智能体拆解本任务创建的工作单；同主任务可有多张单（决策变更重建，历史保留），点卡可看工作单档案与逐步进度。</p>`
       : '',
-    prompt: promptZoneHtml(t),
-    fail: r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : '',
     answer: drawerAnswerHtml(t, r, needs),
-    logs: r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
     artifacts: `<h3>产物文件</h3>
     ${artifactsHtml(t)}
     <p class="footer-note">产物经中心端中继从执行机器取回，SHA-256 校验一致才允许下载；产物文件保留取决于执行机（无自动回收），可取性以实际取回为准。</p>`,
-    input: `<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre></details>`,
-    timeline: `<h3 class="spaced">时间线</h3>${drawerTimelineHtml(t)}`,
+    fail: r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : '',
     review: reviewSection(t),
+    evidence: `<h3 class="spaced">证据与记录</h3>
+    <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>
+    <p class="muted small">下方完整证据（任务输入原样 JSON / 诊断日志 / 时间线）默认折叠——普通成功任务不用展开；需要核对异常时再打开。</p>`,
+    input: `<details class="spaced"><summary>任务输入（原样 JSON）</summary><pre>${esc(JSON.stringify({ args: t.input?.args || [], stdin: t.input?.stdin || '', env: t.input?.env || {} }, null, 2))}</pre></details>`,
+    logs: r && (r.stdout_tail || r.stderr_tail) ? `<details><summary>诊断日志（stdout / stderr 尾部）</summary><div id="drawer-runlog">${drawerLogInner(r, !!S.drawer?.logRaw)}</div><small>最多保留各 64KiB。</small></details>` : '',
+    timeline: `<details class="spaced"><summary>时间线（受理 / 执行 / 终态事件）</summary>${drawerTimelineHtml(t)}</details>`,
     next: `${terminal(t.status) && !needs ? `<div class="notice">终态任务记录${retentionClause()}${retentionDisabled() ? '。' : '，到期自动清理。'}${button('查看全部任务 →', 'go-tasks', 'link')}</div>` : ''}
-    <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}${!terminal(t.status) ? button('取消任务', 'task-cancel', 'danger', `data-id="${esc(t.id)}"`) : ''}</div>`,
+    <div class="actions spaced">${button('导出此任务 JSON', 'export-one', '', `data-id="${esc(t.id)}"`)}</div>`,
   };
 }
 /* ---------- 任务结果 Markdown 渲染接入（t20261023-969e） ----------
@@ -2080,7 +2125,11 @@ function failInner(t) {
 function artifactsHtml(t) {
   const arts = t.result?.artifacts || [];
   if (!arts.length) return '<p class="muted">暂无已登记产物。中断任务不推断存在可交付产物。</p>';
-  return arts.map((a, i) => `<div class="artifact row"><div><b>${esc(a.path)}</b><br><small>${a.size} 字节 · sha256 ${esc(String(a.sha256 || '').slice(0, 16))}…</small></div>${button('取回', 'artifact', '', `data-id="${esc(t.id)}" data-index="${i}"`)}</div>`).join('');
+  /* H15 产物行（FE-POLISH 轮2）：前置文件名+易读大小（fmtSize shared）+取回按钮；
+   * 完整路径/原始字节/SHA-256 收进行内 details（「完整路径与校验」），技术态可核对
+   * 不丢（导出 JSON 仍含全量）。 */
+  return arts.map((a, i) => `<div class="artifact"><div class="row"><div><b>${esc(String(a.path).split('/').pop() || a.path)}</b><br><small class="artifact-size">${fmtSize(a.size)}</small></div>${button('取回', 'artifact', '', `data-id="${esc(t.id)}" data-index="${i}"`)}</div>
+  <details class="artifact-detail"><summary>完整路径与校验</summary><small>路径 <code>${esc(a.path)}</code><br>sha256 <code>${esc(String(a.sha256 || '—'))}</code> · 原始 ${a.size} 字节</small></details></div>`).join('');
 }
 function reviewSection(t) {
   if (t.status !== 'needs_review') return '';
@@ -3133,16 +3182,28 @@ function worksPage() {
     ${S.works.length ? workTable(S.works) : `<div class="empty"><h2>还没有工作单</h2><p class="muted">统筹智能体拆解多步目标时会经 MCP 创建工作单；单步小任务直接派发、不建单。</p></div>`}
     <p class="footer-note">${S.works.length} 个工作单 · 时间为 UTC · 未完成的工作单不会清理；已关闭的保留 30 天。</p></section>`;
 }
+/* workNextLine 工作单下一步人话（FE-POLISH 轮2 H18）：列表只回答「卡在哪、下一步
+ * 做什么」——由状态与步骤集推导；尝试数/任期/关闭时间等档案细节收详情抽屉
+ *（详情头部已有关闭于/任期/创建于，尝试数在「执行尝试（N）」表）。 */
+function workNextLine(w) {
+  const steps = w.steps || [];
+  if (WORK_TERMINAL.has(w.status)) return w.status === 'done' ? '已关闭 · 收集报告在详情' : '已处置关闭 · 理由在详情报告';
+  const blocker = steps.find(s => s.status === 'failed' || s.status === 'needs_review');
+  if (blocker) return `第 ${blocker.seq} 步${WORK_STEP_STATES[blocker.status] || blocker.status}——续派该步或处置放弃剩余步骤`;
+  const open = steps.find(s => s.status === 'pending');
+  if (open) return `第 ${open.seq} 步待派发——接管后续派`;
+  if (steps.length && steps.every(s => s.status === 'done')) return '全部步骤完成——收集关闭（写报告）';
+  if (!steps.length) return '尚无派发记录——接管后按计划续派';
+  return '执行中——等在途步骤收束后收集关闭';
+}
 function workTable(list) {
-  return `<div class="table-wrap"><table><thead><tr><th>工作单</th><th>状态</th><th>步骤进度</th><th>尝试</th><th>任期</th><th>创建（UTC）</th><th>关闭（UTC）</th><th></th></tr></thead><tbody>
+  /* H18 工作单列表（FE-POLISH 轮2）：前置工作目标+阻断/下一步；尝试/任期/创建/
+   * 关闭四列退役进详情（详情头部与尝试表已承载，零信息丢失）。 */
+  return `<div class="table-wrap"><table><thead><tr><th>工作单</th><th>状态</th><th>下一步</th><th></th></tr></thead><tbody>
   ${list.map(w => `<tr data-work="${esc(w.id)}" tabindex="0" aria-label="查看工作单 ${esc(w.id)}">
-    <td class="task-title"><strong>${esc(summarize(w.goal, 40))}</strong><small>${esc(w.id)}</small></td>
+    <td class="task-title"><strong>${esc(summarize(w.goal, 46))}</strong><small>步骤 ${w.done_steps || 0}/${w.steps || 0}</small></td>
     <td>${workBadge(w.status)}</td>
-    <td>${w.done_steps}/${w.steps}</td>
-    <td>${w.attempts}</td>
-    <td>${esc(w.prime_term || '—')}</td>
-    <td><small>${esc(fmtTime(w.created_at))}</small></td>
-    <td><small>${w.closed_at ? esc(fmtTime(w.closed_at)) : '—'}</small></td>
+    <td class="work-next"><small>${esc(workNextLine(w))}</small></td>
     <td class="table-action">${button('查看 →', 'work-open', 'link', `data-id="${esc(w.id)}"`)}</td>
   </tr>`).join('')}</tbody></table></div>`;
 }

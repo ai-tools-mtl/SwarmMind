@@ -318,6 +318,16 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .wiz-step.on{color:var(--accent)}
 .wiz-step.on .n{background:var(--accent);color:var(--white)}
 .enroll-token-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+/* 接入状态行（FE-POLISH 轮2 H07）：尚未登记/等待连接/已连接三态前置——todo 灰点、
+ * wait heat 点、ok live 绿底；点颜色全走既有语义色不扩编。 */
+.enroll-state{display:flex;align-items:center;gap:10px;margin:6px 0 16px;padding:10px 14px;border-radius:var(--r-thumb);background:rgba(0,0,0,.04)}
+.enroll-state .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex-shrink:0}
+.enroll-state b{font-size:var(--fs-small)}
+.enroll-state small{display:block}
+.enroll-state.enroll-wait .dot{background:var(--heat)}
+.enroll-state.enroll-ok{background:var(--live-bg);color:var(--live-ink)}
+.enroll-state.enroll-ok .dot{background:var(--live)}
+.enroll-state.enroll-ok small{color:var(--live-ink)}
 .enroll-token-row code{user-select:all;word-break:break-all;background:var(--hover);border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:10px 14px;flex:1;min-width:200px}
 .enroll-rows{border:1px solid var(--hairline);border-radius:var(--r-thumb);overflow:hidden;margin:12px 0}
 .enroll-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,320px)}
@@ -355,6 +365,15 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}
 .timeline li.hl:before{background:var(--heat)}
 .artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
+/* H15 产物行详情折叠（FE-POLISH 轮2，双端同值）：行内 details 不吃全局 details
+ * 的 border-top/margin（产物行已有分隔线，避免双线噪音）；文件名+易读大小主行，
+ * 完整路径/SHA 沉折叠。task-sum 任务列表人话摘要回正文字体（td small 默认 mono
+ * 只给可复制技术串）；work-next 工作单「下一步」列同口径。 */
+.artifact .artifact-detail{border-top:0;padding-top:4px;margin:6px 0 0}
+.artifact .artifact-detail summary{font-size:var(--fs-small);color:var(--ink-3);font-weight:500}
+.artifact-size{color:var(--ink-3)}
+.task-sum{font-family:var(--font);color:var(--ink-3)}
+.work-next{min-width:180px}.work-next small{font-family:var(--font)}
 .cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}
 /* 能力描述是中文正文（B1）：解除 td small 对中文说明的无差别 mono（mono 只给
  * 可复制技术字符串——任务 ID 等）；说明文字回正文字体。 */
