@@ -20,17 +20,29 @@ import (
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
-// autoMemberMock 决策 mock：单选 Suggest 不可达兜底 + 多选 SuggestMembers 可编程。
+// autoMemberMock 决策 mock：单选 Suggest 可编程（jev 主持人点名）+ 多选
+// SuggestMembers 可编程（建群自动选人回退）。
 type autoMemberMock struct {
-	members []string
+	members []string // SuggestMembers 多选返回
 	reason  string
 	err     error
+	// pickNode/pickAgent Suggest 单选返回（主持人点名目标）；两者皆空时返回
+	// ErrNoFit（与 v3 mock 行为一致：未编程即无建议）。
+	pickNode  string
+	pickAgent string
+	pickErr   error
 }
 
 func (m *autoMemberMock) Name() string  { return "mock-jev" }
 func (m *autoMemberMock) Model() string { return "mock-model" }
 func (m *autoMemberMock) Suggest(ctx context.Context, req decision.Request) (*decision.Suggestion, error) {
-	return nil, decision.ErrNoFit
+	if m.pickErr != nil {
+		return nil, m.pickErr
+	}
+	if m.pickNode == "" && m.pickAgent == "" {
+		return nil, decision.ErrNoFit
+	}
+	return &decision.Suggestion{TargetNode: m.pickNode, TargetAgent: m.pickAgent}, nil
 }
 func (m *autoMemberMock) SuggestMembers(ctx context.Context, goal string, cands []decision.Candidate) ([]string, string, error) {
 	return m.members, m.reason, m.err
@@ -79,12 +91,15 @@ func newAutoFixture(t *testing.T, mp decision.Provider) *fixture {
 	return f
 }
 
-// TestGroupAutoMembersJevPick 智能选人建群：jev 多选 → members 转 node/agent 形态
-// → 201；派发失败不回滚群（best-effort 口径，目标节点不在网也建群成立）。
+// TestGroupAutoMembersJevPick auto_members 兼容路径（v4 主持人语义）：空成员回退
+// jev 多选 → 转 node/agent 形态 → 201 + jev 主持开启 + 点名第一棒（ghost 键）。
+// v3「建群即全员并发派发」已退役——v4 的唤醒载体是主持人接力棒，删除
+// startHostFirstBaton/submitHostBaton 链路本测试必转红（派发对账 R1-07 同口径）。
 func TestGroupAutoMembersJevPick(t *testing.T) {
-	mp := &autoMemberMock{members: []string{"zcode-dev@mac-mini", "diskcheck@win-box"}, reason: "编码加巡检"}
+	mp := &autoMemberMock{members: []string{"zcode-dev@mac-mini", "diskcheck@win-box"}, reason: "编码加巡检",
+		pickNode: "mac-mini", pickAgent: "zcode-dev"}
 	f := newAutoFixture(t, mp)
-	// 候选面：两节点在线 + exposed 能力卡（jev 多选的判定对象）
+	// 候选面：两节点在线 + exposed 能力卡（jev 多选与单选点名的判定对象）
 	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{{Name: "zcode-dev", Exposed: true}}); err != nil {
 		t.Fatal(err)
 	}
@@ -113,27 +128,53 @@ func TestGroupAutoMembersJevPick(t *testing.T) {
 		t.Fatalf("jev 结果应转 node/agent 群成员形态: %v", g.Members)
 	}
 
-	// 派发对账（R1-07）：两名成员各落一单，目标/group_ref/stdin/幂等键逐项核对
-	// ——删除 dispatchGroupCollab 本测试必须转红，不能只绿在选人形态转换上。
+	// 派发对账（R1-07，v4 主持单棒）：恰一棒、目标=点名成员、group_ref 挂群、
+	// stdin 指引带 kind=agent、幂等键 ghost-<gid>-<round>。
 	tasks := f.st.View().Tasks
-	if len(tasks) != 2 {
-		t.Fatalf("两名成员应各落一个协作任务, got %d", len(tasks))
+	if len(tasks) != 1 {
+		t.Fatalf("v4 主持语义应恰派第一棒一单（全员并发派发已退役）, got %d", len(tasks))
 	}
-	seen := map[string]bool{}
+	var baton protocol.Task
 	for _, tk := range tasks {
-		if tk.GroupRef != g.ID {
-			t.Fatalf("协作任务 %s 应挂群 %s, got group_ref %q", tk.ID, g.ID, tk.GroupRef)
-		}
-		if !strings.Contains(tk.Input.Stdin, `kind="agent"`) {
-			t.Fatalf("协作任务 %s stdin 应带协作指引（含 kind=agent 示例）: %.80s", tk.ID, tk.Input.Stdin)
-		}
-		if want := groupJoinIdem(g.ID, tk.TargetNode, tk.TargetAgent); tk.IdemKey != want {
-			t.Fatalf("幂等键应为三元组无歧义编码: got %q want %q", tk.IdemKey, want)
-		}
-		seen[tk.TargetNode+"/"+tk.TargetAgent] = true
+		baton = tk
 	}
-	if !seen["mac-mini/zcode-dev"] || !seen["win-box/diskcheck"] {
-		t.Fatalf("协作任务目标应对齐成员集合: %v", seen)
+	if baton.GroupRef != g.ID {
+		t.Fatalf("棒任务 %s 应挂群 %s, got group_ref %q", baton.ID, g.ID, baton.GroupRef)
+	}
+	if !strings.Contains(baton.Input.Stdin, `kind="agent"`) || !strings.Contains(baton.Input.Stdin, "主持人点名") {
+		t.Fatalf("棒任务 %s stdin 应为主持点名指引（含 kind=agent 示例）: %.80s", baton.ID, baton.Input.Stdin)
+	}
+	if want := hostBatonIdem(g.ID, 1); baton.IdemKey != want {
+		t.Fatalf("幂等键应为 ghost-<gid>-<round>: got %q want %q", baton.IdemKey, want)
+	}
+	if baton.TargetNode != "mac-mini" || baton.TargetAgent != "zcode-dev" {
+		t.Fatalf("第一棒应点名 jev 单选成员, got %s/%s", baton.TargetNode, baton.TargetAgent)
+	}
+
+	// 主持状态（GET 群列表视图）：HostActive/HostRound/HostTurn 三字段与在途棒
+	// 展示字段（host_turn_member 经任务账本反查）。
+	code, body = f.do(hc, http.MethodGet, "/api/v1/groups", "")
+	if code != http.StatusOK {
+		t.Fatal("群列表应 200")
+	}
+	var list struct {
+		Groups []struct {
+			ID             string `json:"group_id"`
+			HostActive     bool   `json:"host_active"`
+			HostRound      int    `json:"host_round"`
+			HostTurn       string `json:"host_turn"`
+			HostTurnMember string `json:"host_turn_member"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal([]byte(body), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Groups) != 1 {
+		t.Fatalf("应恰一群, got %d", len(list.Groups))
+	}
+	v := list.Groups[0]
+	if !v.HostActive || v.HostRound != 1 || v.HostTurn != baton.ID || v.HostTurnMember != "mac-mini/zcode-dev" {
+		t.Fatalf("主持状态应为首棒在途: %+v（棒任务 %s）", v, baton.ID)
 	}
 }
 
@@ -322,18 +363,22 @@ func TestTaskDetailRelatedWorksEmptyArray(t *testing.T) {
 
 // TestGroupCollabGjoinKeyCollisionMembers gjoin 键无歧义编码（R1-02）：边界成员
 // a-b/c 与 a/b-c 的朴素拼接曾碰撞出同键（第二成员被判「同键不同内容」确定性
-// 漏派）——修复后两名成员各落一单、幂等键互异、创建注记各一条（TaskRefs 外显）。
+// 漏派）——修复后两名成员各落一单、幂等键互异且可逆解码、创建注记各一条
+//（TaskRefs 外显）。v4 语义转向后 gjoin 键仍在显式多成员补派入口
+// dispatchGroupCollab 生效（主持人轮转用 ghost 键，不经过本编码），本测试白盒
+// 调用该入口锁键的编码不变。
 func TestGroupCollabGjoinKeyCollisionMembers(t *testing.T) {
-	mp := &autoMemberMock{members: []string{"c@a-b", "b-c@a"}}
-	f := newAutoFixture(t, mp)
+	s, f := newAutoFixtureServer(t, &autoMemberMock{})
+	hc := f.loginClient(true)
+	// v4 建群语义：成员主人手选（边界形态 a-b/c 与 a/b-c 原样保留）；补派目标
+	// 须 exposed（submit 校验链第 3 条），两节点注册 + 上线
 	for node, agent := range map[string]string{"a-b": "c", "a": "b-c"} {
 		if err := f.core.RegisterNode(node, []protocol.AgentCard{{Name: agent, Exposed: true}}); err != nil {
 			t.Fatal(err)
 		}
 		f.core.SetOnline(node, true)
 	}
-	hc := f.loginClient(true)
-	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"collaborate","auto_members":true}`)
+	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"collaborate","members":["a-b/c","a/b-c"]}`)
 	if code != http.StatusCreated {
 		t.Fatalf("建群应 201, got %d: %s", code, body)
 	}
@@ -343,6 +388,11 @@ func TestGroupCollabGjoinKeyCollisionMembers(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &g); err != nil {
 		t.Fatal(err)
 	}
+	grp, ok := s.cfg.Groups.GetGroup(g.ID)
+	if !ok {
+		t.Fatal("群应存在")
+	}
+	s.dispatchGroupCollab(grp, "admin") // 显式多成员补派入口（v4 保留面）
 
 	tasks := f.st.View().Tasks
 	if len(tasks) != 2 {
@@ -352,6 +402,9 @@ func TestGroupCollabGjoinKeyCollisionMembers(t *testing.T) {
 	for _, tk := range tasks {
 		if tk.GroupRef != g.ID {
 			t.Fatalf("协作任务应挂群 %s, got %q", g.ID, tk.GroupRef)
+		}
+		if want := groupJoinIdem(g.ID, tk.TargetNode, tk.TargetAgent); tk.IdemKey != want {
+			t.Fatalf("幂等键应为三元组长度前缀编码: got %q want %q", tk.IdemKey, want)
 		}
 		if keys[tk.IdemKey] {
 			t.Fatalf("不同成员幂等键不得相同: %q", tk.IdemKey)
@@ -447,12 +500,12 @@ func TestGroupCollabIdemReplaySingleTask(t *testing.T) {
 	}
 }
 
-// TestGroupCollabGuidanceChain 指引→预算→FINAL 收敛链端到端（R1-03）：真实派发
-// 任务 stdin（agent 实际拿到的指引）每次 group_say 示例都带 kind="agent"；照指引
-// 走 REST——agent 发言占预算、FINAL 注记恰一条、user 插话不触发；预算耗尽拒绝
-// 后正式任务提交不受影响。
+// TestGroupCollabGuidanceChain 指引→预算→FINAL 收敛链端到端（R1-03，v4 主持
+// 人语义）：真实派发的主持棒任务 stdin（agent 实际拿到的点名指引）每次
+// group_say 示例都带 kind="agent"；照指引走 REST——agent 发言占预算、FINAL 注记
+// 恰一条、user 插话不触发；预算耗尽拒绝后正式任务提交不受影响。
 func TestGroupCollabGuidanceChain(t *testing.T) {
-	mp := &autoMemberMock{members: []string{"butler@mac-mini"}}
+	mp := &autoMemberMock{pickNode: "mac-mini", pickAgent: "butler"}
 	f := newAutoFixture(t, mp)
 	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{{Name: "butler", Exposed: true}}); err != nil {
 		t.Fatal(err)
@@ -460,7 +513,9 @@ func TestGroupCollabGuidanceChain(t *testing.T) {
 	f.core.SetOnline("mac-mini", true)
 	hc := f.loginClient(true)
 
-	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"协作收敛","auto_members":true}`)
+	// v4 建群语义：成员主人手选 + jev 主持开启 → 点名第一棒（协作指引随棒派发）
+	code, body := f.do(hc, http.MethodPost, "/api/v1/groups",
+		`{"goal":"协作收敛","members":["mac-mini/butler"],"jev_host":true}`)
 	if code != http.StatusCreated {
 		t.Fatalf("建群应 201, got %d: %s", code, body)
 	}
@@ -474,10 +529,14 @@ func TestGroupCollabGuidanceChain(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 真实派发任务的 stdin 即指引：group_say 示例（含 FINAL）全部显式 kind="agent"，
-	// 且带预算耗尽指引
+	// 真实派发的主持棒任务 stdin 即指引：group_say 示例（含 FINAL）全部显式
+	// kind="agent"，且带预算耗尽指引
+	batons := f.st.View().Tasks
+	if len(batons) != 1 {
+		t.Fatalf("应恰一棒在途, got %d", len(batons))
+	}
 	var stdin string
-	for _, tk := range f.st.View().Tasks {
+	for _, tk := range batons {
 		stdin = tk.Input.Stdin
 	}
 	if strings.Count(stdin, `kind="agent"`) < 2 {

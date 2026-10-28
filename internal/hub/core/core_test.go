@@ -18,8 +18,12 @@ type fakeClock struct {
 	t  time.Time
 }
 
+// 锚点取运行时刻（非写死日期）：artifact_fullchain_test 把真实 node service 桥到
+// 本基座，node 侧过期守卫按真实墙钟复核任务 ExpireAt（=锚点+7d）——写死的过去
+// 锚点会让 ExpireAt 随日期推进落入真实过去，node 正确拒绝执行（2026-10-28 实证
+// 的「时间炸弹」）。锚点随运行日走，+7d 恒在未来；测试内推进仍全可控。
 func newFakeClock() *fakeClock {
-	return &fakeClock{t: time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)}
+	return &fakeClock{t: time.Now().UTC().Truncate(time.Second)}
 }
 
 func (c *fakeClock) Now() time.Time {

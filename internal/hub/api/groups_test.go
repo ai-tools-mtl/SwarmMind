@@ -208,7 +208,8 @@ func TestGroupEndpointsUnavailable(t *testing.T) {
 func TestGroupSayRejectsSystem(t *testing.T) {
 	f := newGroupFixture(t)
 	hc := f.loginClient(true)
-	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"保留字验证"}`)
+	// v4 建群语义：members 必填（本测试意图是 kind=system 保留字，成员随手给）
+	code, body := f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"保留字验证","members":["a"]}`)
 	if code != http.StatusCreated {
 		t.Fatalf("建群应 201, got %d: %s", code, body)
 	}
@@ -328,7 +329,7 @@ func TestGroupTaskRefFlow(t *testing.T) {
 	if code != http.StatusNotFound || !strings.Contains(string(body), "group_not_found") {
 		t.Fatalf("未知群 group_ref 应 404, got %d: %s", code, body)
 	}
-	code, body = f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"短命群"}`)
+	code, body = f.do(hc, http.MethodPost, "/api/v1/groups", `{"goal":"短命群","members":["echo"]}`)
 	if code != http.StatusCreated {
 		t.Fatalf("建群 2 应 201, got %d", code)
 	}

@@ -124,28 +124,33 @@ func taskDesc(input protocol.TaskInput) string {
 type groupCreateRequest struct {
 	Goal    string   `json:"goal"`
 	Members []string `json:"members"`
-	// AutoMembers 智能选人（DESIGN-butler 方案三，2026-10-28 伦哥口径：群聊是
-	// 多 agent 协作，成员由中心端 jev 判定、无需人工确认）：true 时忽略 members，
-	// 由决策服务从全网在线∩exposed 能力中多选参与集合（SuggestMembers，贡献潜力
-	// 降序），建群后对每个成员并发派发群协作任务（任务即唤醒与执行载体）。降级：
-	// 决策不可用/无合适成员 → 422 带人话原因，建群不发生（主人回退手选路径）。
+	// JevHost jev 主持轮转发言（DESIGN-butler 方案三 3.6，v4 修订：伦哥口径
+	// 「成员由主人自己选，jev 是群内主持人」）：true 时建群即开启主持——hub 调
+	// decision.Suggest 单选从成员∩在线候选点名接力棒（idem 键 ghost-<gid>-<round>，
+	// HostTurn 锁防重入），棒任务终态自动触发下一轮；FINAL:/预算尽/降级即停轮
+	// （人话注记，循环挂起不阻塞群）。决策未启用时建群照常（无主持，纯手动讨论）。
+	JevHost bool `json:"jev_host,omitempty"`
+	// AutoMembers 兼容参数，语义转向（v4）：true = 开启 jev 主持 + members 为空
+	// 时回退 SuggestMembers 自动选人（旧调用方不炸）。members 非空时以传入为准
+	//（不再忽略 members——v3 的「忽略 members」口径随主持人模型退役）。
 	AutoMembers bool `json:"auto_members,omitempty"`
 }
 
-// handleGroupCreate POST /api/v1/groups：→ 201 群对象 / 400。
-// auto_members=true：jev 选成员 → 建群 → 每成员并发派发群协作任务（submit 正式
-// 任务即唤醒与执行载体，group_ref 挂群，终态自动回流；幂等键 groupJoinIdem）。
+// handleGroupCreate POST /api/v1/groups：→ 201 群对象 / 400 / 422 / 503。
+// jev_host / auto_members 开启主持：建群（HostActive）→ 同步点名第一棒（best-
+// effort，Suggest 预算内失败只注记挂起，不回滚群——与 dispatchGroupCollab 同款
+// 口径）。members 必填（auto_members 空成员回退选人除外）：v4 起成员由主人手选。
 func (s *Server) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	if s.groupUnavailable(w) {
 		return
 	}
 	var req groupCreateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {goal, members[], auto_members?}")
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {goal, members[], jev_host?}")
 		return
 	}
-	principal := authPrincipal(r)
-	if req.AutoMembers {
+	host := req.JevHost || req.AutoMembers
+	if req.AutoMembers && len(req.Members) == 0 {
 		members, apiErr := s.autoSelectMembers(req.Goal)
 		if apiErr != nil {
 			apiErr.write(w)
@@ -153,13 +158,30 @@ func (s *Server) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Members = members
 	}
-	g, err := s.cfg.Groups.CreateGroup(req.Goal, adminIdentity, req.Members)
+	if len(req.Members) == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_request",
+			"请先选择成员智能体：members 必填（或传 auto_members=true 由 jev 自动选人）")
+		return
+	}
+	hostOn := host && s.cfg.Decision != nil && s.cfg.Decision.Enabled()
+	var (
+		g   group.Group
+		err error
+	)
+	if hostOn {
+		g, err = s.cfg.Groups.CreateHostedGroup(req.Goal, adminIdentity, req.Members)
+	} else {
+		g, err = s.cfg.Groups.CreateGroup(req.Goal, adminIdentity, req.Members)
+	}
 	if err != nil {
 		writeGroupErr(w, err)
 		return
 	}
-	if req.AutoMembers {
-		s.dispatchGroupCollab(g, principal) // best-effort：群已建成，单成员派发失败只记日志
+	switch {
+	case hostOn:
+		s.startHostFirstBaton(g) // best-effort：点名失败只注记挂起，群已建成
+	case host:
+		s.postHostNote(g.ID, "主持人未开启：决策服务未启用（hub.yaml 未配置 decision 段或密钥不可得），本群为手动讨论")
 	}
 	writeJSON(w, http.StatusCreated, g)
 }
@@ -233,10 +255,17 @@ func groupJoinIdem(groupID, node, agent string) string {
 	return fmt.Sprintf("gjoin-%s-%d:%s-%d:%s", groupID, len(node), node, len(agent), agent)
 }
 
-// dispatchGroupCollab 协作任务并发派发（DESIGN-butler 方案三 3.2 步骤 3）：对每个
-// 成员各派一个群协作任务（submit 正式任务即唤醒与执行载体），顺序落库（hub 单写
-// 事务），执行并发由 node 并发槽控制。best-effort：单成员失败只记日志不回滚群——
-// 部分成员缺席时其余协作照常，缺席成员可由主人手动补派（同 idem 键幂等）。
+// dispatchGroupCollab 协作任务并发派发（DESIGN-butler 方案三 3.2 步骤 3，v3
+// 「建群即全员并发派发」口径）：对每个成员各派一个群协作任务（submit 正式任务
+// 即唤醒与执行载体），顺序落库（hub 单写事务），执行并发由 node 并发槽控制。
+// best-effort：单成员失败只记日志不回滚群——部分成员缺席时其余协作照常，缺席
+// 成员可由主人手动补派（同 idem 键幂等）。
+//
+// v4 语义转向（3.6 主持人接力棒，2026-10-28 伦哥口径）后生产建群路径不再调用
+// 本函数（auto_members/jev_host 均走主持人单棒轮转，hostBatonStdin/ghost 键）；
+// 保留为多成员并发补派的显式派发入口（幂等键/预登记回滚/创建注记链由
+// groups_auto_test、groups_collab_integration_test 固化——终态回流恰好一次等
+// 断言仍守护 v4 棒任务共用的回流机制），去留待伦哥裁决。
 func (s *Server) dispatchGroupCollab(g group.Group, principal string) {
 	for _, m := range g.Members {
 		node, agent, ok := strings.Cut(m, "/")
@@ -272,12 +301,39 @@ func (s *Server) dispatchGroupCollab(g group.Group, principal string) {
 	}
 }
 
-// handleGroupList GET /api/v1/groups：全量群列表（按创建时间升序）。
+// groupView 群对象 + 主持轮转展示字段（v4 3.6 前端数据源）：Group 平铺嵌入
+// （JSON 字段原地提升），host_turn_member 经任务账本反查当前在途棒的目标成员。
+type groupView struct {
+	group.Group
+	// HostTurnMember 当前在途棒任务的目标成员（node/agent）；任务已过保留期/
+	// 未在途为空串（omitempty 不下发，前端按「第 N 轮」降级呈现）。
+	HostTurnMember string `json:"host_turn_member,omitempty"`
+}
+
+// groupViews 群列表视图组装（主持状态展示字段补齐）：HostTurn 非空时经
+// Core.GetTask 反查目标成员——查不到（任务清理/派发窗口）留空即降级呈现。
+func (s *Server) groupViews() []groupView {
+	gs := s.cfg.Groups.ListGroups()
+	out := make([]groupView, 0, len(gs))
+	for _, g := range gs {
+		v := groupView{Group: g}
+		if g.HostTurn != "" && s.cfg.Core != nil {
+			if t, ok := s.cfg.Core.GetTask(g.HostTurn); ok {
+				v.HostTurnMember = strings.Trim(t.TargetNode+"/"+t.TargetAgent, "/")
+			}
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// handleGroupList GET /api/v1/groups：全量群列表（按创建时间升序；带主持状态
+// 展示字段）。
 func (s *Server) handleGroupList(w http.ResponseWriter, r *http.Request) {
 	if s.groupUnavailable(w) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"groups": s.cfg.Groups.ListGroups()})
+	writeJSON(w, http.StatusOK, map[string]any{"groups": s.groupViews()})
 }
 
 // handleGroupMessages GET /api/v1/groups/{id}/messages?since=N：增量拉取
@@ -302,7 +358,31 @@ func (s *Server) handleGroupMessages(w http.ResponseWriter, r *http.Request) {
 		writeGroupErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "pruned_before_seq": prunedBefore})
+	// 响应平级附群快照（v4 3.6 主持状态数据源）：群详情 3s 增量轮询零额外请求
+	// 即可感知 HostRound/HostTurn 变化（additive 字段，既有消费方不受影响）。
+	resp := map[string]any{"messages": msgs, "pruned_before_seq": prunedBefore}
+	if views := s.groupViewsOf(r.PathValue("id")); views != nil {
+		resp["group"] = *views
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// groupViewsOf 单群视图（不存在返回 nil）：handleGroupMessages 附带快照用。
+func (s *Server) groupViewsOf(groupID string) *groupView {
+	if s.cfg.Groups == nil {
+		return nil
+	}
+	g, ok := s.cfg.Groups.GetGroup(groupID)
+	if !ok {
+		return nil
+	}
+	v := groupView{Group: g}
+	if g.HostTurn != "" && s.cfg.Core != nil {
+		if t, ok := s.cfg.Core.GetTask(g.HostTurn); ok {
+			v.HostTurnMember = strings.Trim(t.TargetNode+"/"+t.TargetAgent, "/")
+		}
+	}
+	return &v
 }
 
 // groupSayRequest 群发言请求体。from 为发言者标识；REST/MCP 发言只允许
@@ -340,9 +420,10 @@ func (s *Server) handleGroupSay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// FINAL 收敛候选登记（DESIGN-butler 方案三 3.1，2026-10-28）：成员发言以
-	// FINAL: 前缀开买即登记「最终版本候选」——best-effort 注一条 kind=system 注记
+	// FINAL: 前缀开头即登记「最终版本候选」（group.PostMessage 同事务置 FinalSeen
+	// 持久化标记，主持停轮判定的数据源）——best-effort 注一条 kind=system 注记
 	//（群页高亮展示）；注记失败不影响发言本体（log 后照常返回）。
-	if req.Kind == group.KindAgent && strings.HasPrefix(strings.TrimSpace(req.Body), "FINAL:") {
+	if req.Kind == group.KindAgent && strings.HasPrefix(strings.TrimSpace(req.Body), group.FinalPrefix) {
 		if _, nerr := s.cfg.Groups.PostMessage(r.PathValue("id"), "hub",
 			group.KindSystem, "成员 "+req.From+" 登记最终版本候选（FINAL）"); nerr != nil {
 			log.Printf("[hub] FINAL 注记失败 group=%s member=%s: %v", r.PathValue("id"), req.From, nerr)

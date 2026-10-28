@@ -67,6 +67,11 @@ const (
 	KindSystem = "system"
 )
 
+// FinalPrefix FINAL 收敛候选前缀（DESIGN-butler 方案三）：agent 发言 body 以此
+// 开头即登记收敛候选（FinalSeen 标记落账，v4 审查修复②——标记持久化防消息裁剪
+// 导致 FINAL 遗失），主持循环见标记即停轮等待主人定版。
+const FinalPrefix = "FINAL:"
+
 // 错误哨兵（api 层据此映射 HTTP 状态与错误码）。
 var (
 	// ErrNotFound 群不存在。
@@ -104,6 +109,19 @@ type Group struct {
 	// TaskRefs 群内任务引用列表（GROUP-RFC 六「结论转正式任务」：追加去重，
 	// 随快照持久化；终态回流据此反查任务归属群）。
 	TaskRefs []string `json:"task_refs,omitempty"`
+	// jev 主持轮转状态（DESIGN-butler 方案三 3.6，v4 修订）。HostActive=主持
+	// 开关（建群时开启；停轮/降级后保持 true，循环挂起非关闭）；HostRound=已
+	// 派发的接力棒数（与 Budget.MaxRounds 同一预算旋钮：达上限即停轮）；
+	// HostTurn=当前在途棒任务 ID（空=循环挂起，同群恒至多一棒在途，CAS 锁）。
+	// 三字段 omitempty 向后兼容：无主持群序列化字节与历史一致，旧快照零迁移可读。
+	HostActive bool   `json:"host_active,omitempty"`
+	HostRound  int    `json:"host_round,omitempty"`
+	HostTurn   string `json:"host_turn,omitempty"`
+	// FinalSeen 群内已出现 FINAL: 前缀 agent 发言（收敛候选持久化标记，v4 审查
+	// 修复②）：PostMessage 落账时同事务登记，滚动裁剪/过期清理丢消息不丢标记，
+	// 主持停轮判定不依赖现存消息扫描（消息可能已被裁剪——扫描会漏检已落账的
+	// FINAL）。标记落地前的旧快照按现存消息迁移补记（loadState）。
+	FinalSeen bool `json:"final_seen,omitempty"`
 }
 
 // GroupMessage 群消息（GROUP-RFC 二）：seq 由 hub 组内单调分配，是历史
@@ -204,6 +222,16 @@ func loadState(path string) (*state, error) {
 	for id := range st.Groups {
 		if st.AgentMsgs[id] == 0 {
 			st.AgentMsgs[id] = countAgent(st.Messages[id])
+		}
+	}
+	// FINAL 收敛标记迁移（final_seen 落地前的快照为零值）：按现存消息补记——
+	// 标记机制引入前 FINAL 只存在于消息正文；已被裁剪的无法追补（与主持循环
+	// 当时可见状态一致）。补记结果随下次落盘持久化。
+	for id := range st.Groups {
+		if !st.Groups[id].FinalSeen && hasAgentFinal(st.Messages[id]) {
+			g := st.Groups[id]
+			g.FinalSeen = true
+			st.Groups[id] = g
 		}
 	}
 	return st, nil
@@ -354,6 +382,155 @@ func (s *Store) CreateGroup(goal, host string, members []string) (Group, error) 
 	return cloneGroup(g), nil
 }
 
+// CreateHostedGroup 建群并开启 jev 主持轮转（DESIGN-butler 方案三 3.6 v4）：
+// 其余语义与 CreateGroup 一致，仅 HostActive 置位。点名/推进由 api 层主持控制器
+// 驱动（store 只管状态与护栏）。
+func (s *Store) CreateHostedGroup(goal, host string, members []string) (Group, error) {
+	g, err := s.CreateGroup(goal, host, members)
+	if err != nil {
+		return Group{}, err
+	}
+	var hosted Group
+	err = s.mutate(func(next *state) error {
+		h, ok := next.Groups[g.ID]
+		if !ok {
+			return ErrNotFound
+		}
+		h.HostActive = true
+		next.Groups[g.ID] = h
+		hosted = h
+		return nil
+	})
+	if err != nil {
+		return Group{}, err
+	}
+	return cloneGroup(hosted), nil
+}
+
+// 主持推进停轮原因（AdvanceHostTurn 事务内停轮复核命中时返回，v4 审查修复①②）：
+// 停轮判定与 HostTurn CAS 同一 mutate 事务——点名决策（Suggest）等待窗口内其他
+// agent 可并发发言（落 FINAL/耗尽预算），仅凭决策前的预检存在漏检窗口。
+const (
+	HostStopFinal  = "final"  // FINAL 收敛候选已登记（FinalSeen 持久化标记）
+	HostStopSpeech = "speech" // agent 发言预算累计耗尽（AgentMsgs 真实口径）
+	HostStopRounds = "rounds" // 主持轮转达 Budget.MaxRounds
+)
+
+// AdvanceHostTurn 主持接力棒 CAS 推进（DESIGN-butler 方案三 3.6，v4 审查修复①②）：
+// 仅当 fromTurn 与当前 HostTurn 一致（同群恒一棒在途的防重入锁）且群在 discussing
+// 时，在同一事务内复核停轮条件（FINAL 收敛标记 → 发言预算真实累计 → 轮转上限）
+// 后置棒 toTurn 并 HostRound+1。出口三态：
+//   - advanced=true：置棒成功，返回推进后群状态（stop 恒空）；
+//   - advanced=false 且 stop 非空：停轮条件命中，状态未变（HostTurn 仍=fromTurn，
+//     调用方释放挂起并注记人话原因）；
+//   - advanced=false 且 stop 为空：CAS 未命中（并发赢家已推进/群已结束），幂等放弃。
+//
+// 发言预算复核读持久化 AgentMsgs 计数（真实累计口径）——一棒可发多条消息、其他
+// agent 可并发发言，HostRound 与发言数不等价；可见消息数会被滚动裁剪低估，不得
+// 以其推算（v4 审查修复①）。
+func (s *Store) AdvanceHostTurn(groupID, fromTurn, toTurn string) (Group, string, bool, error) {
+	if strings.TrimSpace(toTurn) == "" && toTurn != "" {
+		return Group{}, "", false, fmt.Errorf("%w: toTurn 不能为空白", ErrInvalid)
+	}
+	var (
+		out      Group
+		advanced bool
+		stop     string
+	)
+	err := s.mutate(func(next *state) error {
+		g, ok := next.Groups[groupID]
+		if !ok {
+			return ErrNotFound
+		}
+		if g.HostTurn != fromTurn {
+			return nil // CAS 未命中：他人已推进/清理，幂等无害
+		}
+		if g.Status == StatusConcluded {
+			return nil // 终态群不推进（调用方以 advanced=false 判定放弃本轮）
+		}
+		// 停轮条件同事务复核（顺序即注记优先级：收敛候选 > 发言预算 > 轮转上限）。
+		if g.FinalSeen {
+			stop = HostStopFinal
+			return nil
+		}
+		if next.AgentMsgs[groupID] >= g.Budget.MaxRounds {
+			stop = HostStopSpeech
+			return nil
+		}
+		if g.HostRound >= g.Budget.MaxRounds {
+			stop = HostStopRounds
+			return nil
+		}
+		g.HostTurn = toTurn
+		g.HostRound++
+		next.Groups[groupID] = g
+		out = g
+		advanced = true
+		return nil
+	})
+	if err != nil {
+		return Group{}, "", false, err
+	}
+	if !advanced {
+		return Group{}, stop, false, nil
+	}
+	return cloneGroup(out), "", true, nil
+}
+
+// RedirectHostTurn 在途棒换绑不改轮数（幂等重放路径：ghost 键命中已有任务时，
+// HostTurn 从预生成 ID 改指原任务 ID，使原任务终态仍能触发下一轮推进）。
+func (s *Store) RedirectHostTurn(groupID, fromTurn, toTurn string) (bool, error) {
+	_, ok, err := s.casHostTurn(groupID, fromTurn, toTurn, false, true)
+	return ok, err
+}
+
+// ReleaseHostTurn 清除在途棒（停轮/降级/派发失败路径，循环挂起）：仅当
+// turnID 与当前 HostTurn 一致时清空；HostActive 保持（挂起非关闭）、轮数不动。
+// 群已 concluded 也允许清（账本卫生，推进另有 discussing 护栏）。
+func (s *Store) ReleaseHostTurn(groupID, turnID string) (bool, error) {
+	_, ok, err := s.casHostTurn(groupID, turnID, "", false, false)
+	return ok, err
+}
+
+// casHostTurn HostTurn 单字段 CAS（须在 mutate 事务内执行）：fromTurn 匹配才
+// 改写 toTurn；bumpRound 时 HostRound+1（仅推进路径）；requireDiscussing 关闭
+// 推进/换绑在终态群上的发生面（释放不清也可，见 ReleaseHostTurn）。toTurn 非
+// 空、fromTurn 为空即「无在途棒时置棒」（建群第一棒走此形态）。
+func (s *Store) casHostTurn(groupID, fromTurn, toTurn string, bumpRound, requireDiscussing bool) (Group, bool, error) {
+	if strings.TrimSpace(toTurn) == "" && toTurn != "" {
+		return Group{}, false, fmt.Errorf("%w: toTurn 不能为空白", ErrInvalid)
+	}
+	var out Group
+	var advanced bool
+	err := s.mutate(func(next *state) error {
+		g, ok := next.Groups[groupID]
+		if !ok {
+			return ErrNotFound
+		}
+		if g.HostTurn != fromTurn {
+			return nil // CAS 未命中：他人已推进/清理，幂等无害
+		}
+		if requireDiscussing && g.Status == StatusConcluded {
+			return nil // 终态群不推进（调用方以 false 判定放弃本轮）
+		}
+		g.HostTurn = toTurn
+		if bumpRound {
+			g.HostRound++
+		}
+		next.Groups[groupID] = g
+		out = g
+		advanced = true
+		return nil
+	})
+	if err != nil {
+		return Group{}, false, err
+	}
+	if !advanced {
+		return Group{}, false, nil
+	}
+	return cloneGroup(out), true, nil
+}
+
 // PostMessage 发言：校验 → 预算/终态护栏 → 分配组内单调 seq → 24h 过期清理 +
 // 滚动裁剪（超 MaxGroupMessages 丢最旧，二者并存）→ 落盘 → 返回。
 // 落盘失败不占用 seq、不计预算（内存未变，重试重新分配）。
@@ -387,6 +564,9 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 		if kind == KindAgent && next.AgentMsgs[groupID] >= g.Budget.MaxRounds {
 			return ErrBudgetExhausted
 		}
+		if kind == KindAgent && strings.HasPrefix(strings.TrimSpace(body), FinalPrefix) {
+			g.FinalSeen = true // 收敛候选同事务登记（v4 审查修复②）：持久化标记
+		}
 		msg = GroupMessage{
 			MsgID:     MsgIDPrefix + protocol.NewMessageID(),
 			GroupID:   groupID,
@@ -399,6 +579,7 @@ func (s *Store) PostMessage(groupID, from, kind, body string) (GroupMessage, err
 		if kind == KindAgent {
 			next.AgentMsgs[groupID]++
 		}
+		next.Groups[groupID] = g // FinalSeen 写回（其余字段未变，副本整体落盘）
 		// 24h 过期清理与滚动裁剪并存（GROUP-RFC 三 独立信箱约定）：超龄消息
 		// 先行丢弃，再落新消息（过期与滚动均为前缀丢弃，prunedBefore 口径不变）
 		if kept, n := pruneExpiredMessages(next.Messages[groupID], msg.CreatedAt); n > 0 {
@@ -505,6 +686,19 @@ func (s *Store) GetGroup(groupID string) (Group, bool) {
 	return cloneGroup(g), true
 }
 
+// SpeechBudgetUsed 群真实累计 agent 发言数（发言预算计量口径，v4 审查修复①）：
+// 数据源为持久化 AgentMsgs 计数器——独立于滚动窗口（窗口只保最新 200 条，旧
+// agent 消息被裁不得让预算「失忆」）。主持停轮判定用真实累计，禁止以可见消息
+// 数推算。群不存在返回 (0, false)。
+func (s *Store) SpeechBudgetUsed(groupID string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.st.Groups[groupID]; !ok {
+		return 0, false
+	}
+	return s.st.AgentMsgs[groupID], true
+}
+
 // AddTaskRef 登记群内任务引用（GROUP-RFC 六「结论转正式任务」）：追加去重
 // （幂等，重复登记不产生重复条目），随快照持久化。concluded 群拒绝登记——
 // 转任务的创建注记消息要求群可收消息，与 PostMessage 护栏同口径。
@@ -521,7 +715,7 @@ func (s *Store) AddTaskRef(groupID, taskID string) error {
 		if g.Status == StatusConcluded {
 			return ErrConcluded
 		}
-		if taskRefIn(g.TaskRefs, taskID) {
+		if TaskRefIn(g.TaskRefs, taskID) {
 			return nil // 幂等命中：已登记
 		}
 		g.TaskRefs = append(g.TaskRefs, taskID)
@@ -601,7 +795,7 @@ func postRefluxLocked(next *state, taskID, body string, now time.Time) bool {
 	}
 	posted := false
 	for gid, g := range next.Groups {
-		if !taskRefIn(g.TaskRefs, taskID) {
+		if !TaskRefIn(g.TaskRefs, taskID) {
 			continue
 		}
 		msg := GroupMessage{
@@ -697,7 +891,7 @@ func retryRefluxPendingLocked(next *state, now time.Time) {
 // anyGroupRefs 报告是否有群引用该任务（补偿对象存在性判定）。
 func anyGroupRefs(st *state, taskID string) bool {
 	for _, g := range st.Groups {
-		if taskRefIn(g.TaskRefs, taskID) {
+		if TaskRefIn(g.TaskRefs, taskID) {
 			return true
 		}
 	}
@@ -720,8 +914,8 @@ func pruneExpiredMessages(msgs []GroupMessage, now time.Time) ([]GroupMessage, i
 	return kept, idx
 }
 
-// taskRefIn 引用列表包含判定（线性扫描；群内引用数为个位量级，不值得建索引）。
-func taskRefIn(refs []string, taskID string) bool {
+// TaskRefIn 引用列表包含判定（线性扫描；群内引用数为个位量级，不值得建索引）。
+func TaskRefIn(refs []string, taskID string) bool {
 	for _, r := range refs {
 		if r == taskID {
 			return true
@@ -739,6 +933,17 @@ func countAgent(msgs []GroupMessage) int {
 		}
 	}
 	return n
+}
+
+// hasAgentFinal 消息列表是否含 FINAL: 前缀 agent 发言（收敛候选判定口径，
+// loadState 旧快照标记迁移用——与 PostMessage 落账判定同词）。
+func hasAgentFinal(msgs []GroupMessage) bool {
+	for i := range msgs {
+		if msgs[i].Kind == KindAgent && strings.HasPrefix(strings.TrimSpace(msgs[i].Body), FinalPrefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- 群闭环消息文案（GROUP-RFC group_task_created 语义） ----------

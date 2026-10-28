@@ -1532,3 +1532,107 @@ pass
 ```
 
 边界声明：清扫是一次性尽力动作——降级持久化与清扫之间若再次崩溃，内存清单丢失且下次启动条目已终态不再收集（安全侧漏清扫，非必达保证）。pid 复用的确定性负例（同名异实例指纹不符）由单测 TestCleanupOrphanSkipsStartMismatch / TestReapStopsWhenGroupReowned 真进程与注入时序锁定，真机不重复造复用场景。
+
+## 增补批次（2026-10-28：DESIGN-butler v4 群主持人接力棒专项）
+
+前置：沿用「验收实例准备」的隔离环境；hub.yaml 配置 decision 段（GLM key 可得），
+两节点（a/b）各在线且至少一个 exposed 能力卡；管理台可登录；MCP 建群走查用
+swarmmind-mcp（hub 模式，jev_host 参数）。行为级单测锁（常驻，不依赖部署实例，
+先行执行并记录）：
+
+```bash
+go test ./internal/hub/group/ -count=1 -run 'TestAdvanceHostTurnStopRecheck|TestFinalMarker|TestHostTurnCAS'
+go test ./internal/hub/api/ -count=1 -run 'TestHost'
+go test ./internal/hub/web/ -count=1 -run 'TestConsoleGroupHostSnapshotReplace|TestGroupHostSnapshotReplaceSources'
+node --check internal/hub/web/app.js && node --check internal/node/web/app.js
+```
+
+语义基线（v4 首审修复后）：主持人停轮判定 = FINAL 收敛标记（持久化，消息裁剪不
+遗失）/ 发言预算真实累计（AgentMsgs，一棒可发多条、其他 agent 可并发发言）/ 轮转
+上限三条与 HostTurn CAS 同一 store 事务复核——点名决策等待窗口内新落账的 FINAL/
+发言不漏检；点名 goal 显式主持人语义（下一位新增贡献者/避免重复/完成选 none）。
+
+### TC-HOST-01 双成员轮转 → FINAL 停轮 → 主人定版（真机双成员；部署后由 Hana 执行走查与截图）
+
+```bash
+begin TC-HOST-01
+# 1. 控制台建群：勾选「智能主持（jev 主持轮转发言）」，手选 a、b 两机各一能力 → 201
+#    断言：时间线「主持人点名第 1 棒 · 成员 …」系统注记恰一条；主持分区「主持人 jev · 第 1 轮 · 当前 …」；
+#    MCP 侧同参数 swarmmind_group_create(jev_host=true) 走查一次，主持同样开启。
+# 2. 被点名成员按棒指引发言（group_say kind="agent"）→ 群页可见发言；棒任务 completed。
+# 3. 自动点名第 2 棒：注记「主持人点名第 2 棒」恰一条、成员与第一棒不同；主持分区转「第 2 轮」。
+# 4. 第二棒发 FINAL: 前缀发言 → 金框高亮 + 注记「登记最终版本候选（FINAL）」；
+#    该棒终态后主持分区转「已停轮（等待定版）」，不再出现第 3 棒（无新棒任务落库）。
+# 5. 主人「关闭群聊」定版 → concluded、时间线只读、插话框禁用。
+pass = 轮转 ≥2 轮、FINAL 停轮、无越限棒、全部注记人话；双端截图归档 docs/archive/
+```
+
+### TC-HOST-02 发言预算停轮（真实累计口径）
+
+```bash
+begin TC-HOST-02
+# 1. 建主持群（预算默认 20）；成员在一棒内连发多条 agent 发言计满 20 条（或经 REST
+#    groups/{id}/messages kind=agent 计满）→ 第 21 条 409 budget_exhausted。
+# 2. 在途棒终态 → 主持停轮：注记「群发言预算已用尽（上限 20 条）」恰一条；无新棒；
+#    群页预算横幅出现；HostTurn 清空、HostActive 保持。
+# 3. 消息裁剪回归：预算内发言后再灌 200 条插话把窗口内 agent 消息全部挤出 →
+#    推进仍停轮（真实累计不失忆，可见消息数不得用于推算预算）。
+pass = 停轮而非继续派棒；注记人话
+回归锁：TestHostStopOnSpeechBudget / TestHostStopOnSpeechBudgetAfterPrune /
+TestAdvanceHostTurnStopRecheck/发言预算真实累计
+```
+
+### TC-HOST-03 降级停轮与决策窗口竞态
+
+```bash
+begin TC-HOST-03
+# 1. hub.yaml 移除 decision 段重启 → jev_host=true 建群照常 201：注记「主持人未开启」，
+#    群可手动插话/转任务（既有语义）。
+# 2. decision 段恢复但密钥置错（provider 失败）→ 建群主持挂起注记「决策模型暂不可用」。
+# 3. 决策等待窗口竞态（单测等价锁，真机不构造）：Suggest 阻塞期间落 FINAL / 打满
+#    发言预算 → 决策返回后仍停轮，不派棒。
+pass = 三种降级均挂起 + 人话注记，群不阻塞
+回归锁：TestHostSuspendOnDegraded / TestHostStopFinalDuringDecision /
+TestHostStopSpeechBudgetDuringDecision
+```
+
+### TC-HOST-04 停轮快照前端状态（浏览器；部署后由 Hana 执行截图）
+
+```bash
+begin TC-HOST-04
+# 1. 群详情页保持打开，等停轮（FINAL 或预算触发）：3s 轮询周期内主持分区必须转
+#    「已停轮（等待定版）」——不得残留旧「第 N 轮 · 当前 …」直到手动刷新
+#    （v4 首审修复③行为锁）。
+# 2. 在途棒任务已过保留期（任务账本查不到目标成员）：主持分区降级显示「第 N 轮」、
+#    无「当前」成员段，不虚构成员。
+pass = 两状态呈现正确；VM 断言 TestConsoleGroupHostSnapshotReplace
+（stopped-snapshot-clears-turn / member-lookup-missing-degrades）常驻回归
+```
+
+### TC-PAGE-01 多数据页分页 21/40/41 与筛选重置
+
+```bash
+begin TC-PAGE-01
+# 1. 任务列表造 21 条 → 第 1 页恰 20 条 + 总数「21」；下一页 1 条；上下页/页码可达。
+# 2. 恰 40 条 → 两页各 20；41 条 → 第三页 1 条（页码钳制：URL 直改越界页回落最后一页）。
+# 3. 筛选（目标机器/关键词）变更 → 重置回第 1 页；清除筛选恢复全集。
+# 4. 令牌列表、群聊列表同组件形态（页大小 20）各走查一遍 21 条边界。
+pass = 三列表分页边界与重置行为一致（hub pageOf/pagerHtml 单源组件）
+```
+
+### TC-ORCH-01 管家本机声明 / 离线待同步 / 多机冲突
+
+```bash
+begin TC-ORCH-01
+# 1. node 控制台服务页把某能力开关为管家 → 绿徽标「管家 · 本机」+ 弱化文字链
+#    「取消管家」；「设为管家」按钮不再出现（单按钮状态化）。
+# 2. hub 离线时声明：徽标旁待同步说明在场；hub 重连后目录出现该 Orchestrator 卡。
+# 3. 两台机器同时声明：hub 侧冲突告警（当前实现口径=恰一生效+冲突回退；「每台机器
+#    各有管家、目录各展示各的」为待伦哥拍板裁决点，见设计稿文首——测试按当前实现
+#    断言，裁决落地后本条同步修订）。
+pass = 三态呈现与既有冲突口径一致
+```
+
+边界声明：本批 v4 用例的单测行为锁已全部入仓并通过；TC-HOST-01/04 的真机双成员
+走查与浏览器截图依赖部署实例，在部署后由 Hana 按上述步骤执行（本轮仅落档测试计划，
+不冒充已验收）。

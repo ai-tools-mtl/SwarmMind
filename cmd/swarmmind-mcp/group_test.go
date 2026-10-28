@@ -166,11 +166,12 @@ func TestGroupToolsFullFlow(t *testing.T) {
 func TestGroupCloseByAudit(t *testing.T) {
 	realHub(t)
 
-	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "默认署名群"})
+	// v4 建群语义 members 必填（本测试意图是 close 审计署名，成员随手给）
+	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "默认署名群", "members": []any{"a"}})
 	gidDefault := gidFrom(t, out)
 	mustCall(t, "swarmmind_group_close", map[string]any{"group_id": gidDefault})
 
-	out = mustCall(t, "swarmmind_group_create", map[string]any{"goal": "自定义署名群"})
+	out = mustCall(t, "swarmmind_group_create", map[string]any{"goal": "自定义署名群", "members": []any{"a"}})
 	gidCustom := gidFrom(t, out)
 	mustCall(t, "swarmmind_group_close", map[string]any{"group_id": gidCustom, "by": " tester-甲 "})
 
@@ -245,7 +246,7 @@ func textOf(res map[string]any) string {
 func TestGroupToolsTrimNotice(t *testing.T) {
 	realHub(t)
 
-	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "滚动窗口群"})
+	out := mustCall(t, "swarmmind_group_create", map[string]any{"goal": "滚动窗口群", "members": []any{"a"}})
 	gid := gidFrom(t, out)
 
 	// 5 条 agent（计入预算）+ 200 条 user = 205 条 → 裁掉 seq 1..5

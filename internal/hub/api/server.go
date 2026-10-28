@@ -101,6 +101,12 @@ func New(cfg Config) *Server {
 	if cfg.Enroll != nil {
 		s.enroll = newEnrollBuilder(cfg.Enroll)
 	}
+	// 群 jev 主持人接力棒（DESIGN-butler 方案三 3.6，v4）：api 包经附加终态钩子
+	// 注册接入（Config.OnTaskTerminal 由装配方 cmd/hub 的群回流闭包独占，本处
+	// 不侵入）；Groups/Core 任一未接线即不注册（旧构造方与降级基座零感知）。
+	if cfg.Groups != nil && cfg.Core != nil {
+		cfg.Core.AddOnTaskTerminal(s.advanceHostOnTerminal)
+	}
 	return s
 }
 

@@ -74,7 +74,8 @@ type Config struct {
 	// OnTaskTerminal 任务终态旁路钩子（可选，nil 安全）：任务首次落定终态时
 	// 同步调用（result 首次接受 / 清扫置 failed 均触发；重复结果与冲突不触发）。
 	// 群聊闭环「结果回流群」的接线点（GROUP-RFC）：实现方不得长时间阻塞，错误
-	// 自行消化，不影响任务状态机。
+	// 自行消化，不影响任务状态机。下游组件的附加钩子不占用本字段——经
+	// Core.AddOnTaskTerminal 注册（如群 jev 主持人轮转推进，DESIGN-butler 3.6）。
 	OnTaskTerminal func(protocol.Task)
 	// Notifier 任务终态 IM 通知器（P4③，可选，nil=禁用）：与 OnTaskTerminal 同一
 	// 触发点（首次落终态；重复结果、冲突、cancelled 合并不触发——去重即挂在
@@ -90,6 +91,12 @@ type Core struct {
 	now        func() time.Time
 	onTerminal func(protocol.Task)
 	notifier   TerminalNotifier
+
+	// onTerminalExtra AddOnTaskTerminal 注册的附加终态钩子（muHooks 保护：
+	// 注册发生在装配方装配期，fireTerminal 触发来自各工作 goroutine，按并发
+	// 纪律加锁——注册与触发无固定先后保证）。
+	muHooks         sync.Mutex
+	onTerminalExtra []func(protocol.Task)
 
 	// terminalRetention 终态保留时长（New 时从 cfg.TerminalRetention 解析落定：
 	// nil → protocol.TerminalRetention；0 = 永不清理）。TerminalRetention() 读侧。
@@ -377,11 +384,26 @@ type TerminalNotifier interface {
 	TaskFinal(t protocol.Task)
 }
 
+// AddOnTaskTerminal 注册附加终态旁路钩子（幂等无去重，重复注册即重复触发）。
+// 语义约束与 Config.OnTaskTerminal 相同：首次落终态时同步调用，实现方不得长
+// 时间阻塞（预算内调用须自行异步化），错误自行消化，不影响任务状态机。
+func (c *Core) AddOnTaskTerminal(hook func(protocol.Task)) {
+	c.muHooks.Lock()
+	defer c.muHooks.Unlock()
+	c.onTerminalExtra = append(c.onTerminalExtra, hook)
+}
+
 // fireTerminal 终态旁路钩子触发（nil 安全；同步调用，见 Config.OnTaskTerminal
 // 与 Config.Notifier）。
 func (c *Core) fireTerminal(t *protocol.Task) {
 	if c.onTerminal != nil {
 		c.onTerminal(*t)
+	}
+	c.muHooks.Lock()
+	hooks := append(make([]func(protocol.Task), 0, len(c.onTerminalExtra)), c.onTerminalExtra...)
+	c.muHooks.Unlock()
+	for _, h := range hooks {
+		h(*t)
 	}
 	if c.notifier != nil {
 		c.notifier.TaskFinal(*t)

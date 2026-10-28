@@ -619,6 +619,7 @@ const S = {
                                // 版本已变的任务在本批必为回写前旧快照，不得覆盖本地新态
   drafts: {},                  // taskId → {note, checked}：抽屉核对草稿（P0.3），重绘回填、登出清空
   busy: new Set(),             // 进行中操作键（P0.5）：'cancel:<id>' 等，防重建窗口重复提交
+  pages: {},                   // 列表分页游标（v4 试用反馈三）：列表页键 → 当前页码（tokens/groups/tasks）
   layerGen: 0,                 // 层世代（D3）：开/关层递增，延迟回调执行前校验，不符即放弃
   C: freshControl(),           // 运维控制页状态
   tokens: [],                  // 访问令牌列表
@@ -898,7 +899,7 @@ function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [p, arg] = h.split('/');
   if (!S.authed) { S.page = 'login'; render(); return; }
-  if (p === 'tasks' && arg && STATES[arg]) { S.f = { ...blankFilters(), status: arg }; }
+  if (p === 'tasks' && arg && STATES[arg]) { S.f = { ...blankFilters(), status: arg }; S.pages.tasks = 1; }
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
   S.groupId = S.page === 'groups' && arg ? arg : '';
   render();
@@ -911,6 +912,7 @@ function route() {
 }
 function go(p, status = '') {
   S.f = { ...blankFilters(), status };
+  S.pages.tasks = 1;
   closeLayer();
   const h = '#/' + p + (status ? '/' + status : '');
   if (location.hash === h) route(); else location.hash = h;
@@ -1616,8 +1618,27 @@ function filteredTasks() {
     return true;
   });
 }
+/* ---------- 通用列表分页（v4 试用反馈三则之三，2026-10-28）：前端内存分页，
+ * 页大小 20，上一页/下一页 + 页码 + 总数。筛选/搜索先作用于全集、分页作用于
+ * 筛选后集合——筛选变更处把游标拨回第 1 页（S.pages.tasks=1），集合缩小后当前
+ * 页越界由 pageOf 钳制回末页。单页不渲染分页条；样式复用既有 row/muted/link
+ * 原语，零新增 CSS（style.css 不在本轮改动面）。 */
+const PAGE_SIZE = 20;
+function pageOf(key, total) {
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.min(Math.max(1, S.pages[key] || 1), pages);
+  return { page, pages };
+}
+function pagerHtml(key, page, pages, total) {
+  if (pages <= 1) return '';
+  return `<div class="row spaced" style="align-items:center;gap:14px"><small class="muted">共 ${total} 条 · 第 ${page} / ${pages} 页</small><span class="row" style="gap:10px">
+  ${page > 1 ? button('‹ 上一页', 'pager', 'link', `data-key="${esc(key)}" data-page="${page - 1}"`) : ''}
+  ${page < pages ? button('下一页 ›', 'pager', 'link', `data-key="${esc(key)}" data-page="${page + 1}"`) : ''}
+  </span></div>`;
+}
 function tasksPage() {
   const list = filteredTasks();
+  const { page, pages } = pageOf('tasks', list.length);
   const counts = stateCounts();
   const filtered = !!(S.f.status || S.f.trace || S.f.by || S.f.error || S.f.from || S.f.to || S.f.node);
   const submitters = [...new Set(S.tasks.map(t => t.submitted_by).filter(Boolean))].sort();
@@ -1643,7 +1664,7 @@ function tasksPage() {
       <label>提交时间 · 至（UTC）<input type="datetime-local" data-f="to" value="${esc(S.f.to)}"></label>
     </div>
     </details>
-    ${list.length ? taskTable(list) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`}
+    ${list.length ? taskTable(list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)) + pagerHtml('tasks', page, pages, list.length) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`}
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务${retentionClause()}，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
@@ -2406,8 +2427,10 @@ function accountInfoHtml() {
 function tokenListHtml() {
   if (S.tokensLoading) return '<p class="muted">令牌列表加载中…</p>';
   if (S.tokensError) return `<div class="notice warn"><b>令牌列表加载失败</b><br>${esc(S.tokensError)}</div><div class="actions spaced">${button('重试', 'tokens-retry', '')}</div>`;
+  const { page, pages } = pageOf('tokens', S.tokens.length);
+  const rows = S.tokens.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   return `<div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th></th></tr></thead><tbody>
-    ${S.tokens.length ? S.tokens.map(t => `<tr>
+    ${S.tokens.length ? rows.map(t => `<tr>
       <td><b>${esc(t.name)}</b></td>
       <td><code>${esc(t.prefix)}…</code></td>
       <td><small>${esc(fmtTime(t.created_at))}</small></td>
@@ -2415,7 +2438,7 @@ function tokenListHtml() {
       <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
       <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
-    </tbody></table></div>`;
+    </tbody></table></div>` + (S.tokens.length ? pagerHtml('tokens', page, pages, S.tokens.length) : '');
 }
 function tokensPage() {
   const nt = S.newToken;
@@ -2626,10 +2649,11 @@ function summarize(s, n = 64) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 function groupListPage() {
+  const { page, pages } = pageOf('groups', S.groups.length);
   return head('群聊', '人与智能体的协作空间：建群讨论目标，代理发言有轮数预算，你可以随时插话与决策。', button('＋ 新建协作群', 'group-new', 'primary'))
     + (S.groupsOff ? `<div class="notice warn spaced"><b>群聊功能未启用</b>：当前 hub 未接线群存储，请联系管理员升级 hub 配置。</div>` : '')
     + `<section class="card${S.groupsOff ? ' spaced' : ''}">
-    ${S.groups.length ? `<div class="group-list">${S.groups.map(groupCard).join('')}</div>`
+    ${S.groups.length ? `<div class="group-list">${S.groups.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(groupCard).join('')}</div>` + pagerHtml('groups', page, pages, S.groups.length)
     : `<div class="empty"><h2>还没有协作群</h2><p class="muted">创建一个群，把协作目标和成员智能体拉进来讨论；代理发言默认上限 20 轮，用尽后等待人工决策。</p>${S.groupsOff ? '' : button('＋ 新建协作群', 'group-new', 'primary')}</div>`}
     ${S.groups.length ? `<p class="footer-note">${S.groups.length} 个群 · 时间为 UTC · 群结束后时间线保留、只读。</p>` : ''}</section>`;
 }
@@ -2678,6 +2702,7 @@ function groupDetailPage() {
     + `<section class="card">
     <div class="row"><h2>讨论时间线</h2><span class="row" style="gap:8px">${badge(g.status)}<small class="muted">${members.length} 名成员</small></span></div>
     ${members.length ? `<div class="group-members">${members.map(m => `<span class="badge">${esc(m)}</span>`).join(' ')}</div>` : '<p class="muted">建群时未选择成员智能体。</p>'}
+    <div id="group-host" data-host-sig="${esc(hostSig(g))}">${hostStatusHtml(g)}</div>
     <p class="muted">协作目标：${esc(g.goal)}</p>
     <div id="group-budget-slot"></div>
     ${isBudgetExhausted(g, msgs) ? budgetBanner : ''}
@@ -2699,15 +2724,53 @@ async function enterGroupView() {
   if (!S.groupView || S.groupView.id !== id) S.groupView = { id, lastSeq: 0, msgs: [], unread: 0 };   // unread=回看期间未读新消息数（滚动跟随用）
   await pullGroupMessages();
 }
+/* 主持轮转状态展示（v4 3.6）：数据源群对象 host_active/host_round/host_turn/
+ * host_turn_member（REST 附带快照）。三态：未开启主持 / 在途第 N 轮（当前成员）/
+ * 已停轮挂起（原因见时间线内系统注记）。hostSig 供分区 diff——值不变不碰 DOM。 */
+function hostSig(g) {
+  if (!g || !g.host_active) return 'off';
+  return (g.host_turn ? 'run' : 'stop') + ':' + (g.host_round || 0) + ':' + (g.host_turn_member || '');
+}
+function hostStatusHtml(g) {
+  if (!g || !g.host_active) return '<small class="muted">未开启主持（手动讨论）</small>';
+  if (g.host_turn) {
+    const cur = g.host_turn_member ? ` · 当前 <b>${esc(g.host_turn_member)}</b>` : '';
+    return `<small class="muted">主持人 jev · 第 ${g.host_round || '?'} 轮${cur}</small>`;
+  }
+  return '<small class="muted">已停轮（等待定版）</small>';
+}
+/* paintGroupHost 主持状态分区局部更新（D22）：只在签名变化时替换该分区内容，
+ * 发言输入/滚动/时间线不受触碰；分区不存在（已切走）静默放弃。 */
+function paintGroupHost() {
+  const g = S.groups.find(x => x.group_id === S.groupId);
+  const zone = $('#group-host');
+  if (!g || !zone) return;
+  const sig = hostSig(g);
+  if (zone.dataset.hostSig === sig) return;
+  zone.dataset.hostSig = sig;
+  zone.innerHTML = hostStatusHtml(g);
+}
 /* pullGroupMessages 增量拉取：GET messages?since=lastSeq，只追加新消息到
  * 时间线尾部（不重绘整页，与任务页的重绘式刷新不同）；按 data-seq 去重，
  * 全量重绘与增量追加两条路径并发到达也不会画重。追加前采样「是否接近底部」：
- * 接近则跟随滚动并清零未读，否则不打断、累加未读并点亮浮标。 */
+ * 接近则跟随滚动并清零未读，否则不打断、累加未读并点亮浮标。
+ * 响应平级附群快照（v4 主持状态数据源）：就地更新本地群对象并局部刷主持状态
+ * 分区——无新消息时主持轮转变化同样可见（零额外请求）。 */
 async function pullGroupMessages() {
   const G = S.groupView;
   if (!G || G.id !== S.groupId) return;
   const r = await api('GET', `/api/v1/groups/${encodeURIComponent(G.id)}/messages?since=${G.lastSeq}`).catch(() => null);
   if (!r || r.code !== 200) return;
+  const gv = r.data?.group;
+  if (gv && gv.group_id) {   // 群快照就地主更新（不改列表顺序），分区 diff 刷新主持状态
+    const i = S.groups.findIndex(x => x.group_id === gv.group_id);
+    // 整对象替换而非 {...旧,...新} 合并：服务端快照的空值字段被 omitempty 省略
+    //（停轮清空 host_turn/host_turn_member），合并会让旧在途值残留——停轮快照
+    // 到达后详情页仍显示在途棒，直到整页重载（v4 审查修复③）。快照是服务端
+    // 全量视图（与群列表同形态），整替换不丢字段；DOM 仍走分区 diff。
+    if (i >= 0) S.groups[i] = gv;
+    paintGroupHost();
+  }
   const fresh = (r.data?.messages || []).filter(m => m.seq > G.lastSeq);
   if (!fresh.length) return;
   G.lastSeq = fresh[fresh.length - 1].seq;
@@ -2788,9 +2851,10 @@ async function sendGroupMsg() {
     toast('发言超过 8KB 上限，请拆成多条发送');
   } else toast('发送失败：' + errLine(r.data));
 }
-/* groupCreateModal 建群弹层：goal 必填；成员用智能体选择公共组件按机器分组多选
- * （机器名做分组标题含在线状态，值 = node/agent）；代理发言预算走服务端默认 20
- * （MVP 建群端点不支持自定义，展示为只读避免假功能）。 */
+/* groupCreateModal 建群弹层（v4 主持人模型：成员手选回归主位，jev 当主持人不
+ * 再选人）：goal 必填；成员用智能体选择公共组件按机器分组多选（机器名做分组
+ * 标题含在线状态，值 = node/agent）；代理发言预算走服务端默认 20（MVP 建群端点
+ * 不支持自定义，展示为只读避免假功能）。jev 主持轮转默认勾选，关闭即纯手动讨论。 */
 function groupCreateModal() {
   openLayerPlain(`${modalHead('新建协作群')}
   <div class="notice">创建即进入「进行中」：你与成员智能体可在群内讨论，代理发言总轮数默认 20，用尽后等待人工决策。</div>
@@ -2798,17 +2862,11 @@ function groupCreateModal() {
   <label class="full">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
   <label>代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
   </div>
-  <label class="spaced" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="group-auto-members"> 智能选人（jev）：由决策服务从全网在线能力中自动选出适合参与这场协作的成员，建群后自动向每位成员派发协作任务，多智能体并发讨论、消息共享、FINAL: 收敛最终版本——无需逐个勾选</label>
-  <div id="group-manual-members">
   <h3 class="spaced">选择成员智能体（可多选）</h3>
-  ${S.directory.length ? agentPickerHtml({ ids: 'gnew', multi: true }) : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
-  </div>
+  ${S.directory.length ? agentPickerHtml({ ids: 'gnew', multi: true }) : '<div class="notice warn">能力目录为空：还没有节点开放能力，请先在各机器控制台开放能力并勾选成员。</div>'}
+  <label class="spaced" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="group-jev-host" checked> jev 主持轮转发言：建群后由决策服务（jev）担任主持人，逐轮点名一名成员发言/干活；成员给出 FINAL: 收敛候选或发言预算用尽即停轮，等待你定版</label>
   <div class="actions spaced">${button('创建群聊', 'group-create', 'primary')}${button('取消', 'close', 'link')}</div>
-  <p class="footer-note">勾选智能选人后成员由 jev 判定；决策服务未启用或无合适成员时会提示改用手选。建群后自动打开群详情。</p>`);
-  $('#group-auto-members')?.addEventListener('change', e => {
-    const manual = $('#group-manual-members');
-    if (manual) manual.hidden = e.target.checked;
-  });
+  <p class="footer-note">成员由你手动勾选；主持轮转默认开启，决策服务未启用时建群照常（无主持，纯手动讨论）。建群后自动打开群详情。</p>`);
 }
 
 /* taskFromMsgModal 转任务弹层（GROUP-RFC 闭环三件套之三）：预填消息内容为任务
@@ -3069,8 +3127,16 @@ function workStepPicked() {
  * 统筹指定入口移至各机器 node 控制台「设为管家」开关，hub 只读汇聚展示。 */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
-  fchip: b => { S.f.status = b.dataset.fchip || ''; render(); },
-  'clear-filters': () => { S.f = blankFilters(); render(); toast('已清除筛选'); },
+  fchip: b => { S.f.status = b.dataset.fchip || ''; S.pages.tasks = 1; render(); },
+  'clear-filters': () => { S.f = blankFilters(); S.pages.tasks = 1; render(); toast('已清除筛选'); },
+  /* pager 通用翻页（v4 试用反馈三）：设置页走子树局部刷新（D2 表单保护，不整页
+   * 重绘），其余列表页走既有 render()（页级无输入态，重绘安全）。 */
+  pager: b => {
+    const key = b.dataset.key, p = parseInt(b.dataset.page, 10);
+    if (!key || !p) return;
+    S.pages[key] = p;
+    if (S.page === 'tokens') paintTokensSubtrees(); else render();
+  },
   close: () => closeLayer(true),   // 用户发起的关闭：焦点返回触发元素（FE-10）
   detail: b => { closeLayer(); openTask(b.dataset.id); },
   'go-tasks': () => go('tasks'),
@@ -3324,20 +3390,20 @@ const ACT = {
     if (!goal) { toast('请先填写协作目标'); $('#group-goal')?.focus(); return; }
     if (S.busy.has('group-create')) return;
     S.busy.add('group-create');
-    const auto = $('#group-auto-members')?.checked || false;
+    const host = $('#group-jev-host')?.checked || false;
     const box = $('#gnew-picker');
     const members = box ? pickerChecked(box).agents : [];
-    if (!auto && !members.length) { toast('请勾选成员，或改用智能选人'); S.busy.delete('group-create'); return; }
+    if (!members.length) { toast('请勾选成员智能体'); S.busy.delete('group-create'); return; }
     const btn = document.querySelector('[data-act="group-create"]');
-    if (btn) { btn.disabled = true; btn.textContent = auto ? '智能选人中…' : '创建中…'; }
+    if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
     try {
-      const body = auto ? { goal, auto_members: true } : { goal, members };
+      const body = host ? { goal, members, jev_host: true } : { goal, members };
       const r = await api('POST', '/api/v1/groups', body).catch(() => null);
       if (r && r.code === 201) {
         closeLayer();
         await loadGroups();
         render();
-        toast(auto ? '群已创建，jev 已选成员并向每位成员派发了协作任务 —— 进入群详情查看协作进展' : '群已创建 —— 下一步：点击群卡片进入讨论');
+        toast(host ? '群已创建，主持人 jev 将逐轮点名成员发言 —— 进入群详情查看轮转进展' : '群已创建 —— 下一步：点击群卡片进入讨论');
       } else {
         if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
         toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
@@ -3685,7 +3751,7 @@ function bindEvents() {
   });
   document.addEventListener('input', e => {
     const k = e.target.dataset.f;
-    if (k) { S.f[k] = e.target.value; preserveFocus(() => render()); return; }
+    if (k) { S.f[k] = e.target.value; S.pages.tasks = 1; preserveFocus(() => render()); return; }
     if (e.target.id === 'review-note') {
       /* 抽屉核对草稿（P0.3/FE-07/08）：input 即写，重绘回填，任务间隔离 */
       if (S.drawer) {
@@ -3723,7 +3789,7 @@ function bindEvents() {
   });
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
-    if (k) { S.f[k] = e.target.value; render(); return; }
+    if (k) { S.f[k] = e.target.value; S.pages.tasks = 1; render(); return; }
     /* 通知渠道弹层：类型切换只重绘 #nf-hint 与 #nf-type-fields 两槽（shared
      * nfRepaint），名称与事件勾选不被冲掉（局部刷新纪律，弹层不整层重开）；
      * 类型切走格式重置通用。消息格式切换同槽重绘，已输入地址与请求头经

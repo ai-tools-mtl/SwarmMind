@@ -324,10 +324,11 @@ func tools() []toolDef {
 		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选概率分布。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
 			"goal": toolStr("任务目标/需求描述（一句话说清要做什么，越具体越准；工作单步骤描述也可直接传入）"),
 		}, "goal")},
-		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。传 auto_members=true 时由决策服务（jev）智能选人建群并自动向每位成员派发群协作任务，多 agent 并发协作、消息共享、FINAL: 收敛最终版本。返回群 ID", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。成员由调用方指定；传 jev_host=true 时决策服务（jev）担任群内主持人，逐轮点名一名成员发言协作，成员给出 FINAL: 收敛候选或发言预算用尽即停轮、等待人工定版。返回群 ID", InputSchema: toolObj(map[string]any{
 			"goal":         toolStr("群目标（一句话说清要讨论出什么）"),
-			"members":      toolArr("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
-			"auto_members": toolBool("智能选人（可选，默认 false）：true 时由决策服务从全网在线能力中多选参与集合，忽略 members；建群后自动派发群协作任务启动多 agent 协作"),
+			"members":      toolArr("成员列表（node/agent 形式，如 [\"mac-mini/coder\"]；必填，auto_members 空成员回退选人除外）"),
+			"jev_host":     toolBool("jev 主持轮转发言（可选，默认 false）：true 时建群后由 jev 主持人逐轮点名成员发言；FINAL:/预算尽/决策不可用即停轮挂起，群内有人话注记，人工可随时插话"),
+			"auto_members": toolBool("兼容参数（可选，默认 false）：等价于开启 jev 主持；且 members 为空时回退由决策服务自动选人（成员以传入为准，不再忽略 members）"),
 		}, "goal")},
 		{Name: "swarmmind_group_list", Description: "查看全部协作群：群 ID、目标、状态（discussing 进行中 / concluded 已结束）、成员与发言预算", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_group_say", Description: "在协作群里发一条消息。默认按 user（人转述）发言；agent 参与讨论请传 kind=agent（计入发言预算，默认 20 轮，用尽返回 budget_exhausted）", InputSchema: toolObj(map[string]any{
@@ -1907,21 +1908,30 @@ func toolGroupCreate(args map[string]any) (string, error) {
 		return "", fmt.Errorf("goal 必填（一句话说清要讨论出什么）")
 	}
 	req := map[string]any{"goal": goal}
-	if bv, ok := args["auto_members"].(bool); ok && bv {
-		// 智能选人（DESIGN-butler 方案三）：jev 判定参与集合，无需人工确认；
-		// 建群后 hub 自动向每位成员派发群协作任务（多 agent 并发协作）。
-		req["auto_members"] = true
-	} else {
-		raw, _ := args["members"].([]any)
-		members := make([]string, 0, len(raw))
-		for _, v := range raw {
-			sv, ok := v.(string)
-			if !ok || strings.TrimSpace(sv) == "" {
-				return "", fmt.Errorf("members 须为非空字符串数组")
-			}
-			members = append(members, strings.TrimSpace(sv))
+	// v4 主持人模型（DESIGN-butler 3.6）：成员由调用方手选（node/agent）；
+	// jev_host 开主持轮转点名，auto_members 为兼容参数（开主持 + 空成员回退
+	// jev 选人）。成员非空时以传入为准。
+	raw, _ := args["members"].([]any)
+	members := make([]string, 0, len(raw))
+	for _, v := range raw {
+		sv, ok := v.(string)
+		if !ok || strings.TrimSpace(sv) == "" {
+			return "", fmt.Errorf("members 须为非空字符串数组（node/agent 形式）")
 		}
+		members = append(members, strings.TrimSpace(sv))
+	}
+	if bv, ok := args["jev_host"].(bool); ok && bv {
+		req["jev_host"] = true
+	}
+	auto := false
+	if bv, ok := args["auto_members"].(bool); ok && bv {
+		req["auto_members"] = true
+		auto = true
+	}
+	if len(members) > 0 {
 		req["members"] = members
+	} else if !auto {
+		return "", fmt.Errorf("members 必填（node/agent 形式，如 [\"mac-mini/coder\"]）；或传 auto_members=true 由 jev 自动选人")
 	}
 	code, data, err := hubAPI("POST", "/api/v1/groups", req)
 	if err != nil {
@@ -1931,12 +1941,17 @@ func toolGroupCreate(args map[string]any) (string, error) {
 		return "", groupErrHint(code, data)
 	}
 	var g struct {
-		ID      string   `json:"group_id"`
-		Members []string `json:"members"`
+		ID         string   `json:"group_id"`
+		Members    []string `json:"members"`
+		HostActive bool     `json:"host_active"`
 	}
 	_ = json.Unmarshal(data, &g)
-	return fmt.Sprintf("协作群已创建：%s\n目标：%s\n成员：%s\n用 swarmmind_group_say 发言、swarmmind_group_messages 拉消息、swarmmind_group_close 结束。",
-		g.ID, goal, strings.Join(g.Members, "、")), nil
+	hostLine := ""
+	if g.HostActive {
+		hostLine = "主持：jev 轮转点名发言，FINAL:/预算尽即停轮等待人工定版。\n"
+	}
+	return fmt.Sprintf("协作群已创建：%s\n目标：%s\n成员：%s\n%s用 swarmmind_group_say 发言、swarmmind_group_messages 拉消息、swarmmind_group_close 结束。",
+		g.ID, goal, strings.Join(g.Members, "、"), hostLine), nil
 }
 
 func toolGroupList() (string, error) {

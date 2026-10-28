@@ -1135,8 +1135,12 @@ function svcCard(a) {
       ${button('开放', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
       ${button('停止开放', `expose-off:${esc(a.name)}`, 'off-btn' + (on ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
     </div><div class="toggle" role="group" aria-label="智行管家声明" title="智行管家：接收复合目标拆解派发汇总（全网同一时刻至多一个，由各机器客户端声明、hub 汇聚）">
-      ${button('设为管家', `orch-on:${esc(a.name)}`, 'on-btn' + (a.orchestrator ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
-      ${button('取消管家', `orch-off:${esc(a.name)}`, 'off-btn' + (a.orchestrator ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
+    ${/* 管家开关状态化单按钮（DESIGN-butler v4 试用反馈二，2026-10-28）：已声明
+        只留绿徽标+弱化文字链（「设为管家」不再出现，双按钮并排视觉混乱退役）；
+        未声明只留一颗中性灰按钮（非实心蓝主操作，与开放/停止开放区分）。 */
+    a.orchestrator
+    ? `<span class="badge online">管家 · 本机</span>${button('取消管家', `orch-off:${esc(a.name)}`, 'link', '', `data-agent="${esc(a.name)}"`)}`
+    : button('设为管家', `orch-on:${esc(a.name)}`, '', '', `data-agent="${esc(a.name)}"`)}
     </div></div></div>${syncNote}${orchNote(a)}
     <details><summary>配置详情（只读 · 来自本机 ExecProfile）</summary>
       <div class="table-wrap"><table><tbody>

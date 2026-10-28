@@ -3,6 +3,7 @@ package group
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -761,5 +762,252 @@ func TestRollingTrim(t *testing.T) {
 	}
 	if _, err := s2.PostMessage(g.ID, "a", KindAgent, "over-after-restart"); !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("重启后预算仍应耗尽（AgentMsgs 持久化）, got %v", err)
+	}
+}
+
+// TestHostFieldsSnapshotCompat v4 主持字段向后兼容（DESIGN-butler 3.6）：v3 旧
+// 快照（无 host_active/host_round/host_turn 字段）载入零迁移可读、零值语义正确
+//（未开主持，群照常可用）；v4 快照写读回环不丢主持状态与在途棒。
+func TestHostFieldsSnapshotCompat(t *testing.T) {
+	dir := t.TempDir()
+	// v3 形态快照：群对象只有历史字段（无任何 host_* 键）
+	snapshot := `{
+  "groups": {
+    "g-old": {"group_id": "g-old", "goal": "旧快照群", "status": "discussing", "host": "admin", "members": ["a/b"], "budget": {"max_rounds": 20}, "created_at": "2026-10-26T00:00:00Z", "task_refs": ["t-1"]}
+  },
+  "messages": {"g-old": []},
+  "seqs": {"g-old": 0}
+}`
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(snapshot), 0o644); err != nil {
+		t.Fatalf("预置旧快照: %v", err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("旧快照载入应成功: %v", err)
+	}
+	g, ok := s.GetGroup("g-old")
+	if !ok || g.HostActive || g.HostRound != 0 || g.HostTurn != "" {
+		t.Fatalf("旧群应零值主持状态可读: %+v ok=%v", g, ok)
+	}
+	// 旧群照常可用（零值不触发主持/预算异常）
+	if _, err := s.PostMessage("g-old", "admin", KindUser, "旧群插话"); err != nil {
+		t.Fatalf("旧群发言应照常: %v", err)
+	}
+	s.Close()
+
+	// v4 回环：开主持 → 置棒 → 重启 → 主持状态原样恢复
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	h, err := s2.CreateHostedGroup("v4 群", "admin", []string{"x/y"})
+	if err != nil || !h.HostActive {
+		t.Fatalf("开主持建群: %+v err=%v", h, err)
+	}
+	if _, _, advanced, err := s2.AdvanceHostTurn(h.ID, "", "t-baton"); err != nil || !advanced {
+		t.Fatalf("首棒置位: advanced=%v err=%v", advanced, err)
+	}
+	s2.Close()
+	s3, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重启打开: %v", err)
+	}
+	defer s3.Close()
+	g2, ok := s3.GetGroup(h.ID)
+	if !ok || !g2.HostActive || g2.HostRound != 1 || g2.HostTurn != "t-baton" {
+		t.Fatalf("重启后主持状态应原样恢复: %+v ok=%v", g2, ok)
+	}
+}
+
+// TestHostTurnCAS HostTurn 单字段 CAS 护栏（同群恒一棒在途）：fromTurn 匹配才
+// 推进/换绑/释放；终态群不推进；并发竞争只有一个赢家；重放路径换绑不改轮数。
+func TestHostTurnCAS(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	defer s.Close()
+	g, err := s.CreateHostedGroup("cas", "admin", []string{"a/b"})
+	if err != nil {
+		t.Fatalf("建群: %v", err)
+	}
+
+	// 首棒置位（fromTurn="" → toTurn）：轮数 0→1
+	if _, _, advanced, err := s.AdvanceHostTurn(g.ID, "", "t1"); err != nil || !advanced {
+		t.Fatalf("首棒置位: advanced=%v err=%v", advanced, err)
+	}
+	// 竞争者 fromTurn 不匹配：CAS 未命中（幂等放弃，非错误）
+	if _, _, advanced, err := s.AdvanceHostTurn(g.ID, "t-stale", "t2"); err != nil || advanced {
+		t.Fatalf("过期的 fromTurn 应 CAS 未命中: advanced=%v err=%v", advanced, err)
+	}
+	// 正常推进（t1 → t2）：轮数 1→2
+	if _, _, advanced, err := s.AdvanceHostTurn(g.ID, "t1", "t2"); err != nil || !advanced {
+		t.Fatalf("换棒: advanced=%v err=%v", advanced, err)
+	}
+	// 幂等重放换绑（t2 → t2-real）：不改轮数
+	if ok, err := s.RedirectHostTurn(g.ID, "t2", "t2-real"); err != nil || !ok {
+		t.Fatalf("换绑: ok=%v err=%v", ok, err)
+	}
+	got, _ := s.GetGroup(g.ID)
+	if got.HostRound != 2 || got.HostTurn != "t2-real" {
+		t.Fatalf("换绑不改轮数: %+v", got)
+	}
+	// 释放（停轮）：HostTurn 清空、HostActive 保持、轮数不动
+	if ok, err := s.ReleaseHostTurn(g.ID, "t2-real"); err != nil || !ok {
+		t.Fatalf("释放: ok=%v err=%v", ok, err)
+	}
+	got, _ = s.GetGroup(g.ID)
+	if !got.HostActive || got.HostTurn != "" || got.HostRound != 2 {
+		t.Fatalf("释放后应挂起态: %+v", got)
+	}
+	// 终态群不推进：关闭后 CAS 恒未命中
+	if _, err := s.CloseGroup(g.ID, "admin"); err != nil {
+		t.Fatalf("关群: %v", err)
+	}
+	if _, _, advanced, err := s.AdvanceHostTurn(g.ID, "", "t3"); err != nil || advanced {
+		t.Fatalf("终态群不得置棒: advanced=%v err=%v", advanced, err)
+	}
+}
+
+// TestAdvanceHostTurnStopRecheck 停轮条件与 HostTurn CAS 同事务复核（v4 审查修复
+// ①②）：FINAL 收敛标记 / 发言预算真实累计（AgentMsgs）/ 轮转上限命中时推进被拒、
+// 状态不变（HostTurn 保持 fromTurn），返回对应停轮原因；复核通过才置棒 +1 轮。
+func TestAdvanceHostTurnStopRecheck(t *testing.T) {
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	defer s.Close()
+
+	t.Run("轮转上限", func(t *testing.T) {
+		g, err := s.CreateHostedGroup("轮转上限复核", "admin", []string{"a/b"})
+		if err != nil {
+			t.Fatalf("建群: %v", err)
+		}
+		turn := ""
+		for i := 0; i < DefaultMaxRounds; i++ { // 推满预算：HostRound 0→20
+			got, stop, advanced, err := s.AdvanceHostTurn(g.ID, turn, fmt.Sprintf("t-%d", i+1))
+			if err != nil || !advanced || stop != "" {
+				t.Fatalf("第 %d 棒应正常置位: advanced=%v stop=%q err=%v", i+1, advanced, stop, err)
+			}
+			turn = got.HostTurn
+		}
+		// 第 21 棒：轮转上限命中，状态不变
+		_, stop, advanced, err := s.AdvanceHostTurn(g.ID, turn, "t-over")
+		if err != nil || advanced || stop != HostStopRounds {
+			t.Fatalf("轮转达上限应停轮拒推: advanced=%v stop=%q err=%v", advanced, stop, err)
+		}
+		if got, _ := s.GetGroup(g.ID); got.HostTurn != turn || got.HostRound != DefaultMaxRounds {
+			t.Fatalf("停轮拒推不得改状态: %+v", got)
+		}
+	})
+
+	t.Run("FINAL标记", func(t *testing.T) {
+		g, err := s.CreateHostedGroup("FINAL复核", "admin", []string{"a/b"})
+		if err != nil {
+			t.Fatalf("建群: %v", err)
+		}
+		if _, err := s.PostMessage(g.ID, "a/b", KindAgent, "FINAL: 共识达成"); err != nil {
+			t.Fatalf("FINAL 发言: %v", err)
+		}
+		if got, _ := s.GetGroup(g.ID); !got.FinalSeen {
+			t.Fatal("FINAL: 前缀 agent 发言应同事务置收敛标记")
+		}
+		_, stop, advanced, err := s.AdvanceHostTurn(g.ID, "", "t-x")
+		if err != nil || advanced || stop != HostStopFinal {
+			t.Fatalf("FINAL 标记应停轮拒推: advanced=%v stop=%q err=%v", advanced, stop, err)
+		}
+		if got, _ := s.GetGroup(g.ID); got.HostTurn != "" || got.HostRound != 0 {
+			t.Fatalf("停轮拒推不得置棒: %+v", got)
+		}
+	})
+
+	t.Run("发言预算真实累计", func(t *testing.T) {
+		g, err := s.CreateHostedGroup("发言预算复核", "admin", []string{"a/b"})
+		if err != nil {
+			t.Fatalf("建群: %v", err)
+		}
+		for i := 0; i < DefaultMaxRounds; i++ { // 一棒多条：发言数打满而轮数不动
+			if _, err := s.PostMessage(g.ID, "a/b", KindAgent, "补充观点"); err != nil {
+				t.Fatalf("预算内发言: %v", err)
+			}
+		}
+		if used, ok := s.SpeechBudgetUsed(g.ID); !ok || used != DefaultMaxRounds {
+			t.Fatalf("SpeechBudgetUsed 应读真实累计: used=%d ok=%v", used, ok)
+		}
+		// 预检口径的同一判据在推进事务内复核：一棒多条把发言数打满而轮数为 0，
+		// 推进必须被真实累计口径拦下（只看 HostRound 会放行）。
+		_, stop, advanced, err := s.AdvanceHostTurn(g.ID, "", "t-x")
+		if err != nil || advanced || stop != HostStopSpeech {
+			t.Fatalf("发言预算耗尽应停轮拒推: advanced=%v stop=%q err=%v", advanced, stop, err)
+		}
+	})
+}
+
+// TestFinalMarkerSurvivesPruneAndRestart FINAL 收敛标记持久化（v4 审查修复②）：
+// FINAL 消息被滚动裁剪挤出窗口后标记仍在（停轮判定不丢）；重启载入仍在（随快照
+// 持久化）；标记落地前的旧快照按现存消息迁移补记。
+func TestFinalMarkerSurvivesPruneAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("打开 store: %v", err)
+	}
+	g, err := s.CreateHostedGroup("裁剪不丢标记", "admin", []string{"a/b"})
+	if err != nil {
+		t.Fatalf("建群: %v", err)
+	}
+	if _, err := s.PostMessage(g.ID, "a/b", KindAgent, "FINAL: 收敛候选"); err != nil {
+		t.Fatalf("FINAL 发言: %v", err)
+	}
+	// 灌满滚动窗口把 FINAL 消息挤出（窗口 200 条，从最小 seq 丢最旧）
+	for i := 0; i < MaxGroupMessages; i++ {
+		if _, err := s.PostMessage(g.ID, "admin", KindUser, "插话"); err != nil {
+			t.Fatalf("插话: %v", err)
+		}
+	}
+	msgs, _, err := s.ListMessages(g.ID, 0)
+	if err != nil {
+		t.Fatalf("拉取消息: %v", err)
+	}
+	if hasAgentFinal(msgs) {
+		t.Fatal("前置：FINAL 消息应已被滚动裁剪挤出窗口")
+	}
+	if got, _ := s.GetGroup(g.ID); !got.FinalSeen {
+		t.Fatal("FINAL 消息被裁剪后收敛标记不得遗失")
+	}
+	_ = s.Close()
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatalf("重启打开: %v", err)
+	}
+	defer s2.Close()
+	if got, _ := s2.GetGroup(g.ID); !got.FinalSeen {
+		t.Fatal("重启后收敛标记应随快照恢复")
+	}
+}
+
+// TestFinalMarkerLegacySnapshotMigration 标记落地前的旧快照迁移：无 final_seen
+// 字段、消息含 FINAL: agent 发言 → 载入补记标记（裁剪丢失的部分无法追补，与
+// 载入时可见状态一致）。
+func TestFinalMarkerLegacySnapshotMigration(t *testing.T) {
+	dir := t.TempDir()
+	snapshot := `{
+  "groups": {
+    "g-old": {"group_id": "g-old", "goal": "旧快照群", "status": "discussing", "host": "admin", "members": ["a/b"], "budget": {"max_rounds": 20}, "created_at": "2026-10-26T00:00:00Z", "host_active": true, "host_round": 1, "host_turn": "t1"}
+  },
+  "messages": {"g-old": [{"msg_id":"gm-1","group_id":"g-old","seq":1,"from":"a/b","kind":"agent","body":"FINAL: 收敛候选","created_at":"2026-10-26T01:00:00Z"}]},
+  "seqs": {"g-old": 1}
+}`
+	if err := os.WriteFile(filepath.Join(dir, fileName), []byte(snapshot), 0o644); err != nil {
+		t.Fatalf("预置旧快照: %v", err)
+	}
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatalf("载入旧快照: %v", err)
+	}
+	defer s.Close()
+	if got, ok := s.GetGroup("g-old"); !ok || !got.FinalSeen {
+		t.Fatalf("旧快照含 FINAL agent 发言应迁移补记标记: %+v ok=%v", got, ok)
 	}
 }
