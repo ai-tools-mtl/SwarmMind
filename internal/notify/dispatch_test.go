@@ -520,3 +520,92 @@ func TestChannelTestButton(t *testing.T) {
 		t.Errorf("inbox 测试应写演示条目, got %+v unread=%d", items, unread)
 	}
 }
+
+// ---------- 渠道最近投递状态（FE-POLISH P0-3） ----------
+
+// TestDeliveryStatusRecorded 渠道卡「最近成功/最近失败」数据源回归锁：
+// ① 投递成功落 LastOKAt；② 重试穷尽落 LastFailAt+脱敏原因（不含 path/query
+// 凭证）；③ 失败后恢复可达再投递，两事实并存且成功晚于失败（卡上据此判
+// 「当前疑似失败」解除）；④ ListView 响应体带 last_ok_at/last_fail_at 字段、
+// 无记录渠道字段缺席；⑤ 「发测试」成功/失败同落状态（测试=可达性证据）。
+func TestDeliveryStatusRecorded(t *testing.T) {
+	s := newTestStore(t)
+	d, _ := newTestDispatcher(t, s)
+
+	// ① 成功投递：hook 前 0 次 500（直接 200）
+	hOK := newHookServer(t, 0)
+	chOK := mustCreate(t, s, TypeWebhook, "", "能通", nil, map[string]string{"url": hOK.srv.URL})
+	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
+	d.WaitIdle()
+	st := d.DeliveryStatuses()[chOK.ID]
+	if st.LastOKAt.IsZero() {
+		t.Fatalf("成功投递应记录 LastOKAt")
+	}
+	if !st.LastFailAt.IsZero() {
+		t.Errorf("无失败不应记录 LastFailAt")
+	}
+
+	// ② 穷尽失败：hook 恒 500（failN 极大），原因脱敏
+	hBad := newHookServer(t, 1<<30)
+	u := hBad.srv.URL + "/hook/sekret-path?token=topsecret-query"
+	chBad := mustCreate(t, s, TypeWebhook, "", "不通", nil, map[string]string{"url": u})
+	d.TaskFinal(testTask(protocol.StatusFailed, nil))
+	d.WaitIdle()
+	stBad := d.DeliveryStatuses()[chBad.ID]
+	if stBad.LastFailAt.IsZero() || stBad.LastFailReason == "" {
+		t.Fatalf("穷尽失败应记录 LastFailAt+原因, got %+v", stBad)
+	}
+	for _, secret := range []string{"sekret-path", "topsecret-query"} {
+		if strings.Contains(stBad.LastFailReason, secret) {
+			t.Errorf("失败原因不得外带凭证 %s: %q", secret, stBad.LastFailReason)
+		}
+	}
+
+	// ③ 失败后恢复：同渠道再投递成功，LastOK 更新且晚于 LastFail；两事实并存
+	before := stBad.LastFailAt
+	hBad.setFailN(0) // 切回全 200：模拟「渠道恢复可达」
+	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
+	d.WaitIdle()
+	stBad2 := d.DeliveryStatuses()[chBad.ID]
+	if stBad2.LastOKAt.IsZero() {
+		t.Fatalf("恢复后成功应记录 LastOKAt")
+	}
+	if !stBad2.LastFailAt.Equal(before) {
+		t.Errorf("成功投递不得改写失败事实")
+	}
+	if !stBad2.LastOKAt.After(stBad2.LastFailAt) {
+		t.Errorf("恢复成功应晚于最近失败（渠道卡解除告警的判据）")
+	}
+
+	// ④ ListView：字段透传；无记录渠道（inbox）字段缺席
+	chInbox := mustCreate(t, s, TypeInbox, "", "站内", nil, nil)
+	d.TaskFinal(testTask(protocol.StatusCancelled, nil))
+	d.WaitIdle()
+	view := map[string]ChannelView{}
+	for _, cv := range d.ListView() {
+		view[cv.ID] = cv
+	}
+	if view[chBad.ID].LastOKAt == nil || view[chBad.ID].LastFailAt == nil || view[chBad.ID].LastFailReason == "" {
+		t.Errorf("ListView 应带失败渠道的投递状态: %+v", view[chBad.ID])
+	}
+	if view[chInbox.ID].LastOKAt != nil || view[chInbox.ID].LastFailAt != nil {
+		t.Errorf("inbox 不落投递状态（站内恒成功，不承担外部通道观测）: %+v", view[chInbox.ID])
+	}
+
+	// ⑤ 发测试：成功/失败各落状态
+	h2 := newHookServer(t, 0)
+	ch2 := mustCreate(t, s, TypeWebhook, "", "测试通", nil, map[string]string{"url": h2.srv.URL})
+	if ok, _ := d.TestChannel(ch2.ID); !ok {
+		t.Fatalf("可达渠道测试应成功")
+	}
+	if d.DeliveryStatuses()[ch2.ID].LastOKAt.IsZero() {
+		t.Errorf("测试成功应落 LastOKAt")
+	}
+	ch3 := mustCreate(t, s, TypeWebhook, "", "测试不通", nil, map[string]string{"url": "http://127.0.0.1:1/nope"})
+	if ok, _ := d.TestChannel(ch3.ID); ok {
+		t.Fatalf("不可达渠道测试应失败")
+	}
+	if d.DeliveryStatuses()[ch3.ID].LastFailAt.IsZero() {
+		t.Errorf("测试失败应落 LastFailAt")
+	}
+}

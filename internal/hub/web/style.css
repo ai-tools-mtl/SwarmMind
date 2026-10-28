@@ -429,6 +429,9 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 240px}
 .chan-name{font-weight:600;font-size:13.5px;overflow-wrap:anywhere}
 .chan-meta{flex-basis:100%;font-size:12px;color:var(--ink-3)}
+/* 渠道最近投递事实行（FE-POLISH P0-3，双端同值）：占满整行；「当前疑似失败」着 danger。 */
+.chan-deli{flex-basis:100%;font-size:12px;color:var(--ink-3)}
+.chan-deli.deli-fail{color:var(--danger)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
 .chan-actions button{padding:6px 12px;font-size:12px}
 /* 渠道编辑弹层表单骨架（t20261026-notify-polish 改动二，双端同构）：hub 全局

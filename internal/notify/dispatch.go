@@ -37,6 +37,9 @@ type Dispatcher struct {
 	backoff     []time.Duration // 长度即重试次数
 	smtpTimeout time.Duration   // SMTP 全链路 deadline（net/smtp 无原生超时）
 	wg          sync.WaitGroup  // 在途投递计数（WaitIdle 用）
+
+	dmu   sync.Mutex                // deliv 锁（投递在独立 goroutine，读写并发）
+	deliv map[string]DeliveryStatus // 渠道 ID → 最近投递事实（内存态，deliverystatus.go）
 }
 
 // DispatcherOption Dispatcher 可选参数（测试注入短超时/短退避）。
@@ -167,7 +170,8 @@ func (d *Dispatcher) deliver(ch Channel, t protocol.Task) {
 }
 
 // retry 渠道级重试骨架：任一次成功即停；失败按退避序列重试（首次发送 +
-// len(backoff) 次重试），穷尽后只记日志（渠道名 + 脱敏原因）。
+// len(backoff) 次），穷尽后只记日志（渠道名 + 脱敏原因）。成功/穷尽两路都落
+// 渠道投递状态（FE-POLISH P0-3：渠道卡「最近成功/最近失败」数据源）。
 func (d *Dispatcher) retry(ch Channel, attempt func() error) {
 	var lastErr error
 	for i := 0; ; i++ {
@@ -176,6 +180,7 @@ func (d *Dispatcher) retry(ch Channel, attempt func() error) {
 		}
 		err := attempt()
 		if err == nil {
+			d.deliveryOK(ch.ID)
 			return
 		}
 		lastErr = err
@@ -183,13 +188,16 @@ func (d *Dispatcher) retry(ch Channel, attempt func() error) {
 			break
 		}
 	}
+	d.deliveryFail(ch.ID, sanitizeErrMsg(lastErr))
 	log.Printf("[notify] 通知渠道 %s(%s) 投递最终失败（已重试 %d 次，放弃；不影响任务）: %s",
 		ch.Name, ch.ID, len(d.backoff), sanitizeErrMsg(lastErr))
 }
 
 // TestChannel 渠道「发测试」按钮：单次尝试（不走重试——HTTP 请求控制在单次
 // 超时内，管理面不等 27s），返回 (成功, 人话失败原因)。inbox 渠道写一条演示
-// 站内通知恒成功；未知渠道 → ErrNotFound。
+// 站内通知恒成功；未知渠道 → ErrNotFound。email/webhook 两路落渠道投递状态
+//（FE-POLISH P0-3：测试成功/失败与真实投递同为渠道可达性证据）；inbox 不落
+//（站内投递恒成功，不承担外部告警通道观测职责）。
 func (d *Dispatcher) TestChannel(id string) (bool, string) {
 	ch, ok := d.store.Get(id)
 	if !ok {
@@ -204,16 +212,31 @@ func (d *Dispatcher) TestChannel(id string) (bool, string) {
 		return true, ""
 	case TypeEmail:
 		err := d.sendEmail(ch.Secrets, sampleTestTask())
-		return err == nil, sanitizeErrMsg(err)
+		if err != nil {
+			d.deliveryFail(ch.ID, sanitizeErrMsg(err))
+			return false, sanitizeErrMsg(err)
+		}
+		d.deliveryOK(ch.ID)
+		return true, ""
 	case TypeWebhook:
 		if normalizeFormat(ch.Format) == FormatFeishu {
 			body := mustJSON(feishuMessage{MsgType: "text", Content: feishuContent{Text: testText(ch.Name)}})
 			err := d.postHTTP(ch, ch.Secrets["url"], body, nil)
-			return err == nil, sanitizeErrMsg(err)
+			if err != nil {
+				d.deliveryFail(ch.ID, sanitizeErrMsg(err))
+				return false, sanitizeErrMsg(err)
+			}
+			d.deliveryOK(ch.ID)
+			return true, ""
 		}
 		body := mustJSON(testPayload(ch.Name))
 		err := d.postHTTP(ch, ch.Secrets["url"], body, headerMap(ch.Secrets))
-		return err == nil, sanitizeErrMsg(err)
+		if err != nil {
+			d.deliveryFail(ch.ID, sanitizeErrMsg(err))
+			return false, sanitizeErrMsg(err)
+		}
+		d.deliveryOK(ch.ID)
+		return true, ""
 	default:
 		return false, "该类型暂无投递实现"
 	}

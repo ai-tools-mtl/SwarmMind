@@ -41,17 +41,14 @@ func (s *Server) notifyReady(w http.ResponseWriter) bool {
 	return true
 }
 
-// handleNotifyChannelList GET /api/v1/notify/channels：渠道列表（凭证脱敏）。
+// handleNotifyChannelList GET /api/v1/notify/channels：渠道列表（凭证脱敏 +
+// 最近投递状态，notify.ChannelView——渠道卡「最近成功/最近失败」数据源，
+// FE-POLISH P0-3；端点组属 SPEC 六.六豁免⑦，无 MCP 变更）。
 func (s *Server) handleNotifyChannelList(w http.ResponseWriter, r *http.Request) {
 	if !s.notifyReady(w) {
 		return
 	}
-	chs := s.cfg.Notify.Store().List()
-	out := make([]notify.Channel, len(chs))
-	for i, c := range chs {
-		out[i] = c.Masked()
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"channels": out})
+	writeJSON(w, http.StatusOK, map[string]any{"channels": s.cfg.Notify.ListView()})
 }
 
 // handleNotifyChannelCreate POST /api/v1/notify/channels：创建（body 含明文

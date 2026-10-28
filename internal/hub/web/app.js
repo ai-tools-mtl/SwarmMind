@@ -252,6 +252,28 @@ const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记�
  * 「hub 下发 | 本机派单」双端逐字节同文——来源徽标、筛选 chip、抽屉来源行唯一出处，
  * 不得再复制字面量。 */
 const ORIGIN_WORDS = { hub: 'hub 下发', local: '本机派单' };
+/* PERM_MODE_NOTES 权限模式人话词典（FE-POLISH P0-7 权限展示过强修正，2026-10-29）：
+ * permission_mode 原始标签是能力自报的权限机制映射（SPEC「权限模型（诚实声明）」：
+ * 命令白名单不构成 agent 行为隔离），直接示人像隔离承诺。键=常见映射值（小写命中），
+ * 值=一句人话；未命中/未声明走兜底，不虚构隔离。双端逐字节同文，UI 词典同源。 */
+const PERM_MODE_NOTES = {
+  'read-only': '只读执行：不能改动本机文件',
+  'workspace-write': '受限写入：仅工作目录内可写',
+  'danger-full-access': '完全访问：无额外限制（等同直接运行）',
+  'no-shell': '禁 shell：固定命令入口，不开放任意命令',
+};
+/* permissionNote 权限模式一句人话（兜底口径：白名单限制命令入口，不等于沙箱
+ * 隔离——不确定时按诚实声明提示，不替 agent 承诺边界）。 */
+function permissionNote(mode) {
+  const m = String(mode || '').trim();
+  if (!m) return '未声明：边界以该能力的命令与参数白名单为准';
+  return PERM_MODE_NOTES[m.toLowerCase()] || '白名单限制命令入口，不等于沙箱隔离；具体以该 agent 自带权限机制为准';
+}
+/* permLabel 展示行形态：原始值保留（技术态可核对），人话随后括注。 */
+function permLabel(mode) {
+  const m = String(mode || '').trim();
+  return m ? `权限 ${m}（${permissionNote(m)}）` : `权限未声明（${permissionNote('')}）`;
+}
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -447,6 +469,11 @@ const NOTIFY_EVENT_OPTS = [
 function modalHead(title) {
   return `<div class="row"><h2 id="layer-title">${title}</h2><button type="button" data-act="close" class="close" aria-label="关闭弹层">×</button></div>`;
 }
+/* NOTIFY_DELIV 渠道投递状态文案词典（FE-POLISH P0-3「告警通道失效不告警」双端
+ * 同源）：渠道卡「最近成功/最近失败+原因」事实行与修复入口按钮词的唯一出处；
+ * 时间格式化与 DOM 组装留各端（button() 签名双端不同，见 modalHead 注）。
+ * 状态数据（last_ok_at/last_fail_at/last_fail_reason）随渠道列表响应下发。 */
+const NOTIFY_DELIV = { ok: '最近成功投递', fail: '最近投递失败', fix: '修复（检查配置）' };
 /* notifyTypeOptionsHtml 类型下拉选项（typeKeys=端上可见类型键序，缺省=全集；
  * sms 在枚举中占位，option disabled 灰显「需接入服务商，暂未开放」）。 */
 function notifyTypeOptionsHtml(type, typeKeys) {
@@ -636,6 +663,7 @@ const S = {
   notifyChannels: [],          // 通知渠道列表（P4③ 控制台化；已脱敏形态）
   notifyLoading: false,        // 设置页通知区块加载态（D2 模式：局部更新）
   notifyError: '',             // 通知渠道加载失败信息（空=正常）
+  chanSummary: null,           // 外部通知渠道数（P0-4：null=未加载；总览「无外部渠道」明示数据源；inbox 不计入——站内=关页面即失，正是提示要覆盖的盲区）
   inboxItems: [],              // 站内通知（内存态，重启清空；顶栏铃铛数据源）
   inboxUnread: 0,              // 站内未读数（badge）
   bellOpen: false,             // 铃铛面板开合
@@ -695,6 +723,7 @@ function sessionExpired() {
   S.workDrawer = null;
   S.f = blankFilters();   // 筛选不跨会话（TASK-nav-filter A2：登出重置同步覆盖）
   S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
+  S.chanSummary = null;   // 渠道计数随会话边界重置（P0-4），下次登录重拉
   closeBellPanel();   // 铃铛面板随会话收起（S.bellOpen 不跨会话）
   render();
   location.hash = '#/login';
@@ -969,7 +998,7 @@ function humanLeft() {
 }
 function shell(inner) {
   const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];
-  const nr = S.tasks.filter(t => t.status === 'needs_review').length;
+  const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1，见 pendingReviewCount 注）
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
@@ -1046,6 +1075,13 @@ function toast(msg) {
 }
 function terminal(st) { return TERMINAL.has(st); }   // 终态集来自抽屉展示词典 shared block
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
+/* pendingReviewCount 待办口径（FE-POLISH P0-1「核对完待办不减」，2026-10-29）：
+ * 人工核对只写 Review 记录、协议状态保持 needs_review（core.RecordReview 不改终态），
+ * 旧口径按 status 全数计入——核对完待办永远挂着。新口径=「needs_review 且无 review
+ * 记录」：任务快照（GET /api/v1/tasks）已含 review 字段，纯前端改计数，零新端点；
+ * 已核对任务进抽屉历史详情（reviewSection），协议状态原样保留。状态分布 chips 仍按
+ * stateCounts 全数呈现（那是状态分布不是待办）。 */
+function pendingReviewCount() { return S.tasks.filter(t => t.status === 'needs_review' && !t.review).length; }
 function preserveFocus(fn) {
   const a = document.activeElement;
   const id = a?.id, pos = a && 'selectionStart' in a ? a.selectionStart : 0;
@@ -1123,6 +1159,7 @@ async function doPasswordLogin(u, p) {
       setRetentionSec(d.terminal_retention_sec);
       S.C = freshControl();
       try { await loadAll(); } catch { }
+      loadChanSummary();   // P0-4：无外部渠道明示的数据源（不 await，迟到由 render 补画）
       location.hash = '#/overview';
       route();
       toast('登录成功 · 已进入总览');
@@ -1151,6 +1188,7 @@ async function doLogin(form) {
       S.C = freshControl();
       S.f = blankFilters();
       try { await loadAll(); } catch { }
+      loadChanSummary();   // P0-4：无外部渠道明示的数据源（不 await，迟到由 render 补画）
       location.hash = '#/overview';
       route();
       toast('登录成功 · 已进入总览');
@@ -1171,7 +1209,7 @@ async function doLogin(form) {
 function overviewPage() {
   const c = stateCounts();
   const online = S.nodes.filter(n => n.online).length;
-  const nr = c.needs_review || 0;
+  const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1）；c 留给状态分布 chips
   const offline = sortNodesStable(S.nodes.filter(n => !n.online));
   // 状态分布 chips = 下钻入口：点某个状态直达任务监管页对应筛选（总览无列表，就地筛选无意义）
   // 计数为 0 时 badge 不上彩色（橙描边/蓝点脉冲只给有量的状态），避免「等你确认 0」像告警（2026-10-23 伦哥实测抓出）
@@ -1199,7 +1237,8 @@ function overviewPage() {
     <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
       ${nr ? `<div class="notice warn"><b>${nr} 个任务结果拿不准，等你确认</b><p>执行中断，结果是否完整系统无法确认；请核对后登记结论，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
     : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务」页下钻原因。</div>`}
-      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：交给它的任务先放进离线暂存，重连后自动送达；7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
+      ${S.chanSummary === 0 ? `<div class="notice warn spaced"><b>当前无外部通知渠道</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去添加渠道 →', 'go', 'link', 'data-page="tokens"')}</div>` : ''}
+      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：本页只做登记与观察，不能对离线机器派发；此前已提交给它的任务在离线暂存等待投递，重连后自动送达，7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
     </div>`
     + `<section class="card spaced"><div class="row"><h2>任务状态分布</h2>${button('全部任务 →', 'go', 'link', 'data-page="tasks"')}</div>
@@ -1212,17 +1251,17 @@ function overviewPage() {
 function nodesPage() {
   return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
-    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>进行中任务</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
+    ${S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
     ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
-      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${n.inflight} / 8</td><td>${caps.length ? caps.map(d => {
-      const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : '');
+      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${caps.length ? caps.map(d => {
+      const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · ${permLabel(d.card.permission_mode)}` : ' · 权限未声明（以该能力的命令与参数白名单为准）');
       return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
     }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台机器（只读说明）"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
     : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`}
-    <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定。每台机器最多同时进行 8 个任务，超出自动排队；离线不会终止已在执行的任务。</p></section>`;
+    <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定；离线不会终止已在执行的任务。</p></section>`;
 }
 /* ---------- 添加机器向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
  * Step1 节点身份（实时校验）→ Step2 hub 侧登记（本地生成 64 位随机令牌 + 可复制
@@ -1886,7 +1925,7 @@ function drawerZones(t) {
     ? '这个任务结果拿不准，等你确认：执行到一半机器重启了，请核对后登记结论，不要重新提交同一任务。'
     : t.status === 'completed' ? '任务已完成：可阅读最终答复并下载产物文件。'
     : t.status === 'failed' ? '本次执行未完成：先看下方说明，再决定是否重新派任务。'
-    : t.status === 'cancelled' ? '任务已被取消：执行进程已整组终止（或尚未执行），不会自动重跑。'
+    : t.status === 'cancelled' ? '已登记取消，执行机停止情况待确认：hub 已发出停止指令（离线机重连后补发），不会自动重跑。'
     : '任务仍在进行，抽屉每 5 秒自动刷新。';
   return {
     head: `${modalHead('任务详情 · ' + esc(t.id))}
@@ -2090,7 +2129,7 @@ function controlPage() {
   return head('派发', '把任务派给网内任意机器上的智能体或工具：先选执行机器，再选该机器上的智能体（zcode/codex 等编码智能体或巡检脚本）。')
     + `<section class="card"><form id="control-form"><fieldset ${locked ? 'disabled' : ''}>
     <div class="row"><h2>新任务</h2><span class="badge offered">正式任务 · 在机器本机执行</span></div>
-    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存，等其上线后再派发。' })}
+    ${agentPickerHtml({ ids: 'ctrl', node: C.node, agent: C.agent, nodeHelp: '离线机器暂不可选：本页提交对离线机器直接跳过、不暂存；经支持暂存的入口提交的任务，重连后自动送达。' })}
     ${orchLineHtml()}
     ${S.directory.length ? '' : '<div class="notice warn spaced">能力目录为空：需要先在机器的 node.yaml 里把能力开放出去（exposed: true）。</div>'}
     <label class="spaced">任务描述<textarea id="ctrl-stdin" rows="6" placeholder="${esc(stdinPlaceholder(C.node, C.agent))}">${esc(C.stdin)}</textarea></label>
@@ -2106,7 +2145,7 @@ function controlPage() {
     </div></form></section>
     ${C.message ? `<section class="card spaced">${C.message}</section>` : ''}
     <section class="card spaced"><h3>运行规则</h3>
-    <div class="step"><span>1</span><p>单目标派发：任务只提交给你选定的机器上的选定智能体；离线机器暂不可选（提交端点不排队，上线后再派）。</p></div>
+    <div class="step"><span>1</span><p>单目标派发：任务只提交给你选定的机器上的选定智能体；离线机器暂不可选（本页提交不排队，上线后再派；支持暂存入口提交的任务重连后送达）。</p></div>
     <div class="step"><span>2</span><p>提交后返回批次报告；任务在机器本机执行，「任务」页全程可追踪。</p></div>
     <div class="step"><span>3</span><p>智行管家（默认按能力名含 zcode-dev 识别）由各机器在能力目录中开放后出现在智能体列表顶部；选中它即管家模式：复合目标由它拆解并调度网内多台机器执行，产出汇总报告。</p></div></section>`;
 }
@@ -2133,7 +2172,7 @@ function pickerNodeOptions(selected) {
     const hasCaps = S.directory.some(d => d.node_id === n.node_id);
     const dead = !n.online || !hasCaps;
     const why = !n.online ? '（离线）' : hasCaps ? '' : '（无开放能力）';
-    const tip = !n.online ? '离线：提交会被跳过，暂不支持排队暂存' : hasCaps ? `在线 · 正在执行 ${n.inflight} 个任务` : '这台机器还没有开放任何能力（node.yaml 的 exposed）';
+    const tip = !n.online ? '离线：本页不能选它派发（提交不暂存）；支持暂存入口提交的任务会在重连后送达' : hasCaps ? `在线` : '这台机器还没有开放任何能力（node.yaml 的 exposed）';
     return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
@@ -2157,7 +2196,7 @@ function pickerHelpText() {
   const src = S.prime
     ? `已由网页指定智行管家：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
     : `未指定智行管家（默认按能力名 <code>zcode-dev</code> 识别）`;
-  return `离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src}`;
+  return `离线机器暂不可选：本页提交对离线机器直接跳过、不暂存；经支持暂存的入口提交的任务，重连后自动送达。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src}`;
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
@@ -2171,7 +2210,7 @@ function pickerAgentOptions(nodeId, selected) {
   const isPrime = isPrimeDir;   // 统筹判定统一走网页指定+回退约定（isPrimeDir）
   const prime = list.filter(isPrime), rest = list.filter(d => !isPrime(d));
   const opt = d => {
-    const tip = `${d.card.name}${isPrime(d) ? ' · 智行管家：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · 权限 ${d.card.permission_mode}` : ''}）`;
+    const tip = `${d.card.name}${isPrime(d) ? ' · 智行管家：拆解复合目标并派发汇总，不亲自执行子任务' : ''} — ${d.card.description || '（无描述）'}（输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}${d.card.permission_mode ? ` · ${permLabel(d.card.permission_mode)}` : ''}）`;
     const label = isPrime(d) ? `智行管家 · ${d.card.name}` : d.card.name;
     return `<option value="${esc(d.card.name)}" ${selected === d.card.name ? 'selected' : ''} title="${esc(tip)}">${esc(label)}</option>`;
   };
@@ -2187,9 +2226,12 @@ function pickerSummaryHtml(node, agent) {
   if (node && agent) {
     const d = S.directory.find(x => x.node_id === node && x.card.name === agent);
     const flag = isPrimeDir(d) ? ' <span class="badge orch">智行管家 · 自动拆解派发汇总</span>' : '';
-    return `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行${flag}</small>`;
+    /* 权限口径进摘要行（P0-7：原始标签像隔离承诺——人话+兜底随行，见 permLabel）：
+     * option title 在主流浏览器不显示，权限说明必须在可见面。 */
+    const perm = d ? ` · ${esc(permLabel(d.card.permission_mode))}` : '';
+    return `<small>将在 <b>${esc(node)}</b> 上用 <b>${esc(agent)}</b> 执行${perm}${flag}</small>`;
   }
-  return '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置。</small>';
+  return '<small class="muted">先选机器，再选该机器上的智能体；选好后这里显示执行位置与权限口径。</small>';
 }
 function updatePickerSummary(prefix) {
   const line = $('#' + prefix + '-summary-line');
@@ -2496,6 +2538,16 @@ async function submitToken(form) {
  * 设置页「通知」区块（D2 局部刷新纪律：只 innerHTML 替换 #notify-section，
  * 永不整页重建）+ 渠道编辑弹层 + 顶栏铃铛（独立 DOM 通道，不经 render()）。 */
 
+/* loadChanSummary 外部通知渠道计数（FE-POLISH P0-4「站内通知易失」，2026-10-29）：
+ * 总览「需要你关注」区判断「当前无外部通知渠道」的数据源。渠道变更低频，不进 5s
+ * 轮询——登录成功/会话恢复与设置页渠道列表刷新（loadNotifyChannels）两个时机更新；
+ * inbox 类型不计入（站内=内存态关页面即失，正是本提示要覆盖的盲区）。 */
+async function loadChanSummary() {
+  const r = await api('GET', '/api/v1/notify/channels').catch(() => null);
+  if (!r || r.code !== 200 || !Array.isArray(r.data?.channels)) return;
+  S.chanSummary = r.data.channels.filter(c => c.type !== 'inbox').length;
+  if (S.page === 'overview') render();   // 已在总览：立即补画提示行
+}
 /* loadNotifyChannels 拉渠道列表（已脱敏形态），完成后只重绘通知区块。 */
 async function loadNotifyChannels() {
   S.notifyLoading = true; S.notifyError = '';
@@ -2504,6 +2556,7 @@ async function loadNotifyChannels() {
   if (S.page !== 'tokens') return;   // 已切页：状态留下次进页用，不碰 DOM
   if (r && r.code === 200 && Array.isArray(r.data?.channels)) {
     S.notifyChannels = r.data.channels; S.notifyError = '';
+    S.chanSummary = r.data.channels.filter(c => c.type !== 'inbox').length;   // P0-4：渠道 CRUD 后计数随刷新
   } else {
     S.notifyError = r ? errLine(r.data) : '网络异常 · 未收到服务器应答';
   }
@@ -2520,6 +2573,21 @@ function notifySectionHtml() {
   if (S.notifyError) return `<div class="notice warn"><b>通知渠道加载失败</b><br>${esc(S.notifyError)}</div><div class="actions spaced">${button('重试', 'notify-retry', '')}</div>`;
   if (!S.notifyChannels.length) return `<div class="empty"><h2>还没有通知渠道</h2><p class="muted">添加一个渠道，任务完成、失败或等你确认时主动给你发消息——飞书群、邮件都行；不配置也完全不影响派活。</p>${button('＋ 添加第一个渠道', 'notify-add', 'primary')}</div>`;
   return S.notifyChannels.map(notifyChannelCardHtml).join('');
+}
+/* deliveryLineHtml 渠道最近投递事实行（FE-POLISH P0-3「告警通道失效不告警」，
+ * 2026-10-29）：数据=渠道列表响应的 last_ok_at/last_fail_at/last_fail_reason
+ * （Dispatcher 内存态，自进程启动起记，重启清零——「尚未投递」不冒充成功，无记录
+ * 不渲染）。最近失败晚于最近成功（或从无成功）即「当前疑似失败」：事实行着
+ * danger + 前置「修复」入口（打开渠道编辑）。文案词典 NOTIFY_DELIV 双端同文。 */
+function deliveryLineHtml(ch) {
+  const ok = realTime(ch.last_ok_at), fail = realTime(ch.last_fail_at);
+  if (!ok && !fail) return '';
+  const failing = fail && (!ok || new Date(ch.last_fail_at) > new Date(ch.last_ok_at));
+  const parts = [];
+  if (ok) parts.push(`${NOTIFY_DELIV.ok} ${esc(fmtTime(ch.last_ok_at))}`);
+  if (fail) parts.push(`${NOTIFY_DELIV.fail} ${esc(fmtTime(ch.last_fail_at))}${ch.last_fail_reason ? '（' + esc(ch.last_fail_reason) + '）' : ''}`);
+  const fix = failing ? ' · ' + button(NOTIFY_DELIV.fix, 'notify-edit', 'link', `data-id="${esc(ch.id)}"`) : '';
+  return `<div class="chan-deli${failing ? ' deli-fail' : ''}">${parts.join(' · ')}${fix}</div>`;
 }
 function notifyChannelCardHtml(ch) {
   /* 徽标：webhook+飞书格式沿用「飞书机器人」心智词（存量迁移渠道用户一眼认出），
@@ -2540,6 +2608,7 @@ function notifyChannelCardHtml(ch) {
       ${button('删除', 'notify-del', 'danger', `data-id="${esc(ch.id)}" data-name="${esc(ch.name)}"`)}
     </div>
     <div class="chan-meta">订阅：${esc(ev)}${meta ? ' · ' + esc(meta) : ''} · 创建于 ${esc(fmtTime(ch.created_at))}${ch.enabled ? '' : ' · 已停用'}</div>
+    ${deliveryLineHtml(ch)}
   </div>`;
 }
 
@@ -3478,7 +3547,7 @@ const ACT = {
   </div><div class="notice warn">撤下前该机器在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态${retentionClause()}）继续可查。</div><div class="actions spaced">${button('我知道了，返回机器列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
-    <div class="notice warn">取消会立即整组终止执行机器上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
+    <div class="notice warn">确认后 hub 登记取消并向执行机发送停止指令（尽力送达；离线机重连后补发，实际停止情况以执行机回执为准）。任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
     <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),
   'task-cancel-confirm': async b => {
     const key = 'cancel:' + b.dataset.id;
@@ -3900,6 +3969,7 @@ async function init() {
       .then(r => r.json()).then(d => { setServerVersion(d?.server_version); setRetentionSec(d?.terminal_retention_sec); }).catch(() => {});
     await loadAll();
     refreshInbox();   // 登录态恢复：立即拉一次站内未读（后续随 5s 轮询）
+    loadChanSummary();   // P0-4：会话恢复同样补取外部渠道计数
   } catch (e) { /* 未登录 / 网络故障：登录页兜底 */ }
   route();
 }

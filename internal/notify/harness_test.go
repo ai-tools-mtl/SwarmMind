@@ -62,6 +62,13 @@ func (h *hookServer) count() int {
 	return len(h.bodies)
 }
 
+// setFailN 调整失败阈值（测试中途把恒 500 服务器切回 200，模拟「渠道恢复可达」）。
+func (h *hookServer) setFailN(n int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.failN = n
+}
+
 func (h *hookServer) lastBody() string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
