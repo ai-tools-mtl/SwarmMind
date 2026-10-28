@@ -64,10 +64,11 @@ type AgentState struct {
 // 不视为损坏——配置漂移不应阻塞 node 启动。
 func OpenAgentState(dataDir string, baseline []protocol.ExecProfile) (*AgentState, error) {
 	s := &AgentState{
-		baseline: append([]protocol.ExecProfile(nil), baseline...),
-		override: map[string]agentExposedRecord{},
-		path:     filepath.Join(dataDir, agentsStateFileName),
-		tmp:      filepath.Join(dataDir, agentsStateFileName+".tmp"),
+		baseline:     append([]protocol.ExecProfile(nil), baseline...),
+		override:     map[string]agentExposedRecord{},
+		orchOverride: map[string]agentOrchRecord{}, // 必须初始化：盘上已有 orchestrator 字段时重启路径会写入（nil map 赋值 panic，2026-10-28 生产实证）
+		path:         filepath.Join(dataDir, agentsStateFileName),
+		tmp:          filepath.Join(dataDir, agentsStateFileName+".tmp"),
 	}
 	b, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
