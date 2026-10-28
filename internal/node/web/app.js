@@ -2148,7 +2148,8 @@ document.addEventListener('input', e => {
 document.addEventListener('keydown', e => {
   /* R2-P2-01（2026-10-29）：确认层键盘分支——Esc 只关最上层（确认层开着=取消确认；
    * 仅抽屉/无层维持基线不响应）。Tab 焦点圈定兜底：inert 已把下层移出 Tab 序，
-   * keydown 层围住首尾循环；焦点意外落在层外（无 inert 的旧引擎等）拉回层内。
+   * keydown 层围住首尾循环；焦点意外落在层外（无 inert 的旧引擎等）或层内非
+   * items 节点（R3-P2-01：开层初始焦点=tabindex=-1 容器）一律消费按键入层。
    * 选择器口径与 hub layerFocusables 同文（排除禁用/隐藏/tabindex=-1 容器）。 */
   if (e.key === 'Escape' && $('#confirm-modal')) { e.preventDefault(); closeConfirm(); return; }
   if (e.key === 'Tab' && $('#confirm-modal')) {
@@ -2159,6 +2160,14 @@ document.addEventListener('keydown', e => {
       const first = items[0], last = items[items.length - 1];
       const active = document.activeElement;
       if (!m.contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      /* R3-P2-01（2026-10-29）：层内非 items 节点显式消费——开层初始焦点落在
+       * tabindex=-1 容器（confirmModal 聚焦 role=dialog）时 contains 为真但不入
+       * items，原三分支全不命中、无 preventDefault，首次 Shift+Tab 由浏览器默认
+       * 遍历逸出文档（activeElement=BODY、hasFocus=false，codex R3 双端实证）。
+       * 方向锚点：反向送 items[0]、正向送 items[last]，此后首尾循环两分支接力。
+       * 与 hub 文档级 keydown Tab 兜底同分支同语义（两端各自实现不入 shared
+       * block，改一处须核对另一处）。 */
+      else if (!items.includes(active)) { e.preventDefault(); (e.shiftKey ? first : last).focus(); }
       else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
       else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
     }

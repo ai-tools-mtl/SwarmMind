@@ -3973,8 +3973,9 @@ function bindEvents() {
       if (layerState === 'open') closeLayer(true);
       return;
     }
-    /* Tab 焦点循环（P0.6/FE-10）：仅 open 态拦截——焦点在层内则在首尾循环；
-     * 焦点意外落在层外（重绘丢焦点等）则拉回层内。背景 inert 已把 #app/顶栏
+    /* Tab 焦点循环（P0.6/FE-10）：仅 open 态拦截——焦点在 items 上则首尾循环；
+     * 焦点意外落在层外（重绘丢焦点等）或层内非 items 节点（R3-P2-01：开层初始
+     * 焦点=tabindex=-1 容器）则消费按键按方向入层。背景 inert 已把 #app/顶栏
      * 移出 Tab 序，本陷阱保证连按 Tab 焦点始终不出层。 */
     if (e.key === 'Tab' && layerState === 'open') {
       const items = layerFocusables();
@@ -3982,6 +3983,15 @@ function bindEvents() {
         const first = items[0], last = items[items.length - 1];
         const active = document.activeElement;
         if (!$('#layer').contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+        /* R3-P2-01（2026-10-29）：层内非 items 节点显式消费——开层初始焦点落在
+         * tabindex=-1 的 role=dialog 容器（openLayerPlain 聚焦、swapModalContent
+         * 回落均此态）时 contains 为真但不在 items，原三分支全不命中、无
+         * preventDefault，首次 Shift+Tab 由浏览器默认遍历逸出文档（codex R3 双端
+         * 实证；hub 既有缺口，本轮同构核实暴露后一并修复）。方向锚点：反向送
+         * items[0]、正向送 items[last]，此后首尾循环两分支接力。与 node 确认层
+         * keydown Tab 兜底同分支同语义（两端各自实现不入 shared block，改一处
+         * 须核对另一处）。 */
+        else if (!items.includes(active)) { e.preventDefault(); (e.shiftKey ? first : last).focus(); }
         else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
         else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
       }
