@@ -1291,27 +1291,44 @@ async function doLogin(form) {
   idleBtn(btn);   // 恢复取 dataset.label（原文案「用令牌登录」）——修失败后文案永久漂移的 B6 真 bug
 }
 
-/* ---------- 总览 ---------- */
+/* ---------- 总览（FE-POLISH 轮2 B 保守版重做，裁决 D） ----------
+ * 前置顺序：等你确认（未核对口径 P0-1）→ 正在执行 → 最近结果（最近任务表）。
+ * 删累计式大数字（全网任务总数/已完成总数）与「任务状态分布」整块（状态分布
+ * chips 在任务页已有，总览重复呈现被裁决删除）。「需要你关注」区整合 P0-4 通知
+ * 明示与 H03 失败/离线逻辑：只前置仍有工作受影响的失败/离线——失败且无核对记录=
+ * 「失败待查看」（不声称已处置）；离线机器有未终态任务受影响才上总览（纯离线
+ * 无受影响工作的去机器页看，不在总览抢注意力）。主入口 H04：有可用执行者给
+ * 「派任务」，否则引导添加机器。中心端状态卡与登录剩余行维持现状（轮 1 不擅动
+ * 口径）；在线机器/能力数保留一行摘要（页头副题）。 */
 function overviewPage() {
   const c = stateCounts();
   const online = S.nodes.filter(n => n.online).length;
-  const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1）；c 留给状态分布 chips
-  const offline = sortNodesStable(S.nodes.filter(n => !n.online));
-  // 状态分布 chips = 下钻入口：点某个状态直达任务监管页对应筛选（总览无列表，就地筛选无意义）
-  // 计数为 0 时 badge 不上彩色（橙描边/蓝点脉冲只给有量的状态），避免「等你确认 0」像告警（2026-10-23 伦哥实测抓出）
-  const drillChips = Object.keys(STATES).map(s => {
-    const n = c[s] || 0;
-    const bd = n ? badge(s) : `<span class="badge">${esc(STATES[s] || s)}</span>`;
-    return `<button data-act="go" data-page="tasks" data-status="${s}" class="chip-link${n ? '' : ' zero'}">${bd} ${n} →</button>`;
-  }).join('');
-  return head('总览', `${online} / ${S.nodes.length} 台机器在线 · ${S.directory.length} 项网内能力`, button('＋ 添加机器', 'go', 'primary', 'data-page="nodes"'))
-    + `<section class="panel"><div class="stat-grid">
-    ${metric('全网任务', S.tasks.length, '查看全部 →', '', 'data-act="go" data-page="tasks"')}
-    ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
-    ${metric('已完成', c.completed || 0, c.completed ? '查看已完成 →' : '暂无完成任务', '', `data-act="go" data-page="tasks" data-status="completed"`)}
+  const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1）
+  const failedPending = S.tasks.filter(t => t.status === 'failed' && !t.review).length;   // H03：失败且无核对记录（有 review=人工已核对处置）
+  const active = new Set(['submitted', 'offered', 'acknowledged', 'running']);
+  const offlineBusy = sortNodesStable(S.nodes.filter(n => !n.online &&
+    S.tasks.some(t => t.target_node === n.node_id && active.has(t.status))));
+  const hasExecutor = S.directory.some(d => S.nodes.find(n => n.node_id === d.node_id)?.online);
+  const headAction = hasExecutor
+    ? button('＋ 派任务', 'go', 'primary', 'data-page="control"')
+    : button('＋ 添加机器', 'go', 'primary', 'data-page="nodes"');
+  const headBadge = nr ? badge('needs_review') : failedPending
+    ? '<span class="badge failed">有失败待查看</span>' : '<span class="badge completed">无待办</span>';
+  return head('总览', `${online} / ${S.nodes.length} 台机器在线 · ${S.directory.length} 项网内能力`, headAction)
+    + `<section class="panel"><div class="stat-grid half">
     ${metric('等你确认', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'heat' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
+    ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
     </div></section>`
     + `<div class="grid cols2 spaced">
+    <section class="card"><div class="row"><h2>需要你关注</h2>${headBadge}</div>
+      ${nr ? `<div class="notice warn"><b>${nr} 个任务结果拿不准，等你确认</b><p>执行中断，结果是否完整系统无法确认；请核对后登记结论，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
+    : failedPending ? `<div class="notice warn"><b>${failedPending} 条失败任务待查看</b><p>这些失败还没有人工核对过；核实原因后可在任务页下钻，或重新派发。</p>${button('去查看 →', 'go', 'link', 'data-page="tasks" data-status="failed"')}</div>`
+    : '<div class="notice">当前没有待办。</div>'}
+      ${S.chanSummary === 0 ? (S.chanExtAll > 0
+        ? `<div class="notice warn spaced"><b>外部通知渠道均已停用</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去启用渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`
+        : `<div class="notice warn spaced"><b>当前无外部通知渠道</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去添加渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`) : ''}
+      ${offlineBusy.length ? `<div class="notice warn spaced"><b>${esc(offlineBusy.map(n => n.node_id).join('、'))} 离线（有未完成工作受影响）</b>：在途任务已暂停，此前提交给它的任务在离线暂存等待投递，重连后自动送达，7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
+    </section>
     <section class="card"><div class="row"><h2>中心端状态</h2><span class="badge online">在线</span></div>
       <div class="stack">
         <div class="row"><span>访问地址</span><code>${esc(location.host)}</code></div>
@@ -1320,19 +1337,11 @@ function overviewPage() {
       </div>
       <small class="muted">中心端负责登记与监管；所有任务都在各机器本机执行。</small>
     </section>
-    <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
-      ${nr ? `<div class="notice warn"><b>${nr} 个任务结果拿不准，等你确认</b><p>执行中断，结果是否完整系统无法确认；请核对后登记结论，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
-    : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务」页下钻原因。</div>`}
-      ${S.chanSummary === 0 ? (S.chanExtAll > 0
-        ? `<div class="notice warn spaced"><b>外部通知渠道均已停用</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去启用渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`
-        : `<div class="notice warn spaced"><b>当前无外部通知渠道</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去添加渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`) : ''}
-      ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：本页只做登记与观察，不能对离线机器派发；此前已提交给它的任务在离线暂存等待投递，重连后自动送达，7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
-    </section>
     </div>`
-    + `<section class="card spaced"><div class="row"><h2>任务状态分布</h2>${button('全部任务 →', 'go', 'link', 'data-page="tasks"')}</div>
-    <div class="filters">${drillChips}<small class="muted" style="align-self:center">点状态直达对应筛选的任务列表</small></div></section>`
     + `<section class="card spaced"><div class="row"><h2>最近任务</h2>${button(`全部 ${S.tasks.length} 条任务 →`, 'go', 'link', 'data-page="tasks"')}</div>
-    ${S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
+    ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
+    : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
+    : S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
 }
 
 /* ---------- 机器（添加机器 / 已登记机器列表） ---------- */

@@ -99,6 +99,9 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
  * 数字上（E2E E03 锚点）；「等待核对」橙左竖条废除，数字在 nr>0 时着 heat。 */
 .panel{background:var(--surface);border-radius:var(--r-panel);box-shadow:var(--sh-panel)}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr)}
+/* 总览两格统计（FE-POLISH 轮2 B 重做：等你确认→正在执行，累计大数字删除）：
+ * .half 收敛为两列，不留 4 格空位。 */
+.stat-grid.half{grid-template-columns:repeat(2,1fr)}
 .stat-grid>.stat{display:block;height:auto;padding:20px 22px;border:0;border-radius:0;background:transparent;color:inherit;font-weight:400;text-align:left;cursor:pointer}
 .stat-grid>.stat:hover{background:var(--hover)}
 .stat+.stat{border-left:1px solid var(--hairline)}
