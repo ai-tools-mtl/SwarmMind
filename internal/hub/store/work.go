@@ -142,6 +142,12 @@ type Work struct {
 	ID string `json:"id"`
 	// Goal 工作目标（一句话全貌）。
 	Goal string `json:"goal"`
+	// OriginTask 来源主任务（DESIGN-butler 方案二，2026-10-28 客户端管家拆解
+	// 挂接）：管家把复合目标拆解建单时携带的主任务 task_id（不可变，建单后
+	// 不改写）。空 = 无挂接（Prime/MCP 直接建单的独立工作单）。任务账本 24h
+	// 保留期后 OriginTask 指向的 task 查不到（Work 自身 30 天保留内仍可解释
+	// ——挂接断链由读端注解，字段不删）。
+	OriginTask string `json:"origin_task,omitempty"`
 	// PrimeTerm 建单/最近接管任期的逻辑归属标识（非身份证明，RFC 六.2；
 	// W2 接管事务为权威改写点）。
 	PrimeTerm string `json:"prime_term,omitempty"`

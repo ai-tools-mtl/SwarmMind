@@ -8,12 +8,14 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/mtl802/swarmmind/internal/decision"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
@@ -122,24 +124,152 @@ func taskDesc(input protocol.TaskInput) string {
 type groupCreateRequest struct {
 	Goal    string   `json:"goal"`
 	Members []string `json:"members"`
+	// AutoMembers 智能选人（DESIGN-butler 方案三，2026-10-28 伦哥口径：群聊是
+	// 多 agent 协作，成员由中心端 jev 判定、无需人工确认）：true 时忽略 members，
+	// 由决策服务从全网在线∩exposed 能力中多选参与集合（SuggestMembers，贡献潜力
+	// 降序），建群后对每个成员并发派发群协作任务（任务即唤醒与执行载体）。降级：
+	// 决策不可用/无合适成员 → 422 带人话原因，建群不发生（主人回退手选路径）。
+	AutoMembers bool `json:"auto_members,omitempty"`
 }
 
 // handleGroupCreate POST /api/v1/groups：→ 201 群对象 / 400。
+// auto_members=true：jev 选成员 → 建群 → 每成员并发派发群协作任务（submit 正式
+// 任务即唤醒与执行载体，group_ref 挂群，终态自动回流；幂等键 groupJoinIdem）。
 func (s *Server) handleGroupCreate(w http.ResponseWriter, r *http.Request) {
 	if s.groupUnavailable(w) {
 		return
 	}
 	var req groupCreateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {goal, members[]}")
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {goal, members[], auto_members?}")
 		return
+	}
+	principal := authPrincipal(r)
+	if req.AutoMembers {
+		members, apiErr := s.autoSelectMembers(req.Goal)
+		if apiErr != nil {
+			apiErr.write(w)
+			return
+		}
+		req.Members = members
 	}
 	g, err := s.cfg.Groups.CreateGroup(req.Goal, adminIdentity, req.Members)
 	if err != nil {
 		writeGroupErr(w, err)
 		return
 	}
+	if req.AutoMembers {
+		s.dispatchGroupCollab(g, principal) // best-effort：群已建成，单成员派发失败只记日志
+	}
 	writeJSON(w, http.StatusCreated, g)
+}
+
+// apiErr 简易错误载体（autoSelectMembers 降级路径）。
+type apiErr struct {
+	code int
+	kind string
+	msg  string
+}
+
+func (e *apiErr) write(w http.ResponseWriter) {
+	writeErr(w, e.code, e.kind, e.msg)
+}
+
+// autoSelectMembers jev 智能选人（DESIGN-butler 方案三）：SuggestMembers 多选 →
+// 转群成员存储形态（node/agent，与控制台建群 members 语义一致）。降级矩阵：
+// 决策未启用/失败 → 503 decision_unavailable + Note；全不适合/空集合 → 422
+// decision_no_fit + Note（主人回退手选路径，建群不发生——宁缺毋滥不硬凑）。
+func (s *Server) autoSelectMembers(goal string) ([]string, *apiErr) {
+	if s.cfg.Decision == nil || !s.cfg.Decision.Enabled() {
+		return nil, &apiErr{http.StatusServiceUnavailable, "decision_unavailable",
+			"决策服务未启用（hub.yaml 未配置 decision 段或密钥不可得）：请手动选择成员建群"}
+	}
+	res := s.cfg.Decision.SuggestMembers(decision.Request{Goal: goal, Candidates: s.dispatchCandidates()})
+	if res.Degraded {
+		return nil, &apiErr{http.StatusServiceUnavailable, "decision_unavailable", res.Note}
+	}
+	if len(res.Members) == 0 {
+		return nil, &apiErr{http.StatusUnprocessableEntity, "decision_no_fit", res.Note}
+	}
+	members := make([]string, 0, len(res.Members))
+	for _, key := range res.Members {
+		agent, node, ok := strings.Cut(key, "@")
+		if !ok {
+			continue
+		}
+		members = append(members, node+"/"+agent)
+	}
+	if len(members) == 0 {
+		return nil, &apiErr{http.StatusUnprocessableEntity, "decision_no_fit", "智能选人结果为空：请手动选择成员建群"}
+	}
+	return members, nil
+}
+
+// groupCollabStdin 群协作任务指引模板（DESIGN-butler 方案三 3.2/R1-03）：任务即
+// 唤醒与执行载体——agent 在任务内经 MCP 群工具读写共享消息、贡献协作，FINAL:
+// 前缀收敛最终版本候选。每次 group_say 示例（含 FINAL）都显式携带 kind="agent"：
+// REST/MCP 缺 kind 固定按 user 插话处理（不计预算、FINAL 不登记），指引若漏带
+// 该参数，照做即绕过预算与收敛链。预算耗尽指引（budget_exhausted 后立即收尾，
+// 不再发必被拒绝的消息）一并给出。
+func groupCollabStdin(g group.Group, member string) string {
+	return fmt.Sprintf(`你是协作群 %s 的成员（%s），与其他 agent 协作完成以下目标：
+%s
+
+协作方式（swarmmind MCP 群工具）：
+1. 先用 swarmmind_group_messages（group_id=%s，since=0）读取已有讨论——其他成员的观点与进展都在里面，先读再说话，避免重复劳动。
+2. 贡献你的部分：需要落正式工作用 swarmmind_submit（务必带 group_ref="%s"，结果会自动回流群）；分析观点直接成文。
+3. 用 swarmmind_group_say（group_id=%s，from="%s"，kind="agent"）把贡献/观点发到群里——必须带 kind="agent"，发言才计入群预算并参与收敛；漏传会被当成用户插话，FINAL 不被登记。
+4. 当你认为已形成「最终版本」（共识达成或你的贡献完成），用 swarmmind_group_say（group_id=%s，from="%s"，kind="agent"）发一条以 FINAL: 开头的总结发言（恰发一条，发出后即收尾）。
+注意：群发言预算全群共享，agent 发言计入（本群上限 %d 条），不要刷屏；预算用尽（budget_exhausted）或 FINAL 已发出后立即收尾，不要再发必被拒绝的消息。正式工作成果以 submit 任务结果为准（自动回流，无需复述全文）。`,
+		g.ID, member, g.Goal, g.ID, g.ID, g.ID, member, g.ID, member, g.Budget.MaxRounds)
+}
+
+// groupJoinIdem 协作任务幂等键（R1-02）：(group, node, agent) 三元组长度前缀
+// 编码。成员标识可含「-」「/」（node/agent 命名不设字符限制），无边界信息的
+// 拼接会让不同成员碰撞出同键（如 a-b/c 与 a/b-c 同群曾同键 → 第二成员被判
+// 「同键不同内容」确定性漏派）；长度前缀让键内边界自描述、编码可逆，同成员
+// 重放键稳定（幂等语义不变）。
+func groupJoinIdem(groupID, node, agent string) string {
+	return fmt.Sprintf("gjoin-%s-%d:%s-%d:%s", groupID, len(node), node, len(agent), agent)
+}
+
+// dispatchGroupCollab 协作任务并发派发（DESIGN-butler 方案三 3.2 步骤 3）：对每个
+// 成员各派一个群协作任务（submit 正式任务即唤醒与执行载体），顺序落库（hub 单写
+// 事务），执行并发由 node 并发槽控制。best-effort：单成员失败只记日志不回滚群——
+// 部分成员缺席时其余协作照常，缺席成员可由主人手动补派（同 idem 键幂等）。
+func (s *Server) dispatchGroupCollab(g group.Group, principal string) {
+	for _, m := range g.Members {
+		node, agent, ok := strings.Cut(m, "/")
+		if !ok {
+			node, agent = "", m
+		}
+		idem := groupJoinIdem(g.ID, node, agent)
+		preID := protocol.NewTaskID()
+		if err := s.cfg.Groups.AddTaskRef(g.ID, preID); err != nil {
+			log.Printf("[hub] 协作任务预登记失败 group=%s member=%s: %v", g.ID, m, err)
+			continue
+		}
+		req := protocol.TaskSubmitRequest{
+			TargetNode:  node,
+			TargetAgent: agent,
+			Input:       protocol.TaskInput{Stdin: groupCollabStdin(g, m)},
+			SubmittedBy: adminIdentity,
+			IdemKey:     idem,
+			GroupRef:    g.ID,
+		}
+		ack, err := s.cfg.Core.SubmitWithID(req, preID, "", principal)
+		if err != nil {
+			s.unwireGroupTask(g.ID, preID)
+			log.Printf("[hub] 协作任务派发失败 group=%s member=%s: %v", g.ID, m, err)
+			continue
+		}
+		if ack.Dup {
+			s.unwireGroupTask(g.ID, preID)
+			_ = s.cfg.Groups.AddTaskRef(g.ID, ack.TaskID)
+		} else {
+			s.noteGroupTaskCreated(g.ID, ack.TaskID, "协作任务（成员 "+m+"）")
+		}
+	}
 }
 
 // handleGroupList GET /api/v1/groups：全量群列表（按创建时间升序）。
@@ -208,6 +338,15 @@ func (s *Server) handleGroupSay(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeGroupErr(w, err)
 		return
+	}
+	// FINAL 收敛候选登记（DESIGN-butler 方案三 3.1，2026-10-28）：成员发言以
+	// FINAL: 前缀开买即登记「最终版本候选」——best-effort 注一条 kind=system 注记
+	//（群页高亮展示）；注记失败不影响发言本体（log 后照常返回）。
+	if req.Kind == group.KindAgent && strings.HasPrefix(strings.TrimSpace(req.Body), "FINAL:") {
+		if _, nerr := s.cfg.Groups.PostMessage(r.PathValue("id"), "hub",
+			group.KindSystem, "成员 "+req.From+" 登记最终版本候选（FINAL）"); nerr != nil {
+			log.Printf("[hub] FINAL 注记失败 group=%s member=%s: %v", r.PathValue("id"), req.From, nerr)
+		}
 	}
 	writeJSON(w, http.StatusCreated, msg)
 }

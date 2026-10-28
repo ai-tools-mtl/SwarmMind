@@ -139,7 +139,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
 	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest))            // 派发建议（P5.1 D1）
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）
-	mux.HandleFunc("PUT /api/v1/prime", s.auth(s.handlePrimeSet))                               // 指定/撤销（agent_name 空 = 撤销）
 	mux.HandleFunc("POST /api/v1/groups", s.auth(s.handleGroupCreate))                          // 群聊 MVP（GROUP-RFC 六）
 	mux.HandleFunc("GET /api/v1/groups", s.auth(s.handleGroupList))                             // 群列表
 	mux.HandleFunc("GET /api/v1/groups/{id}/messages", s.auth(s.handleGroupMessages))           // 增量拉取
@@ -392,7 +391,14 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, protocol.CodeTaskNotFound, "任务不存在或已过保留期")
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	// related_works 拆解挂接下钻（DESIGN-butler 方案二，2026-10-28）：OriginTask
+	// 反查的工作单摘要（创建降序；无挂接为空数组不省略字段——前端判定面稳定）。
+	// 任务是账本副本只读，附加字段平级输出不污染账本形态。
+	body := struct {
+		protocol.Task
+		RelatedWorks []core.WorkSummary `json:"related_works"`
+	}{Task: t, RelatedWorks: s.cfg.Core.RelatedWorks(t.ID)}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleArtifact GET /api/v1/tasks/{id}/artifacts/{index}：经 artifact_fetch/
@@ -590,40 +596,20 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"directory": s.cfg.Core.ListDirectory()})
 }
 
-// handlePrimeGet GET /api/v1/prime：当前统筹指定（未指定返回 null，前端回退名字约定）。
+// handlePrimeGet GET /api/v1/prime：统筹指定汇聚展示（2026-10-28 客户端声明制——
+// 指定权在 node（AgentCard.Orchestrator 随能力表上报），hub 只读汇聚：
+// 恰一声明 → designation=该条目；多声明 → designation=null + conflicts 清单
+//（回退名字约定，控制台告警）；零声明 → designation=null（回退名字约定）。
+// 中心端写入口（PUT /api/v1/prime）已随客户端声明制退役。
 func (s *Server) handlePrimeGet(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"designation": s.cfg.Core.PrimeDesignation()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"designation": s.cfg.Core.PrimeDesignation(),
+		"conflicts":   s.cfg.Core.PrimeConflicts(),
+	})
 }
 
-// handlePrimeSet PUT /api/v1/prime：指定/撤销统筹载体（伦哥 2026-10-23 定案：
-// 网页指定取代改配置文件；node.yaml 只负责能力本身存在，统筹身份在网页指定）。
-func (s *Server) handlePrimeSet(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		NodeID    string `json:"node_id"`
-		AgentName string `json:"agent_name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
-		return
-	}
-	d, err := s.cfg.Core.SetPrimeDesignation(req.NodeID, req.AgentName, adminIdentity)
-	if err != nil {
-		// 目标非法（目录无此 (node_id, agent_name)）才 400；存储故障不得伪装成
-		// 目标问题——500 + 内部日志（与其他 handler 的 5xx 惯例一致）。
-		if errors.Is(err, core.ErrInvalid) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_target"})
-			return
-		}
-		log.Printf("[hub] 统筹指定持久化失败: %v", err)
-		writeErr(w, http.StatusInternalServerError, "internal", "统筹指定保存失败")
-		return
-	}
-	if d.AgentName == "" { // 撤销语义：返回 null 而非零值结构（与 GET 未指定口径一致）
-		writeJSON(w, http.StatusOK, map[string]any{"designation": nil})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"designation": &d})
-}
+/* handlePrimeSet PUT /api/v1/prime 已退役（2026-10-28 客户端声明制）：中心端不再
+   提供统筹指定写入口，路由注册同步删除；客户端经能力表 Orchestrator 声明。 */
 
 // ---------- 编码工具 ----------
 

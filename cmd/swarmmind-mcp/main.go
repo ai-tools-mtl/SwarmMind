@@ -252,6 +252,10 @@ func toolStr(desc string) map[string]any {
 	return map[string]any{"type": "string", "description": desc}
 }
 
+func toolBool(desc string) map[string]any {
+	return map[string]any{"type": "boolean", "description": desc}
+}
+
 func toolNum(desc string) map[string]any {
 	return map[string]any{"type": "number", "description": desc}
 }
@@ -320,9 +324,10 @@ func tools() []toolDef {
 		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选概率分布。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
 			"goal": toolStr("任务目标/需求描述（一句话说清要做什么，越具体越准；工作单步骤描述也可直接传入）"),
 		}, "goal")},
-		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。返回群 ID", InputSchema: toolObj(map[string]any{
-			"goal":    toolStr("群目标（一句话说清要讨论出什么）"),
-			"members": toolArr("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
+		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。传 auto_members=true 时由决策服务（jev）智能选人建群并自动向每位成员派发群协作任务，多 agent 并发协作、消息共享、FINAL: 收敛最终版本。返回群 ID", InputSchema: toolObj(map[string]any{
+			"goal":         toolStr("群目标（一句话说清要讨论出什么）"),
+			"members":      toolArr("成员列表（agent 或人的标识，如 [\"coder\",\"reviewer\"]）"),
+			"auto_members": toolBool("智能选人（可选，默认 false）：true 时由决策服务从全网在线能力中多选参与集合，忽略 members；建群后自动派发群协作任务启动多 agent 协作"),
 		}, "goal")},
 		{Name: "swarmmind_group_list", Description: "查看全部协作群：群 ID、目标、状态（discussing 进行中 / concluded 已结束）、成员与发言预算", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_group_say", Description: "在协作群里发一条消息。默认按 user（人转述）发言；agent 参与讨论请传 kind=agent（计入发言预算，默认 20 轮，用尽返回 budget_exhausted）", InputSchema: toolObj(map[string]any{
@@ -339,7 +344,8 @@ func tools() []toolDef {
 			"group_id": toolStr("群 ID"),
 			"by":       toolStr("关闭者标识（可选，默认 mcp；记入群审计 closed_by，重复关闭不改写首次记录）"),
 		}, "group_id")},
-		{Name: "swarmmind_work_create", Description: "创建工作单：把一件多步工作落成 hub 侧的正式执行记录，Prime 断线/崩溃后接管者可按单续管。步骤计划建单即定死（依赖用步骤序号声明）；同一 goal+步骤计划重复调用返回同一工作单，响应丢失重试安全。返回 w- 工作单 ID", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_work_create", Description: "创建工作单：把一件多步工作落成 hub 侧的正式执行记录，Prime 断线/崩溃后接管者可按单续管。步骤计划建单即定死（依赖用步骤序号声明）；同一 goal+步骤计划重复调用返回同一工作单，响应丢失重试安全。返回 w- 工作单 ID。管家拆解复合任务时传 origin_task（SWARM_TASK_ID）挂接主任务，主人可在任务详情下钻查看本工作单进度", InputSchema: toolObj(map[string]any{
+			"origin_task": toolStr("来源主任务 ID（可选；管家拆解挂接——携带派给自己的复合任务 task_id，SWARM_TASK_ID 即得。任务详情页将关联本工作单）"),
 			"goal":       toolStr("工作目标（一句话说清整件事）"),
 			"steps":      toolWorkSteps("步骤计划（1..64 步）：每步 {desc,target_node,target_agent,depends_on}；depends_on 为前置步骤序号整数数组（1..总步数，可选）"),
 			"prime_term": toolStr("当前任期标识（可选，如 prime-3；逻辑归属审计）"),
@@ -1900,16 +1906,24 @@ func toolGroupCreate(args map[string]any) (string, error) {
 	if strings.TrimSpace(goal) == "" {
 		return "", fmt.Errorf("goal 必填（一句话说清要讨论出什么）")
 	}
-	raw, _ := args["members"].([]any)
-	members := make([]string, 0, len(raw))
-	for _, v := range raw {
-		sv, ok := v.(string)
-		if !ok || strings.TrimSpace(sv) == "" {
-			return "", fmt.Errorf("members 须为非空字符串数组")
+	req := map[string]any{"goal": goal}
+	if bv, ok := args["auto_members"].(bool); ok && bv {
+		// 智能选人（DESIGN-butler 方案三）：jev 判定参与集合，无需人工确认；
+		// 建群后 hub 自动向每位成员派发群协作任务（多 agent 并发协作）。
+		req["auto_members"] = true
+	} else {
+		raw, _ := args["members"].([]any)
+		members := make([]string, 0, len(raw))
+		for _, v := range raw {
+			sv, ok := v.(string)
+			if !ok || strings.TrimSpace(sv) == "" {
+				return "", fmt.Errorf("members 须为非空字符串数组")
+			}
+			members = append(members, strings.TrimSpace(sv))
 		}
-		members = append(members, strings.TrimSpace(sv))
+		req["members"] = members
 	}
-	code, data, err := hubAPI("POST", "/api/v1/groups", map[string]any{"goal": goal, "members": members})
+	code, data, err := hubAPI("POST", "/api/v1/groups", req)
 	if err != nil {
 		return "", err
 	}
@@ -2165,6 +2179,12 @@ func toolWorkCreate(args map[string]any) (string, error) {
 	req := map[string]any{"goal": goal, "steps": steps}
 	if pt, _ := args["prime_term"].(string); strings.TrimSpace(pt) != "" {
 		req["prime_term"] = strings.TrimSpace(pt)
+	}
+	// origin_task 主任务挂接（DESIGN-butler 方案二，2026-10-28）：管家拆解建单
+	// 时携带派给自己的复合任务 ID（SWARM_TASK_ID 即得）——工作单与主任务互相关
+	// 联，任务详情 related_works 下钻。幂等指纹含 origin（不同主任务同计划不撞单）。
+	if ot, _ := args["origin_task"].(string); strings.TrimSpace(ot) != "" {
+		req["origin_task"] = strings.TrimSpace(ot)
 	}
 	code, data, err := hubAPI("POST", "/api/v1/works", req)
 	if err != nil {

@@ -658,3 +658,47 @@ func TestDirectory(t *testing.T) {
 		}
 	}
 }
+
+// TestPrimeGetAggregation 客户端声明制（2026-10-28）：GET /api/v1/prime 汇聚三态
+//（零声明 nil / 恰一生效 / 多声明冲突清单），PUT 写入口已退役（405/404 语义）。
+func TestPrimeGetAggregation(t *testing.T) {
+	f := newFixture(t)
+	hc := f.client(true)
+	if hc == nil {
+		t.Fatal("登录失败")
+	}
+	// 零声明：designation=null + conflicts 空
+	code, body := f.do(hc, "GET", "/api/v1/prime", "")
+	if code != 200 {
+		t.Fatalf("零声明 GET 应 200, got %d", code)
+	}
+	if !strings.Contains(string(body), `"designation":null`) {
+		t.Fatalf("零声明 designation 应 null: %s", body)
+	}
+	// PUT 已退役：写入口不再存在（路由 404/405 皆可，绝不 200）
+	code, _ = f.do(hc, "PUT", "/api/v1/prime", `{"node_id":"n1","agent_name":"x"}`)
+	if code == 200 {
+		t.Fatal("PUT /api/v1/prime 已退役，不应 200")
+	}
+	// 恰一声明：designation=该条目
+	f.core.RegisterNode("n1", []protocol.AgentCard{{
+		Name: "zcode-dev", Kind: protocol.AgentKindCLI, Exposed: true, Orchestrator: true,
+	}})
+	code, body = f.do(hc, "GET", "/api/v1/prime", "")
+	if code != 200 || !strings.Contains(string(body), `"agent_name":"zcode-dev"`) ||
+		!strings.Contains(string(body), `"node_id":"n1"`) {
+		t.Fatalf("恰一声明应生效: %d %s", code, body)
+	}
+	// 多声明：designation=null + conflicts 双方
+	f.core.RegisterNode("n2", []protocol.AgentCard{{
+		Name: "orch-b", Kind: protocol.AgentKindCLI, Exposed: true, Orchestrator: true,
+	}})
+	code, body = f.do(hc, "GET", "/api/v1/prime", "")
+	if code != 200 {
+		t.Fatalf("冲突态 GET 应 200, got %d", code)
+	}
+	if !strings.Contains(string(body), `"designation":null`) ||
+		!strings.Contains(string(body), "orch-b") || !strings.Contains(string(body), "zcode-dev") {
+		t.Fatalf("冲突态应 null+conflicts: %s", body)
+	}
+}

@@ -388,7 +388,7 @@ function promptZoneHtml(t) {
  * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
  * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
  * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+const DRAWER_ZONES = ['head', 'intro', 'related', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -602,7 +602,8 @@ const S = {
   page: 'overview',            // hash 路由当前页
   nodes: [], tasks: [], directory: [],
   works: [],                   // 工作单列表摘要（P5 W3，hub 编排面）
-  prime: null,                 // 统筹指定 {node_id, agent_name, set_at, set_by}；null=未指定（回退名字约定）
+  prime: null,                 // 统筹指定 {node_id, agent_name}；null=未声明/冲突（回退名字约定）
+  primeConflicts: [],          // 统筹声明冲突清单（多机同时声明时非空；客户端声明制 2026-10-28）
   seq: { nodes: 0, tasks: 0, directory: 0, prime: 0, works: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
   resSnap: { nodes: '', tasks: '', directory: '', prime: '', works: '' },   // 按资源指纹：任一资源有变才整页重绘
   fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
@@ -744,7 +745,11 @@ async function loadAll() {
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
-    loadResource('prime', '/api/v1/prime', d => (!d || !('designation' in d)) ? null : (d.designation ?? PRIME_UNSET)),
+    loadResource('prime', '/api/v1/prime', d => {
+      if (!d || !('designation' in d)) return null;
+      S.primeConflicts = Array.isArray(d.conflicts) ? d.conflicts : [];   // 客户端声明制：冲突清单随行
+      return d.designation ?? PRIME_UNSET;
+    }),
     loadResource('works', '/api/v1/works', d => Array.isArray(d?.works) ? d.works.slice().sort(byCreatedDesc) : null),
   ]);
   let changed = false;
@@ -768,7 +773,7 @@ async function loadAll() {
     S.resSnap[name] = fp;
     if (name === 'nodes') S.nodes = value;
     else if (name === 'tasks') S.tasks = value;
-    else if (name === 'prime') S.prime = value === PRIME_UNSET ? null : value;   // 标记还原为合法 null
+    else if (name === 'prime') S.prime = value === PRIME_UNSET ? null : value;   // 标记还原为合法 null（primeConflicts 已在 loadResource 时随行更新）
     else if (name === 'works') S.works = value;
     else S.directory = value;
     changed = true;
@@ -1868,6 +1873,11 @@ function drawerZones(t) {
     <p class="muted small">追踪 <code>${esc(t.trace_id || '—')}</code> · ${esc(t.submitted_by || '—')} 提交 · 创建于 ${esc(fmtUTC(t.created_at) || '—')}${t.idem ? ' · 恢复密钥 <code>' + esc(t.idem) + '</code>' : ''}</p>`,
     intro: `<div class="${needs ? 'notice warn' : 'notice'}">${intro}</div>
     ${taskErrorNotice(r, needs)}`,
+    related: Array.isArray(t.related_works) && t.related_works.length
+      ? `<h3>拆解工作单（${t.related_works.length}）</h3>
+      ${t.related_works.map(w => `<div class="artifact row"><div><b>${esc(w.id)}</b> ${workBadge(w.status)}<br><small>${esc(w.goal)}</small><br><small>步骤进度 ${w.done_steps || 0}/${w.steps || 0}</small></div>${button('查看', 'work-jump', 'link', `data-work="${esc(w.id)}"`)}</div>`).join('')}
+      <p class="footer-note">统筹智能体拆解本任务创建的工作单；同主任务可有多张单（决策变更重建，历史保留），点卡可看工作单档案与逐步进度。</p>`
+      : '',
     prompt: promptZoneHtml(t),
     fail: r && r.stderr_tail && (t.status === 'failed' || r.error) ? `<h3 class="spaced">失败原因（进程错误输出）</h3><div id="drawer-fail">${failInner(t)}</div>` : '',
     answer: drawerAnswerHtml(t, r, needs),
@@ -2109,20 +2119,24 @@ function pickerNodeOptions(selected) {
 /* orchLineHtml 派发页统筹状态条：显眼的独立一行（不再藏在帮助长文尾部——
  * 2026-10-23 伦哥反馈「找不到统筹怎么设置」，入口可见性失败重做）。 */
 function orchLineHtml() {
-  const btn = S.prime
-    ? `<button type="button" data-act="prime-manage" class="link">更改 / 撤销</button>`
-    : `<button type="button" data-act="prime-manage" class="primary">指定智行管家</button>`;
+  /* 2026-10-28 客户端声明制：指定权在 node（机器控制台「设为管家」开关），hub 只
+   * 接收汇聚展示——中心端不再提供配置入口。冲突态（多机同时声明）无生效管家，
+   * 回退名字约定并列出冲突双方，提示到对应机器取消多余声明。 */
+  if (S.primeConflicts && S.primeConflicts.length) {
+    const list = S.primeConflicts.map(c => `<b>${esc(c.agent_name)}</b> @ ${esc(c.node_id)}`).join('、');
+    return `<div class="orch-line"><span class="badge">智行管家</span> <span><b>声明冲突</b>：${list} 同时声明为智行管家——无生效管家，已回退默认识别（能力名含 <code>zcode-dev</code>）。请到多余机器的控制台取消声明，只保留一台。</span></div>`;
+  }
   const body = S.prime
-    ? `<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)} · 复合目标交给它拆解派发并汇总`
-    : `未指定（默认识别能力名含 <code>zcode-dev</code> 的智能体）；复合目标建议先指定智行管家`;
-  return `<div class="orch-line">${S.prime ? '<span class="badge orch">智行管家</span>' : '<span class="badge">智行管家</span>'} <span>${body}</span> ${btn}</div>`;
+    ? `<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)} · 复合目标交给它拆解派发并汇总（由该机器客户端声明）`
+    : `未声明（默认识别能力名含 <code>zcode-dev</code> 的智能体）；如需指定，请到目标机器控制台将该能力「设为管家」`;
+  return `<div class="orch-line">${S.prime ? '<span class="badge orch">智行管家</span>' : '<span class="badge">智行管家</span>'} <span>${body}</span></div>`;
 }
 /* pickerHelpText 派发页机器选择的补充说明（已精简：统筹信息移至 orchLineHtml 独立状态条）。 */
 function pickerHelpText() {
   const src = S.prime
     ? `已由网页指定智行管家：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
     : `未指定智行管家（默认按能力名 <code>zcode-dev</code> 识别）`;
-  return `离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src} <button type="button" data-act="prime-manage" class="link">${S.prime ? '更换 / 撤销' : '指定智行管家'}</button>`;
+  return `离线机器暂不可选：提交端点对离线机器直接跳过、不排队暂存。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src}`;
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
@@ -2641,7 +2655,7 @@ function groupMsgHtml(m) {
   const canTask = g && g.status !== 'concluded' && (m.kind === 'user' || m.kind === 'agent') && S.directory.length;
   return `<li class="msg ${cls}" data-seq="${m.seq}">
   <div class="msg-meta"><b>${esc(m.from)}</b> · ${esc(GROUP_KINDS[m.kind] || m.kind)} · ${esc(fmtFull(m.created_at))}${canTask ? ` · <button class="link" data-act="task-from-msg" data-seq="${m.seq}">转任务</button>` : ''}</div>
-  <div class="msg-body">${esc(m.body)}</div>
+  <div class="msg-body${m.kind === 'agent' && m.body.trim().startsWith('FINAL:') ? ' msg-final' : ''}">${esc(m.body)}</div>
   </li>`;
 }
 function groupDetailPage() {
@@ -2784,10 +2798,17 @@ function groupCreateModal() {
   <label class="full">协作目标（必填）<textarea id="group-goal" rows="3" placeholder="例如：对比两台机器的磁盘占用并汇总成对比报告"></textarea></label>
   <label>代理发言轮数上限（本版本固定默认值）<input readonly value="20"></label>
   </div>
+  <label class="spaced" style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="group-auto-members"> 智能选人（jev）：由决策服务从全网在线能力中自动选出适合参与这场协作的成员，建群后自动向每位成员派发协作任务，多智能体并发讨论、消息共享、FINAL: 收敛最终版本——无需逐个勾选</label>
+  <div id="group-manual-members">
   <h3 class="spaced">选择成员智能体（可多选）</h3>
   ${S.directory.length ? agentPickerHtml({ ids: 'gnew', multi: true }) : '<div class="notice warn">能力目录为空：还没有节点开放能力，可先不选成员直接建群。</div>'}
+  </div>
   <div class="actions spaced">${button('创建群聊', 'group-create', 'primary')}${button('取消', 'close', 'link')}</div>
-  <p class="footer-note">建群后自动打开群详情；成员智能体经节点侧接入批次后才会自动发言。</p>`);
+  <p class="footer-note">勾选智能选人后成员由 jev 判定；决策服务未启用或无合适成员时会提示改用手选。建群后自动打开群详情。</p>`);
+  $('#group-auto-members')?.addEventListener('change', e => {
+    const manual = $('#group-manual-members');
+    if (manual) manual.hidden = e.target.checked;
+  });
 }
 
 /* taskFromMsgModal 转任务弹层（GROUP-RFC 闭环三件套之三）：预填消息内容为任务
@@ -3044,9 +3065,8 @@ function workStepPicked() {
 }
 
 /* ---------- 动作表（事件委托） ---------- */
-/* primeBusy 统筹指定互斥（P1 复审）：prime-save / prime-clear 共享——PUT /prime 在途时
- * 两入口（含跨按钮连点）都直接拒绝，防重复提交与迟到响应互相覆盖、误关新层。 */
-let primeBusy = false;
+/* prime-manage/prime-save/prime-clear 已退役（2026-10-28 客户端声明制）：
+ * 统筹指定入口移至各机器 node 控制台「设为管家」开关，hub 只读汇聚展示。 */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
   fchip: b => { S.f.status = b.dataset.fchip || ''; render(); },
@@ -3304,17 +3324,20 @@ const ACT = {
     if (!goal) { toast('请先填写协作目标'); $('#group-goal')?.focus(); return; }
     if (S.busy.has('group-create')) return;
     S.busy.add('group-create');
+    const auto = $('#group-auto-members')?.checked || false;
     const box = $('#gnew-picker');
     const members = box ? pickerChecked(box).agents : [];
+    if (!auto && !members.length) { toast('请勾选成员，或改用智能选人'); S.busy.delete('group-create'); return; }
     const btn = document.querySelector('[data-act="group-create"]');
-    if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+    if (btn) { btn.disabled = true; btn.textContent = auto ? '智能选人中…' : '创建中…'; }
     try {
-      const r = await api('POST', '/api/v1/groups', { goal, members }).catch(() => null);
+      const body = auto ? { goal, auto_members: true } : { goal, members };
+      const r = await api('POST', '/api/v1/groups', body).catch(() => null);
       if (r && r.code === 201) {
         closeLayer();
         await loadGroups();
         render();
-        toast('群已创建 —— 下一步：点击群卡片进入讨论');
+        toast(auto ? '群已创建，jev 已选成员并向每位成员派发了协作任务 —— 进入群详情查看协作进展' : '群已创建 —— 下一步：点击群卡片进入讨论');
       } else {
         if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
         toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
@@ -3388,77 +3411,6 @@ const ACT = {
   <div class="enroll-row"><code>sudo systemctl restart swarmmind-hub</code><small>重启后机器列表不再出现该机器</small></div>
   </div><div class="notice warn">撤下前该机器在途任务会随连接断开暂停；已产生的任务记录与产物按保留策略（终态${retentionClause()}）继续可查。</div><div class="actions spaced">${button('我知道了，返回机器列表', 'close', 'link')}</div>`, true),
   /* ---------- 任务取消（cancelled 终态）：danger + 二次确认 ---------- */
-  'prime-manage': () => {
-    /* 指定智行管家弹层（2026-10-23 伦哥定案：网页配置取代改配置文件）：
-     * 两级选择复用 agentPickerHtml（ids='pm'），保存/撤销走 PUT /api/v1/prime。 */
-    const body = `${modalHead('指定智行管家')}
-    <div class="notice">智行管家是某个智能体扮演的角色（不是常驻的新服务）：接收复合目标后拆解、派发网内能力、汇总产出报告，持有全网管家权限——本机派单不受它影响，全网同一时刻至多一个。指定前请确认该智能体已接 SwarmMind MCP（否则收了管家提示词也没有派发工具）。</div>
-    ${agentPickerHtml({ ids: 'pm', node: S.prime?.node_id || '', agent: S.prime?.agent_name || '' })}
-    <div class="actions spaced">${button('保存指定', 'prime-save', 'primary')}${S.prime ? button('撤销指定（回退默认识别）', 'prime-clear', 'danger') : ''}${button('再想想', 'close', 'link')}</div>`;
-    openLayerPlain(body, false, true);
-    // 恢复已保存的选择到弹层下拉
-    syncAgentPicker('pm', S.prime?.agent_name || '');
-  },
-  'prime-save': async b => {
-    const node = $('#pm-node')?.value || '', agent = $('#pm-agent')?.value || '';
-    if (!node || !agent) { toast('请先选择机器和智能体'); return; }
-    if (primeBusy) { toast('统筹指定处理中，请稍候'); return; }
-    primeBusy = true;
-    const gen = S.layerGen;   // 在途世代快照（D3）：响应回来层已关/换则只静默落账
-    b.disabled = true; b.textContent = '保存中…';
-    try {
-      const r = await api('PUT', '/api/v1/prime', { node_id: node, agent_name: agent });
-      if (gen !== S.layerGen) {   // 用户已关层/换层：不 closeLayer 不 render 抢页面
-        if (r.code === 200) S.prime = r.data.designation;
-        loadAll();   // 静默刷新（loadResource 逐资源兜错，不会 reject）
-        return;
-      }
-      if (r.code === 200) {
-        S.prime = r.data.designation;
-        toast('已指定智行管家：' + agent + ' @ ' + node);
-        closeLayer();
-        await loadAll();
-        render();
-      } else {
-        b.disabled = false; b.textContent = '保存指定';   // 失败路径按钮必须恢复（FE-09 同款）
-        toast('指定失败：' + (r.data?.error || r.code));
-      }
-    } catch (e) {
-      if (!e.unauthorized) {   // 401 已走 api 统一 sessionExpired 路径，勿叠加「网络异常」
-        b.disabled = false; b.textContent = '保存指定';
-        toast('网络异常，请重试');
-      }
-    } finally { primeBusy = false; }
-  },
-  'prime-clear': async b => {
-    if (primeBusy) { toast('统筹指定处理中，请稍候'); return; }
-    primeBusy = true;
-    const gen = S.layerGen;
-    b.disabled = true; b.textContent = '撤销中…';
-    try {
-      const r = await api('PUT', '/api/v1/prime', { node_id: '', agent_name: '' });
-      if (gen !== S.layerGen) {   // 同 prime-save：层已关/换只静默落账
-        if (r.code === 200) S.prime = null;
-        loadAll();
-        return;
-      }
-      if (r.code === 200) {
-        S.prime = null;
-        toast('已撤销智行管家指定，回退默认识别（能力名含 zcode-dev）');
-        closeLayer();
-        await loadAll();
-        render();
-      } else {
-        b.disabled = false; b.textContent = '撤销指定（回退默认识别）';
-        toast('撤销失败：' + (r.data?.error || r.code));
-      }
-    } catch (e) {
-      if (!e.unauthorized) {
-        b.disabled = false; b.textContent = '撤销指定（回退默认识别）';
-        toast('网络异常，请重试');
-      }
-    } finally { primeBusy = false; }
-  },
   'task-cancel': b => openLayerPlain(`${modalHead('取消任务 · ' + esc(b.dataset.id))}
     <div class="notice warn">取消会立即整组终止执行机器上的进程（含派生子进程），任务进入「已取消」终态：不可恢复、不会自动重跑。</div>
     <div class="actions spaced">${button('确认取消任务', 'task-cancel-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('再想想', 'close', 'link')}</div>`, true),
@@ -3719,7 +3671,9 @@ function bindEvents() {
     const tr = e.target.closest('tr[data-task]');
     if (tr) { openTask(tr.dataset.task); return; }
     const trw = e.target.closest('tr[data-work]');
-    if (trw) openWork(trw.dataset.work);
+    if (trw) { openWork(trw.dataset.work); return; }
+    const bw = e.target.closest('[data-act="work-jump"][data-work]');
+    if (bw) { openWork(bw.dataset.work); return; }
   });
   document.addEventListener('submit', e => {
     e.preventDefault();

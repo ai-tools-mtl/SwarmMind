@@ -450,3 +450,6 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .switch:disabled{opacity:.5;cursor:wait}
 @media(max-width:680px){.notify-panel{position:fixed;top:60px;right:10px;left:10px;width:auto}.chan-actions{margin-left:0;flex-basis:100%}}
 @media (prefers-reduced-transparency:reduce){.notify-panel{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
+/* FINAL 收敛候选高亮（DESIGN-butler 方案三，2026-10-28）：成员 FINAL: 前缀发言
+ * = 最终版本候选，群页金框强调；系统注记（msg-system）不由前端判断，仅 agent 发言。 */
+.msg-body.msg-final{border-left:3px solid #d9a441;background:rgba(217,164,65,.08);border-radius:0 6px 6px 0;padding:6px 10px}

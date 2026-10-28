@@ -252,3 +252,91 @@ func SortCandidates(cands []Candidate) {
 		return cands[i].Agent < cands[j].Agent
 	})
 }
+
+// memberSelector 成员多选判定可选接口（R3' P1-6 纪律：多选与单选语义独立，不
+// 复用 Choice 概率分布——provider 按需实现；D1 llm-as-jev 已实现，mock 可自行选配）。
+type memberSelector interface {
+	SuggestMembers(ctx context.Context, goal string, cands []Candidate) (members []string, reason string, err error)
+}
+
+// MemberResult 成员多选查询出口（与 Result 同构的降级收敛形态）。
+type MemberResult struct {
+	Members  []string // 参与成员键（agent@node，贡献潜力降序）；nil = 无集合
+	Degraded bool     // true = 决策链路故障降级（provider 错误/超时）
+	Note     string   // 无集合时的人话原因（供 UI/agent 转述）
+	Reason   string   // 组队理由（provider 给出，展示层自行取舍）
+	Provider string   // 来源标签
+}
+
+// SuggestMembers 协作成员多选查询总入口（方案三群聊协作）。语义保证与 Suggest
+// 同款：恒返回 MemberResult（provider 错误/超时 → Degraded + Note；越界目标剔除；
+// 全不适合 → 非 degraded 的「无合适成员」转述）；零值 Service 恒未启用。
+func (s *Service) SuggestMembers(req Request) MemberResult {
+	if !s.Enabled() {
+		return MemberResult{Note: NotEnabledNote}
+	}
+	name := s.provider.Name()
+	if strings.TrimSpace(req.Goal) == "" {
+		return MemberResult{Provider: name, Note: "协作目标为空，无法给出组队建议"}
+	}
+	if len(req.Candidates) == 0 {
+		return MemberResult{Provider: name, Note: "网内暂无在线能力候选：可稍后重试，或手动选择成员"}
+	}
+	ms, ok := s.provider.(memberSelector)
+	if !ok {
+		return MemberResult{Provider: name, Degraded: true,
+			Note: "决策提供者不支持协作选人判定（仅单选建议可用）"}
+	}
+	// 预算内执行 provider（call() 同款骨架，R1-04）：WithTimeout 派生预算 ctx
+	// 传入 provider——预算耗尽同时取消上游调用（HTTP 连接/模型请求即释放，配合
+	// 取消的 provider 立即退出，不占资源到 HTTP 独立超时）；容量 1 缓冲通道保留
+	// 为「provider 不配合取消」时的返回兜底，迟到结果弃用，无数据竞争。
+	ctx, cancel := context.WithTimeout(context.Background(), s.budget)
+	defer cancel()
+	type outcome struct {
+		members []string
+		reason  string
+		err     error
+	}
+	ch := make(chan outcome, 1)
+	go func() {
+		m, r, err := ms.SuggestMembers(ctx, req.Goal, req.Candidates)
+		ch <- outcome{m, r, err}
+	}()
+	var (
+		members []string
+		reason  string
+		callErr error
+	)
+	select {
+	case o := <-ch:
+		members, reason, callErr = o.members, o.reason, o.err
+	case <-ctx.Done():
+		callErr = errors.New("决策超时（预算 " + s.budget.String() + "）")
+	}
+	if callErr != nil {
+		if errors.Is(callErr, ErrNoFit) {
+			return MemberResult{Provider: name, Note: "决策模型判断当前候选均不适合该协作：可手动选择成员"}
+		}
+		return MemberResult{Provider: name, Degraded: true,
+			Note: "决策模型暂不可用（" + callErr.Error() + "）：可手动选择成员，建群不受影响"}
+	}
+	// 越界剔除 + 去重（出口守卫，DESIGN-butler 方案三）：候选稳定序为权威序，
+	// provider 应答序仅作参考——剔除后为空视同「无有效成员」人话降级。
+	valid := map[string]bool{}
+	for _, c := range req.Candidates {
+		valid[c.Key()] = true
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(members))
+	for _, m := range members {
+		if valid[m] && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	if len(out) == 0 {
+		return MemberResult{Provider: name, Note: "决策模型未给出有效成员（候选外目标已剔除）：可手动选择成员"}
+	}
+	return MemberResult{Members: out, Reason: reason, Provider: name}
+}

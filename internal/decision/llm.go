@@ -125,58 +125,13 @@ func (p *llmProvider) Suggest(ctx context.Context, req Request) (*Suggestion, er
 		logf("[decision] llm-as-jev 候选 %d 超过 state 上限 %d，已按稳定序截断（超出部分不参与判定）",
 			len(req.Candidates), stateCandidateCap)
 	}
-	body := chatRequest{
-		Model: p.cfg.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: jevSystemPrompt},
-			{Role: "user", Content: buildState(req)},
-		},
-		Temperature: 0.2,
-		MaxTokens:   2000, // 应答本体 <100 token，余量防异常形态截断（解析失败降级成本高于余量成本）
-		Thinking:    &chatThinking{Type: "disabled"},
-	}
-	buf, err := json.Marshal(body)
+	content, err := p.chat(ctx, jevSystemPrompt, buildState(req))
 	if err != nil {
-		return nil, errors.New("决策请求构造失败")
+		return nil, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		strings.TrimRight(p.cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(buf))
+	dec, err := parseDecision(content)
 	if err != nil {
-		logf("[decision] llm-as-jev 请求构造失败（原始错误仅入日志）: %v", err)
-		return nil, errors.New("决策请求构造失败")
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := p.hc.Do(httpReq)
-	if err != nil {
-		logf("[decision] llm-as-jev 网络请求失败（原始错误仅入日志）: %v", err)
-		return nil, errors.New("决策模型网络请求失败")
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		logf("[decision] llm-as-jev 应答读取失败（原始错误仅入日志）: %v", err)
-		return nil, errors.New("决策模型应答读取失败")
-	}
-	if resp.StatusCode != http.StatusOK {
-		logf("[decision] llm-as-jev 端点 HTTP %d（原始应答仅入日志）: %.500s", resp.StatusCode, string(data))
-		return nil, fmt.Errorf("决策模型端点返回 HTTP %d", resp.StatusCode)
-	}
-	var out chatResponse
-	if err := json.Unmarshal(data, &out); err != nil {
-		logf("[decision] llm-as-jev 应答非合法 JSON（原始内容仅入日志）: %.500s", string(data))
-		return nil, errors.New("决策模型应答格式异常")
-	}
-	if out.Error != nil && out.Error.Message != "" {
-		logf("[decision] llm-as-jev 上游拒绝本次请求（原始信息仅入日志）: %s", out.Error.Message)
-		return nil, errors.New("决策模型拒绝了本次请求")
-	}
-	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
-		return nil, errors.New("决策模型应答为空")
-	}
-	dec, err := parseDecision(out.Choices[0].Message.Content)
-	if err != nil {
-		logf("[decision] llm-as-jev 应答解析失败（原始内容仅入日志）: %.500s", out.Choices[0].Message.Content)
+		logf("[decision] llm-as-jev 应答解析失败（原始内容仅入日志）: %.500s", content)
 		return nil, err
 	}
 	if dec.Choice == "" || dec.Choice == "none" {
@@ -272,4 +227,161 @@ func truncateRunes(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// chat 一次 chat/completions 调用骨架（Suggest/SuggestMembers 共用）：state 压缩
+// 由调用方完成，本方法只管请求构造、预算内 HTTP、错误人话收敛（原始内容经 logf
+// 留痕不外泄，codex 审 D1 ④ 纪律）。返回应答 content 原文。
+func (p *llmProvider) chat(ctx context.Context, system, user string) (string, error) {
+	logf := p.cfg.Logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	body := chatRequest{
+		Model: p.cfg.Model,
+		Messages: []chatMessage{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		},
+		Temperature: 0.2,
+		MaxTokens:   2000, // 应答本体 <100 token，余量防异常形态截断（解析失败降级成本高于余量成本）
+		Thinking:    &chatThinking{Type: "disabled"},
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return "", errors.New("决策请求构造失败")
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(p.cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(buf))
+	if err != nil {
+		logf("[decision] llm-as-jev 请求构造失败（原始错误仅入日志）: %v", err)
+		return "", errors.New("决策请求构造失败")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := p.hc.Do(httpReq)
+	if err != nil {
+		logf("[decision] llm-as-jev 网络请求失败（原始错误仅入日志）: %v", err)
+		return "", errors.New("决策模型网络请求失败")
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		logf("[decision] llm-as-jev 应答读取失败（原始错误仅入日志）: %v", err)
+		return "", errors.New("决策模型应答读取失败")
+	}
+	if resp.StatusCode != http.StatusOK {
+		logf("[decision] llm-as-jev 端点 HTTP %d（原始应答仅入日志）: %.500s", resp.StatusCode, string(data))
+		return "", fmt.Errorf("决策模型端点返回 HTTP %d", resp.StatusCode)
+	}
+	var out chatResponse
+	if err := json.Unmarshal(data, &out); err != nil {
+		logf("[decision] llm-as-jev 应答非合法 JSON（原始内容仅入日志）: %.500s", string(data))
+		return "", errors.New("决策模型应答格式异常")
+	}
+	if out.Error != nil && out.Error.Message != "" {
+		logf("[decision] llm-as-jev 上游拒绝本次请求（原始信息仅入日志）: %s", out.Error.Message)
+		return "", errors.New("决策模型拒绝了本次请求")
+	}
+	if len(out.Choices) == 0 || strings.TrimSpace(out.Choices[0].Message.Content) == "" {
+		return "", errors.New("决策模型应答为空")
+	}
+	return out.Choices[0].Message.Content, nil
+}
+
+// memberSystemPrompt 协作成员多选判定提示词（方案三群聊协作）：与 jevSystemPrompt
+//（单选 Choice）语义独立——本判定回答「哪些能力应该参与这场协作」，输出参与集合
+// 而非唯一执行者。系统一判定纪律同款：唯一 JSON、无推理文本。
+const memberSystemPrompt = `你是网内协作群成员选择引擎（Jev 范式：系统一判定，不做长推理）。
+输入 state：协作目标 goal 与候选执行者列表 candidates（每项 id 形如 "agent@node"，含能力描述 desc、形态 kind、权限模式 permission、节点在途负载 inflight）。
+任务：从候选中选出适合**参与这场协作**的全部成员（多选判定——协作需要能力互补与交叉视角，不只选一个最强者；与目标明确无关的候选不选）。只输出一个 JSON 对象，无任何其他文字、无 markdown 围栏：
+{"members":["<候选id>",...],"reason":"<不超过60字的中文组队理由>"}
+判定规则：
+- members 逐字取自候选 id，按贡献潜力降序排列；所有候选都不合适时 members 为空数组。
+- 至少给出 1 个成员（除非全不适合）；无上限，但只选真正能贡献的（宁缺毋滥）。
+- 组队依据优先级：能力描述与协作目标的互补覆盖（不同视角/不同技能面组队价值高于同质堆叠）> 形态适配 > 节点负载（inflight 低者优先）> 权限模式是否满足协作要求。
+- reason 说明组队逻辑（谁负责哪个面），不复述目标。`
+
+// llmMemberDecision 应答 JSON 判定体（多选）。
+type llmMemberDecision struct {
+	Members []string `json:"members"`
+	Reason  string   `json:"reason"`
+}
+
+// parseMemberDecision 容错解析（同 parseDecision 围栏/杂文剥除纪律）。
+func parseMemberDecision(content string) (*llmMemberDecision, error) {
+	s := strings.TrimSpace(content)
+	if i := strings.Index(s, "{"); i >= 0 {
+		if j := strings.LastIndex(s, "}"); j > i {
+			s = s[i : j+1]
+		}
+	}
+	var dec llmMemberDecision
+	if err := json.Unmarshal([]byte(s), &dec); err != nil {
+		return nil, errors.New("决策模型应答不是合法组队 JSON")
+	}
+	dec.Reason = strings.TrimSpace(dec.Reason)
+	clean := make([]string, 0, len(dec.Members))
+	for _, m := range dec.Members {
+		if v := strings.TrimSpace(m); v != "" {
+			clean = append(clean, v)
+		}
+	}
+	dec.Members = clean
+	return &dec, nil
+}
+
+// buildMemberState 协作选人 state 压缩（同 buildState 口径）。
+func buildMemberState(goal string, cands []Candidate) string {
+	type candDTO struct {
+		ID         string `json:"id"`
+		Desc       string `json:"desc,omitempty"`
+		Kind       string `json:"kind,omitempty"`
+		Permission string `json:"permission,omitempty"`
+		Inflight   int    `json:"inflight,omitempty"`
+	}
+	n := len(cands)
+	if n > stateCandidateCap {
+		n = stateCandidateCap
+	}
+	list := make([]candDTO, 0, n)
+	for _, c := range cands[:n] {
+		list = append(list, candDTO{
+			ID:         c.Key(),
+			Desc:       truncateRunes(strings.TrimSpace(c.Description), stateDescLimit),
+			Kind:       c.Kind,
+			Permission: c.PermissionMode,
+			Inflight:   c.Inflight,
+		})
+	}
+	state := map[string]any{"goal": strings.TrimSpace(goal), "candidates": list}
+	if len(cands) > stateCandidateCap {
+		state["candidates_note"] = fmt.Sprintf("候选共 %d 个，超过上限 %d，仅按稳定序列出前 %d 个", len(cands), stateCandidateCap, stateCandidateCap)
+	}
+	b, _ := json.Marshal(state)
+	return string(b)
+}
+
+// SuggestMembers 协作成员多选判定（方案三群聊协作，与 Suggest 单选语义独立）：
+// 返回模型应答的成员键（agent@node，预期贡献潜力降序）与组队理由。错误纪律同
+// Suggest（原始内容只入日志，对外固定人话类别）；全不适合返回 ErrNoFit（调用方
+// 转述）。候选外目标剔除在 Service 出口统一守卫（本层透传原样）。
+func (p *llmProvider) SuggestMembers(ctx context.Context, goal string, cands []Candidate) ([]string, string, error) {
+	content, err := p.chat(ctx, memberSystemPrompt, buildMemberState(goal, cands))
+	if err != nil {
+		return nil, "", err
+	}
+	dec, err := parseMemberDecision(content)
+	if err != nil {
+		logf := p.cfg.Logf
+		if logf == nil {
+			logf = log.Printf
+		}
+		logf("[decision] llm-as-jev 组队应答解析失败（原始内容仅入日志）: %.500s", content)
+		return nil, "", err
+	}
+	if len(dec.Members) == 0 {
+		return nil, "", ErrNoFit
+	}
+	return dec.Members, dec.Reason, nil
 }

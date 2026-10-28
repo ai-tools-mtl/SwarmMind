@@ -69,6 +69,12 @@ type WorkCreateRequest struct {
 	// CreatedBy 动作方审计标签（缺省 mcp；建单入口 v1 仅 Prime/MCP，
 	// RFC 六.六裁决 1。逻辑归属非身份证明）。
 	CreatedBy string `json:"created_by,omitempty"`
+	// OriginTask 来源主任务（DESIGN-butler 方案二，2026-10-28 客户端管家拆解
+	// 挂接；可选）：管家建单时携带派给自己的复合任务 task_id（SWARM_TASK_ID
+	// 即得）。非空时校验：任务存在且 (TargetNode,TargetAgent) 为目录中带
+	// Orchestrator 声明的能力卡（软校验，防乱挂；不校验在线）；幂等指纹含
+	// origin（不同主任务相同计划不撞单——DESIGN-butler R3' P1-3 闭合）。
+	OriginTask string `json:"origin_task,omitempty"`
 }
 
 // WorkView 工作单详情视图：全量记录 + 账本游标读取（事件只返回 seq > sinceEvents
@@ -115,6 +121,10 @@ type workStep struct {
 // 保证指纹跨版本稳定；同 mailbox/batch 指纹口径）。
 type workContent struct {
 	Goal  string     `json:"goal"`
+	// OriginTask 参与指纹（DESIGN-butler 方案二）：omitempty 保证无 origin 的
+	// 建单指纹与历史字节一致（既有 WorkIdems 映射零失效）；有 origin 时不同
+	// 主任务的相同计划不撞单（幂等命名空间，R3' P1-3）。
+	OriginTask string     `json:"origin_task,omitempty"`
 	Steps []workStep `json:"steps"`
 }
 
@@ -142,8 +152,8 @@ func normalizeWorkSteps(in []WorkStepInput) []workStep {
 }
 
 // workContentHash 建单内容指纹：canonical JSON 的 SHA-256 hex。
-func workContentHash(goal string, steps []workStep) string {
-	b, err := json.Marshal(workContent{Goal: goal, Steps: steps})
+func workContentHash(goal string, steps []workStep, originTask string) string {
+	b, err := json.Marshal(workContent{Goal: goal, OriginTask: originTask, Steps: steps})
 	if err != nil {
 		// 纯标量+slice 结构，不可达；防御性返回空串（调用方按不同内容处理）
 		return ""
@@ -163,7 +173,7 @@ func storedWorkHash(w store.Work) string {
 		}
 		steps[i] = workStep{Seq: s.Seq, Desc: s.Desc, TargetNode: s.TargetNode, TargetAgent: s.TargetAgent, DependsOn: deps}
 	}
-	return workContentHash(w.Goal, steps)
+	return workContentHash(w.Goal, steps, w.OriginTask)
 }
 
 // validateWorkPlan 步骤计划准入校验（RFC 二.2：引用有效/无环/级联上限；唯一性
@@ -270,6 +280,21 @@ func validateWorkPlan(goal string, steps []workStep) error {
 	return nil
 }
 
+// orchestratorCardInState 统筹卡判定（State 副本上的纯函数形态）：口径与
+// IsOrchestratorCard 一致（exposed 能力卡 + Orchestrator 声明，精确
+// (node,agent) 匹配），但作用于传入的 State——CreateWork 建单事务内用它校验
+// origin，校验与落单消费同一事务快照（R1-01：消除「目录快照校验通过 → 落单
+// 前声明被撤销」的跨快照窗口）。两函数的一致性由
+// TestOrchestratorCardStateViewAgree 锁定。
+func orchestratorCardInState(st *store.State, nodeID, agentName string) bool {
+	for _, card := range st.Nodes[nodeID].Agents {
+		if card.Name == agentName && card.Exposed && card.Orchestrator {
+			return true
+		}
+	}
+	return false
+}
+
 // CreateWork 建单（RFC 二.2 步骤 1）：规范化+校验 → 幂等预检 → 单事务落库
 // （工作单全量 + work_created 事件同事务，事实与事件一致）→ 详情视图。
 //
@@ -279,8 +304,12 @@ func validateWorkPlan(goal string, steps []workStep) error {
 // 主体字段（仅限直连 core 的内部调用方；REST 入口恒非空）。
 //
 // 返回 dup=true 表示幂等命中（同 goal+steps 指纹）：返回原单、零写入零记账。
-// 建单事务失败（存储故障）返回错误：内存与磁盘零变化，重试安全（落盘失败不占
-// seq——副本整体丢弃，重试重新分配 ID，指纹亦未登记）。
+// origin 软校验只在「确定新建」分支执行且用写事务内同一 State 副本（R1-01）：
+// 幂等命中（快读或事务内复核）先返回原单回执、不重校验——建单成功后声明被
+// 撤销或主任务先于工作单清理时，原样重试仍得 dup 回执而非 ErrInvalid（SPEC
+// 规则 16「幂等回执补拉不重校验」的字面兑现）。建单事务失败（校验拒绝或存储
+// 故障）返回错误：内存与磁盘零变化，重试安全（落盘失败不占 seq——副本整体
+// 丢弃，重试重新分配 ID，指纹亦未登记）。
 func (c *Core) CreateWork(req WorkCreateRequest, actor string) (*WorkView, bool, error) {
 	goal := strings.TrimSpace(req.Goal)
 	createdBy := strings.TrimSpace(req.CreatedBy)
@@ -291,7 +320,10 @@ func (c *Core) CreateWork(req WorkCreateRequest, actor string) (*WorkView, bool,
 	if err := validateWorkPlan(goal, steps); err != nil {
 		return nil, false, err
 	}
-	fingerprint := workContentHash(goal, steps)
+	// origin_task 规范化（DESIGN-butler 方案二/R3' P1-4/R1-01）；软校验延后到
+	// 建单事务内「确定新建」分支（orchestratorCardInState + st.Tasks）。
+	origin := strings.TrimSpace(req.OriginTask)
+	fingerprint := workContentHash(goal, steps, origin)
 
 	// 幂等预检（快读路径；权威判定在建单事务内重检）。命中复核存储单的重算
 	// 指纹（对齐 storedBatchHash 口径）：指纹即寻址键，正常由构造保证一致，
@@ -316,10 +348,25 @@ func (c *Core) CreateWork(req WorkCreateRequest, actor string) (*WorkView, bool,
 			// 指纹悬空或与存储单不符（Work 无删除路径，不可达；防御）：
 			// 按新单登记覆盖映射
 		}
+		// 确定新建：origin 软校验（R1-01 校验时点契约）。挂接锚点 = 原任务派发
+		// 目标 (TargetNode,TargetAgent) 精确匹配同一事务副本目录中带 Orchestrator
+		// 声明的能力卡；不校验在线；校验先于本事务一切写入，拒绝即副本整体丢弃。
+		// 目录漂移（声明事后撤销）不追溯已建单。旧 node 缺声明 → 无标记 → 拒绝
+		// 并指路升级。
+		if origin != "" {
+			task, ok := st.Tasks[origin]
+			if !ok {
+				return fmt.Errorf("%w: origin_task %q 不存在（须为账本内主任务 ID；任务 24h 保留期后已清理不可挂接）", ErrInvalid, origin)
+			}
+			if !orchestratorCardInState(st, task.TargetNode, task.TargetAgent) {
+				return fmt.Errorf("%w: origin_task %q 的派发目标 %s/%s 不是带统筹声明的能力卡（声明入口在各机器 node 控制台「设为管家」开关）", ErrInvalid, origin, task.TargetNode, task.TargetAgent)
+			}
+		}
 		w := store.Work{
-			ID:        protocol.NewWorkID(),
-			Goal:      goal,
-			PrimeTerm: strings.TrimSpace(req.PrimeTerm),
+			ID:         protocol.NewWorkID(),
+			Goal:       goal,
+			OriginTask: origin,
+			PrimeTerm:  strings.TrimSpace(req.PrimeTerm),
 			Status:    store.WorkStatusPlanning,
 			Steps:     make([]store.WorkStep, len(steps)),
 			CreatedAt: now,
@@ -448,5 +495,32 @@ func (c *Core) ListWorks() []WorkSummary {
 		}
 		return out[i].ID < out[j].ID
 	})
+	return out
+}
+
+// RelatedWorks 来源主任务反查（DESIGN-butler 方案二，2026-10-28）：OriginTask ==
+// taskID 的工作单摘要，按创建时间降序（最新在前）。1:N 允许（同主任务决策变更
+// 建新单，历史保留）；无挂接返回非 nil 空切片（HTTP 序列化为 []，R1-05：REST
+// 客户端可对稳定数组形态直接迭代）。任务 24h 清理后反查仍可用（Work.OriginTask
+// 随单保留 30 天）——断链注解由读端呈现。
+func (c *Core) RelatedWorks(taskID string) []WorkSummary {
+	out := make([]WorkSummary, 0)
+	for _, w := range c.st.View().Works {
+		if w.OriginTask != taskID {
+			continue
+		}
+		done := 0
+		for _, st := range w.Steps {
+			if st.Status == store.StepStatusDone {
+				done++
+			}
+		}
+		out = append(out, WorkSummary{
+			ID: w.ID, Goal: w.Goal, PrimeTerm: w.PrimeTerm, Status: w.Status,
+			Steps: len(w.Steps), DoneSteps: done, Attempts: len(w.Attempts),
+			CreatedAt: w.CreatedAt, ClosedAt: w.ClosedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
 }

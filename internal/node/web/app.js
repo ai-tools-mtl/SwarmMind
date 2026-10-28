@@ -296,7 +296,7 @@ function promptZoneHtml(t) {
  * 动画只随壳播放一次，分区更新不重放。names 缺省 DRAWER_ZONES（任务抽屉）；
  * 同机制其他长驻视图（P5 W3 hub 工作单抽屉）传自有分区表复用本机制（2026-10-25
  * 双端同改同验，SPEC 六.五 分区更新机制单一来源）。 */
-const DRAWER_ZONES = ['head', 'intro', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
+const DRAWER_ZONES = ['head', 'intro', 'related', 'prompt', 'fail', 'answer', 'logs', 'artifacts', 'input', 'timeline', 'review', 'next'];
 function drawerShellHtml() { return DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
 function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
@@ -970,7 +970,7 @@ function normalizeProfile(p) {
     name: p.name || '', kind: p.kind || 'cli', command: p.command || '', workdir: p.workdir || '',
     agent_args: p.agent_args || [], timeout_sec: p.timeout_sec || 600,
     allow_args: !!p.allow_args, allow_env: p.allow_env || [], config_home: p.config_home || '',
-    description: p.description || '', permission_mode: p.permission_mode || '', exposed: p.exposed !== false,
+    description: p.description || '', permission_mode: p.permission_mode || '', exposed: p.exposed !== false, orchestrator: !!p.orchestrator,
     stdin_to_arg: !!p.stdin_to_arg,
   };
 }
@@ -1109,6 +1109,16 @@ function cfgDrawerView(a, i) {
       <span class="actions">${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}${button('保存（校验+写盘）', 'cfg-save-row', 'primary')}</span>
     </div>`;
 }
+/* orchNote 智行管家声明提示：生效/待同步同 exposed 三态；冲突（hub 汇聚发现
+ * 多声明）由目录状态展示（orchestrator_conflicts），本机侧只提示声明已生效。 */
+function orchNote(a) {
+  if (!a.orchestrator) return '';
+  const name = 'orch-' + CSS.escape(a.name);
+  if (a._pending) return `<div class="notice warn spaced" id="${name}">同步中…</div>`;
+  if (a._synced === false) return `<div class="notice warn spaced" id="${name}"><b>本机已生效 · 待同步</b>：hub 暂不可达，重连注册后自动生效。</div>`;
+  return `<div class="notice ok spaced" id="${name}"><b>智行管家已声明</b>：复合目标将交由本能力拆解派发汇总（hub 汇聚全网声明，冲突时告警并回退名字识别）。</div>`;
+}
+
 function svcCard(a) {
   const on = !!a.exposed;
   const syncNote = a._pending
@@ -1124,7 +1134,10 @@ function svcCard(a) {
     <div class="actions"><div class="toggle" role="group" aria-label="开放给其他机器调用" title="开放给其他机器调用：关闭后仅本机可派单">
       ${button('开放', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
       ${button('停止开放', `expose-off:${esc(a.name)}`, 'off-btn' + (on ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
-    </div></div></div>${syncNote}
+    </div><div class="toggle" role="group" aria-label="智行管家声明" title="智行管家：接收复合目标拆解派发汇总（全网同一时刻至多一个，由各机器客户端声明、hub 汇聚）">
+      ${button('设为管家', `orch-on:${esc(a.name)}`, 'on-btn' + (a.orchestrator ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
+      ${button('取消管家', `orch-off:${esc(a.name)}`, 'off-btn' + (a.orchestrator ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
+    </div></div></div>${syncNote}${orchNote(a)}
     <details><summary>配置详情（只读 · 来自本机 ExecProfile）</summary>
       <div class="table-wrap"><table><tbody>
         <tr><th>command</th><td><code>${esc(a.command)}</code> ${a.allow_args ? '' : '<span class="readonly">allow_args=false：任务参数将被拒绝</span>'}</td></tr>
@@ -1149,6 +1162,29 @@ async function setExposed(name, exposed, btn) {
       const a = S.agents.find(x => x.name === name);
       if (a) { a.exposed = r.data.exposed; a._synced = !!r.data.hub_synced; }
       toast(exposed ? '已开放 · 即时生效' : '已停止开放 · 其他机器的新任务不再接收');
+    } else {
+      toast('开关失败 · ' + errLine(r.data));
+    }
+  } catch (e) {
+    toast(e.network ? '本机 API 不可达' : '开关失败');
+  }
+  render();
+  pollTick();
+}
+
+async function setOrchestrator(name, orchestrator, btn) {
+  const card = $('#svc-' + CSS.escape(name));
+  const note = card?.querySelector('#orch-' + CSS.escape(name));
+  if (btn) btn.disabled = true;
+  if (note) note.outerHTML = `<div class="notice spaced" id="orch-${esc(name)}">同步中…</div>`;
+  try {
+    const r = await api('PATCH', `/api/v1/local/agents/${encodeURIComponent(name)}/orchestrator`, { orchestrator });
+    if (r.code === 200) {
+      const a = S.agents.find(x => x.name === name);
+      if (a) { a.orchestrator = r.data.orchestrator; a._synced = !!r.data.hub_synced; }
+      toast(orchestrator ? '已声明智行管家 · 即时生效' : '已取消智行管家声明');
+    } else if (r.code === 409) {
+      toast('声明被拒 · ' + errLine(r.data));
     } else {
       toast('开关失败 · ' + errLine(r.data));
     }
@@ -1900,6 +1936,7 @@ document.addEventListener('click', e => {
         resetPrimeState(); // 修复 5：登出清一次性凭证
         render(); return;
       case 'expose-on': case 'expose-off': setExposed(arg, act === 'expose-on', btn); return;
+      case 'orch-on': case 'orch-off': setOrchestrator(arg, act === 'orch-on', btn); return;
       case 'form-submit': submitForm(); return;
       case 'form-retry': // 新幂等键开新单
         S.f = { stage: 'idle', target: S.f.target, stdin: S.f.stdin, idem: newIdem(), message: '' };
