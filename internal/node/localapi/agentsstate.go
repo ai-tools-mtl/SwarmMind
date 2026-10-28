@@ -33,21 +33,30 @@ type agentsStateDisk struct {
 	Version int `json:"version"`
 	// Exposed agent 名 → 开关覆盖与变更时刻（审计：谁在本机何时下线了它）。
 	Exposed map[string]agentExposedRecord `json:"exposed"`
+	// Orchestrator 统筹载体声明覆盖（2026-10-28 客户端声明制）。
+	Orchestrator map[string]agentOrchRecord `json:"orchestrator,omitempty"`
 }
 
-// agentExposedRecord 单 agent 的开关覆盖记录。
+// agentExposedRecord 单 agent 的开关覆盖记录（Exposed/Orchestrator 共用形态）。
 type agentExposedRecord struct {
 	Exposed   bool      `json:"exposed"`
 	UpdatedAt time.Time `json:"updated_at"` // UTC
 }
 
+// agentOrchRecord 单 agent 的统筹声明覆盖记录。
+type agentOrchRecord struct {
+	Orchestrator bool      `json:"orchestrator"`
+	UpdatedAt    time.Time `json:"updated_at"` // UTC
+}
+
 // AgentState exposed 开关运行时状态（并发安全）。
 type AgentState struct {
-	mu       sync.Mutex
-	baseline []protocol.ExecProfile // YAML 基线（构造后只读）
-	override map[string]agentExposedRecord
-	path     string
-	tmp      string
+	mu           sync.Mutex
+	baseline     []protocol.ExecProfile // YAML 基线（构造后只读）
+	override     map[string]agentExposedRecord
+	orchOverride map[string]agentOrchRecord // 统筹声明覆盖（2026-10-28 客户端声明制）
+	path         string
+	tmp          string
 }
 
 // OpenAgentState 打开（或创建）本机 agent 状态：加载 data_dir/agents-state.json，
@@ -82,6 +91,12 @@ func OpenAgentState(dataDir string, baseline []protocol.ExecProfile) (*AgentStat
 		}
 		s.override[name] = rec
 	}
+	for name, rec := range disk.Orchestrator {
+		if !known[name] {
+			continue // 同 exposed：配置漂移忽略不阻塞启动
+		}
+		s.orchOverride[name] = rec
+	}
 	return s, nil
 }
 
@@ -94,6 +109,9 @@ func (s *AgentState) Effective() []protocol.ExecProfile {
 	for i := range out {
 		if rec, ok := s.override[out[i].Name]; ok {
 			out[i].Exposed = rec.Exposed
+		}
+		if rec, ok := s.orchOverride[out[i].Name]; ok {
+			out[i].Orchestrator = rec.Orchestrator
 		}
 	}
 	return out
@@ -138,6 +156,55 @@ func (s *AgentState) SetExposed(name string, exposed bool) (protocol.ExecProfile
 	return p, nil
 }
 
+// SetAgentOrchestrator 变更统筹载体声明（2026-10-28 客户端声明制）：镜像 SetExposed
+// 的先写后见语义——落盘成功才发布内存；回归 YAML 基线值时删除覆盖项防状态文件积累。
+// 声明即身份：本机恰一个声明由调用方（node 控制台）保证互斥（同机多声明在开关层拒绝）。
+func (s *AgentState) SetAgentOrchestrator(name string, orchestrator bool) (protocol.ExecProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.baseline {
+		if s.baseline[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return protocol.ExecProfile{}, ErrAgentNotFound
+	}
+	if orchestrator {
+		// 同机互斥：本机已有其他 agent 持声明则拒绝（全网多声明属跨机配置漂移，
+		// hub 聚合层告警；本机双声明在源头即可避免）。
+		for k, rec := range s.orchOverride {
+			if k != name && rec.Orchestrator {
+				return protocol.ExecProfile{}, fmt.Errorf("localapi: 本机 %q 已声明为智行管家（全网同一时刻至多一个统筹，先取消原声明）", k)
+			}
+		}
+		for _, p := range s.baseline {
+			if p.Name != name && p.Orchestrator {
+				return protocol.ExecProfile{}, fmt.Errorf("localapi: 本机 %q 已声明为智行管家（yaml 基线），先改配置再声明", p.Name)
+			}
+		}
+	}
+	// 回归基线值时删除覆盖（状态文件不积累）；orchOverride 与盘上 Exposed 结构分离存储
+	next := make(map[string]agentOrchRecord, len(s.orchOverride)+1)
+	for k, v := range s.orchOverride {
+		next[k] = v
+	}
+	if orchestrator == s.baseline[idx].Orchestrator {
+		delete(next, name)
+	} else {
+		next[name] = agentOrchRecord{Orchestrator: orchestrator, UpdatedAt: protocol.NowUTC()}
+	}
+	if err := s.persistOrch(next); err != nil {
+		return protocol.ExecProfile{}, err // 落盘失败：不发布，运行时状态不变
+	}
+	s.orchOverride = next
+	p := s.baseline[idx]
+	p.Orchestrator = orchestrator
+	return p, nil
+}
+
 // ReplaceBaseline 整表替换 YAML 基线（方案 3.5 网页编辑，PUT /api/v1/local/config
 // 热应用链）：提交表落盘后即权威配置，既有 exposed 覆盖一并清除——覆盖残留会让
 // 盘上 yaml 与生效值分叉（PATCH 开关写覆盖、PUT 写基线，基线刷新后覆盖语义失效），
@@ -153,9 +220,20 @@ func (s *AgentState) ReplaceBaseline(profiles []protocol.ExecProfile) error {
 	return nil
 }
 
-// persist 覆盖集落盘（临时文件+rename，SPEC 4.7）；调用方持 mu。
+// persist exposed 覆盖集落盘（临时文件+rename，SPEC 4.7）；调用方持 mu（R3' 审查：
+// 内部不得重复加锁——SetExposed/ReplaceBaseline 均持 mu 调用，二次 Lock 即自锁死锁）。
 func (s *AgentState) persist(override map[string]agentExposedRecord) error {
-	b, err := json.MarshalIndent(agentsStateDisk{Version: 1, Exposed: override}, "", "  ")
+	return s.persistDisk(agentsStateDisk{Version: 1, Exposed: override, Orchestrator: s.orchOverride})
+}
+
+// persistOrch 统筹声明覆盖集落盘（同 persist；调用方持 mu）。
+func (s *AgentState) persistOrch(orch map[string]agentOrchRecord) error {
+	return s.persistDisk(agentsStateDisk{Version: 1, Exposed: s.override, Orchestrator: orch})
+}
+
+// persistDisk agents-state.json 原子落盘（临时文件+rename）。
+func (s *AgentState) persistDisk(disk agentsStateDisk) error {
+	b, err := json.MarshalIndent(disk, "", "  ")
 	if err != nil {
 		return fmt.Errorf("localapi: 状态编码失败: %w", err)
 	}

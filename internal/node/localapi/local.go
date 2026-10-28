@@ -98,6 +98,44 @@ func (s *Server) handleSetExposed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// orchestratorRequest PATCH orchestrator 请求体。
+type orchestratorRequest struct {
+	Orchestrator bool `json:"orchestrator"`
+}
+
+// handleSetAgentOrchestrator PATCH /api/v1/local/agents/{name}/orchestrator：
+// 统筹载体声明开关（2026-10-28 客户端声明制）——运行时 + 持久化（重启保持）+
+// card_update 上报 hub（hub 全网汇聚：恰一声明生效，多声明冲突告警回退名字约定）。
+// 同机互斥由 SetAgentOrchestrator 保证（已有其他声明则 409）。
+func (s *Server) handleSetAgentOrchestrator(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Agents == nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "未装配 agent 状态（装配方须传入 Agents）")
+		return
+	}
+	var req orchestratorRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 JSON {\"orchestrator\":bool}")
+		return
+	}
+	name := r.PathValue("name")
+	p, err := s.cfg.Agents.SetAgentOrchestrator(name, req.Orchestrator)
+	if errors.Is(err, ErrAgentNotFound) {
+		writeErr(w, http.StatusNotFound, protocol.CodeAgentNotFound, "agent 不在本机配置中: "+name)
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusConflict, "orchestrator_conflict", err.Error())
+		return
+	}
+	synced := true
+	if s.cfg.CardsReporter != nil {
+		synced = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name": name, "orchestrator": p.Orchestrator, "hub_synced": synced,
+	})
+}
+
 // localStatus 本机状态总览（旅程③）。node 只呈现本机事实：形态/总理声明/
 // 连接/epoch/账本/最近同步；信箱余量与投递窗口是 hub 侧事实，不在此代理展示
 //（方案 v2 D6）。

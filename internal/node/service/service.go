@@ -926,6 +926,7 @@ func CardsFromProfiles(profiles []protocol.ExecProfile) []protocol.AgentCard {
 			Exposed:        p.Exposed,
 			AllowArgs:      p.AllowArgs, // 输入语义声明（SPEC 4.9）：控制台/调用方据此呈现传参面
 			StdinToArg:     p.StdinToArg,
+			Orchestrator:   p.Orchestrator, // 统筹载体声明（2026-10-28 客户端声明制）
 		})
 	}
 	return cards

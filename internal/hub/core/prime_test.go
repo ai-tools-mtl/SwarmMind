@@ -6,119 +6,93 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// TestPrimeDesignation 网页指定统筹载体（2026-10-23 伦哥定案）：设置/替换/撤销/校验。
-func TestPrimeDesignation(t *testing.T) {
+// TestPrimeFromDirectory 聚合三态（2026-10-28 客户端声明制）：零声明 nil（回退名字
+// 约定）、恰一声明生效、多声明冲突（nil + 冲突清单）。声明随 AgentCard.Orchestrator
+// 上报，hub 只读汇聚，无写入口。
+func TestPrimeFromDirectory(t *testing.T) {
 	f := newHub(t)
-	// 目录里放一个 exposed 的 zcode-dev（mac-mini）与一个未 exposed 的 echo（node-b）
+	// 零声明：nil（前端回退名字约定）
 	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
-		{Name: "zcode-dev", Exposed: true},
-		{Name: "diskcheck", Exposed: true},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
-		{Name: "echo", Exposed: false},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := f.core.PrimeDesignation(); got != nil {
-		t.Fatalf("初始应为未指定，got %+v", got)
-	}
-	// 未 exposed 能力拒绝指定
-	if _, err := f.core.SetPrimeDesignation("node-b", "echo", "admin"); err == nil {
-		t.Fatal("未 exposed 能力应被拒绝")
-	}
-	// 不存在的能力拒绝指定
-	if _, err := f.core.SetPrimeDesignation("mac-mini", "ghost", "admin"); err == nil {
-		t.Fatal("不存在能力应被拒绝")
-	}
-	// 正常指定：字段齐全
-	d, err := f.core.SetPrimeDesignation("mac-mini", "zcode-dev", "admin")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d.NodeID != "mac-mini" || d.AgentName != "zcode-dev" || d.SetBy != "admin" || d.SetAt == "" {
-		t.Fatalf("指定字段不完整: %+v", d)
-	}
-	// 读回一致（深拷贝：改返回值不影响存储态）
-	got := f.core.PrimeDesignation()
-	if got == nil || got.AgentName != "zcode-dev" {
-		t.Fatalf("读回不一致: %+v", got)
-	}
-	// 替换指定
-	if _, err := f.core.SetPrimeDesignation("mac-mini", "diskcheck", "admin"); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.core.PrimeDesignation(); got.AgentName != "diskcheck" {
-		t.Fatalf("替换失败: %+v", got)
-	}
-	// 撤销（幂等：再撤销不报错）
-	if _, err := f.core.SetPrimeDesignation("", "", "admin"); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.core.PrimeDesignation(); got != nil {
-		t.Fatalf("撤销后应为 nil: %+v", got)
-	}
-	if _, err := f.core.SetPrimeDesignation("", "", "admin"); err != nil {
-		t.Fatalf("重复撤销应幂等: %v", err)
-	}
-}
-
-// TestPrimeDesignationBoundToNode P1 回归：目录校验必须精确绑定 (node_id, agent_name)。
-// 旧实现全网找同名 exposed 能力——跨节点同名能力时，把指定落到无此能力的节点也放行，
-// 派发端点按 (node_id, agent_name) 找不到目标即跳过，指定形同虚设。
-func TestPrimeDesignationBoundToNode(t *testing.T) {
-	f := newHub(t)
-	// 跨节点同名：zcode-dev 只在 mac-mini 上 exposed，node-b 没有这个能力
-	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
-		{Name: "zcode-dev", Exposed: true},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
 		{Name: "echo", Exposed: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// node-b 无 zcode-dev（虽然全网存在同名 exposed 能力）：必须拒绝
-	if _, err := f.core.SetPrimeDesignation("node-b", "zcode-dev", "admin"); err == nil {
-		t.Fatal("指定到无此能力的节点应被拒绝")
+	if got := f.core.PrimeDesignation(); got != nil {
+		t.Fatalf("零声明应为 nil, got %+v", got)
 	}
-	// 节点不存在：必须拒绝
-	if _, err := f.core.SetPrimeDesignation("ghost-node", "zcode-dev", "admin"); err == nil {
-		t.Fatal("指定到不存在的节点应被拒绝")
+	if len(f.core.PrimeConflicts()) != 0 {
+		t.Fatal("零声明应无冲突")
 	}
-	// 精确匹配命中：正常指定
-	if _, err := f.core.SetPrimeDesignation("mac-mini", "zcode-dev", "admin"); err != nil {
-		t.Fatal(err)
-	}
-	if got := f.core.PrimeDesignation(); got == nil || got.NodeID != "mac-mini" {
-		t.Fatalf("精确匹配应放行: %+v", got)
-	}
-}
-
-// TestPrimeDesignationSurvivesUnrelatedTx 回归（P0）：任何事务都从 Clone 副本构造
-// 新状态——Clone 曾遗漏 Prime 字段，导致指定后任意无关事务（如 RegisterNode）都会
-// 把统筹指定丢掉并落盘为未指定。指定后执行一次无关事务，读回 Prime 必须仍在。
-func TestPrimeDesignationSurvivesUnrelatedTx(t *testing.T) {
-	f := newHub(t)
-	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
-		{Name: "zcode-dev", Exposed: true},
+	// 未 exposed 的声明不算（目录口径=exposed=true）
+	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+		{Name: "hidden-orch", Orchestrator: true, Exposed: false},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.core.SetPrimeDesignation("mac-mini", "zcode-dev", "admin"); err != nil {
-		t.Fatal(err)
+	if got := f.core.PrimeDesignation(); got != nil {
+		t.Fatalf("未 exposed 的声明不应生效, got %+v", got)
 	}
-	// 无关事务：注册另一个节点（走 Update → Clone 全链）
-	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+	// 恰一声明：生效
+	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
 		{Name: "echo", Exposed: true},
+		{Name: "zcode-dev", Orchestrator: true, Exposed: true},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	got := f.core.PrimeDesignation()
 	if got == nil || got.NodeID != "mac-mini" || got.AgentName != "zcode-dev" {
-		t.Fatalf("无关事务后统筹指定丢失: %+v", got)
+		t.Fatalf("恰一声明应生效: %+v", got)
+	}
+	if len(f.core.PrimeConflicts()) != 0 {
+		t.Fatalf("单声明应无冲突: %+v", f.core.PrimeConflicts())
+	}
+	// 第二台机器也声明 → 冲突态：无生效管家 + 冲突清单（含双方，稳定排序）
+	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+		{Name: "orch-b", Orchestrator: true, Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.core.PrimeDesignation(); got != nil {
+		t.Fatalf("多声明应为冲突态（nil）, got %+v", got)
+	}
+	conf := f.core.PrimeConflicts()
+	if len(conf) != 2 {
+		t.Fatalf("冲突清单应含双方, got %+v", conf)
+	}
+	if conf[0].NodeID != "mac-mini" || conf[0].AgentName != "zcode-dev" ||
+		conf[1].NodeID != "node-b" || conf[1].AgentName != "orch-b" {
+		t.Fatalf("冲突清单应稳定排序: %+v", conf)
+	}
+	// 撤销一侧声明 → 回到恰一生效
+	if err := f.core.RegisterNode("node-b", []protocol.AgentCard{
+		{Name: "orch-b", Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.core.PrimeDesignation(); got == nil || got.AgentName != "zcode-dev" {
+		t.Fatalf("撤销一侧后应恢复单声明生效: %+v", got)
+	}
+}
+
+// TestPrimeDeclFollowsUnexpose exposed 撤下（声明能力下线）后声明自然失效：
+// 目录口径（exposed=true）与聚合一致，撤下的能力不再充当管家（回退名字约定）。
+func TestPrimeDeclFollowsUnexpose(t *testing.T) {
+	f := newHub(t)
+	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
+		{Name: "zcode-dev", Orchestrator: true, Exposed: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.core.PrimeDesignation(); got == nil {
+		t.Fatal("声明应生效")
+	}
+	// 能力下线（exposed=false）：声明随目录口径失效
+	if err := f.core.RegisterNode("mac-mini", []protocol.AgentCard{
+		{Name: "zcode-dev", Orchestrator: true, Exposed: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.core.PrimeDesignation(); got != nil {
+		t.Fatalf("下线能力的声明应失效, got %+v", got)
 	}
 }

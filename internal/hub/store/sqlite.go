@@ -180,11 +180,12 @@ func loadStateFromDB(q dbQueryer) (*State, error) {
 	case err != nil:
 		return nil, fmt.Errorf("store: 读 prime 失败: %w", err)
 	default:
-		var d PrimeDesignation
-		if err := json.Unmarshal(primeBody, &d); err != nil {
+		var legacy PrimeDesignation
+		if err := json.Unmarshal(primeBody, &legacy); err != nil {
 			return nil, fmt.Errorf("store: prime 条目损坏: %w", err)
 		}
-		st.Prime = &d
+		_ = legacy // 统筹指定退役（2026-10-28 客户端声明制）：历史行不进运行态，
+		// diffPrime 对 nil 态生成 delete，旧表行随首次写事务自动清理。
 	}
 	return st, nil
 }

@@ -67,6 +67,8 @@ func TestSQLiteImportFromLegacyJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("解析备份快照: %v", err)
 	}
+	// 统筹指定退役（2026-10-28）：旧快照的 prime 历史行不进运行态，比对时剔除
+	want.Prime = nil
 	got := s.View()
 	gb, err1 := json.Marshal(got)
 	wb, err2 := json.Marshal(want)
@@ -95,8 +97,9 @@ func TestSQLiteImportFromLegacyJSON(t *testing.T) {
 	if got.WorkIdems["fp1"] != "w1" {
 		t.Errorf("work_idems 未导入: %+v", got.WorkIdems)
 	}
-	if got.Prime == nil || got.Prime.AgentName != "diskcheck" {
-		t.Errorf("prime 未导入: %+v", got.Prime)
+	// 统筹指定退役（2026-10-28 客户端声明制）：旧快照历史行不进运行态（diff 清表）
+	if got.Prime != nil {
+		t.Errorf("prime 已退役，历史行不应导入: %+v", got.Prime)
 	}
 
 	// 重启：不重复导入（备份仍恰一个），状态从 SQLite 恢复
@@ -112,8 +115,8 @@ func TestSQLiteImportFromLegacyJSON(t *testing.T) {
 		t.Errorf("重启不得重复导入: %v", backups)
 	}
 	v := s2.View()
-	if v.Nodes["n1"].Epoch != 3 || v.WorkIdems["fp1"] != "w1" || v.Prime == nil {
-		t.Errorf("重启后状态未从 SQLite 恢复: nodes=%+v idems=%+v prime=%+v", v.Nodes, v.WorkIdems, v.Prime)
+	if v.Nodes["n1"].Epoch != 3 || v.WorkIdems["fp1"] != "w1" || v.Prime != nil {
+		t.Errorf("重启后状态恢复异常（prime 应保持退役 nil）: nodes=%+v idems=%+v prime=%+v", v.Nodes, v.WorkIdems, v.Prime)
 	}
 	// 导入后可正常事务写入并持久化
 	if err := s2.Update(func(st *State) error {
@@ -358,26 +361,28 @@ func copyFile(src, dst string) error {
 	return os.WriteFile(dst, b, 0o644)
 }
 
-// TestSQLitePrimeDeleteRoundTrip prime 单例行 nil↔非 nil 迁移：指定后撤销 → 行删除
-//（非置空体），重开库不得复活旧指定。
-func TestSQLitePrimeDeleteRoundTrip(t *testing.T) {
+// TestSQLitePrimeRetiredLegacyRow 统筹指定退役（2026-10-28 客户端声明制）：历史库
+// 中的 prime 行不进运行态（读取丢弃），任一写事务后 diff 清表——重开库旧行消失。
+func TestSQLitePrimeRetiredLegacyRow(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	at := time.Date(2026, 10, 26, 8, 0, 0, 0, time.UTC)
+	// 模拟旧版遗留：直接经 Update 写入历史 prime 行（退役前写路径的产物形态）
 	if err := s.Update(func(st *State) error {
 		st.Prime = &PrimeDesignation{NodeID: "n1", AgentName: "zcode-dev", SetAt: at.Format(time.RFC3339), SetBy: "admin"}
 		return nil
 	}); err != nil {
-		t.Fatalf("指定 Update: %v", err)
+		t.Fatalf("历史行 Update: %v", err)
 	}
+	// 任意一次无关写事务（退役后的正常写入）：diff 对 nil 态生成 delete 清旧行
 	if err := s.Update(func(st *State) error {
 		st.Prime = nil
 		return nil
 	}); err != nil {
-		t.Fatalf("撤销 Update: %v", err)
+		t.Fatalf("清表 Update: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -388,7 +393,7 @@ func TestSQLitePrimeDeleteRoundTrip(t *testing.T) {
 	}
 	defer func() { _ = s2.Close() }()
 	if s2.View().Prime != nil {
-		t.Errorf("撤销后的指定不得在重启后复活: %+v", s2.View().Prime)
+		t.Errorf("退役后 prime 不得进运行态/复活: %+v", s2.View().Prime)
 	}
 }
 

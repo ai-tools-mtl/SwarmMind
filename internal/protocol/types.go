@@ -58,6 +58,10 @@ type AgentCard struct {
 	// TaskInput.Args 透传照常执行。混跑期建议先升 node（或同步升级）；需传参的
 	// 任务以 CLI/REST 直派，不受目录呈现影响。
 	StdinToArg bool `json:"stdin_to_arg"`
+	// Orchestrator 统筹载体声明（2026-10-28 客户端声明制）：node 声明本能力为智行
+	// 管家；hub 全网汇聚（恰一声明生效；多声明冲突回退名字约定并告警；零声明回退
+	// 名字约定）。混跑兼容同 StdinToArg：旧端缺字段解码零值 false。
+	Orchestrator bool `json:"orchestrator,omitempty"`
 }
 
 // ExecProfile 本机执行配置（永不离开本机；SPEC 4.9）。
@@ -93,6 +97,11 @@ type ExecProfile struct {
 	// 「旗标后必须接提示词参数」的 args 型 CLI；控制台/表单派单走 stdin 语义，
 	// 不加此开关此类 agent 必因旗标缺参打印 usage 退出。默认 false（行为不变）。
 	StdinToArg bool `json:"stdin_to_arg"`
+	// Orchestrator 统筹载体声明（2026-10-28 伦哥定案：客户端声明，hub 只接收汇聚）：
+	// true = 本能力承担智行管家职责（接收复合目标拆解派发汇总，不亲自执行子任务）。
+	// hub 全网汇聚：恰一声明即生效；多声明为配置漂移冲突（无生效管家，回退名字约定
+	// + 控制台警告）；零声明回退能力名含 zcode-dev 的名字约定。
+	Orchestrator bool `json:"orchestrator,omitempty"`
 }
 
 // TaskInput 任务输入（SPEC 4.9）。

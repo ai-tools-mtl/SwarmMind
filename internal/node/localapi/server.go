@@ -241,6 +241,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/agents", s.authRead(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/local/agents", s.authRead(s.handleLocalAgents))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/exposed", s.authRead(s.handleSetExposed))
+	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/orchestrator", s.authRead(s.handleSetAgentOrchestrator))
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
 	mux.HandleFunc("GET /api/v1/local/config", s.authRead(s.handleGetConfig))
