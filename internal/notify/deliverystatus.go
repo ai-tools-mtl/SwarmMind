@@ -29,6 +29,10 @@ type ChannelView struct {
 	LastFailAt *time.Time `json:"last_fail_at,omitempty"`
 	// LastFailReason 最近失败原因摘要（已脱敏，同日志口径）。
 	LastFailReason string `json:"last_fail_reason,omitempty"`
+	// Failing 最近失败晚于最近成功（或从无成功）=「当前疑似失败」：由服务端按
+	// 原始时刻（含亚毫秒纳秒差）判定，前端只用该字段不再自比——JS Date 只保留
+	// 毫秒，同毫秒内先成后败会被误判为已恢复（FE-POLISH P2-02）。
+	Failing bool `json:"failing,omitempty"`
 }
 
 // deliveryOK 记录一次投递成功（含渠道「发测试」成功——测试成功同样是「这条
@@ -89,6 +93,7 @@ func (d *Dispatcher) ListView() []ChannelView {
 			t := st.LastFailAt
 			out[i].LastFailAt = &t
 			out[i].LastFailReason = st.LastFailReason
+			out[i].Failing = st.LastOKAt.IsZero() || st.LastFailAt.After(st.LastOKAt)
 		}
 	}
 	return out

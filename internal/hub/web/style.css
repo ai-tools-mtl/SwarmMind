@@ -396,6 +396,7 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
   .overlay,.modal,.drawer,.modal .pane,.group-card{transform:none!important;transition:opacity 200ms ease!important}
   .toast{translate:-50% 0!important;transition:opacity 200ms ease!important}
   [data-zone].zone-in{animation:none!important}   /* B4：分区淡入关停（轮询重放面为零，但首开淡入也一并静止） */
+  .spin{animation:none!important}   /* P1-05：busy 转圈停转；忙态反馈由 .loading 底色+「进行中…」文案承担 */
 }
 @media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}
@@ -453,8 +454,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 240px}
 .chan-name{font-weight:600;font-size:13.5px;overflow-wrap:anywhere}
 .chan-meta{flex-basis:100%;font-size:12px;color:var(--ink-3)}
-/* 渠道最近投递事实行（FE-POLISH P0-3，双端同值）：占满整行；「当前疑似失败」着 danger。 */
-.chan-deli{flex-basis:100%;font-size:12px;color:var(--ink-3)}
+/* 渠道最近投递事实行（FE-POLISH P0-3，双端同值）：占满整行；「当前疑似失败」着
+ * danger。字号 12.5px=全站地板（P1-04：失败原因正是要读的事实，不缩字号）；
+ * overflow-wrap:anywhere 兜脱敏长原因（scheme://host 形态无空格可断）。 */
+.chan-deli{flex-basis:100%;font-size:12.5px;color:var(--ink-3);overflow-wrap:anywhere}
 .chan-deli.deli-fail{color:var(--danger)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
 .chan-actions button{padding:6px 12px;font-size:12px}
@@ -483,4 +486,5 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * 看起来像已定版。金色仍限本孤例，不构成先例。系统注记（msg-system）不由前端
  * 判断，仅 agent 发言。 */
 .msg-body.msg-final{border-left:2px solid #d9a441;border-radius:0 6px 6px 0;padding:6px 10px}
-.final-tag{display:inline-block;margin-right:8px;font-size:11px;font-weight:650;color:#8a6a1f;vertical-align:1px}
+/* final-tag 字号 12.5px=全站地板（P1-04：「待定版」是要读的状态，不缩字号）。 */
+.final-tag{display:inline-block;margin-right:8px;font-size:12.5px;font-weight:650;color:#8a6a1f;vertical-align:1px}

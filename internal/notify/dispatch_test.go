@@ -609,3 +609,63 @@ func TestDeliveryStatusRecorded(t *testing.T) {
 		t.Errorf("测试失败应落 LastFailAt")
 	}
 }
+
+// TestDeliveryStatusFailingFlag FE-POLISH P2-02 回归锁：「当前疑似失败」判定归服务端
+// 单一来源——ListView.Failing 按原始时刻（含亚毫秒纳秒差）比较，前端 Date 只保留
+// 毫秒不再自比。覆盖此前会被误判的样本：
+// ① 同毫秒先成后败（.123100s/.123900s，JS Date 视角两点相等必误判已恢复）→ Failing；
+// ② 同毫秒先败后成（恢复）与跨秒失败早于成功 → 不 Failing；
+// ③ 从无成功只有失败 → Failing；④ 仅成功/无失败事实 → 字段缺席。
+func TestDeliveryStatusFailingFlag(t *testing.T) {
+	s := newTestStore(t)
+	d, _ := newTestDispatcher(t, s)
+	base := time.Date(2026, 10, 29, 1, 0, 0, 123100000, time.UTC) // 01:00:00.123100Z
+
+	set := func(id string, st DeliveryStatus) {
+		d.dmu.Lock()
+		defer d.dmu.Unlock()
+		if d.deliv == nil {
+			d.deliv = map[string]DeliveryStatus{}
+		}
+		d.deliv[id] = st
+	}
+	view := func(id string) ChannelView {
+		for _, cv := range d.ListView() {
+			if cv.ID == id {
+				return cv
+			}
+		}
+		t.Fatalf("ListView 缺渠道 %s", id)
+		return ChannelView{}
+	}
+
+	chA := mustCreate(t, s, TypeWebhook, "", "同毫秒先成后败", nil, map[string]string{"url": "http://127.0.0.1:1/a"})
+	set(chA.ID, DeliveryStatus{LastOKAt: base, LastFailAt: base.Add(800 * time.Microsecond), LastFailReason: "connection refused"})
+	if v := view(chA.ID); !v.Failing {
+		t.Errorf("同毫秒先成后败应 Failing（失败晚于成功，纳秒差即差）: %+v", v)
+	}
+
+	chB := mustCreate(t, s, TypeWebhook, "", "同毫秒先败后成", nil, map[string]string{"url": "http://127.0.0.1:1/b"})
+	set(chB.ID, DeliveryStatus{LastOKAt: base.Add(800 * time.Microsecond), LastFailAt: base, LastFailReason: "connection refused"})
+	if v := view(chB.ID); v.Failing {
+		t.Errorf("同毫秒先败后成（恢复）不得 Failing: %+v", v)
+	}
+
+	chC := mustCreate(t, s, TypeWebhook, "", "失败早于成功", nil, map[string]string{"url": "http://127.0.0.1:1/c"})
+	set(chC.ID, DeliveryStatus{LastOKAt: base.Add(2 * time.Second), LastFailAt: base})
+	if v := view(chC.ID); v.Failing {
+		t.Errorf("失败早于成功（跨秒恢复）应解除 Failing: %+v", v)
+	}
+
+	chD := mustCreate(t, s, TypeWebhook, "", "从无成功", nil, map[string]string{"url": "http://127.0.0.1:1/d"})
+	set(chD.ID, DeliveryStatus{LastFailAt: base, LastFailReason: "boom"})
+	if v := view(chD.ID); !v.Failing {
+		t.Errorf("从无成功只有失败应 Failing: %+v", v)
+	}
+
+	chE := mustCreate(t, s, TypeWebhook, "", "仅成功", nil, map[string]string{"url": "http://127.0.0.1:1/e"})
+	set(chE.ID, DeliveryStatus{LastOKAt: base})
+	if v := view(chE.ID); v.Failing || v.LastFailAt != nil {
+		t.Errorf("无失败事实不应 Failing 且 last_fail_at 缺席: %+v", v)
+	}
+}

@@ -160,27 +160,31 @@ const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记�
  * 「hub 下发 | 本机派单」双端逐字节同文——来源徽标、筛选 chip、抽屉来源行唯一出处，
  * 不得再复制字面量。 */
 const ORIGIN_WORDS = { hub: 'hub 下发', local: '本机派单' };
-/* PERM_MODE_NOTES 权限模式人话词典（FE-POLISH P0-7 权限展示过强修正，2026-10-29）：
- * permission_mode 原始标签是能力自报的权限机制映射（SPEC「权限模型（诚实声明）」：
- * 命令白名单不构成 agent 行为隔离），直接示人像隔离承诺。键=常见映射值（小写命中），
- * 值=一句人话；未命中/未声明走兜底，不虚构隔离。双端逐字节同文，UI 词典同源。 */
+/* PERM_MODE_NOTES 权限模式人话词典（FE-POLISH P1-03 声明性降格，2026-10-29）：
+ * permission_mode 是能力自报的权限机制标签；执行器白名单只约束命令入口（args/
+ * env），不参与运行期约束，SPEC「权限模型（诚实声明）」明确白名单不构成 agent
+ * 行为隔离——此前「不能改动本机文件」「仅工作目录内可写」是未经执行器验证的
+ * 绝对保证，禁再现。词典值只写该声明的意图（不带「不能/仅」绝对断言），
+ * permissionNote 统一挂声明性尾注。键=常见映射值（小写命中）；未知值/未声明
+ * 同口径兜底，不虚构隔离。双端逐字节同文，UI 词典同源。 */
 const PERM_MODE_NOTES = {
-  'read-only': '只读执行：不能改动本机文件',
-  'workspace-write': '受限写入：仅工作目录内可写',
-  'danger-full-access': '完全访问：无额外限制（等同直接运行）',
-  'no-shell': '禁 shell：固定命令入口，不开放任意命令',
+  'read-only': '只读使用',
+  'workspace-write': '工作目录内写入',
+  'danger-full-access': '无附加限制（等同直接运行）',
+  'no-shell': '固定命令入口，不开放任意命令',
 };
-/* permissionNote 权限模式一句人话（兜底口径：白名单限制命令入口，不等于沙箱
- * 隔离——不确定时按诚实声明提示，不替 agent 承诺边界）。 */
+/* permissionNote 声明性一句人话：统一句式「该能力声明为 <mode>（意图：…）；
+ * 实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离」——
+ * 只转述声明，不替 agent 承诺边界。 */
 function permissionNote(mode) {
   const m = String(mode || '').trim();
-  if (!m) return '未声明：边界以该能力的命令与参数白名单为准';
-  return PERM_MODE_NOTES[m.toLowerCase()] || '白名单限制命令入口，不等于沙箱隔离；具体以该 agent 自带权限机制为准';
+  if (!m) return '该能力未声明权限模式；实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离';
+  const note = PERM_MODE_NOTES[m.toLowerCase()];
+  return `该能力声明为 ${m}（意图：${note || '本系统未收录该值的解释'}）；实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离`;
 }
-/* permLabel 展示行形态：原始值保留（技术态可核对），人话随后括注。 */
+/* permLabel 展示行形态：原始值已内嵌于 permissionNote 句中（技术态可核对）。 */
 function permLabel(mode) {
-  const m = String(mode || '').trim();
-  return m ? `权限 ${m}（${permissionNote(m)}）` : `权限未声明（${permissionNote('')}）`;
+  return `权限：${permissionNote(mode)}`;
 }
 /* ===== 抽屉展示词典 shared block end ===== */
 
@@ -1330,13 +1334,14 @@ function notifySectionHtml() {
 /* deliveryLineHtml 渠道最近投递事实行（FE-POLISH P0-3「告警通道失效不告警」，
  * 2026-10-29）：与 hub 同词典（NOTIFY_DELIV shared block）同判据——数据=渠道列表
  * 响应的 last_ok_at/last_fail_at/last_fail_reason（Dispatcher 内存态，自进程启动
- * 起记，重启清零——「尚未投递」不冒充成功，无记录不渲染）；最近失败晚于最近成功
- * （或从无成功）即「当前疑似失败」：事实行着 danger + 前置「修复」入口（打开渠道
- * 编辑）。DOM 组装留本端（button() 签名差异，见 NOTIFY_DELIV 块注）。 */
+ * 起记，重启清零——「尚未投递」不冒充成功，无记录不渲染）；「当前疑似失败」判据
+ * =服务端 failing 字段（P2-02：失败晚于成功或从无成功由服务端按原始时刻含亚毫秒
+ * 判定，前端 Date 只保留毫秒不自比）：事实行着 danger + 前置「修复」入口（打开
+ * 渠道编辑）。DOM 组装留本端（button() 签名差异，见 NOTIFY_DELIV 块注）。 */
 function deliveryLineHtml(ch) {
   const ok = realTime(ch.last_ok_at), fail = realTime(ch.last_fail_at);
   if (!ok && !fail) return '';
-  const failing = fail && (!ok || new Date(ch.last_fail_at) > new Date(ch.last_ok_at));
+  const failing = !!ch.failing;
   const parts = [];
   if (ok) parts.push(`${NOTIFY_DELIV.ok} ${esc(timeFull(ch.last_ok_at))}`);
   if (fail) parts.push(`${NOTIFY_DELIV.fail} ${esc(timeFull(ch.last_fail_at))}${ch.last_fail_reason ? '（' + esc(ch.last_fail_reason) + '）' : ''}`);
@@ -1943,27 +1948,39 @@ function idleBtn(btn) {
 /* ---------- 确认弹层（FE-POLISH B5，2026-10-29：window.confirm 全量退役） ----------
  * hub slim modal 同形态（居中 modal + danger 描边确认键 + modalHead 同词 ×）。
  * confirmModal(title, bodyHtml, okLabel, onOk)：onOk 在用户确认后执行（闭包自带
- * 上下文），取消/遮罩/× 即弃（confirmCb 置空）。node #layer 直清家族（SPEC 六.五
- * 白名单）：无出场后生命周期，关闭=清层。可逆操作不进此层（不做清单 16）。 */
+ * 上下文），取消/遮罩/× 即弃（confirmCb 置空）。可逆操作不进此层（不做清单 16）。
+ * P1-02（2026-10-29）：能力配置抽屉不再让位——确认层作为 #layer 第二个子 overlay
+ * 叠加（同 z-index DOM 序后者在上），取消只摘确认层，抽屉草稿/焦点原样保留；
+ * 先关抽屉会经 closeCfgDrawer(true) 用快照覆盖未保存草稿（原 window.confirm 取消
+ * 语义是保留编辑）。遮罩点击在确认层自身监听并 stopPropagation：不冒泡到 #layer
+ * 触发下层 cfgMaskClose。任务详情抽屉（只读视图）让位不变。 */
 let confirmCb = null;
+let confirmReturnFocus = null;   // 确认层弹出前焦点在 cfg 抽屉内时，取消后还给该元素
 function confirmModal(title, bodyHtml, okLabel, onOk) {
-  if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
-  if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
+  if (S.drawer) closeDrawer();       // 任务详情抽屉让位（只读视图，无草稿）
   confirmCb = onOk;
-  $('#layer').innerHTML = `<div class="overlay"><section class="modal slim" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${modalHead(title)}
+  confirmReturnFocus = cfgEdit && $('#cfg-drawer')?.contains(document.activeElement) ? document.activeElement : null;
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML = `<section class="modal slim" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${modalHead(title)}
   <div class="notice warn">${bodyHtml}</div>
-  <div class="actions spaced"><button type="button" class="danger" data-act="confirm-ok">${esc(okLabel)}</button>${button('取消', 'close', 'link')}</div></section></div>`;
-  $('#layer [role=dialog]')?.focus();
-  playDrawerOpen();
-  $('#layer').addEventListener('click', cfMaskClose);
-}
-function cfMaskClose(e) {
-  if (!$('#confirm-modal')) return;   // 弹层已关后残留监听不动作（与 nfMaskClose 同机制）
-  if (e.target.classList.contains('overlay')) closeConfirm();
+  <div class="actions spaced"><button type="button" class="danger" data-act="confirm-ok">${esc(okLabel)}</button>${button('取消', 'close', 'link')}</div></section>`;
+  ov.addEventListener('click', e => {
+    if (e.target !== ov) return;     // 层内点击交给文档级委托；遮罩点击才归此层
+    e.stopPropagation();             // 不上抛 #layer：下层抽屉的 cfgMaskClose 不误触发
+    closeConfirm();
+  });
+  $('#layer').appendChild(ov);
+  ov.querySelector('[role=dialog]')?.focus();
+  void ov.offsetWidth;               // 先落初始帧再放行 .open，入场过渡可播（playDrawerOpen 同口径）
+  requestAnimationFrame(() => ov.classList.add('open'));
 }
 function closeConfirm() {
   confirmCb = null;
-  $('#layer').innerHTML = '';
+  $('#confirm-modal')?.closest('.overlay')?.remove();
+  const back = confirmReturnFocus;
+  confirmReturnFocus = null;
+  if (cfgEdit && back?.isConnected) back.focus();   // 取消回原抽屉：焦点还给弹层前的字段
 }
 
 /* ---------- 事件委托 ---------- */

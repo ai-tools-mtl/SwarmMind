@@ -252,27 +252,31 @@ const REVIEW_ACTIONS = { ack_review: '确认结果有效', mark_failed: '标记�
  * 「hub 下发 | 本机派单」双端逐字节同文——来源徽标、筛选 chip、抽屉来源行唯一出处，
  * 不得再复制字面量。 */
 const ORIGIN_WORDS = { hub: 'hub 下发', local: '本机派单' };
-/* PERM_MODE_NOTES 权限模式人话词典（FE-POLISH P0-7 权限展示过强修正，2026-10-29）：
- * permission_mode 原始标签是能力自报的权限机制映射（SPEC「权限模型（诚实声明）」：
- * 命令白名单不构成 agent 行为隔离），直接示人像隔离承诺。键=常见映射值（小写命中），
- * 值=一句人话；未命中/未声明走兜底，不虚构隔离。双端逐字节同文，UI 词典同源。 */
+/* PERM_MODE_NOTES 权限模式人话词典（FE-POLISH P1-03 声明性降格，2026-10-29）：
+ * permission_mode 是能力自报的权限机制标签；执行器白名单只约束命令入口（args/
+ * env），不参与运行期约束，SPEC「权限模型（诚实声明）」明确白名单不构成 agent
+ * 行为隔离——此前「不能改动本机文件」「仅工作目录内可写」是未经执行器验证的
+ * 绝对保证，禁再现。词典值只写该声明的意图（不带「不能/仅」绝对断言），
+ * permissionNote 统一挂声明性尾注。键=常见映射值（小写命中）；未知值/未声明
+ * 同口径兜底，不虚构隔离。双端逐字节同文，UI 词典同源。 */
 const PERM_MODE_NOTES = {
-  'read-only': '只读执行：不能改动本机文件',
-  'workspace-write': '受限写入：仅工作目录内可写',
-  'danger-full-access': '完全访问：无额外限制（等同直接运行）',
-  'no-shell': '禁 shell：固定命令入口，不开放任意命令',
+  'read-only': '只读使用',
+  'workspace-write': '工作目录内写入',
+  'danger-full-access': '无附加限制（等同直接运行）',
+  'no-shell': '固定命令入口，不开放任意命令',
 };
-/* permissionNote 权限模式一句人话（兜底口径：白名单限制命令入口，不等于沙箱
- * 隔离——不确定时按诚实声明提示，不替 agent 承诺边界）。 */
+/* permissionNote 声明性一句人话：统一句式「该能力声明为 <mode>（意图：…）；
+ * 实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离」——
+ * 只转述声明，不替 agent 承诺边界。 */
 function permissionNote(mode) {
   const m = String(mode || '').trim();
-  if (!m) return '未声明：边界以该能力的命令与参数白名单为准';
-  return PERM_MODE_NOTES[m.toLowerCase()] || '白名单限制命令入口，不等于沙箱隔离；具体以该 agent 自带权限机制为准';
+  if (!m) return '该能力未声明权限模式；实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离';
+  const note = PERM_MODE_NOTES[m.toLowerCase()];
+  return `该能力声明为 ${m}（意图：${note || '本系统未收录该值的解释'}）；实际边界取决于执行器权限配置，SwarmMind 白名单不构成 agent 行为隔离`;
 }
-/* permLabel 展示行形态：原始值保留（技术态可核对），人话随后括注。 */
+/* permLabel 展示行形态：原始值已内嵌于 permissionNote 句中（技术态可核对）。 */
 function permLabel(mode) {
-  const m = String(mode || '').trim();
-  return m ? `权限 ${m}（${permissionNote(m)}）` : `权限未声明（${permissionNote('')}）`;
+  return `权限：${permissionNote(mode)}`;
 }
 /* ===== 抽屉展示词典 shared block end ===== */
 
@@ -667,7 +671,8 @@ const S = {
   notifyChannels: [],          // 通知渠道列表（P4③ 控制台化；已脱敏形态）
   notifyLoading: false,        // 设置页通知区块加载态（D2 模式：局部更新）
   notifyError: '',             // 通知渠道加载失败信息（空=正常）
-  chanSummary: null,           // 外部通知渠道数（P0-4：null=未加载；总览「无外部渠道」明示数据源；inbox 不计入——站内=关页面即失，正是提示要覆盖的盲区）
+  chanSummary: null,           // 启用的外部通知渠道数（P0-4：null=未加载；inbox 不计入——站内=关页面即失，正是提示要覆盖的盲区。P2-01：只数启用的，停用渠道不压掉提示）
+  chanExtAll: 0,               // 外部渠道总数（含停用；P2-01：与 chanSummary 区分「无渠道」与「全部停用」两种口径）
   inboxItems: [],              // 站内通知（内存态，重启清空；顶栏铃铛数据源）
   inboxUnread: 0,              // 站内未读数（badge）
   bellOpen: false,             // 铃铛面板开合
@@ -727,7 +732,7 @@ function sessionExpired() {
   S.workDrawer = null;
   S.f = blankFilters();   // 筛选不跨会话（TASK-nav-filter A2：登出重置同步覆盖）
   S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
-  S.chanSummary = null;   // 渠道计数随会话边界重置（P0-4），下次登录重拉
+  S.chanSummary = null; S.chanExtAll = 0;   // 渠道计数随会话边界重置（P0-4），下次登录重拉
   closeBellPanel();   // 铃铛面板随会话收起（S.bellOpen 不跨会话）
   render();
   location.hash = '#/login';
@@ -1283,7 +1288,9 @@ function overviewPage() {
     <section class="card"><div class="row"><h2>需要你关注</h2>${nr ? badge('needs_review') : '<span class="badge completed">无待办</span>'}</div>
       ${nr ? `<div class="notice warn"><b>${nr} 个任务结果拿不准，等你确认</b><p>执行中断，结果是否完整系统无法确认；请核对后登记结论，请勿重新提交同一任务。</p>${button('去处理 →', 'go', 'link', 'data-page="tasks" data-status="needs_review"')}</div>`
     : `<div class="notice">当前没有待办；${c.failed || 0} 条失败任务可在「任务」页下钻原因。</div>`}
-      ${S.chanSummary === 0 ? `<div class="notice warn spaced"><b>当前无外部通知渠道</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去添加渠道 →', 'go', 'link', 'data-page="tokens"')}</div>` : ''}
+      ${S.chanSummary === 0 ? (S.chanExtAll > 0
+        ? `<div class="notice warn spaced"><b>外部通知渠道均已停用</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去启用渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`
+        : `<div class="notice warn spaced"><b>当前无外部通知渠道</b>：关闭页面后异常不会主动送达（站内铃铛只存在内存里，重启即清空）。${button('去添加渠道 →', 'go', 'link', 'data-page="tokens"')}</div>`) : ''}
       ${offline.length ? `<div class="notice warn spaced"><b>${esc(offline.map(n => n.node_id).join('、'))} 离线</b>：本页只做登记与观察，不能对离线机器派发；此前已提交给它的任务在离线暂存等待投递，重连后自动送达，7 天未送达则过期。<br>${button('查看机器 →', 'go', 'link', 'data-page="nodes"')}</div>` : ''}
     </section>
     </div>`
@@ -1301,7 +1308,7 @@ function nodesPage() {
     ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
       return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${caps.length ? caps.map(d => {
-      const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'}` + (d.card.permission_mode ? ` · ${permLabel(d.card.permission_mode)}` : ' · 权限未声明（以该能力的命令与参数白名单为准）');
+      const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'} · ${permLabel(d.card.permission_mode)}`;   // 未声明走词典兜底同口径（P1-03）
       return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
     }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台机器（只读说明）"`)}</td></tr>`;
     }).join('')}
@@ -2585,13 +2592,17 @@ async function submitToken(form) {
  * 永不整页重建）+ 渠道编辑弹层 + 顶栏铃铛（独立 DOM 通道，不经 render()）。 */
 
 /* loadChanSummary 外部通知渠道计数（FE-POLISH P0-4「站内通知易失」，2026-10-29）：
- * 总览「需要你关注」区判断「当前无外部通知渠道」的数据源。渠道变更低频，不进 5s
- * 轮询——登录成功/会话恢复与设置页渠道列表刷新（loadNotifyChannels）两个时机更新；
- * inbox 类型不计入（站内=内存态关页面即失，正是本提示要覆盖的盲区）。 */
+ * 总览「需要你关注」区判断「当前无启用的外部通知渠道」的数据源。渠道变更低频，
+ * 不进 5s 轮询——登录成功/会话恢复与设置页渠道列表刷新（loadNotifyChannels）两个
+ * 时机更新；inbox 类型不计入（站内=内存态关页面即失，正是本提示要覆盖的盲区）。
+ * P2-01：只数 enabled——停用渠道不会投递（Dispatcher 跳过），不得压掉关页无告警
+ * 提示；chanExtAll 留总数区分「无渠道」与「有渠道但全部停用」两种文案。 */
 async function loadChanSummary() {
   const r = await api('GET', '/api/v1/notify/channels').catch(() => null);
   if (!r || r.code !== 200 || !Array.isArray(r.data?.channels)) return;
-  S.chanSummary = r.data.channels.filter(c => c.type !== 'inbox').length;
+  const ext = r.data.channels.filter(c => c.type !== 'inbox');
+  S.chanExtAll = ext.length;
+  S.chanSummary = ext.filter(c => c.enabled).length;
   if (S.page === 'overview') render();   // 已在总览：立即补画提示行
 }
 /* loadNotifyChannels 拉渠道列表（已脱敏形态），完成后只重绘通知区块。 */
@@ -2602,7 +2613,9 @@ async function loadNotifyChannels() {
   if (S.page !== 'tokens') return;   // 已切页：状态留下次进页用，不碰 DOM
   if (r && r.code === 200 && Array.isArray(r.data?.channels)) {
     S.notifyChannels = r.data.channels; S.notifyError = '';
-    S.chanSummary = r.data.channels.filter(c => c.type !== 'inbox').length;   // P0-4：渠道 CRUD 后计数随刷新
+    const ext = r.data.channels.filter(c => c.type !== 'inbox');
+    S.chanExtAll = ext.length;
+    S.chanSummary = ext.filter(c => c.enabled).length;   // P0-4/P2-01：渠道 CRUD/启停后计数随刷新（只数启用）
   } else {
     S.notifyError = r ? errLine(r.data) : '网络异常 · 未收到服务器应答';
   }
@@ -2623,12 +2636,13 @@ function notifySectionHtml() {
 /* deliveryLineHtml 渠道最近投递事实行（FE-POLISH P0-3「告警通道失效不告警」，
  * 2026-10-29）：数据=渠道列表响应的 last_ok_at/last_fail_at/last_fail_reason
  * （Dispatcher 内存态，自进程启动起记，重启清零——「尚未投递」不冒充成功，无记录
- * 不渲染）。最近失败晚于最近成功（或从无成功）即「当前疑似失败」：事实行着
+ * 不渲染）。「当前疑似失败」判据=服务端 failing 字段（P2-02：失败晚于成功或从无
+ * 成功由服务端按原始时刻含亚毫秒判定，前端 Date 只保留毫秒不自比）：事实行着
  * danger + 前置「修复」入口（打开渠道编辑）。文案词典 NOTIFY_DELIV 双端同文。 */
 function deliveryLineHtml(ch) {
   const ok = realTime(ch.last_ok_at), fail = realTime(ch.last_fail_at);
   if (!ok && !fail) return '';
-  const failing = fail && (!ok || new Date(ch.last_fail_at) > new Date(ch.last_ok_at));
+  const failing = !!ch.failing;
   const parts = [];
   if (ok) parts.push(`${NOTIFY_DELIV.ok} ${esc(fmtTime(ch.last_ok_at))}`);
   if (fail) parts.push(`${NOTIFY_DELIV.fail} ${esc(fmtTime(ch.last_fail_at))}${ch.last_fail_reason ? '（' + esc(ch.last_fail_reason) + '）' : ''}`);
@@ -2669,20 +2683,27 @@ async function saveNotifyChannel() {
   S.busy.add('notify-save');
   const btn = document.querySelector('[data-act="notify-save"]');
   busyBtn(btn, editing ? '保存中…' : '创建中…');
+  let done = false;   // 成功=关层按钮随层退场；失败=留层，finally 必须解锁按钮
   try {
     const r = editing
       ? await api('PUT', '/api/v1/notify/channels/' + encodeURIComponent(f.id), f).catch(() => null)
       : await api('POST', '/api/v1/notify/channels', f).catch(() => null);
     if (r && (r.code === 201 || r.code === 200)) {
+      done = true;
       closeLayer();
       await loadNotifyChannels();
       paintNotifySection();
       toast(editing ? '渠道已更新' : '渠道已创建 · 点「发测试」验证一下');
     } else {
       toast((editing ? '保存失败' : '创建失败') + '：' + (r ? errLine(r.data) : '网络异常'));
-      if (btn) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; }
     }
-  } finally { S.busy.delete('notify-save'); }
+  } finally {
+    /* P1-01：失败留层时手工还原文字漏清 .loading（pointer-events:none 恒卡死
+     * 重试），统一走 idleBtn 清 loading/锁宽/dataset；成功路径按钮已随层退场，
+     * idleBtn 落在游离节点上无副作用。 */
+    if (!done) idleBtn(btn);
+    S.busy.delete('notify-save');
+  }
 }
 
 /* ---------- 顶栏铃铛（站内通知中心） ----------
@@ -3425,6 +3446,9 @@ const ACT = {
     const r = await api('PUT', '/api/v1/notify/channels/' + encodeURIComponent(id), { enabled: !ch.enabled }).catch(() => null);
     if (r && r.code === 200) {
       ch.enabled = !ch.enabled;
+      const ext = S.notifyChannels.filter(c => c.type !== 'inbox');
+      S.chanExtAll = ext.length;
+      S.chanSummary = ext.filter(c => c.enabled).length;   // P2-01：启停即时反映总览口径（本端点不走 loadNotifyChannels）
       paintNotifySection();
       toast(ch.enabled ? '渠道已启用' : '渠道已停用（配置保留）');
     } else {
