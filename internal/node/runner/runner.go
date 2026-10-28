@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -42,6 +43,20 @@ type Runner struct {
 	profile protocol.ExecProfile
 	baseEnv []string // "K=V" 序列（node 配置 base_env，不继承 daemon 环境）
 	homeDir string   // HOME 固定值：ConfigHome，空则 defaultHome（data_dir/home）
+	// spawnHook spawn 成功回调（maturity-orphan-guard）：service 装配 OnSpawn
+	// 后经 SetSpawnHook 注入，Run 在子进程 Start 后同步调用（pgid、组长启动指纹
+	// 与启动周期标识即时可用）。atomic 存取：同一 Runner 并发服务多任务，Store
+	// 幂等（service 对同一 OnSpawn 重复 Store 等值覆盖），Load 无锁。
+	spawnHook atomic.Pointer[func(task protocol.Task, pgid, procStart int64, bootIdent string)]
+}
+
+// SetSpawnHook 注册 spawn 成功回调（maturity-orphan-guard）：pgid 为执行进程组
+// ID（Unix=子进程 pid；Windows 恒 0——Job 兑底，service 侧自然不落盘）；
+// procStart 为组长启动时刻指纹、bootIdent 为系统启动周期标识（R2 必修1：同周期
+// +指纹等值才是同一实例）。回调在 Run 的执行 goroutine 内同步调用，勿做耗时
+// 操作（只供账本落盘）。
+func (r *Runner) SetSpawnHook(h func(task protocol.Task, pgid, procStart int64, bootIdent string)) {
+	r.spawnHook.Store(&h)
 }
 
 // New 构造 runner。baseEnv 为 node 配置的执行环境基线（PATH/TMPDIR/LANG 等）；
@@ -146,7 +161,17 @@ func (r *Runner) Run(ctx context.Context, task protocol.Task) protocol.TaskResul
 		_ = os.MkdirAll(r.homeDir, 0o755)
 	}
 
-	runErr := launchGoverned(cmd) // Start+Wait（Windows 在两步间挂接 Job Object）
+	runErr := launchGoverned(cmd, func() {
+		// spawn 成功即回调（maturity-orphan-guard）：pgid+procStart 尽早落盘，
+		// 缩小崩溃窗口。
+		if h := r.spawnHook.Load(); h != nil {
+			func() {
+				defer func() { _ = recover() }() // 回调异常不击穿任务执行（账本落盘失败已由 service 降级处理）
+				p, s := spawnIdentity(cmd)
+				(*h)(task, p, s, currentBootIdent())
+			}()
+		}
+	})
 	timedOut := ctx.Err() != nil  // Cancel 路径下 Run 可能回传信号错误，以 ctx 为准
 	if cmd.ProcessState != nil {
 		res.ExitCode = cmd.ProcessState.ExitCode() // 信号终止/未运行 = -1

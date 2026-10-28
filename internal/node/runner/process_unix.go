@@ -23,12 +23,30 @@ func InitSelfJobGuard() error { return nil }
 
 // launchGoverned spawn 全程（Start + Wait，语义等价 exec.Cmd.Run 一体化）：
 // 抽成平台钩子是给 Windows 在 Start 与 Wait 之间挂接 Job Object（Assign 需要
-// 进程句柄）；Unix 无中间动作，直通即 Run。
-func launchGoverned(cmd *exec.Cmd) error {
+// 进程句柄）；Unix 无中间动作。afterStart 非 nil 时在子进程成功启动后（Windows
+// 侧在恢复执行后）同步调用——maturity-orphan-guard 的 spawn 回调从此接入
+//（pgid 在 Start 后即可用，尽早落盘缩小崩溃窗口）。
+func launchGoverned(cmd *exec.Cmd, afterStart func()) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	if afterStart != nil {
+		afterStart()
+	}
 	return cmd.Wait()
+}
+
+// spawnIdentity 执行进程组 ID 与组长启动时刻指纹（maturity-orphan-guard，R1
+// 必修1）：Unix setpgid 后 pgid=子进程 pid；procStart 为 /proc/<pid>/stat 的
+// starttime（ticks since boot，10ms 粒度）——pid+指纹在同启动周期内做等值比对，
+// 配合 boot_id 周期校验与补杀前重验把 pgid 复用误杀面压到残余窗口（见
+// orphan_unix.go 头注释的诚实声明）。读取失败 procStart=0（恢复时证据
+// 不足放过，安全侧）。Windows 侧见 process_windows.go 同名函数。
+func spawnIdentity(cmd *exec.Cmd) (pgid, procStart int64) {
+	if cmd.Process == nil {
+		return 0, 0
+	}
+	return int64(cmd.Process.Pid), procStartTime(cmd.Process.Pid)
 }
 
 // killProcessGroup 整组终止：kill(-pgid, SIGKILL)。cmd.Cancel（超时/取消）调用；

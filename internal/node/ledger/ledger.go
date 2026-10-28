@@ -120,6 +120,24 @@ type Entry struct {
 	// 路径永不改写。旧账本条目无此字段=0，回带缺失由 hub 按「缺省=当前
 	// epoch」宽容处理，向后兼容。
 	FenceEpoch int64 `json:"fence_epoch,omitempty"`
+	// Pgid 执行进程组 ID（maturity-orphan-guard）：spawn 成功后由 service 经
+	// MarkSpawned 落盘，供 node 崩溃重启后的孤儿清扫（started 未终态条目）。
+	// Windows 恒 0 不落（Job Object KILL_ON_JOB_CLOSE 由 OS 兑底，无需清扫）；
+	// 旧账本条目无此字段（=0），恢复扫描直接放过（向后兼容，零迁移）。
+	Pgid int64 `json:"pgid,omitempty"`
+	// ProcStart 组长的进程启动时刻指纹（maturity-orphan-guard，R1 必修1）：与
+	// Pgid 同事务落盘的「进程实例证据」——Linux 为 /proc/<pid>/stat 第 22 字段
+	//（clock ticks since boot），darwin 为 P_starttime 微秒（Sec*1e6+Usec，R2：
+	// 秒精度存在同秒不同实例碰撞，真机实证）。恢复清扫以 pid+指纹等值比对精确
+	// 匹配原进程实例；指纹为平台本地格式，仅「同平台 + 同启动周期」内做等值
+	// 比较（BootIdent 域校验），升级/换机后值域不同自然失配 → 放过（安全侧）。
+	// 0 = 未记录（旧条目/Windows/读取失败），恢复时证据不足直接放过。
+	ProcStart int64 `json:"proc_start,omitempty"`
+	// BootIdent 落盘时的系统启动周期标识（maturity-orphan-guard，R2 必修1）：
+	// Linux=/proc/sys/kernel/random/boot_id，darwin=kern.boottime 微秒串。账本
+	// 跨 OS 重启保留，无周期校验则跨周期的同 pid/同指纹/同名无法区分；恢复时
+	// 与当前周期不等即整条证据过期（孤儿必已随旧周期消亡）→ 放过。
+	BootIdent string `json:"boot_ident,omitempty"`
 }
 
 // normalized 归一 origin：空（旧版条目）视为 hub。
@@ -169,6 +187,10 @@ type Ledger struct {
 	// inject 故障注入钩子：按「操作名+阶段」返回非 nil 错误即中断事务（op 为
 	// 触发事务的导出方法名，如 "RearmFence"；仅测试设置，生产为 nil）。
 	inject func(op, stage string) error
+
+	// orphans 启动恢复收集的崩溃孤儿清单（maturity-orphan-guard；recover 填充，
+	// OrphanGroups 读口）：service.New 消费做身份校验清扫。
+	orphans []OrphanGroup
 }
 
 // Open 打开 node 账本：取 data_dir 单实例 flock（冲突即报错）、加载 ledger.json、
@@ -217,6 +239,7 @@ func open(dataDir string, inject func(op, stage string) error) (*Ledger, *Recove
 		_ = l.Close()
 		return nil, nil, err
 	}
+	l.orphans = append([]OrphanGroup(nil), rec.Orphans...) // R2 建议修：与 Recovery 断开别名，读口两侧互不影响
 	return l, rec, nil
 }
 
@@ -247,6 +270,15 @@ func loadEntries(path string) (map[string]Entry, error) {
 // 需要修改一律走 Accept/MarkXxx 等 Update(mutate) 事务，长期持有或跨 goroutine 传递
 // 请自行 Clone（Get 即返回副本）。
 func (l *Ledger) View() map[string]Entry { return *l.cur.Load() }
+
+// OrphanGroups 启动恢复收集的崩溃孤儿清单（maturity-orphan-guard；Open 时固定，
+// 快照读）：started 降级时登记 pgid>0 的条目。service.New 消费做身份校验清扫。
+// 返回内部切片的副本（R1 建议修：读口不外泄可变底层数据）。
+func (l *Ledger) OrphanGroups() []OrphanGroup {
+	out := make([]OrphanGroup, len(l.orphans))
+	copy(out, l.orphans)
+	return out
+}
 
 // Get 查询单个任务条目（返回副本，修改不影响账本）。
 func (l *Ledger) Get(taskID string) (Entry, bool) {
@@ -378,6 +410,34 @@ func (l *Ledger) MarkStarted(taskID string) error {
 		}
 		ne := e.Clone()
 		ne.State = StateStarted
+		m[taskID] = ne
+		return nil
+	})
+}
+
+// MarkSpawned 在 started 条目上登记执行进程组证据三元组（maturity-orphan-guard）：
+// pgid + 组长启动时刻指纹 procStart + 启动周期 bootIdent，spawn 成功后尽快落盘，
+// 使 node 崩溃重启后能以「同周期 + pid + 指纹等值」精确识别重启前在跑的孤儿实例
+//（R1 必修1/R2 必修1：仅有 pgid 无法排除复用给同名异路径进程的误杀面，秒级指纹
+// 存在同秒碰撞）。落盘失败仅日志不致命（降级方向=恢复时放过清扫，安全侧）；终态
+// 条目不接受（去终态后的 pgid 无意义）。窗口声明：spawn 与落盘之间崩溃则证据丢失，
+// 恢复时放过清扫（任务仍正常收敛 needs_review，安全方向，概率极小）。
+func (l *Ledger) MarkSpawned(taskID string, pgid, procStart int64, bootIdent string) error {
+	if pgid <= 0 {
+		return nil // Windows（恒 0）与异常值不落盘
+	}
+	return l.updateOp("MarkSpawned", func(m map[string]Entry) error {
+		e, ok := m[taskID]
+		if !ok {
+			return ErrNotFound
+		}
+		if e.State != StateStarted {
+			return fmt.Errorf("%w: %s 非进行中，不登记 pgid", ErrWrongState, e.State)
+		}
+		ne := e.Clone()
+		ne.Pgid = pgid
+		ne.ProcStart = procStart
+		ne.BootIdent = bootIdent
 		m[taskID] = ne
 		return nil
 	})

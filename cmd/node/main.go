@@ -319,6 +319,15 @@ func run(cfgPath, dataDirOverride string) error {
 		Runners:       runners,
 		ArtifactRoots: artifactRoots,
 		Concurrency:   cfg.Concurrency,
+		// spawn 回调（maturity-orphan-guard）：pgid + 组长启动指纹 + 启动周期
+		// 即时落账本，崩溃重启后以「同周期 + pid + 指纹等值」精确识别孤儿实例
+		//（R1 必修1/R2 必修1）；Windows 恒 (0,"")（Job 兑底）自然不落。落盘失败
+		// 仅降级（恢复时放过清扫，安全侧）。
+		OnSpawn: func(t protocol.Task, pgid, procStart int64, bootIdent string) {
+			if err := led.MarkSpawned(t.ID, pgid, procStart, bootIdent); err != nil {
+				log.Printf("[node] pgid 落盘失败（降级：恢复时放过清扫）task=%s pgid=%d: %v", t.ID, pgid, err)
+			}
+		},
 		// 通知钩子（serviceNotifier 收口）：三模式均非 nil disp，包装差异在
 		// 模式——networked 加「同时通知」gate（读 also_notify 决定本机渠道是否
 		// 跟发），standalone 直连（本机通知即唯一通知）；nil dispatcher 仍须返回

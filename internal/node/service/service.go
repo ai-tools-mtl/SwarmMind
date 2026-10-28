@@ -61,6 +61,12 @@ type Config struct {
 	// 自动清理（terminal_retention: 0s）；清理语义红线：仅清 result_acked 条目
 	// （未 ack 不清——结果重发链路与去重证据依赖账本，SPEC 4.5/4.6/4.8）。
 	TerminalRetention *time.Duration
+	// OnSpawn spawn 成功回调（maturity-orphan-guard）：pgid 为执行进程组 ID
+	//（Unix=子进程 pid；Windows 恒 0——Job 兑底不落盘）；procStart 为组长启动
+	// 时刻指纹、bootIdent 为系统启动周期标识（R2 必修1：同周期+指纹等值才是
+	// 同一实例）。service 在子进程成功启动后同步调用（实现侧做账本 MarkSpawned
+	// 落盘，失败降级为恢复时放过清扫，安全侧）；nil = 不接（测试/无需清扫的装配）。
+	OnSpawn func(task protocol.Task, pgid, procStart int64, bootIdent string)
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -183,6 +189,27 @@ func New(cfg Config, tr transport.Transport) *Service {
 			s.wsLocks.seed(ws, e.Task.ID) // 同键多条目时首个（最早）占锁
 		}
 	}
+	// 孤儿清扫（maturity-orphan-guard）：崩溃重启后，账本 recover 收集的孤儿
+	// 清单（started 降级时登记 pgid>0 的条目）做身份校验并整组终止（校验不过/
+	// 已退出即放过，安全侧）；任务终态已由 recover 降级 needs_review（零改动）。
+	// Windows 产物恒 pgid=0 不进清单（Job 兑底）；旧条目无 pgid 同样不进。清扫
+	// 在 New 内一次性完成（服务就绪前），日志记动作供人工核对。
+	for _, o := range cfg.Ledger.OrphanGroups() {
+		r, ok := cfg.Runners[o.TargetAgent]
+		if !ok {
+			log.Printf("[node] 孤儿清扫跳过 task=%s pgid=%d：agent %s 无执行器（配置漂移）",
+				o.TaskID, o.Pgid, o.TargetAgent)
+			continue
+		}
+		if oc, okc := r.(interface {
+			CleanupOrphanGroup(pgid, procStart int64, bootIdent string) string
+		}); okc {
+			log.Printf("[node] 孤儿清扫 task=%s pgid=%d → %s", o.TaskID, o.Pgid, oc.CleanupOrphanGroup(o.Pgid, o.ProcStart, o.BootIdent))
+		}
+	}
+	// 诚实声明（R2 建议修）：降级持久化与本次清扫之间若再次崩溃，内存清扫清单
+	// 丢失且下次启动条目已终态不再收集——清扫是一次性尽力动作（安全侧漏清扫），
+	// 非必达保证；任务终态已由 recover 降级收敛，主人可见。
 	tr.Subscribe(s.HandleFrame)
 	s.wg.Add(3)
 	go s.resendWorker()
@@ -463,8 +490,11 @@ func isExpired(t protocol.Task, now time.Time) bool {
 	return !t.ExpireAt.IsZero() && t.ExpireAt.Before(now)
 }
 
-// runTask 选择执行器并执行；未知 agent 即配置漂移（SPEC 4.3）：failed/
+ // runTask 选择执行器并执行；未知 agent 即配置漂移（SPEC 4.3）：failed/
 // agent_not_found，不进重推循环（结果已入账本，重复 offer 走重发分支）。
+// maturity-orphan-guard：spawn 成功回调（pgid+procStart 落账本）经 SetSpawnHook
+// 接入——类型断言而非接口方法（Runner 最小接口不膨胀，测试桩零改动；
+// *runner.Runner 之外的自定义执行器自然跳过，无清扫能力也无害）。
 func (s *Service) runTask(ctx context.Context, task protocol.Task) protocol.TaskResult {
 	r, ok := s.runnerFor(task.TargetAgent)
 	if !ok {
@@ -473,6 +503,13 @@ func (s *Service) runTask(ctx context.Context, task protocol.Task) protocol.Task
 			ExitCode:   protocol.ExitCodeNotRun,
 			Error:      protocol.CodeAgentNotFound,
 			FinishedAt: protocol.NowUTC(),
+		}
+	}
+	if s.cfg.OnSpawn != nil {
+		if sh, okc := r.(interface {
+			SetSpawnHook(func(task protocol.Task, pgid, procStart int64, bootIdent string))
+		}); okc {
+			sh.SetSpawnHook(s.cfg.OnSpawn)
 		}
 	}
 	return r.Run(ctx, task)

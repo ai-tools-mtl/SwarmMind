@@ -69,7 +69,7 @@ func configureProcessGroup(cmd *exec.Cmd) error {
 // 先派生孙进程）不复存在。入组/恢复失败一律终止挂起进程并返回错误，绝不静默
 // 降级（返工必修4②）；任务 Job 句柄留给 reapProcessGroup 统一释放（runner 在
 // Wait 完成后必调）。
-func launchGoverned(cmd *exec.Cmd) error {
+func launchGoverned(cmd *exec.Cmd, afterStart func()) error {
 	hv, ok := jobTrack.Load(cmd)
 	if !ok {
 		// 治理装配未登记（configureProcessGroup 失败已在 runner 侧拦截，防御位）
@@ -94,8 +94,17 @@ func launchGoverned(cmd *exec.Cmd) error {
 	if err := resumeMainThread(uint32(cmd.Process.Pid)); err != nil {
 		return killSuspended(cmd, fmt.Errorf("恢复执行失败: %w", err))
 	}
+	if afterStart != nil {
+		afterStart() // 恢复执行后回调（maturity-orphan-guard；Windows spawnIdentity 恒 (0,0)）
+	}
 	return cmd.Wait()
 }
+
+// spawnIdentity 执行进程组 ID 与组长启动时刻指纹（maturity-orphan-guard）：
+// Windows 无进程组语义，恒 (0, 0)——Job Object KILL_ON_JOB_CLOSE 由 OS 兑底
+//（node 崩溃时句柄关闭组员全灭），service 侧 MarkSpawned 对 pgid=0 自然不落盘，
+// 恢复清扫无 Windows 条目。
+func spawnIdentity(cmd *exec.Cmd) (pgid, procStart int64) { return 0, 0 }
 
 // killSuspended 挂起态致命失败收尾：终止未执行过任何指令的进程并 Wait 收割
 // （排干管道拷贝协程，满足「kill 后必须 Wait」纪律）。

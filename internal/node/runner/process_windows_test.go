@@ -34,7 +34,7 @@ func TestLaunchGovernedSuspendsAssignsResumes(t *testing.T) {
 	if err := configureProcessGroup(cmd); err != nil {
 		t.Fatalf("治理装配失败: %v", err)
 	}
-	if err := launchGoverned(cmd); err != nil {
+	if err := launchGoverned(cmd, nil); err != nil {
 		t.Fatalf("受治理执行失败: %v", err)
 	}
 	reapProcessGroup(cmd)
@@ -46,7 +46,7 @@ func TestLaunchGovernedSuspendsAssignsResumes(t *testing.T) {
 // 致命语义：未登记 Job 拒绝执行，绝不静默降级为无治理 spawn。
 func TestLaunchGovernedRefusesWithoutJob(t *testing.T) {
 	cmd := exec.Command("cmd", "/c", "exit", "0")
-	if err := launchGoverned(cmd); err == nil {
+	if err := launchGoverned(cmd, nil); err == nil {
 		t.Fatal("未登记任务 Job 应拒绝执行")
 	}
 	if cmd.Process != nil {

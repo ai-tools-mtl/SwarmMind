@@ -22,6 +22,20 @@ type Recovery struct {
 	// standalone 终态通知据此恰发一次（service.NotifyRecoveredTerminal，cmd/node
 	// 装配处调用）。按任务 ID 排序，清单确定。
 	Downgraded []Entry
+	// Orphans 崩溃孤儿清单（maturity-orphan-guard）：started 降级时登记了 pgid
+	// 的条目——崩溃时仍在跑的执行进程组，service 装配执行器后做身份校验清扫
+	//（宁漏不误，安全语义见 runner.CleanupOrphanGroup）。按任务 ID 排序，清单确定。
+	// 仅 ledger 内部消费（OrphanGroups() 读口），无需经 Open 返回值外泄。
+	Orphans []OrphanGroup
+}
+
+// OrphanGroup 一条待清扫的崩溃孤儿（maturity-orphan-guard）。
+type OrphanGroup struct {
+	TaskID      string
+	TargetAgent string
+	Pgid        int64
+	ProcStart   int64 // 组长启动时刻指纹（pid+指纹等值匹配的证据，0=无证据必放过）
+	BootIdent   string // 落盘时的启动周期标识（与当前周期不等=证据过期，放过）
 }
 
 // recover 执行启动恢复（Open 内调用，SPEC 4.8）：
@@ -35,6 +49,7 @@ type Recovery struct {
 // 终态通知的触发清单，去重锚点见该字段注释）。
 func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 	needDowngrade := false
+	orphans := []OrphanGroup{}
 	for _, e := range l.View() {
 		switch e.State {
 		case StateAccepted:
@@ -69,6 +84,16 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 						Error:      protocol.CodeNodeRestartedMidway,
 						FinishedAt: now,
 					}
+					// 孤儿登记（maturity-orphan-guard）：started 降级时若登记了
+					// pgid，提交恢复清单——崩溃时仍在跑的执行进程组，待 service
+					// 装配执行器后做身份校验清扫；pgid=0（旧条目/Windows）不登记。
+					// ProcStart/BootIdent 随行：清扫侧以同周期+指纹等值精确匹配原实例。
+					if e.Pgid > 0 {
+						orphans = append(orphans, OrphanGroup{
+							TaskID: id, TargetAgent: e.Task.TargetAgent, Pgid: e.Pgid,
+							ProcStart: e.ProcStart, BootIdent: e.BootIdent,
+						})
+					}
 				}
 				if down != nil {
 					ne := e.Clone()
@@ -97,7 +122,8 @@ func (l *Ledger) recover(now time.Time) (*Recovery, error) {
 		sort.Slice(downgraded, func(i, j int) bool { return downgraded[i].Task.ID < downgraded[j].Task.ID })
 	}
 
-	rec := &Recovery{Downgraded: downgraded}
+	rec := &Recovery{Downgraded: downgraded, Orphans: orphans}
+	sort.Slice(rec.Orphans, func(i, j int) bool { return rec.Orphans[i].TaskID < rec.Orphans[j].TaskID })
 	for _, e := range l.View() {
 		switch e.State {
 		case StateAccepted:

@@ -1460,3 +1460,75 @@ api 200 GET /api/v1/directory
 jq -e --arg n "$N1" 'any(.directory[]; .node_id==$n and .card.name=="qa-conv" and .card.allow_args==true and .card.stdin_to_arg==true)' "$T/$ID.body"
 pass
 ```
+
+## 增补批次（2026-10-28：崩溃孤儿清扫，maturity-orphan-guard 专项）
+
+前置：沿用「验收实例准备」的隔离环境与「公共执行函数」helper（begin/api/check/submit/wait_task/wait_node/start_a/stop_a 等）。本轮专项仅改一处 fixture：节点 A 的 `node.yaml` agents 追加直执 sleep 条目（comm=文件名 "sleep"，与配置基名同口径，身份校验可命中；sh 类解释器名实分离会走「放过」安全侧，不能作本用例 fixture）：
+
+```bash
+# fixture 准备（TC-02 前、节点未启动时）：a/node.yaml agents 段追加
+#   - name: qa-sleeper
+#     kind: cli
+#     command: /bin/sleep
+#     workdir: "<同 qa-sh 的 workdir>"
+#     config_home: "<同 qa-sh 的 config_home>"
+#     agent_args: []
+#     timeout_sec: 90
+#     allow_args: true
+#     allow_env: []
+#     description: 崩溃清扫专项 fixture
+#     permission_mode: no-shell
+```
+
+语义说明：清扫身份证据 = 账本证据三元组（pgid + 组长启动指纹 + 启动周期 bootIdent，spawn 时同事务落账本），恢复清扫在服务就绪前一次性完成并记日志；证据不足/周期不符/指纹不符一律放过（宁可漏杀绝不误杀）。任务终态仍由既有 recover 降级 needs_review/node_restarted_midway 链路收敛，清扫不越权改态。
+
+### TC-ORP-01 崩溃→重启→孤儿组被清扫 + 任务收敛 needs_review
+
+```bash
+begin TC-ORP-01
+# 1. 派长任务并等 running（qa-sleeper 直执 sleep，组长即组内唯一成员）
+ORP_TASK="$(submit "$N1" qa-sleeper '' '["60"]')"
+wait_task "$ORP_TASK" running 10
+# 2. 读账本已落盘证据（不猜进程树；pgid 由 spawn 时落盘，证据链数据源）
+ORP_PGID="$(jq -er --arg t "$ORP_TASK" '.[$t].pgid' "$T/a/data/ledger.json")"
+ORP_PS="$(jq -er --arg t "$ORP_TASK" '.[$t].proc_start' "$T/a/data/ledger.json")"
+ORP_BI="$(jq -r --arg t "$ORP_TASK" '.[$t].boot_ident' "$T/a/data/ledger.json")"
+test -n "$ORP_PGID" && test "$ORP_PGID" -gt 0
+test -n "$ORP_PS" && test "$ORP_PS" -gt 0
+test -n "$ORP_BI"
+# 3. kill -9 node（模拟崩溃）：孤儿组必须仍存活（清扫前提）
+kill -9 "$A_PID"
+wait_node "$N1" false
+sleep 1.2   # 跨秒裕量（微秒指纹下同秒也应命中；留裕量避免时钟粒度假阴性）
+kill -0 "$ORP_PGID" 2>/dev/null || { echo "FAIL: node 崩溃后孤儿组应存活"; exit 1; }
+# 4. 重启 node：New 内证据校验命中 → 整组清扫，日志记 killed
+start_a
+wait_node "$N1" true
+grep "孤儿清扫 task=$ORP_TASK" "$T/a.log" | grep -q 'killed'
+if kill -0 "$ORP_PGID" 2>/dev/null; then echo "FAIL: 清扫后孤儿组仍存活"; exit 1; fi
+# 5. 任务收敛 needs_review/node_restarted_midway（既有 recover 链路，零改动）
+wait_task "$ORP_TASK" needs_review 15
+check '.result.error=="node_restarted_midway"'
+# 6. 同 data_dir 第二实例被 flock 拒绝（单实例锁；断言锁冲突原因，配置等错误不得冒充锁证据）
+ORP_LOG_BEFORE="$(wc -l < "$T/a.log")"
+"$T/node" --config "$T/a/node.yaml" >>"$T/a.log" 2>&1 && { echo "FAIL: flock 应拒绝第二实例"; exit 1; }
+tail -n +"$((ORP_LOG_BEFORE + 1))" "$T/a.log" | grep -qi '锁\|flock\|lock' || { echo "FAIL: 第二实例退出原因应含锁冲突"; exit 1; }
+stop_a
+pass
+```
+
+### TC-ORP-02 无孤儿时重启零误伤（账本无进行中条目的回归）
+
+```bash
+begin TC-ORP-02
+# TC-ORP-01 结束后节点已停、无进行中任务：重启不应有任何清扫动作。
+# 只检查本次启动追加的日志增量（a.log 为追加式，历史轮次的清扫记录不算数）
+ORP_LOG_BEFORE="$(wc -l < "$T/a.log")"
+start_a
+wait_node "$N1" true
+tail -n +"$((ORP_LOG_BEFORE + 1))" "$T/a.log" | grep -q '孤儿清扫' && { echo "FAIL: 无孤儿时不应出现清扫日志"; exit 1; }
+stop_a
+pass
+```
+
+边界声明：清扫是一次性尽力动作——降级持久化与清扫之间若再次崩溃，内存清单丢失且下次启动条目已终态不再收集（安全侧漏清扫，非必达保证）。pid 复用的确定性负例（同名异实例指纹不符）由单测 TestCleanupOrphanSkipsStartMismatch / TestReapStopsWhenGroupReowned 真进程与注入时序锁定，真机不重复造复用场景。
