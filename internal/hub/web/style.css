@@ -265,6 +265,16 @@ code{color:var(--ink-2)}
  * 填充即全分区一次性淡入；180ms 即 --dur-hover 值，不新增 token。 */
 @keyframes zone-in{from{opacity:.35}}
 [data-zone].zone-in{animation:zone-in 180ms var(--ease-out-quart)}
+/* 数字 bump（FE-POLISH 轮2 C1，裁决 B 试点）：值变化时 one-shot scale 反馈（判据
+ * 在 bumpCls——变了才挂类，轮询不重放）；范围仅总览 metric 与侧栏待办计数。 */
+@keyframes num-bump{0%{transform:scale(1)}35%{transform:scale(1.06)}100%{transform:scale(1)}}
+.metric.bump{animation:num-bump 150ms var(--ease-out-quart)}
+.navcount{display:inline-block}
+.navcount.bump{animation:num-bump 150ms var(--ease-out-quart)}
+/* 群消息入场（FE-POLISH 轮2 C2，裁决 B 试点）：增量追加的新消息 opacity+4px 上移
+ * 180ms（判据=pullGroupMessages 增量路径真新增节点；历史加载/翻页走整页重绘不挂类）。 */
+@keyframes msg-in{from{opacity:0;transform:translateY(4px)}}
+.msg.msg-in{animation:msg-in 180ms var(--ease-out-quart)}
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 空状态（草案 B.7） ---- */
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
@@ -411,6 +421,8 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
   .toast{translate:-50% 0!important;transition:opacity 200ms ease!important}
   [data-zone].zone-in{animation:none!important}   /* B4：分区淡入关停（轮询重放面为零，但首开淡入也一并静止） */
   .spin{animation:none!important}   /* P1-05：busy 转圈停转；忙态反馈由 .loading 底色+「进行中…」文案承担 */
+  .metric.bump,.navcount.bump{animation:none!important}   /* C1：数字 bump 静止（值变化仍即时可见） */
+  .msg.msg-in{animation:none!important}   /* C2：群消息入场静止（新消息即时全亮） */
 }
 @media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}

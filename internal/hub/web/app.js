@@ -1036,7 +1036,7 @@ function shell(inner) {
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
-    `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
+    `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small class="navcount${bumpCls('navNr', nr)}">(${nr})</small>` : ''}</button>`).join('')}</nav>
   <div class="aside-bottom">中心端 · 登记与监管</div>   <!-- B8 meta 降噪：执行位置一句与顶栏 deploy 重复，撤 -->
   </aside><main id="main">${inner}${versionFoot()}</main></div>`;
 }
@@ -1177,6 +1177,17 @@ function preserveFocus(fn) {
     if (el) { el.focus(); try { if ('setSelectionRange' in el) el.setSelectionRange(pos, pos); } catch { } }
   }
 }
+/* bumpCls 数字 bump 判据（FE-POLISH 轮2 C1，裁决 B 试点两项之一）：比较前后值，
+ * 变了才返回 ' bump'——渲染在模板串构建时执行：轮询数据不变则整页不 render
+ *（resSnap 指纹门控），类不重挂动画不重放；同值重渲染（切页回来）也不挂；
+ * 首次渲染（bumpSeen 无记录）不挂。范围仅总览 metric 与侧栏待办计数，不扩散
+ *（不做清单 4：数字动效上限就是 bump）。 */
+function bumpCls(key, val) {
+  if (!S.bumpSeen) S.bumpSeen = {};
+  const changed = S.bumpSeen[key] !== undefined && S.bumpSeen[key] !== val;
+  S.bumpSeen[key] = val;
+  return changed ? ' bump' : '';
+}
 
 /* ---------- 登录页（免鉴权；其余页 401 自动跳到这里） ---------- */
 let loginMode = 'password'; // password | token
@@ -1316,8 +1327,8 @@ function overviewPage() {
     ? '<span class="badge failed">有失败待查看</span>' : '<span class="badge completed">无待办</span>';
   return head('总览', `${online} / ${S.nodes.length} 台机器在线 · ${S.directory.length} 项网内能力`, headAction)
     + `<section class="panel"><div class="stat-grid half">
-    ${metric('等你确认', nr, nr ? '点击处理 →' : '无需人工处理', nr ? 'heat' : '', nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
-    ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', '', `data-act="go" data-page="tasks" data-status="running"`)}
+    ${metric('等你确认', nr, nr ? '点击处理 →' : '无需人工处理', (nr ? 'heat' : '') + bumpCls('m-nr', nr), nr ? 'data-act="go" data-page="tasks" data-status="needs_review"' : '')}
+    ${metric('正在执行', c.running || 0, c.running ? '查看执行中 →' : '暂无执行中任务', bumpCls('m-run', c.running || 0), `data-act="go" data-page="tasks" data-status="running"`)}
     </div></section>`
     + `<div class="grid cols2 spaced">
     <section class="card"><div class="row"><h2>需要你关注</h2>${headBadge}</div>
@@ -2978,7 +2989,15 @@ async function pullGroupMessages() {
     $('#group-msghint')?.remove();
     let added = 0;
     for (const m of fresh) {
-      if (!line.querySelector(`[data-seq="${m.seq}"]`)) { line.insertAdjacentHTML('beforeend', groupMsgHtml(m)); added++; }
+      if (!line.querySelector(`[data-seq="${m.seq}"]`)) {
+        line.insertAdjacentHTML('beforeend', groupMsgHtml(m));
+        /* C2 群消息入场（FE-POLISH 轮2，裁决 B 试点两项之二）：增量追加的新消息
+         * one-shot msg-in（判据=本增量路径真新增节点；历史加载/翻页走整页重绘
+         * msgs.map 不挂类，自然不播）。 */
+        const li = line.lastElementChild;
+        if (li) { li.classList.remove('msg-in'); void li.offsetWidth; li.classList.add('msg-in'); }
+        added++;
+      }
     }
     if (wrap) {
       if (near) { wrap.scrollTop = wrap.scrollHeight; G.unread = 0; setNewMsgPill(0); }
