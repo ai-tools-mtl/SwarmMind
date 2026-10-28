@@ -592,6 +592,9 @@ function listLoadingBox(label) {
 function listErrorBox(act, label) {
   return `<div class="empty"><h2>${esc(label)}加载失败</h2><p class="muted">最近一次读取没有成功（本机 API 不可达或应答异常），不是没有数据。可以点重试，也可以等轮询自动恢复。</p>${button('重试', act)}</div>`;
 }
+function listStaleBar(act, label) {
+  return `<div class="notice warn" style="margin-bottom:14px"><b>${esc(label)}暂时读不到最新数据</b>：下方是最后一次成功加载的快照（可能已过期）；网络恢复后轮询自动刷新，也可点${button('重试', act)}。</div>`;
+}
 function newIdem() {
   return 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
 }
@@ -720,8 +723,15 @@ async function pollTick() {
     }
   } catch (e) {
     /* 401 已由 api() 处理；其余落失败态（A4 五态：列表区分「失败可重试」与
-     * 「真的没有」，不再静默冒充空列表），下轮轮询自动恢复。 */
-    if (!e.unauthorized) S.loadError = '本机 API 暂不可达';
+     * 「真的没有」，不再静默冒充空列表），下轮轮询自动恢复。失败首次转移时
+     * 就地重绘让陈旧/失败态及时可见——tasks 页豁免（派单表单在页，5s 轮询
+     * 整页重绘会打断输入，2026-10-21 验收口径），该页在下一次自然渲染（切页/
+     * 操作）时呈现陈旧条。 */
+    if (!e.unauthorized) {
+      const was = S.loadError;
+      S.loadError = '本机 API 暂不可达';
+      if (!was && S.page !== 'tasks') render();
+    }
   }
 }
 
@@ -1179,7 +1189,12 @@ function closeCfgDrawer(restore) {
   const back = cfgReturnFocus;
   cfgReturnFocus = null;
   render();
+  /* A2 返焦兜底同 closeDrawer：失存回落侧栏当前页签（与 hub 同构）。 */
   if (back?.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
 }
 // cfgDrawerSave 抽屉保存：同一 PUT 整表协议，口径「保存（校验+写盘）」只落盘本行
 // 的编辑意图；成功关抽屉，被拒/网络未知保持打开（副本保留，现口径）。
@@ -1487,7 +1502,12 @@ function closeNotifyForm() {
   $('#layer').innerHTML = '';
   const back = nfReturnFocus;
   nfReturnFocus = null;
+  /* A2 返焦兜底同 closeDrawer：失存回落侧栏当前页签（与 hub 同构）。 */
   if (back?.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
 }
 async function toggleNotifyChannel(id, btn) {
   const ch = S.notifyChannels.find(x => x.id === id);
@@ -1616,11 +1636,12 @@ function myTasksCard() {
   <div class="filters">${chips}</div>
   ${failed ? listErrorBox('reload-all', '任务列表')
   : loading ? listLoadingBox('任务列表')
-  : rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>
+  : (S.loadError && all.length ? listStaleBar('reload-all', '任务列表') : '')
+    + (rows.length ? `<div class="table-wrap"><table><thead><tr><th>时刻</th><th class="task-title">目标</th><th>来源</th><th>状态</th><th></th></tr></thead><tbody>
     ${rows.map(e => `<tr data-task="${esc(e.task_id)}" tabindex="0" aria-label="查看任务 ${esc(e.task_id)}"><td>${timeShort(e.created_at)}</td><td><strong>${esc(e.target_agent)}</strong> @ ${esc(e.target_node)}</td><td>${originBadge(e.origin)}</td><td>${listStatusBadge(e)}</td><td class="table-action">${button('详情', 'open-task:' + esc(e.task_id))}</td></tr>`).join('')}
   </tbody></table></div>`
     : origin ? `<div class="empty"><h2>没有符合筛选的任务</h2><p class="muted">当前筛选下已载入的任务无命中；清除筛选，或用下方入口加载更早的任务。</p>${button('清除筛选', 'tf-clear')}</div>`
-    : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`}
+    : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`)}
   ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - all.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
   ${(all.length || origin) ? `<p class="footer-note">${origin ? `命中 ${rows.length} 条；筛选作用于已载入的 ${all.length} / 共 ${S.tasksTotal} 条 · ` : ''}列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>` : ''}</section>`;
 }
@@ -1872,7 +1893,13 @@ function closeDrawer() {
   drawerSeq++;   // 在途 refreshDrawer 应答全部作废
   layerInert(false);   // A2：释放背景隔离
   $('#layer').innerHTML = '';
-  if (back && back.isConnected) back.focus();   // 失存（轮询重建使行消失等）不强求
+  /* 关闭返焦（A2 与 hub restoreLayerFocus 同构）：触发元素仍在文档则回它；
+   * 失存（轮询重绘使行消失等）回落侧栏当前页签按钮——hub 同兜底，焦点不落 body。 */
+  if (back && back.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
 }
 // taskOrigin 任务来源判定（功能性修复 7，2026-10-22；2026-10-26 随列表账本全量
 // 驱动校准；codex 审查⑤改为抽屉持久化优先）：① 开抽屉时捕获并保存在
@@ -2360,6 +2387,11 @@ async function boot() {
     window.addEventListener('scroll', onWinScroll, { passive: true });
     onWinScroll();
   }
+  /* 5s 轮询注册恒定前置（A4 验收矩阵实证缺口）：原注册点在本函数末尾，首访会话
+   * （无 localStorage 令牌，走令牌门 tryToken 登录）在 `if (!S.token) return` 早退，
+   * 整页轮询从未注册——任务列表/状态永不自动刷新，五态的「失败自动恢复」也不成立。
+   * 轮询自身有 S.authed/可见性守卫，未登录时空转，恒注册安全。 */
+  setInterval(pollTick, 5000);
   if (!S.token) { render(); return; }
   const epochAtReq = S.sessionEpoch; // 启动验证同样遵守会话边界（迟到 200 不得恢复 authed）
   try {
@@ -2371,6 +2403,5 @@ async function boot() {
     if (!e.unauthorized) { S.authed = true; S.loadError = '本机 API 暂不可达'; }   // A4：启动失败落态，列表呈失败态可重试
   }
   route();
-  setInterval(pollTick, 5000);
 }
 boot();

@@ -1164,14 +1164,15 @@ function terminal(st) { return TERMINAL.has(st); }   // 终态集来自抽屉展
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
 /* ---------- 列表五态判定（FE-POLISH 轮2 A4） ----------
  * 「加载中」「空（真的没有）」「加载失败（可重试）」三态区分——加载失败不再冒充
- * 空列表（codex V07）：S.fresh[name] 无 at=首次加载未落定；at 有而 ok=false=最近
- * 一轮失败（旧数据保留展示+顶部陈旧提示；无旧数据则失败空态+重试钮）；ok=true 且
- * 空=真空态（给下一步指引）。「无权限/未开放」为业务专态（hub 群聊 503 groupsOff
- * 已有专态；hub 管理面登录制无权限降级面），「目标离线」在派单页禁选与机器页徽标
- * 承担——五态各自落到语义成立的页面上，不造假对称。 */
+ * 空列表（codex V07）：S.fresh[name] 无记录=本轮会话尚无应答（加载中）；有记录而
+ * ok=false=最近一轮失败（失败可重试；有旧数据则旧快照保留+顶部陈旧提示，无旧数据
+ * 则失败空态+重试钮）；ok=true 且空=真空态（给下一步指引）。「无权限/未开放」为
+ * 业务专态（hub 群聊 503 groupsOff 已有专态；hub 管理面登录制无权限降级面），
+ * 「目标离线」在派单页禁选与机器页徽标承担——五态各自落到语义成立的页面上，
+ * 不造假对称。 */
 function listState(name) {
   const f = S.fresh[name];
-  if (!f || !f.at) return 'loading';
+  if (!f) return 'loading';   // 无记录=本轮会话尚未收到任何应答（加载中）；首次请求失败同样有记录（ok:false）→ 失败态，不无限「加载中」
   return f.ok ? 'ok' : 'error';
 }
 function listLoadingBox(label) {
@@ -3182,19 +3183,17 @@ function worksPage() {
     ${S.works.length ? workTable(S.works) : `<div class="empty"><h2>还没有工作单</h2><p class="muted">统筹智能体拆解多步目标时会经 MCP 创建工作单；单步小任务直接派发、不建单。</p></div>`}
     <p class="footer-note">${S.works.length} 个工作单 · 时间为 UTC · 未完成的工作单不会清理；已关闭的保留 30 天。</p></section>`;
 }
-/* workNextLine 工作单下一步人话（FE-POLISH 轮2 H18）：列表只回答「卡在哪、下一步
- * 做什么」——由状态与步骤集推导；尝试数/任期/关闭时间等档案细节收详情抽屉
+/* workNextLine 工作单下一步人话（FE-POLISH 轮2 H18）：列表只回答「下一步做什么」
+ * ——由摘要视图字段推导（列表响应 w.steps=步骤总数/w.done_steps=完成数/w.attempts
+ * =尝试数，步骤级明细不在列表响应、REST 契约不动），具体第 N 步阻断定位在详情
+ * 抽屉步骤表（表内状态徽标逐步骤可见）；尝试数/任期/关闭时间等档案细节同样收详情
  *（详情头部已有关闭于/任期/创建于，尝试数在「执行尝试（N）」表）。 */
 function workNextLine(w) {
-  const steps = w.steps || [];
   if (WORK_TERMINAL.has(w.status)) return w.status === 'done' ? '已关闭 · 收集报告在详情' : '已处置关闭 · 理由在详情报告';
-  const blocker = steps.find(s => s.status === 'failed' || s.status === 'needs_review');
-  if (blocker) return `第 ${blocker.seq} 步${WORK_STEP_STATES[blocker.status] || blocker.status}——续派该步或处置放弃剩余步骤`;
-  const open = steps.find(s => s.status === 'pending');
-  if (open) return `第 ${open.seq} 步待派发——接管后续派`;
-  if (steps.length && steps.every(s => s.status === 'done')) return '全部步骤完成——收集关闭（写报告）';
-  if (!steps.length) return '尚无派发记录——接管后按计划续派';
-  return '执行中——等在途步骤收束后收集关闭';
+  if (!w.steps) return '计划就绪——接管后按步骤派发';
+  if ((w.done_steps || 0) >= w.steps) return '全部步骤完成——收集关闭（写报告）';
+  if (w.attempts) return '有步骤未完成——在详情定位未竟步骤后续派或处置放弃';
+  return '等待接管派发';
 }
 function workTable(list) {
   /* H18 工作单列表（FE-POLISH 轮2）：前置工作目标+阻断/下一步；尝试/任期/创建/
