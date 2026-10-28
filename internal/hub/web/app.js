@@ -416,6 +416,10 @@ function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
   el.innerHTML = html;
   [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
+  /* 分区 one-shot 淡入（FE-POLISH B4，2026-10-29）：触发被缓存 diff 天然门控——
+   * 数据没变不进本函数，轮询不重放；打开抽屉首轮建壳填充即全分区一次性淡入。
+   * 动画在容器不在子节点，details 开合回放不受影响；reduced-motion 由 CSS 降级。 */
+  el.classList.remove('zone-in'); void el.offsetWidth; el.classList.add('zone-in');
 }
 function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
   let touched = false;
@@ -905,6 +909,7 @@ async function pollTick() {
   try {
     let changed = await loadAll();
     refreshInbox();   // 铃铛未读数（独立 DOM 通道，不经 render；失败静默下轮再试）
+    updateSessionLeft();   // 会话临近过期提醒门控（B8：先比后写，无变化不碰 DOM）
     if (S.workDrawer) fetchWorkDetail();   // 工作单抽屉轮询同步（分区 diff，稳定 DOM）
     if (S.C.view === 'result' && S.C.batch) {
       const r = await api('GET', '/api/v1/control-operations/' + encodeURIComponent(S.C.batch.batch_id));
@@ -980,7 +985,7 @@ function render() {
 }
 function renderChrome() {
   $('#logout').hidden = !S.authed;
-  $('#session-left').textContent = S.authed ? '会话剩余 ' + humanLeft() : '';
+  updateSessionLeft();
   const bell = document.getElementById('notify-bell');
   if (bell) {
     bell.hidden = !S.authed;   // 铃铛只在登录态显示；面板随登出/会话失效收起
@@ -996,6 +1001,26 @@ function humanLeft() {
   const h = Math.floor(ms / 3.6e6), m = Math.floor((ms % 3.6e6) / 6e4);
   return h > 0 ? `${h} 小时 ${m} 分` : `${m} 分钟`;
 }
+/* updateSessionLeft 会话剩余时间门控（FE-POLISH B8 保守版降噪，2026-10-29）：
+ * 常驻展示撤除，仅临近过期（<10 分钟）显示提醒（#session-left.expiring，heat 色）；
+ * 其余时刻隐藏。先比后写（无变化不碰 DOM），pollTick 每轮调用保证门控窗口及时
+ * 亮起（render 只在数据变化时触发，不依赖它）；无 expAt（reload 恢复）不显示，
+ * 服务端 401 为权威兜底。 */
+function updateSessionLeft() {
+  const left = $('#session-left');
+  if (!left) return;
+  const ms = S.authed && S.expAt ? S.expAt - Date.now() : Infinity;
+  if (ms >= 10 * 60 * 1000) {
+    if (!left.hidden || left.textContent) { left.hidden = true; left.classList.remove('expiring'); left.textContent = ''; }
+    return;
+  }
+  const txt = '会话剩余 ' + humanLeft();
+  if (left.hidden || left.textContent !== txt) {
+    left.hidden = false;
+    left.classList.add('expiring');
+    left.textContent = txt;
+  }
+}
 function shell(inner) {
   const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];
   const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1，见 pendingReviewCount 注）
@@ -1003,7 +1028,7 @@ function shell(inner) {
   <div class="workspace"><small>协作网 · 管理员</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
     `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small>(${nr})</small>` : ''}</button>`).join('')}</nav>
-  <div class="aside-bottom">中心端 · 登记与监管<br>任务执行在各台机器本机</div>
+  <div class="aside-bottom">中心端 · 登记与监管</div>   <!-- B8 meta 降噪：执行位置一句与顶栏 deploy 重复，撤 -->
   </aside><main id="main">${inner}${versionFoot()}</main></div>`;
 }
 /* versionFoot 页脚版本（TASK-maturity-version-var，双端同构：main 末尾纯文本
@@ -1072,6 +1097,27 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg;
   t.classList.add('show');
   clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.classList.remove('show'); }, 3400);
+}
+/* busyBtn/idleBtn 写动作进行时样板（FE-POLISH B6，2026-10-29）：「disabled+换文案」
+ * 手工模式散布十余处，恢复文案全靠各处手写——已有一处真 bug（doLogin 失败恢复把
+ * 「用令牌登录」写成「进入 Hub 中心端 →」）。助手锁宽防抖（进行时文案长短变化不抖
+ * 布局），原文案记忆在 dataset.label、恢复取记忆值；.loading 保持可读（不吃 disabled
+ * 灰）。纯函数不引入框架；spinner 复用既有 .spin。 */
+function busyBtn(btn, label) {
+  if (!btn) return;
+  btn.dataset.label = btn.textContent;
+  btn.style.minWidth = btn.offsetWidth + 'px';
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.innerHTML = '<span class="spin"></span>' + esc(label);
+}
+function idleBtn(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.classList.remove('loading');
+  if (btn.dataset.label) btn.textContent = btn.dataset.label;
+  delete btn.dataset.label;
+  btn.style.minWidth = '';
 }
 function terminal(st) { return TERMINAL.has(st); }   // 终态集来自抽屉展示词典 shared block
 function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c[t.status] || 0) + 1; return c; }
@@ -1172,7 +1218,7 @@ async function doLogin(form) {
   const token = $('#token').value.trim();
   const fb = $('#login-feedback'), btn = form.querySelector('button[type=submit]');
   if (!token) { fb.innerHTML = '<span class="warn-text">请输入访问令牌</span>'; return; }
-  btn.disabled = true; btn.textContent = '验证中…';
+  busyBtn(btn, '验证中…');
   fb.textContent = '正在验证令牌…';
   try {
     const r = await api('POST', '/api/v1/login', { token }, { isLogin: true });
@@ -1202,7 +1248,7 @@ async function doLogin(form) {
       ? warnNotice('结果未知 · 未收到服务器应答', '检查 hub 是否在运行、地址是否正确后重试；登录失败不会产生副作用。')
       : warnNotice('登录失败', '请稍后重试。');
   }
-  btn.disabled = false; btn.textContent = '进入 Hub 中心端 →';
+  idleBtn(btn);   // 恢复取 dataset.label（原文案「用令牌登录」）——修失败后文案永久漂移的 B6 真 bug
 }
 
 /* ---------- 总览 ---------- */
@@ -2622,7 +2668,7 @@ async function saveNotifyChannel() {
   if (S.busy.has('notify-save')) return;
   S.busy.add('notify-save');
   const btn = document.querySelector('[data-act="notify-save"]');
-  if (btn) { btn.disabled = true; btn.textContent = editing ? '保存中…' : '创建中…'; }
+  busyBtn(btn, editing ? '保存中…' : '创建中…');
   try {
     const r = editing
       ? await api('PUT', '/api/v1/notify/channels/' + encodeURIComponent(f.id), f).catch(() => null)
@@ -2746,9 +2792,13 @@ function groupMsgHtml(m) {
    * 结束群无入口）；能力目录为空时隐藏（没有可派发的执行者）。 */
   const g = S.groups.find(x => x.group_id === S.groupId);
   const canTask = g && g.status !== 'concluded' && (m.kind === 'user' || m.kind === 'agent') && S.directory.length;
+  /* FINAL 收敛候选（FE-POLISH B7 裁决 A，2026-10-29）：金色降浓度——去底色，只留
+   * 细竖线（css .msg-final）与「收敛候选 · 待定版」文字标识（.final-tag）。孤例不
+   * 构成先例，不扩散。 */
+  const isFinal = m.kind === 'agent' && m.body.trim().startsWith('FINAL:');
   return `<li class="msg ${cls}" data-seq="${m.seq}">
   <div class="msg-meta"><b>${esc(m.from)}</b> · ${esc(GROUP_KINDS[m.kind] || m.kind)} · ${esc(fmtFull(m.created_at))}${canTask ? ` · <button class="link" data-act="task-from-msg" data-seq="${m.seq}">转任务</button>` : ''}</div>
-  <div class="msg-body${m.kind === 'agent' && m.body.trim().startsWith('FINAL:') ? ' msg-final' : ''}">${esc(m.body)}</div>
+  <div class="msg-body${isFinal ? ' msg-final' : ''}">${isFinal ? '<span class="final-tag">收敛候选 · 待定版</span>' : ''}${esc(m.body)}</div>
   </li>`;
 }
 function groupDetailPage() {
@@ -3385,16 +3435,17 @@ const ACT = {
   'notify-test': async b => {
     if (S.busy.has('notify-test:' + b.dataset.id)) return;
     S.busy.add('notify-test:' + b.dataset.id);
-    b.disabled = true; b.textContent = '发送中…';
+    busyBtn(b, '发送中…');
     try {
       const r = await api('POST', '/api/v1/notify/channels/' + encodeURIComponent(b.dataset.id) + '/test', {}).catch(() => null);
       if (r && r.code === 200 && r.data) {
         if (r.data.ok) { toast(`测试消息已发出 · 「${b.dataset.name}」投递成功`); refreshInbox(); }
         else toast(`投递失败：${r.data.error || '原因未知'}`);
       } else toast('测试请求失败：' + (r ? errLine(r.data) : '网络异常'));
+      await loadNotifyChannels();   // P0-3：测试结果同落投递状态，卡片事实行随刷新（用户正盯着这张卡）
     } finally {
       S.busy.delete('notify-test:' + b.dataset.id);
-      b.disabled = false; b.textContent = '发测试';
+      idleBtn(b);
     }
   },
   'notify-del': b => openLayerPlain(`${modalHead('删除通知渠道 · ' + esc(b.dataset.name))}<div class="notice warn">删除后此渠道不再收到任何通知（不可恢复）。后续可在「设置 → 通知」重新添加。</div><div class="actions spaced">${button('确认删除', 'notify-del-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`, true),
@@ -3402,7 +3453,7 @@ const ACT = {
     const key = 'notify-del:' + b.dataset.id;
     if (S.busy.has(key)) return;
     S.busy.add(key);
-    b.disabled = true; b.textContent = '删除中…';
+    busyBtn(b, '删除中…');
     try {
       const r = await api('DELETE', '/api/v1/notify/channels/' + encodeURIComponent(b.dataset.id)).catch(() => null);
       if (r && r.code === 200) {
@@ -3413,6 +3464,7 @@ const ACT = {
       } else toast('删除失败：' + (r ? errLine(r.data) : '网络异常'));
     } finally {
       S.busy.delete(key);
+      idleBtn(b);   // 失败路径按钮必须恢复（B6 顺带修：原实现失败分支不还原）
     }
   },
   /* ---------- 站内通知铃铛 ---------- */
@@ -3439,7 +3491,7 @@ const ACT = {
     const key = 'token-revoke:' + b.dataset.id;
     if (S.busy.has(key)) return;   // 忙态键在状态层：重绘重建按钮也拦得住（P0.5）
     S.busy.add(key);
-    b.disabled = true; b.textContent = '撤销中…';
+    busyBtn(b, '撤销中…');
     try {
       const r = await api('DELETE', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id)).catch(() => null);
       if (r && r.code === 200) {
@@ -3447,7 +3499,7 @@ const ACT = {
       } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
     } finally {
       S.busy.delete(key);
-      b.disabled = false; b.textContent = '确认撤销';
+      idleBtn(b);
     }
   },
   /* ---------- 群聊动作（GROUP-RFC 六） ---------- */
@@ -3464,7 +3516,7 @@ const ACT = {
     const members = box ? pickerChecked(box).agents : [];
     if (!members.length) { toast('请勾选成员智能体'); S.busy.delete('group-create'); return; }
     const btn = document.querySelector('[data-act="group-create"]');
-    if (btn) { btn.disabled = true; btn.textContent = '创建中…'; }
+    busyBtn(btn, '创建中…');
     try {
       const body = host ? { goal, members, jev_host: true } : { goal, members };
       const r = await api('POST', '/api/v1/groups', body).catch(() => null);
@@ -3474,7 +3526,7 @@ const ACT = {
         render();
         toast(host ? '群已创建，主持人 jev 将逐轮点名成员发言 —— 进入群详情查看轮转进展' : '群已创建 —— 下一步：点击群卡片进入讨论');
       } else {
-        if (btn) { btn.disabled = false; btn.textContent = '创建群聊'; }
+        idleBtn(btn);
         toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
       }
     } finally { S.busy.delete('group-create'); }
@@ -3490,7 +3542,7 @@ const ACT = {
     if (!agent) { toast('请先选择该机器上的执行智能体'); return; }
     if (S.busy.has('task-from-msg')) return;
     S.busy.add('task-from-msg');
-    b.disabled = true; b.textContent = '派发中…';
+    busyBtn(b, '派发中…');
     try {
       const r = await api('POST', '/api/v1/control-operations', {
         agent, targets: [node], input: { args: [], stdin: desc }, group_ref: S.groupId,
@@ -3509,7 +3561,7 @@ const ACT = {
         toast('群已结束，不能再转任务');
       } else {
         toast('派发失败：' + (r ? errLine(r.data) : '网络异常'));
-        b.disabled = false; b.textContent = '派发任务';
+        idleBtn(b);
       }
     } finally { S.busy.delete('task-from-msg'); }
   },
@@ -3525,7 +3577,7 @@ const ACT = {
     const key = 'group-close:' + b.dataset.id;
     if (S.busy.has(key)) return;
     S.busy.add(key);
-    b.disabled = true; b.textContent = '关闭中…';
+    busyBtn(b, '关闭中…');
     try {
       const r = await api('POST', '/api/v1/groups/' + encodeURIComponent(b.dataset.id) + '/close', { by: 'admin' }).catch(() => null);
       if (r && r.code === 200) {
@@ -3535,7 +3587,7 @@ const ACT = {
         render();
         toast('群已结束 · 时间线保留，不能再发言');
       } else {
-        b.disabled = false; b.textContent = '确认关闭';
+        idleBtn(b);
         toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
       }
     } finally { S.busy.delete(key); }
@@ -3553,7 +3605,7 @@ const ACT = {
     const key = 'cancel:' + b.dataset.id;
     if (S.busy.has(key)) return;   // 800ms 在途窗口内连点只发一次请求（FE-09）
     S.busy.add(key);
-    b.disabled = true; b.textContent = '取消中…';
+    busyBtn(b, '取消中…');
     try {
       const r = await api('POST', '/api/v1/tasks/' + encodeURIComponent(b.dataset.id) + '/cancel', { reason: '控制台手动取消' }).catch(() => null);
       if (r && (r.code === 202 || r.code === 200)) {
@@ -3568,7 +3620,7 @@ const ACT = {
       } else toast('取消失败：' + (r ? errLine(r.data) : '网络异常'));
     } finally {
       S.busy.delete(key);
-      b.disabled = false; b.textContent = '确认取消任务';   // 失败路径按钮必须恢复（FE-09）
+      idleBtn(b);   // 失败路径按钮必须恢复（FE-09）
     }
   },
   // 诊断日志/失败原因 查看原文·渲染切换（t20261023-969e）：状态落 S.drawer 后走
@@ -3628,7 +3680,7 @@ const ACT = {
     const key = `artifact:${id}:${idx}`;
     if (S.busy.has(key)) return;
     S.busy.add(key);
-    b.disabled = true; b.textContent = '取回中…';
+    busyBtn(b, '取回中…');
     try {
       const resp = await fetch(`/api/v1/tasks/${encodeURIComponent(id)}/artifacts/${idx}`, { credentials: 'same-origin' });
       if (resp.status === 401) { sessionExpired(); return; }
@@ -3650,7 +3702,7 @@ const ACT = {
       toast('结果未知 · 网络中断：文件可能未下载完整，请重试');
     } finally {
       S.busy.delete(key);
-      b.disabled = false; b.textContent = '取回';
+      idleBtn(b);
     }
   },
   review: async b => {

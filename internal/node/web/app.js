@@ -324,6 +324,10 @@ function drawerZoneSwap(el, html) {
   const open = [...el.querySelectorAll('details')].map(d => d.open);
   el.innerHTML = html;
   [...el.querySelectorAll('details')].forEach((d, i) => { if (open[i]) d.open = true; });
+  /* 分区 one-shot 淡入（FE-POLISH B4，2026-10-29）：触发被缓存 diff 天然门控——
+   * 数据没变不进本函数，轮询不重放；打开抽屉首轮建壳填充即全分区一次性淡入。
+   * 动画在容器不在子节点，details 开合回放不受影响；reduced-motion 由 CSS 降级。 */
+  el.classList.remove('zone-in'); void el.offsetWidth; el.classList.add('zone-in');
 }
 function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
   let touched = false;
@@ -929,8 +933,8 @@ async function loadCfg() {
 // 不再丢提交；本处保持不 GET 只是保护编辑中副本，与后端口径互补。
 // t20261023-a4b1：label 参数区分入口按钮文案（表格「保存全部」/抽屉「保存」），
 // 协议不变；返回是否成功——抽屉入口凭它决定关抽屉（被拒保持打开，副本保留）。
-async function cfgSave(btn, label = '保存全部（校验+写盘）') {
-  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+async function cfgSave(btn) {
+  busyBtn(btn, '保存中…');
   try {
     const r = await api('PUT', '/api/v1/local/config', { agents: S.cfg.agents });
     if (r.code === 200) {
@@ -955,7 +959,7 @@ async function cfgSave(btn, label = '保存全部（校验+写盘）') {
   } catch (e) {
     if (!e?.unauthorized) alert('网络层失败：结果未知，请刷新后从文件重载核对');
     return false;
-  } finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
+  } finally { idleBtn(btn); }
 }
 
 // cfgReload 从文件重载（丢弃未保存编辑，服务端重读走同一校验/分类链）。
@@ -975,7 +979,7 @@ async function cfgReload(btn) {
 
 // cfgRestart 应用并重启（结构性变更收口）：应答先回，进程延时退出靠保活拉起。
 async function cfgRestart(btn) {
-  if (btn) { btn.disabled = true; btn.textContent = '重启中…'; }
+  busyBtn(btn, '重启中…');
   try {
     const r = await api('POST', '/api/v1/local/restart');
     if (r.code === 200) {
@@ -985,7 +989,7 @@ async function cfgRestart(btn) {
       // 保活拉起后自动恢复：6s/12s 两次补拉 + 5s 轮询兑底
       setTimeout(() => { S.cfg.loaded = false; loadCfg(); }, 6000);
       setTimeout(() => { S.cfg.loaded = false; loadCfg(); }, 12000);
-    } else { alert('重启失败：' + errLine(r.data)); if (btn) { btn.disabled = false; btn.textContent = '应用并重启'; } }
+    } else { alert('重启失败：' + errLine(r.data)); idleBtn(btn); }
   } catch (e) {
     if (!e?.unauthorized) alert('网络层失败：进程可能已退出，请稍后刷新');
   }
@@ -1113,7 +1117,7 @@ function closeCfgDrawer(restore) {
 async function cfgDrawerSave(btn) {
   cfgSaving = true;
   let ok = false;
-  try { ok = await cfgSave(btn, '保存（校验+写盘）'); } finally { cfgSaving = false; }
+  try { ok = await cfgSave(btn); } finally { cfgSaving = false; }
   if (ok || !S.authed) closeCfgDrawer(false); // 401 已回令牌门：抽屉随会话收起
 }
 function cfgDrawerView(a, i) {
@@ -1133,7 +1137,7 @@ function cfgDrawerView(a, i) {
     </div>
     <div class="cfg-drawer-foot">
       ${button('取消', 'cfg-cancel', '')}
-      <span class="actions">${button('删除此 agent', `cfg-del:${i}`, 'off-btn')}${button('保存（校验+写盘）', 'cfg-save-row', 'primary')}</span>
+      <span class="actions">${button('删除此 agent', `cfg-del:${i}`, 'danger')}${button('保存（校验+写盘）', 'cfg-save-row', 'primary')}</span>
     </div>`;
 }
 /* orchNote 智行管家声明提示：生效/待同步同 exposed 三态；冲突（hub 汇聚发现
@@ -1355,7 +1359,7 @@ function notifyChannelCardHtml(ch) {
     <div class="chan-actions">
       ${button('发测试', 'notify-test:' + esc(ch.id), '', '', `data-name="${esc(ch.name)}"`)}
       ${button('编辑', 'notify-edit:' + esc(ch.id), '')}
-      ${button('删除', 'notify-del:' + esc(ch.id), 'off-btn', '', `data-name="${esc(ch.name)}"`)}
+      ${button('删除', 'notify-del:' + esc(ch.id), 'danger', '', `data-name="${esc(ch.name)}"`)}
     </div>
     <div class="chan-meta">订阅：${esc(ev)}${meta ? ' · ' + esc(meta) : ''} · 创建于 ${esc(timeFull(ch.created_at))}${ch.enabled ? '' : ' · 已停用'}</div>
     ${deliveryLineHtml(ch)}
@@ -1370,7 +1374,7 @@ async function saveNotifyChannel() {
   if (!f.name) { toast('请先填写渠道名称'); $('#nf-name')?.focus(); return; }
   const editing = !!f.id;
   const btn = document.querySelector('[data-act="notify-save"]');
-  if (btn) { btn.disabled = true; btn.textContent = editing ? '保存中…' : '创建中…'; }
+  busyBtn(btn, editing ? '保存中…' : '创建中…');
   try {
     const r = editing
       ? await api('PUT', '/api/v1/local/notify/channels/' + encodeURIComponent(f.id), f).catch(() => null)
@@ -1382,9 +1386,8 @@ async function saveNotifyChannel() {
       toast(editing ? '渠道已更新' : '渠道已创建 · 点「发测试」验证一下');
     } else {
       toast((editing ? '保存失败' : '创建失败') + '：' + (r ? errLine(r.data) : '网络异常'));
-      if (btn) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; }
     }
-  } finally { if (btn && $('#notify-form')) { btn.disabled = false; btn.textContent = editing ? '保存修改' : '创建渠道'; } }
+  } finally { if ($('#notify-form')) idleBtn(btn); }
 }
 /* 通知渠道编辑弹层基建（居中 modal，与 hub openLayerPlain 同形态——双端一致三层
  * 操作逻辑层，2026-10-26 notify-polish 改动三：右侧抽屉形态退役；遮罩关闭=取消
@@ -1427,18 +1430,20 @@ async function testNotifyChannel(id, btn) {
     } else {
       toast('测试请求失败 · ' + (r ? errLine(r.data) : '网络异常'));
     }
+    await loadNotifyChannels();   // P0-3：测试结果同落投递状态，卡片事实行随刷新（与 hub 同口径）
   } finally { btn.disabled = false; }
 }
-async function deleteNotifyChannel(id, name) {
-  if (!confirm(`确定删除通知渠道「${name}」？删除后不再收到该渠道的通知。`)) return;
-  const r = await api('DELETE', '/api/v1/local/notify/channels/' + encodeURIComponent(id)).catch(() => null);
-  if (r && r.code === 200) {
-    await loadNotifyChannels();
-    paintNotifySection();
-    toast('渠道已删除');
-  } else {
-    toast('删除失败 · ' + (r ? errLine(r.data) : '网络异常'));
-  }
+function deleteNotifyChannel(id, name) {
+  confirmModal('删除通知渠道 · ' + esc(name), `删除后不再收到「${esc(name)}」的任何通知（不可恢复）；后续可重新添加。`, '确认删除', async () => {
+    const r = await api('DELETE', '/api/v1/local/notify/channels/' + encodeURIComponent(id)).catch(() => null);
+    if (r && r.code === 200) {
+      await loadNotifyChannels();
+      paintNotifySection();
+      toast('渠道已删除');
+    } else {
+      toast('删除失败 · ' + (r ? errLine(r.data) : '网络异常'));
+    }
+  });
 }
 
 /* ---------- 页面③：派任务·我的任务（旅程②消费者） ---------- */
@@ -1610,59 +1615,61 @@ async function wizApply() {
   if (v.hub !== S.wiz.preview.hub_url || v.node !== S.wiz.preview.node_id) {
     S.wiz.preview = null; S.wiz.stage = 'failed'; S.wiz.msg = '连接串在预览后被修改，请重新预览'; render(); return;
   }
-  if (!confirm('保存将写入 node.yaml 并重启 node 进入组网模式，确认保存？')) return;
-  S.wiz.stage = 'saving'; render();
-  try {
-    const r = await api('POST', '/api/v1/local/setup/apply', { join_string: S.wiz.join });
-    if (r.code === 200) {
-      S.wiz.stage = 'done'; S.wiz.written = r.data?.written || '';
-      toast('node.yaml 已写入，节点即将重启');
-      // 后端 1.5s 后退出重启（setupRestartDelay）+ 进程拉起窗口；主动补两刷，
-      // 错过由 5s 轮询兜底
-      setTimeout(() => { S.snap = ''; pollTick(); }, 6000);
-      setTimeout(() => { S.snap = ''; pollTick(); }, 12000);
-    } else {
-      S.wiz.stage = 'failed'; S.wiz.msg = errLine(r.data);
+  confirmModal('保存并重启', '将写入 node.yaml 并重启 node 进入组网模式。', '保存并重启', async () => {
+    S.wiz.stage = 'saving'; render();
+    try {
+      const r = await api('POST', '/api/v1/local/setup/apply', { join_string: S.wiz.join });
+      if (r.code === 200) {
+        S.wiz.stage = 'done'; S.wiz.written = r.data?.written || '';
+        toast('node.yaml 已写入，节点即将重启');
+        // 后端 1.5s 后退出重启（setupRestartDelay）+ 进程拉起窗口；主动补两刷，
+        // 错过由 5s 轮询兜底
+        setTimeout(() => { S.snap = ''; pollTick(); }, 6000);
+        setTimeout(() => { S.snap = ''; pollTick(); }, 12000);
+      } else {
+        S.wiz.stage = 'failed'; S.wiz.msg = errLine(r.data);
+      }
+    } catch (e) {
+      if (e.unauthorized) return;
+      S.wiz.stage = 'failed';
+      S.wiz.msg = e.network ? '网络层失败，是否已写入不确定——勿重复提交，稍后刷新本页确认' : '保存失败';
     }
-  } catch (e) {
-    if (e.unauthorized) return;
-    S.wiz.stage = 'failed';
-    S.wiz.msg = e.network ? '网络层失败，是否已写入不确定——勿重复提交，稍后刷新本页确认' : '保存失败';
-  }
-  render();
+    render();
+  });
 }
 
-async function primeRotate(btn) {
-  if (!confirm('轮换管家凭证？旧凭证将立即失效；管家宿主配置若可自动接线会随轮换刷新（重连生效），否则需改配新凭证（SWARM_NODE_PRIME_TOKEN）。')) return;
-  if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
-  const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
-  try {
-    const r = await api('POST', '/api/v1/local/prime/rotate');
-    if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回内存
-    if (r.code === 200) {
-      S.primeNew = r.data?.prime_token || '';
-      S.primeNewWire = r.data?.wired ? { target: r.data?.wired_target || '' } : null;
-      toast(r.data?.wired ? '已轮换 · 新凭证已自动写入管家宿主配置' : '已轮换 · 新凭证仅此一次展示，请立即复制');
-    } else {
-      toast('轮换失败 · ' + errLine(r.data));
+function primeRotate(btn) {
+  confirmModal('轮换管家凭证', '旧凭证将立即失效；管家宿主配置若可自动接线会随轮换刷新（重连生效），否则需改配新凭证（SWARM_NODE_PRIME_TOKEN）。', '确认轮换', async () => {
+    if (btn) btn.disabled = true; // 300ms 反馈：立即锁按钮
+    const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
+    try {
+      const r = await api('POST', '/api/v1/local/prime/rotate');
+      if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回内存
+      if (r.code === 200) {
+        S.primeNew = r.data?.prime_token || '';
+        S.primeNewWire = r.data?.wired ? { target: r.data?.wired_target || '' } : null;
+        toast(r.data?.wired ? '已轮换 · 新凭证已自动写入管家宿主配置' : '已轮换 · 新凭证仅此一次展示，请立即复制');
+      } else {
+        toast('轮换失败 · ' + errLine(r.data));
+      }
+    } catch (e) {
+      if (e.unauthorized) return;
+      toast(e.network ? '本机 API 不可达' : '轮换失败');
     }
-  } catch (e) {
-    if (e.unauthorized) return;
-    toast(e.network ? '本机 API 不可达' : '轮换失败');
-  }
-  render();
-  if (btn && document.contains(btn)) btn.disabled = false;
+    render();
+    if (btn && document.contains(btn)) btn.disabled = false;
+  });
 }
 
-// primeDeclare 网页钦定（方案 3.2.1 UX 收口）：confirm（含旧凭证失效警示）→
+// primeDeclare 网页钦定（方案 3.2.1 UX 收口）：confirmModal 确认（含旧凭证失效警示）→
 // declare → 钦定完成视图（一次性凭证 + MCP 配置片段）。成功后主动刷新 status
 // （prime_agent 即时反映，不等 5s 轮询）。
-async function primeDeclare(btn) {
+function primeDeclare(btn) {
   const name = $('#prime-select')?.value;
   if (!name) { toast('先选择一个本机 agent'); return; }
-  if (!confirm(`钦定「${name}」为本机管家？旧管家凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`)) return;
+  const run = async () => {
   S.primeDecl.busy = true;
-  if (btn) { btn.disabled = true; btn.textContent = '钦定中…'; }
+  busyBtn(btn, '钦定中…');
   const epoch = S.sessionEpoch; // 收敛 3：请求发起时捕获会话代次
   try {
     const r = await api('POST', '/api/v1/local/prime/declare', { prime_agent: name });
@@ -1685,10 +1692,12 @@ async function primeDeclare(btn) {
   }
   S.primeDecl.busy = false;
   render();
+  };
+  confirmModal('钦定本机管家', `钦定「${esc(name)}」为本机管家：旧管家凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`, '确认钦定', run);
 }
 
-async function netDisconnect(btn) {
-  if (!confirm('断开组网并重启进入 standalone（本机自治）？\n\nhub 离线暂存里未送达的任务将留在 hub 等过期；本机历史任务不受影响，本机派单照常可用。')) return;
+function netDisconnect(btn) {
+  confirmModal('断开组网', '重启进入 standalone（本机自治）：hub 离线暂存里未送达的任务将留在 hub 等过期；本机历史任务不受影响，本机派单照常可用。', '确认断开', async () => {
   if (btn) btn.disabled = true;
   try {
     const r = await api('POST', '/api/v1/local/setup/disconnect');
@@ -1704,6 +1713,7 @@ async function netDisconnect(btn) {
     toast(e.network ? '本机 API 不可达' : '断开失败');
   }
   if (btn && document.contains(btn)) btn.disabled = false;
+  });
 }
 
 async function copyPrimeToken() {
@@ -1899,14 +1909,61 @@ async function copyDiagnostics() {
   }
 }
 
-/* ---------- toast ---------- */
+/* ---------- toast（FE-POLISH B3，2026-10-29：移植 hub .show 双向过渡） ----------
+ * hidden 属性退役（[hidden]{display:none} 杀死过渡）；出现/消失走 .show 类，
+ * 单实例 clearTimeout 与 hub toast() 同机制。底部黑条与位置属 SPEC 六.五白名单
+ * 差异不动，只统一运动机制；reduced-motion 降级见 node style.css 媒体查询。 */
 let toastTimer = null;
 function toast(msg) {
   const el = $('#toast');
   el.textContent = msg;
-  el.hidden = false;
+  el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 3200);
+  toastTimer = setTimeout(() => { el.classList.remove('show'); }, 3200);
+}
+/* busyBtn/idleBtn 写动作进行时样板（FE-POLISH B6，与 hub 同实现）：原文案记忆在
+ * dataset.label，恢复取记忆值；锁宽防抖；.loading 保持可读。spinner 复用 .spin
+ * （node style.css 本批补齐定义）。 */
+function busyBtn(btn, label) {
+  if (!btn) return;
+  btn.dataset.label = btn.textContent;
+  btn.style.minWidth = btn.offsetWidth + 'px';
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.innerHTML = '<span class="spin"></span>' + esc(label);
+}
+function idleBtn(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.classList.remove('loading');
+  if (btn.dataset.label) btn.textContent = btn.dataset.label;
+  delete btn.dataset.label;
+  btn.style.minWidth = '';
+}
+/* ---------- 确认弹层（FE-POLISH B5，2026-10-29：window.confirm 全量退役） ----------
+ * hub slim modal 同形态（居中 modal + danger 描边确认键 + modalHead 同词 ×）。
+ * confirmModal(title, bodyHtml, okLabel, onOk)：onOk 在用户确认后执行（闭包自带
+ * 上下文），取消/遮罩/× 即弃（confirmCb 置空）。node #layer 直清家族（SPEC 六.五
+ * 白名单）：无出场后生命周期，关闭=清层。可逆操作不进此层（不做清单 16）。 */
+let confirmCb = null;
+function confirmModal(title, bodyHtml, okLabel, onOk) {
+  if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
+  if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
+  confirmCb = onOk;
+  $('#layer').innerHTML = `<div class="overlay"><section class="modal slim" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${modalHead(title)}
+  <div class="notice warn">${bodyHtml}</div>
+  <div class="actions spaced"><button type="button" class="danger" data-act="confirm-ok">${esc(okLabel)}</button>${button('取消', 'close', 'link')}</div></section></div>`;
+  $('#layer [role=dialog]')?.focus();
+  playDrawerOpen();
+  $('#layer').addEventListener('click', cfMaskClose);
+}
+function cfMaskClose(e) {
+  if (!$('#confirm-modal')) return;   // 弹层已关后残留监听不动作（与 nfMaskClose 同机制）
+  if (e.target.classList.contains('overlay')) closeConfirm();
+}
+function closeConfirm() {
+  confirmCb = null;
+  $('#layer').innerHTML = '';
 }
 
 /* ---------- 事件委托 ---------- */
@@ -1948,11 +2005,12 @@ document.addEventListener('click', e => {
         if (cfgSaving) return; // 保存 PUT 在途禁删：splice 会让 cfgEdit.idx 错位，抽屉续改将写串行
         const di = parseInt(arg, 10);
         if (!Number.isNaN(di) && S.cfg.agents[di]) {
-          if (confirm(`确定删除 agent「${S.cfg.agents[di].name}」？保存后写入 node.yaml（结构性变更需重启生效）。`)) {
-            S.cfg.agents.splice(di, 1);
-            if (cfgEdit) closeCfgDrawer(false); // 抽屉内删除：行已移除即关抽屉（closeCfgDrawer 内含 render）
-            else render();
-          }
+          confirmModal('删除 agent · ' + esc(S.cfg.agents[di].name || '（未命名）'),
+            `从能力配置移除「${esc(S.cfg.agents[di].name || '（未命名）')}」；保存后写入 node.yaml（结构性变更需重启生效）。`, '确认删除', () => {
+              S.cfg.agents.splice(di, 1);
+              if (cfgEdit) closeCfgDrawer(false); // 抽屉内删除：行已移除即关抽屉（closeCfgDrawer 内含 render）
+              else render();
+            });
         }
         return;
       }
@@ -1965,19 +2023,26 @@ document.addEventListener('click', e => {
         return;
       }
       case 'notify-save': saveNotifyChannel(); return;
+      case 'confirm-ok': {   // 确认弹层（B5）：先关层再执行回调——回调可能开新层/重绘
+        const cb = confirmCb;
+        closeConfirm();
+        if (cb) cb();
+        return;
+      }
       case 'close':   // shared modalHead ×/取消 同词关闭动作（与 hub 同词，notify-polish 改动三）；守护防误清其他层
         if ($('#notify-modal')) closeNotifyForm();
+        else if ($('#confirm-modal')) closeConfirm();
         return;
       case 'notify-toggle': toggleNotifyChannel(arg, btn); return;
       case 'notify-test': testNotifyChannel(arg, btn); return;
       case 'notify-del': deleteNotifyChannel(arg, btn.dataset.name || arg); return;
       case 'cfg-reload': {
-        if (!confirm('放弃当前编辑，从 node.yaml 文件重新读取？（未保存的修改将丢失）')) return;
-        cfgReload(btn); return;
+        confirmModal('从文件重载', '放弃当前编辑，从 node.yaml 重新读取（未保存的修改将丢失）。', '放弃并重载', () => cfgReload(btn));
+        return;
       }
       case 'cfg-restart': {
-        if (!confirm('应用并重启 node？在途任务将被中断并进入「等你确认」，确认继续？')) return;
-        cfgRestart(btn); return;
+        confirmModal('应用并重启 node', '在途任务将被中断并进入「等你确认」。', '确认重启', () => cfgRestart(btn));
+        return;
       }
       case 'logout':
         localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = '';

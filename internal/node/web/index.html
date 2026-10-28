@@ -11,12 +11,12 @@
 <header class="topbar">
 <div class="brand"><img class="brand-logo" src="/logo.svg" alt="" width="30" height="30">SwarmMind<span class="chip"> 本机</span></div>
 <div id="conn-chip" class="badge offline" hidden>离线</div>
-<div class="deploy">本机控制台（127.0.0.1:8445 回环）：本机 agent 的开放开关、派任务与我的任务、运行状态。</div>
+<div class="deploy">本机 agent 的开放开关、派任务与我的任务、运行状态。</div>   <!-- B8 meta 降噪：固定回环地址说明退役（令牌门页 footer 保留「仅本机回环可达」） -->
 <div class="top-right"><span id="who" class="muted small"></span><button id="logout" class="link" hidden>换令牌</button></div>
 </header>
 <div id="app"><main><div class="card login"><h1>SwarmMind Node</h1><p class="muted">正在连接本机 API…</p></div></main></div>
 <div id="layer"></div>
-<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>   <!-- B3：hidden 退役（display:none 杀死过渡），显隐走 .show 类 -->
 <script src="/app.js"></script>
 </body>
 </html>

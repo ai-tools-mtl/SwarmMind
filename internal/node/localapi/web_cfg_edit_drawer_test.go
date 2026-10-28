@@ -81,13 +81,15 @@ func TestWebCfgEditDrawer(t *testing.T) {
 		"<div class=\"overlay drawer-overlay\"><div class=\"drawer\" id=\"cfg-drawer\">",
 		// 标题口径
 		`编辑 agent · `,
-		// 底部操作条三键 + 右上 ×：取消（ghost/默认档）｜删除此 agent（off-btn，沿用 cfg-del 协议）｜保存（primary）
+		// 底部操作条三键 + 右上 ×：取消（ghost/默认档）｜删除此 agent（danger 危险
+		// 描边——FE-POLISH B5：off-btn 脱离 toggle 语境无样式，删除动作统一危险形态）｜保存（primary）
 		`button('取消', 'cfg-cancel', '')`,
-		"button('删除此 agent', `cfg-del:${i}`, 'off-btn')",
+		"button('删除此 agent', `cfg-del:${i}`, 'danger')",
 		`button('保存（校验+写盘）', 'cfg-save-row', 'primary')`,
 		`button('×', 'cfg-close', 'close')`,
-		// 保存走同一 PUT 整表协议（label 参数区分「保存全部」文案）
-		`cfgSave(btn, '保存（校验+写盘）')`,
+		// 保存走同一 PUT 整表协议（FE-POLISH B6：恢复文案由 busyBtn 记忆 dataset.label，
+		// label 参数退役——原参数只为失败恢复文案服务）
+		`cfgSave(btn)`,
 		// 表单字段集迁移进抽屉（cfg-form-cols 栅格容器）
 		`<div class="cfg-form-cols">`,
 		// 复选框行标记契约：input 在文字前（.cfg-check flex 同行修复的依赖结构）

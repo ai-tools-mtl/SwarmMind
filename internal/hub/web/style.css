@@ -31,7 +31,10 @@
   --muted:var(--ink-3); --line:var(--hairline); --blue:var(--accent); --orange:var(--heat); --white:var(--surface); --shadow:var(--sh-card);
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:var(--fs-body);line-height:1.6;-webkit-font-smoothing:antialiased;font-optical-sizing:auto}
+/* 等宽数字全局落底（FE-POLISH B1，2026-10-29）：工具界面数字一律 tabular——
+ * 表格 td 已全局 tabular 证明口径成立；消灭徽标计数/时间戳/分页等表外数字宽度跳动。
+ * ID/代码/hash 保持 --mono（可复制技术字符串）；中文说明解除无差别 mono 见 .cap small。 */
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:var(--fs-body);line-height:1.6;-webkit-font-smoothing:antialiased;font-optical-sizing:auto;font-variant-numeric:tabular-nums}
 button,input,select,textarea{font:inherit}button,a,input,select,textarea,summary{outline-offset:4px}
 /* ---- 按钮（草案 B.8）：全站灰 pill，:active 按压反馈；主操作 accent、危险描边 ---- */
 button{cursor:pointer;border:0;background:rgba(0,0,0,.05);color:var(--ink);border-radius:var(--r-pill);height:34px;padding:0 16px;font-weight:500;transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
@@ -43,6 +46,8 @@ button:disabled:active{transform:none}
 /* danger/warning 同一套描边红：红色全站只表达「失败/不可逆」（草案 A.3 拆色依据） */
 .danger,.warning{background:var(--surface);border:1px solid var(--danger-line);color:var(--danger)}
 .danger:hover,.warning:hover{background:var(--danger-bg)}
+/* busy 进行时（FE-POLISH B6）：转圈即反馈，不吃 disabled 的 .48 灰；指针隔离防双击。 */
+button.loading{opacity:1;pointer-events:none}
 a,.link{color:var(--accent);text-decoration:none;cursor:pointer}
 .link{background:transparent;border:0;padding:3px 0;height:auto;border-radius:0;font-weight:inherit}
 .link:hover{text-decoration:underline;background:transparent}
@@ -67,6 +72,9 @@ p{margin-bottom:12px}
 .deploy{font-size:11px;max-width:355px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
 #session-left{font-variant-numeric:tabular-nums}
+/* 会话临近过期提醒（FE-POLISH B8 保守版）：常驻展示撤除，仅 <10 分钟时显示
+ * （updateSessionLeft 门控），heat 提醒色；hidden 属性由 [hidden] 全局规则承担。 */
+#session-left.expiring{color:var(--heat);font-weight:600}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
 /* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
@@ -149,6 +157,13 @@ input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid v
 textarea{resize:vertical;min-height:110px}
 input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring);outline:0}
 input:disabled,textarea:disabled,select:disabled{background:var(--track);color:var(--ink-4)}
+/* 下拉 chrome 精修（FE-POLISH B2，双端同值）：保留原生 select（键盘/读屏免费，
+ * 不自绘），只统一外观——appearance:none + 自绘 chevron（色值写死 ink-3 #6e6e73，
+ * background-image 不吃 currentColor）；padding-right 预留防文字压箭头；
+ * cursor 补 select 缺省；hover/focus 过渡随上方 input 规则自动叠加。 */
+select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236e6e73' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:34px;cursor:pointer}
+select:hover:not(:disabled){border-color:var(--ink-4)}
+select:disabled{background-image:none;cursor:not-allowed}
 fieldset{border:0;padding:0;margin:0;min-width:0}
 details{border-top:1px solid var(--hairline);padding-top:15px;margin:20px 0}summary{cursor:pointer;font-weight:600;color:var(--ink-2)}details[open] summary{margin-bottom:18px}
 /* 任务页高级筛选容器：默认折叠收进 details，任意高级条件生效期间保持展开 */
@@ -231,6 +246,11 @@ code{color:var(--ink-2)}
 .prompt-preview.prompt-open{max-height:none}
 .prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}
 .prompt-foot{margin-top:4px;text-align:right}
+/* zone-in 抽屉分区 one-shot 淡入（FE-POLISH B4，双端同值）：触发点在 shared block
+ * drawerZoneSwap（缓存 diff 门控——数据没变不触发，轮询不重放）；打开抽屉首轮建壳
+ * 填充即全分区一次性淡入；180ms 即 --dur-hover 值，不新增 token。 */
+@keyframes zone-in{from{opacity:.35}}
+[data-zone].zone-in{animation:zone-in 180ms var(--ease-out-quart)}
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 空状态（草案 B.7） ---- */
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
@@ -312,6 +332,9 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .timeline li.hl:before{background:var(--heat)}
 .artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
 .cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}
+/* 能力描述是中文正文（B1）：解除 td small 对中文说明的无差别 mono（mono 只给
+ * 可复制技术字符串——任务 ID 等）；说明文字回正文字体。 */
+.cap small{font-family:var(--font)}
 /* ---- toast（草案 B.6 + C 预算表）：顶部玻璃胶囊；.show 类切换（hidden 属性会
  * 杀死过渡），3400ms 自动消失逻辑与 #toast id 保留（JS 已在 P1 改造）。
  * 进 320ms spring / 出 220ms ease-out-quart：过渡取目的地状态的 transition 值——
@@ -372,6 +395,7 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 @media (prefers-reduced-motion:reduce){
   .overlay,.modal,.drawer,.modal .pane,.group-card{transform:none!important;transition:opacity 200ms ease!important}
   .toast{translate:-50% 0!important;transition:opacity 200ms ease!important}
+  [data-zone].zone-in{animation:none!important}   /* B4：分区淡入关停（轮询重放面为零，但首开淡入也一并静止） */
 }
 @media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}
@@ -453,6 +477,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .switch:disabled{opacity:.5;cursor:wait}
 @media(max-width:680px){.notify-panel{position:fixed;top:60px;right:10px;left:10px;width:auto}.chan-actions{margin-left:0;flex-basis:100%}}
 @media (prefers-reduced-transparency:reduce){.notify-panel{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
-/* FINAL 收敛候选高亮（DESIGN-butler 方案三，2026-10-28）：成员 FINAL: 前缀发言
- * = 最终版本候选，群页金框强调；系统注记（msg-system）不由前端判断，仅 agent 发言。 */
-.msg-body.msg-final{border-left:3px solid #d9a441;background:rgba(217,164,65,.08);border-radius:0 6px 6px 0;padding:6px 10px}
+/* FINAL 收敛候选高亮（DESIGN-butler 方案三；FE-POLISH B7 裁决 A 降金色浓度，
+ * 2026-10-29）：去金色底色，只留细竖线（2px）与「收敛候选 · 待定版」文字标识
+ *（.final-tag 暗金 #8a6a1f，无底色）——既不灭「这一棒要收敛」的信号，也不让它
+ * 看起来像已定版。金色仍限本孤例，不构成先例。系统注记（msg-system）不由前端
+ * 判断，仅 agent 发言。 */
+.msg-body.msg-final{border-left:2px solid #d9a441;border-radius:0 6px 6px 0;padding:6px 10px}
+.final-tag{display:inline-block;margin-right:8px;font-size:11px;font-weight:650;color:#8a6a1f;vertical-align:1px}
