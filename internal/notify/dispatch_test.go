@@ -668,4 +668,24 @@ func TestDeliveryStatusFailingFlag(t *testing.T) {
 	if v := view(chE.ID); v.Failing || v.LastFailAt != nil {
 		t.Errorf("无失败事实不应 Failing 且 last_fail_at 缺席: %+v", v)
 	}
+	// R2-P3-01（2026-10-29）：序列化断言固化——「仅成功渠道 failing/last_fail_at
+	// 字段缺席」是 omitempty 语义承诺，必须落在 JSON 层验证；只查结构体字段的话，
+	// 未来去掉 omitempty 本测试仍绿（codex R2 overlay 实证实现正确后要求收进仓库）。
+	// 反向样本同锁：Failing 渠道 JSON 必须真的序列化出这两个字段。
+	chEJSON, err := json.Marshal(view(chE.ID))
+	if err != nil {
+		t.Fatalf("marshal ChannelView(仅成功): %v", err)
+	}
+	for _, key := range []string{"failing", "last_fail_at", "last_fail_reason"} {
+		if strings.Contains(string(chEJSON), key) {
+			t.Errorf("仅成功渠道 JSON 不应含 %s: %s", key, chEJSON)
+		}
+	}
+	chAJSON, err := json.Marshal(view(chA.ID))
+	if err != nil {
+		t.Fatalf("marshal ChannelView(失败中): %v", err)
+	}
+	if !strings.Contains(string(chAJSON), `"failing":true`) || !strings.Contains(string(chAJSON), `"last_fail_at"`) {
+		t.Errorf("失败中渠道 JSON 应含 failing=true 与 last_fail_at: %s", chAJSON)
+	}
 }

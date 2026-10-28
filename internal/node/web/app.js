@@ -1955,11 +1955,29 @@ function idleBtn(btn) {
  * 语义是保留编辑）。遮罩点击在确认层自身监听并 stopPropagation：不冒泡到 #layer
  * 触发下层 cfgMaskClose。任务详情抽屉（只读视图）让位不变。 */
 let confirmCb = null;
-let confirmReturnFocus = null;   // 确认层弹出前焦点在 cfg 抽屉内时，取消后还给该元素
+let confirmReturnFocus = null;   // 确认层弹出前的焦点元素，取消后还给该元素
+let confirmInertEls = [];        // 确认层存续期间被设 inert 的下层容器（R2-P2-01）
+/* confirmSetInert 确认层键盘隔离（R2-P2-01，2026-10-29）：确认层是视觉模态，键盘
+ * 不得操作被遮住的下层（此前 Shift+Tab 可落回下层「保存」钮，Enter 触发保存）。
+ * 与 hub openLayerPlain 同策略（层开时 #app/顶栏 inert）：面向页面主体与 #layer 内
+ * 先于确认层的旧 overlay（cfg 抽屉叠层等），确认层自身不 inert。关闭（确认或取消）
+ * 先解除再返焦——inert 元素 focus() 静默失败，顺序不能反。 */
+function confirmSetInert(on) {
+  if (on) {
+    const cm = $('#confirm-modal');
+    confirmInertEls = [document.getElementById('app'), document.querySelector('.topbar'),
+      ...[...$('#layer').children].filter(el => !el.contains(cm))].filter(Boolean);
+    for (const el of confirmInertEls) el.setAttribute('inert', '');
+  } else {
+    for (const el of confirmInertEls) el.removeAttribute('inert');
+    confirmInertEls = [];
+  }
+}
 function confirmModal(title, bodyHtml, okLabel, onOk) {
   if (S.drawer) closeDrawer();       // 任务详情抽屉让位（只读视图，无草稿）
   confirmCb = onOk;
-  confirmReturnFocus = cfgEdit && $('#cfg-drawer')?.contains(document.activeElement) ? document.activeElement : null;
+  const a = document.activeElement;
+  confirmReturnFocus = a && a !== document.body ? a : null;
   const ov = document.createElement('div');
   ov.className = 'overlay';
   ov.innerHTML = `<section class="modal slim" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${modalHead(title)}
@@ -1971,16 +1989,18 @@ function confirmModal(title, bodyHtml, okLabel, onOk) {
     closeConfirm();
   });
   $('#layer').appendChild(ov);
+  confirmSetInert(true);
   ov.querySelector('[role=dialog]')?.focus();
   void ov.offsetWidth;               // 先落初始帧再放行 .open，入场过渡可播（playDrawerOpen 同口径）
   requestAnimationFrame(() => ov.classList.add('open'));
 }
 function closeConfirm() {
   confirmCb = null;
+  confirmSetInert(false);            // 先解除下层 inert 再返焦（inert 内 focus() 无效）
   $('#confirm-modal')?.closest('.overlay')?.remove();
   const back = confirmReturnFocus;
   confirmReturnFocus = null;
-  if (cfgEdit && back?.isConnected) back.focus();   // 取消回原抽屉：焦点还给弹层前的字段
+  if (back?.isConnected) back.focus();   // 取消回弹层前焦点（抽屉字段或页面触发钮）
 }
 
 /* ---------- 事件委托 ---------- */
@@ -2126,6 +2146,24 @@ document.addEventListener('input', e => {
   }
 });
 document.addEventListener('keydown', e => {
+  /* R2-P2-01（2026-10-29）：确认层键盘分支——Esc 只关最上层（确认层开着=取消确认；
+   * 仅抽屉/无层维持基线不响应）。Tab 焦点圈定兜底：inert 已把下层移出 Tab 序，
+   * keydown 层围住首尾循环；焦点意外落在层外（无 inert 的旧引擎等）拉回层内。
+   * 选择器口径与 hub layerFocusables 同文（排除禁用/隐藏/tabindex=-1 容器）。 */
+  if (e.key === 'Escape' && $('#confirm-modal')) { e.preventDefault(); closeConfirm(); return; }
+  if (e.key === 'Tab' && $('#confirm-modal')) {
+    const m = $('#confirm-modal');
+    const items = [...m.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')]
+      .filter(el => el.offsetParent !== null);
+    if (items.length) {
+      const first = items[0], last = items[items.length - 1];
+      const active = document.activeElement;
+      if (!m.contains(active)) { e.preventDefault(); (e.shiftKey ? last : first).focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+      else if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+    }
+    return;
+  }
   if (e.key === 'Enter' && e.target.id === 'gate-token') tryToken(e.target.value.trim());
 });
 /* 通知渠道弹层：类型切换只重绘 #nf-hint 与 #nf-type-fields 两槽（shared
