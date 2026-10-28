@@ -319,11 +319,13 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .wiz-step.on .n{background:var(--accent);color:var(--white)}
 .enroll-token-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 /* 接入状态行（FE-POLISH 轮2 H07）：尚未登记/等待连接/已连接三态前置——todo 灰点、
- * wait heat 点、ok live 绿底；点颜色全走既有语义色不扩编。 */
+ * wait heat 点、ok live 绿底；点颜色全走既有语义色不扩编。字号地板：本轮新增展示
+ * 面文字显式 ≥12.5px（P1-05——var(--fs-small)=12px 会经变量绕过地板，本轮新增规则
+ * 一律显式值，不以历史小字重做为边界）。 */
 .enroll-state{display:flex;align-items:center;gap:10px;margin:6px 0 16px;padding:10px 14px;border-radius:var(--r-thumb);background:rgba(0,0,0,.04)}
 .enroll-state .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex-shrink:0}
-.enroll-state b{font-size:var(--fs-small)}
-.enroll-state small{display:block}
+.enroll-state b{font-size:12.5px}
+.enroll-state small{display:block;font-size:12.5px}
 .enroll-state.enroll-wait .dot{background:var(--heat)}
 .enroll-state.enroll-ok{background:var(--live-bg);color:var(--live-ink)}
 .enroll-state.enroll-ok .dot{background:var(--live)}
@@ -370,8 +372,11 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * 完整路径/SHA 沉折叠。task-sum 任务列表人话摘要回正文字体（td small 默认 mono
  * 只给可复制技术串）；work-next 工作单「下一步」列同口径。 */
 .artifact .artifact-detail{border-top:0;padding-top:4px;margin:6px 0 0}
-.artifact .artifact-detail summary{font-size:var(--fs-small);color:var(--ink-3);font-weight:500}
-.artifact-size{color:var(--ink-3)}
+/* P1-05 字号地板：折叠说明/大小/折叠内路径行均为本轮新增展示面，显式 12.5px
+ *（var(--fs-small)=12px 经变量绕过地板）。 */
+.artifact .artifact-detail summary{font-size:12.5px;color:var(--ink-3);font-weight:500}
+.artifact-size{color:var(--ink-3);font-size:12.5px}
+.artifact-detail small{font-size:12.5px}
 .task-sum{font-family:var(--font);color:var(--ink-3)}
 .work-next{min-width:180px}.work-next small{font-family:var(--font)}
 .cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}

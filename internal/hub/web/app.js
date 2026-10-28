@@ -937,6 +937,7 @@ async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   if (S.pollBusy) return;   // single-flight（D1）：上轮在途跳过本轮，避免请求堆积
   S.pollBusy = true;
+  const freshBefore = freshSig();   // P1-03：新鲜度基线——失败/恢复转移独立于数据指纹判变化
   try {
     let changed = await loadAll();
     refreshInbox();   // 铃铛未读数（独立 DOM 通道，不经 render；失败静默下轮再试）
@@ -953,6 +954,10 @@ async function pollTick() {
       if (S.page === 'groups' && S.groupId) return;   // 群详情由 3s 增量追加维护，整页重绘会清空发言输入与滚动位置
       if (S.page === 'tokens') return;   // 设置页豁免整页重绘（D2/FE-05）：数据已按资源静默提交，进任务页即见
       render();
+    } else if (freshBefore !== freshSig()) {
+      /* P1-03：数据指纹未变但新鲜度转移（失败态出现/同数据恢复撤陈旧条）——走
+       * 列表槽位局部更新落 DOM，不经整页 render；不在槽位面上的页面自然跳过。 */
+      paintListFreshness();
     }
   } catch (e) { /* 401 已由 api() 处理；其余静默，下轮再试 */ }
   finally { S.pollBusy = false; }
@@ -1055,10 +1060,11 @@ function updateSessionLeft() {
 function shell(inner) {
   const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];
   const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1，见 pendingReviewCount 注）
+  const navBump = bumpCls('navNr', nr);   // P2-01：每轮无条件求值记录（0 也记录），渲染才按 nr 条件挂 small——记录与条件渲染分离
   return `<div class="shell"><aside>
   <div class="workspace"><small>协作网 · 管理员</small><strong class="workspace-brand"><img class="brand-logo" src="/logo.svg" alt="" width="24" height="24">SwarmMind 中心端</strong></div>
   <nav aria-label="旅程导航">${menus.map(([id, name], i) =>
-    `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small class="navcount${bumpCls('navNr', nr)}">(${nr})</small>` : ''}</button>`).join('')}</nav>
+    `<button data-act="go" data-page="${id}" class="${S.page === id ? 'active' : ''}" ${S.page === id ? 'aria-current="page"' : ''}><span class="navnum">0${i + 1}</span>${name}${id === 'tasks' && nr ? ` <small class="navcount${navBump}">(${nr})</small>` : ''}</button>`).join('')}</nav>
   <div class="aside-bottom">中心端 · 登记与监管</div>   <!-- B8 meta 降噪：执行位置一句与顶栏 deploy 重复，撤 -->
   </aside><main id="main">${inner}${versionFoot()}</main></div>`;
 }
@@ -1178,11 +1184,33 @@ function listState(name) {
 function listLoadingBox(label) {
   return `<div class="empty"><h2>正在加载${esc(label)}…</h2><p class="muted">正在从中心端读取；这一步只读、不产生任何变更，几秒内自动就绪。</p></div>`;
 }
-function listErrorBox(res, label) {
-  return `<div class="empty"><h2>${esc(label)}加载失败</h2><p class="muted">最近一次读取没有成功（网络或服务端异常），不是没有数据。可以点重试，也可以等轮询自动恢复。</p>${button('重试', 'reload-res', '', `data-res="${esc(res)}"`)}</div>`;
+function listStaleBar(res, label, polled = true) {
+  /* polled=false（P1-04 群聊列表专用）：群列表不在 5s 轮询链（进页拉取+手动重试），
+   * 文案不得承诺「等轮询自动恢复」。 */
+  return `<div class="notice warn" style="margin-bottom:14px"><b>${esc(label)}暂时读不到最新数据</b>：下方是最后一次成功加载的快照（可能已过期）；${polled ? '网络恢复后轮询自动刷新，也可点' : '可点'}${button('重试', 'reload-res', 'link', `data-res="${esc(res)}"`)}${polled ? '。' : '重新读取。'}</div>`;
 }
-function listStaleBar(res, label) {
-  return `<div class="notice warn" style="margin-bottom:14px"><b>${esc(label)}暂时读不到最新数据</b>：下方是最后一次成功加载的快照（可能已过期）；网络恢复后轮询自动刷新，也可点${button('重试', 'reload-res', 'link', `data-res="${esc(res)}"`)}。</div>`;
+function listErrorBox(res, label, polled = true) {
+  return `<div class="empty"><h2>${esc(label)}加载失败</h2><p class="muted">最近一次读取没有成功（网络或服务端异常），不是没有数据。可以点重试${polled ? '，也可以等轮询自动恢复' : ''}。</p>${button('重试', 'reload-res', '', `data-res="${esc(res)}"`)}</div>`;
+}
+/* ---------- 列表新鲜度槽位更新（P1-03，FE-POLISH 轮2 修复） ----------
+ * freshSig/paintListFreshness：新鲜度转移（loading→error、error→ok、陈旧条出现/
+ * 消失）独立于数据指纹触发列表槽位局部更新——commit 指纹相同时整页不 render，
+ * 但失败态出现/同数据恢复撤陈旧条必须落 DOM。槽位只重写列表区域本身（任务页筛选
+ * 输入/高级筛选开合、总览关注区、机器页头部不受触碰，守住局部刷新契约）；内容与
+ * 上次写入一致不碰 DOM（稳定轮询零重绘）。豁免页（派单表单视图/群详情/设置）无
+ * 这些槽位，自然跳过，切页时 render 呈现。 */
+const listPaintCache = {};
+function freshSig() { return listState('tasks') + '|' + listState('nodes'); }
+function paintListFreshness() {
+  const id = S.page === 'overview' ? 'recent-tasks-card'
+    : S.page === 'tasks' ? 'tasks-list-zone'
+    : S.page === 'nodes' ? 'nodes-list-zone' : '';
+  if (!id) return;
+  const html = S.page === 'overview' ? recentTasksHtml() : S.page === 'tasks' ? tasksListZone() : nodesListZone();
+  const el = document.getElementById(id);
+  if (!el || listPaintCache[id] === html) return;
+  listPaintCache[id] = html;
+  el.innerHTML = html;
 }
 /* pendingReviewCount 待办口径（FE-POLISH P0-1「核对完待办不减」，2026-10-29）：
  * 人工核对只写 Review 记录、协议状态保持 needs_review（core.RecordReview 不改终态），
@@ -1200,16 +1228,35 @@ function preserveFocus(fn) {
     if (el) { el.focus(); try { if ('setSelectionRange' in el) el.setSelectionRange(pos, pos); } catch { } }
   }
 }
+/* REDUCE_MQ（P2-02）：one-shot 动画（bump/msg-in）的系统偏好。reduce 下动画类
+ * 直接不挂——CSS animation:none 不产生 animationend，挂着不摘的类在偏好中途切回
+ * 时会重放旧动画；值变化仍即时可见（不靠动画传达信息）。 */
+const REDUCE_MQ = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };   // 测试 harness（node vm）无 matchMedia：按「无偏好」处理
+/* P2-02 one-shot 摘类：bump/msg-in 播完即摘（animationend 一次性），不在节点上留
+ * 持久类；偏好切到 reduce 时动画被取消（无 animationend），残余类由 change 事件
+ * 清扫——两路合拢后偏好任意切换旧动画都不重放。 */
+document.addEventListener('animationend', e => {
+  if (!(e.target instanceof Element)) return;
+  if (e.target.classList.contains('bump')) e.target.classList.remove('bump');
+  if (e.target.classList.contains('msg-in')) e.target.classList.remove('msg-in');
+});
+REDUCE_MQ.addEventListener?.('change', () => {
+  if (!REDUCE_MQ.matches) return;
+  document.querySelectorAll('.bump, .msg-in').forEach(el => el.classList.remove('bump', 'msg-in'));
+});
 /* bumpCls 数字 bump 判据（FE-POLISH 轮2 C1，裁决 B 试点两项之一）：比较前后值，
  * 变了才返回 ' bump'——渲染在模板串构建时执行：轮询数据不变则整页不 render
  *（resSnap 指纹门控），类不重挂动画不重放；同值重渲染（切页回来）也不挂；
  * 首次渲染（bumpSeen 无记录）不挂。范围仅总览 metric 与侧栏待办计数，不扩散
- *（不做清单 4：数字动效上限就是 bump）。 */
+ *（不做清单 4：数字动效上限就是 bump）。P2-01：值记录与条件渲染分离——调用方
+ * 对「隐藏也存在的观测值」（侧栏待办 0）必须每轮调用本函数（shell 内 navBump
+ * 无条件求值），0 也记录；否则 0→1 首变化因无旧记录被当首渲染漏播、1→0→1 回弹
+ * 同样漏播。 */
 function bumpCls(key, val) {
   if (!S.bumpSeen) S.bumpSeen = {};
   const changed = S.bumpSeen[key] !== undefined && S.bumpSeen[key] !== val;
   S.bumpSeen[key] = val;
-  return changed ? ' bump' : '';
+  return changed && !REDUCE_MQ.matches ? ' bump' : '';   // P2-02：reduce 不挂类（无 animationend 可摘）
 }
 
 /* ---------- 登录页（免鉴权；其余页 401 自动跳到这里） ---------- */
@@ -1372,29 +1419,40 @@ function overviewPage() {
       <small class="muted">中心端负责登记与监管；所有任务都在各机器本机执行。</small>
     </section>
     </div>`
-    + `<section class="card spaced"><div class="row"><h2>最近任务</h2>${button(`全部 ${S.tasks.length} 条任务 →`, 'go', 'link', 'data-page="tasks"')}</div>
-    ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
-    : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
-    : S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
+    + recentTasksHtml();
+}
+/* recentTasksHtml 总览最近任务卡（P1-03 槽位局部更新单元）：A4 五态分支与任务页
+ * 同口径；总览在列时新鲜度转移同样经 paintListFreshness 落本卡，不经整页 render。 */
+function recentTasksHtml() {
+  return `<section class="card spaced" id="recent-tasks-card"><div class="row"><h2>最近任务</h2>${button(`全部 ${S.tasks.length} 条任务 →`, 'go', 'link', 'data-page="tasks"')}</div>
+  ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
+  : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
+  : S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
 }
 
 /* ---------- 机器（添加机器 / 已登记机器列表） ---------- */
-function nodesPage() {
-  return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
-    + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
-    ${listState('nodes') === 'error' && !S.nodes.length ? listErrorBox('nodes', '机器列表')
-    : listState('nodes') === 'loading' && !S.nodes.length ? listLoadingBox('机器列表')
-    : (listState('nodes') === 'error' ? listStaleBar('nodes', '机器列表') : '')
-      + (S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
+/* nodesListZone 机器列表五态区域（P1-03 槽位局部更新单元，与 tasksListZone 同机
+ * 制）；P2-05：每机能力条目旁弱摘要计数「开放能力 ×N」——既有目录数据计算（纯
+ * 前端，零 REST 变更），总数摘要仍在总览页头与中心端状态卡（不删不迁）。 */
+function nodesListZone() {
+  return `${listState('nodes') === 'error' && !S.nodes.length ? listErrorBox('nodes', '机器列表')
+  : listState('nodes') === 'loading' && !S.nodes.length ? listLoadingBox('机器列表')
+  : (listState('nodes') === 'error' ? listStaleBar('nodes', '机器列表') : '')
+    + (S.nodes.length ? `<div class="table-wrap"><table><thead><tr><th>机器</th><th>连接状态</th><th>重连次数</th><th>开放的能力</th><th>管理</th></tr></thead><tbody>
     ${sortNodesStable().map(n => {
       const caps = S.directory.filter(d => d.node_id === n.node_id);
-      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${caps.length ? caps.map(d => {
+      return `<tr><td><b>${esc(n.node_id)}</b></td><td>${onlineB(n)}</td><td>${n.epoch}</td><td>${caps.length ? `<small class="muted">开放能力 ×${caps.length}</small>` + caps.map(d => {
       const tip = `参数提示：输入 ${d.card.input_mode || 'prompt_text'} · 输出 ${d.card.output_mode || 'answer+artifacts'} · ${permLabel(d.card.permission_mode)}`;   // 未声明走词典兜底同口径（P1-03）
       return `<div class="cap"><span class="badge">${esc(d.card.name)}</span><small class="muted" title="${esc(tip)}">${esc(d.card.description || '（无描述）')}</small></div>`;
     }).join('') : '<small class="muted">未开放能力</small>'}</td><td class="table-action">${button('撤下说明', 'revoke', '', `data-node="${esc(n.node_id)}" title="查看如何从协作网撤下这台机器（只读说明）"`)}</td></tr>`;
     }).join('')}
     </tbody></table></div>`
-    : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`)}
+    : `<div class="empty"><h2>还没有添加机器</h2><p class="muted">在中心端配置里登记机器身份与令牌并重启，机器连接成功后出现在这里。</p>${button('添加机器', 'enroll', 'primary')}</div>`)}`;
+}
+function nodesPage() {
+  return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
+    + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
+    <div id="nodes-list-zone">${nodesListZone()}</div>
     <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定；离线不会终止已在执行的任务。</p></section>`;
 }
 /* ---------- 添加机器向导（2026-10-22 伦哥定：四步向导替代单表单） ----------
@@ -1825,17 +1883,27 @@ function pagerHtml(key, page, pages, total) {
   ${page < pages ? button('下一页 ›', 'pager', 'link', `data-key="${esc(key)}" data-page="${page + 1}"`) : ''}
   </span></div>`;
 }
-function tasksPage() {
+/* tasksListZone 任务列表五态区域（P1-03 槽位局部更新单元）：新鲜度转移独立于数据
+ * 指纹更新本区（paintListFreshness），不经整页 render——筛选输入焦点/高级筛选开合
+ * /分页控件外的页面部分不受触碰。内容与 tasksPage 内联版本同源，禁止双处漂移。 */
+function tasksListZone() {
   const list = filteredTasks();
   const { page, pages } = pageOf('tasks', list.length);
-  const counts = stateCounts();
   const filtered = !!(S.f.status || S.f.trace || S.f.by || S.f.error || S.f.from || S.f.to || S.f.node);
+  const nodeGone = !!S.f.node && !S.tasks.some(t => t.target_node === S.f.node);   // 选中机器不在未过滤快照：空态提示（不静默回退）
+  return listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
+  : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
+  : (listState('tasks') === 'error' ? listStaleBar('tasks', '任务列表') : '')
+    + (list.length ? taskTable(list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)) + pagerHtml('tasks', page, pages, list.length) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`);
+}
+function tasksPage() {
+  const list = filteredTasks();
+  const counts = stateCounts();
   const submitters = [...new Set(S.tasks.map(t => t.submitted_by).filter(Boolean))].sort();
   /* 高级筛选折叠态（P1 B.7）：默认收起；任一高级条件（提交方/失败原因/时间范围）
    * 生效期间保持展开——重绘式筛选不会把生效中的条件藏起来。「目标机器」在主筛选区
    * fields 行（与搜索任务 ID 并排），不进本折叠区（A2 方案定案）。 */
   const advOpen = !!(S.f.by || S.f.error || S.f.from || S.f.to);
-  const nodeGone = !!S.f.node && !S.tasks.some(t => t.target_node === S.f.node);   // 选中机器不在未过滤快照：空态提示（不静默回退）
   return head('任务', '全网任务只读监管；从异常下钻，以证据核对交付。', button('↓ 导出 JSON（当前筛选）', 'export'))
     + `<section class="card">
     <div class="filters">${[''].concat(Object.keys(STATES)).map(s => s
@@ -1853,10 +1921,7 @@ function tasksPage() {
       <label>提交时间 · 至（UTC）<input type="datetime-local" data-f="to" value="${esc(S.f.to)}"></label>
     </div>
     </details>
-    ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
-    : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
-    : (listState('tasks') === 'error' ? listStaleBar('tasks', '任务列表') : '')
-      + (list.length ? taskTable(list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)) + pagerHtml('tasks', page, pages, list.length) : `<div class="empty"><h2>${S.tasks.length ? '没有符合筛选的任务' : '还没有任务记录'}</h2>${filtered ? button('清除筛选', 'clear-filters') : ''}${nodeGone ? `<p class="muted small">目标机器「${esc(S.f.node)}」当前不在任务快照中（可能已无任务或已清理）；可清除筛选或选择其他机器。</p>` : ''}</div>`)}
+    <div id="tasks-list-zone">${tasksListZone()}</div>
     <p class="footer-note">${list.length} 条记录 · 时间为 UTC · 终态任务${retentionClause()}，重要结果请及时导出。</p></section>`;
 }
 function taskTable(list) {
@@ -2900,13 +2965,24 @@ function summarize(s, n = 64) {
 }
 function groupListPage() {
   const { page, pages } = pageOf('groups', S.groups.length);
+  /* P1-04 群聊五态收口：groupsOff（hub 未接线群存储，503 业务专态）优先且排他——
+   * 不与「加载失败」同屏互相冲突（此前 off 与失败可同屏出两条矛盾提示）；有旧快照
+   * 读取失败=陈旧条+列表保留+重试（重试接 loadGroups 真实链路，reload-res 已有
+   * groups 分支）；群列表不在 5s 轮询链（进页拉取+手动重试），失败/陈旧文案不承诺
+   * 「等轮询自动恢复」（listErrorBox/listStaleBar 的 polled=false 形态）。 */
+  const off = !!S.groupsOff;
+  const failed = !off && S.groupsFresh.ok === false && !!S.groupsFresh.at;
+  const listHtml = `<div class="group-list">${S.groups.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(groupCard).join('')}</div>` + pagerHtml('groups', page, pages, S.groups.length);
   return head('群聊', '人与智能体的协作空间：建群讨论目标，代理发言有轮数预算，你可以随时插话与决策。', button('＋ 新建协作群', 'group-new', 'primary'))
-    + (S.groupsOff ? `<div class="notice warn spaced"><b>群聊功能未启用</b>：当前 hub 未接线群存储，请联系管理员升级 hub 配置。</div>` : '')
-    + `<section class="card${S.groupsOff ? ' spaced' : ''}">
-    ${S.groups.length ? `<div class="group-list">${S.groups.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map(groupCard).join('')}</div>` + pagerHtml('groups', page, pages, S.groups.length)
-    : S.groupsFresh.ok === false ? listErrorBox('groups', '群聊列表')
+    + (off ? `<div class="notice warn spaced"><b>群聊功能未启用</b>：当前 hub 未接线群存储，请联系管理员升级 hub 配置。</div>` : '')
+    + `<section class="card${off ? ' spaced' : ''}">
+    ${off
+    ? (S.groups.length ? listHtml : `<div class="empty"><h2>群聊功能未启用</h2><p class="muted">当前 hub 未接线群存储；升级 hub 配置接线后，这里提供建群与协作时间线。</p></div>`)
+    : S.groups.length
+    ? (failed ? listStaleBar('groups', '群聊列表', false) : '') + listHtml
+    : failed ? listErrorBox('groups', '群聊列表', false)
     : !S.groupsFresh.at ? listLoadingBox('群聊列表')
-    : `<div class="empty"><h2>还没有协作群</h2><p class="muted">创建一个群，把协作目标和成员智能体拉进来讨论；代理发言默认上限 20 轮，用尽后等待人工决策。</p>${S.groupsOff ? '' : button('＋ 新建协作群', 'group-new', 'primary')}</div>`}
+    : `<div class="empty"><h2>还没有协作群</h2><p class="muted">创建一个群，把协作目标和成员智能体拉进来讨论；代理发言默认上限 20 轮，用尽后等待人工决策。</p>${button('＋ 新建协作群', 'group-new', 'primary')}</div>`}
     ${S.groups.length ? `<p class="footer-note">${S.groups.length} 个群 · 时间为 UTC · 群结束后时间线保留、只读。</p>` : ''}</section>`;
 }
 function groupCard(g) {
@@ -3043,9 +3119,10 @@ async function pullGroupMessages() {
         line.insertAdjacentHTML('beforeend', groupMsgHtml(m));
         /* C2 群消息入场（FE-POLISH 轮2，裁决 B 试点两项之二）：增量追加的新消息
          * one-shot msg-in（判据=本增量路径真新增节点；历史加载/翻页走整页重绘
-         * msgs.map 不挂类，自然不播）。 */
+         * msgs.map 不挂类，自然不播）。P2-02：reduce 时不挂类（无 animationend
+         * 可摘，挂着会在偏好切回时重放）——新消息即时全亮。 */
         const li = line.lastElementChild;
-        if (li) { li.classList.remove('msg-in'); void li.offsetWidth; li.classList.add('msg-in'); }
+        if (li && !REDUCE_MQ.matches) { li.classList.remove('msg-in'); void li.offsetWidth; li.classList.add('msg-in'); }
         added++;
       }
     }
@@ -3192,6 +3269,13 @@ function workNextLine(w) {
   if (WORK_TERMINAL.has(w.status)) return w.status === 'done' ? '已关闭 · 收集报告在详情' : '已处置关闭 · 理由在详情报告';
   if (!w.steps) return '计划就绪——接管后按步骤派发';
   if ((w.done_steps || 0) >= w.steps) return '全部步骤完成——收集关闭（写报告）';
+  /* P2-04 分诊（状态字典见 store/work.go：planning/executing/blocked/collecting/
+   * done/abandoned）：blocked 才给补救指引；executing 是在途执行（详情 intro 同
+   * 口径「等收束」），此前任何非终态有尝试一律给「续派或放弃」，执行中也中招，
+   * 列表下一步与详情自相矛盾；其余未完成且有尝试才谈续派/放弃。列表响应无步骤
+   * 明细，第 N 步定位仍在详情步骤表（不虚构）。 */
+  if (w.status === 'blocked') return '有步骤受阻——在详情定位受阻步骤后续派，或处置放弃';
+  if (w.status === 'executing') return '执行中——等在途执行收束后收集或处置';
   if (w.attempts) return '有步骤未完成——在详情定位未竟步骤后续派或处置放弃';
   return '等待接管派发';
 }

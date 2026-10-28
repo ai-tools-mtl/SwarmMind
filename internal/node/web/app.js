@@ -662,6 +662,17 @@ async function loadAll() {
     api('GET', '/api/v1/local/tasks?limit=' + TASKS_PAGE),
     api('GET', '/api/v1/agents'),
   ]);
+  /* P1-02（五态加载链收口）：非 200 或结构不合格不得提交快照。api() 对非 401 HTTP
+   * 错误原样返回 {code,data}——这是历史形状且不能一刀切改抛：409（幂等冲突）、
+   * 503（配置未接线）、502（hub 不可达）在本机协议里是业务码，写路径按 code 分诊。
+   * 加载链在此逐资源校验状态码与必需字段（与 hub loadResource 的「结构校验：非 200
+   * 或关键字段缺失不提交」同纪律），任何一项不合格整轮抛错给调用方落 loadError
+   * 失败/陈旧态——四资源一个都不提交，保留最近成功数据，不再把 500 的 {error} 体
+   * 当成功加载、清空列表冒充「没有任务」。 */
+  if (st.code !== 200 || !st.data || typeof st.data.node_id !== 'string') throw { load: 'status' };
+  if (ag.code !== 200 || !Array.isArray(ag.data?.agents)) throw { load: 'agents' };
+  if (tk.code !== 200 || !Array.isArray(tk.data?.tasks) || typeof tk.data?.total !== 'number') throw { load: 'tasks' };
+  if (dir.code !== 200 || !Array.isArray(dir.data?.local)) throw { load: 'agents' };
   S.nodeID = st.data?.node_id || '';
   S.status = st.data || null;
   S.agents = ag.data?.agents || [];
@@ -680,7 +691,10 @@ async function loadAll() {
   // 列表行自带 status（账本全量驱动，2026-10-26 全量审计裁决）——无需逐条补查，
   // 状态真相即本机账本，列表快照内联。
   const snap = JSON.stringify([S.status, S.agents, S.tasks, S.tasksTotal, S.catalog]);
-  const changed = snap !== S.snap;
+  /* P1-03：新鲜度转移进渲染判据——失败态在身时本轮加载成功，即使数据指纹与失败前
+   * 完全相同也必须返回 changed=true，让恢复落 DOM（撤失败态/陈旧条）；否则指纹门控
+   * 把恢复吞掉，失败态永远挂在页面上。 */
+  const changed = snap !== S.snap || !!S.loadError;
   S.snap = snap;
   S.loadError = '';   // 本轮全量加载成功：清除失败态（A4）
   return changed;
@@ -705,8 +719,12 @@ async function loadMoreTasks() {
   try {
     const r = await api('GET', '/api/v1/local/tasks?limit=' + TASKS_PAGE + '&offset=' + loaded);
     if (S.tasksGen === genAtReq) {
-      S.tasks = S.tasks.concat(r.data?.tasks || []);
-      S.tasksTotal = r.data?.total ?? S.tasksTotal;
+      /* P1-02 同口径：翻页应答非 200 或结构不合格不并入——HTTP 错误不得当作
+       * 「没有更早任务」静默吞掉，也不得让 {error} 体污染已载列表。 */
+      if (r.code === 200 && Array.isArray(r.data?.tasks)) {
+        S.tasks = S.tasks.concat(r.data.tasks);
+        S.tasksTotal = r.data?.total ?? S.tasksTotal;
+      } else toast('加载更早任务失败');
     }
   } catch (e) {
     if (!e.unauthorized) toast('加载更早任务失败');
@@ -716,21 +734,62 @@ async function loadMoreTasks() {
 }
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
+  const wasStale = !!S.loadError;   // P1-03：新鲜度基线（失败→恢复转移判据）
   try {
     if (await loadAll()) {
       if (cfgEdit) return; // 能力配置编辑抽屉开着：数据照常刷，表格 DOM 不动（编辑会话不受重绘干扰）
+      /* P1-03：新鲜度转移（失败态在身→恢复成功）走任务列表槽位局部更新而非整页
+       * render——派单表单在页（2026-10-21 验收口径），同数据恢复也要撤失败态/陈旧
+       * 条，但整页重绘会打断输入；数据有变的常规恢复同样经槽位呈现（列表即最新）。
+       * 非 tasks 页维持整页 render（此前行为）。 */
+      if (wasStale && S.page === 'tasks') { paintTasksCard(); return; }
       render();
+    } else if (wasStale) {
+      paintTasksCard();   // 同数据恢复：指纹门控下 changed 恒 false，靠槽位更新撤陈旧条
     }
   } catch (e) {
     /* 401 已由 api() 处理；其余落失败态（A4 五态：列表区分「失败可重试」与
-     * 「真的没有」，不再静默冒充空列表），下轮轮询自动恢复。失败首次转移时
-     * 就地重绘让陈旧/失败态及时可见——tasks 页豁免（派单表单在页，5s 轮询
-     * 整页重绘会打断输入，2026-10-21 验收口径），该页在下一次自然渲染（切页/
-     * 操作）时呈现陈旧条。 */
+     * 「真的没有」，不再静默冒充空列表），下轮轮询自动恢复。失败首次转移时就地
+     * 更新让陈旧/失败态及时可见——tasks 页只刷任务列表槽位（派单表单在页，5s
+     * 轮询整页重绘会打断输入，2026-10-21 验收口径；P1-03 前该页整页豁免使失败态
+     * 在派单页永不出现），其余页整页 render。 */
     if (!e.unauthorized) {
       const was = S.loadError;
       S.loadError = '本机 API 暂不可达';
-      if (!was && S.page !== 'tasks') render();
+      if (!was) {
+        if (S.page === 'tasks') paintTasksCard();
+        else if (!cfgEdit) render();
+      }
+    }
+  }
+}
+
+/* ---------- 任务列表槽位局部更新（P1-03，FE-POLISH 轮2 修复） ----------
+ * paintTasksCard 只重写 #my-tasks-card 内部：新鲜度转移（失败态出现/同数据恢复
+ * 撤陈旧条）不经整页 render——派单表单在页（2026-10-21 验收口径），表单焦点与
+ * 草稿不受触碰。内容与上次写入一致不碰 DOM（稳定轮询零重绘，动画/焦点/滚动不受
+ * 影响）；焦点在卡内（列表行/重试钮/加载更早）时按 data-task/data-act 回位，
+ * 失存回落侧栏当前页签（与 closeDrawer 兜底同构）。 */
+let tasksCardPaint = '';   // 上次写入 #my-tasks-card 的内容（变了才写）
+function paintTasksCard() {
+  const card = document.getElementById('my-tasks-card');
+  if (!card) return;
+  const html = myTasksCard();
+  if (tasksCardPaint === html) return;
+  const active = document.activeElement;
+  const mark = active && card.contains(active)
+    ? { task: active.closest('[data-task]')?.getAttribute('data-task') || '', act: active.getAttribute('data-act') || '' }
+    : null;
+  tasksCardPaint = html;
+  card.innerHTML = html;
+  if (mark) {
+    const el = mark.task
+      ? card.querySelector(`[data-task="${CSS.escape(mark.task)}"]`)
+      : mark.act ? card.querySelector(`[data-act="${CSS.escape(mark.act)}"]`) : null;
+    if (el) el.focus();
+    else {
+      const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+      if (tab) tab.focus();
     }
   }
 }
@@ -1632,7 +1691,7 @@ function myTasksCard() {
    * ⇒ 失败态（就地重试）；S.status 缺失 ⇒ 首刷未落定加载中；其余按既有空态。 */
   const failed = !!S.loadError && !all.length;
   const loading = !S.status && !all.length;
-  return `<section class="card spaced"><div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  return `<section class="card spaced" id="my-tasks-card"><div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
   <div class="filters">${chips}</div>
   ${failed ? listErrorBox('reload-all', '任务列表')
   : loading ? listLoadingBox('任务列表')
@@ -2066,10 +2125,14 @@ async function copyText(value, label, okMsg) {
 }
 /* openPlainModal 普通弹层（node #layer 直清家族）：居中 modal 无障碍基线与通知
  * 编辑弹层同构（role/aria/focus/入场）；层间互斥沿用既有让位语义——开层即替换
- * #layer 内容（copyText 失败兜底单用途，让位可接受）。 */
+ * #layer 内容（copyText 失败兜底单用途，让位可接受）。P2-03：记录触发元素，
+ * 关层返焦（与任务/cfg/通知关闭同机制，Esc/完成/遮罩三入口同经 closeCopyModal）。 */
+let copyReturnFocus = null;
 function openPlainModal(content) {
   if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
   if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
+  const a = document.activeElement;
+  copyReturnFocus = a && a !== document.body ? a : null;
   $('#layer').innerHTML = `<div class="overlay"><section class="modal" id="copy-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${content}</section></div>`;
   layerInert(true);
   $('#layer [role=dialog]')?.focus();
@@ -2116,6 +2179,15 @@ function closeCopyModal() {
   if (!$('#copy-modal')) return;
   layerInert(false);
   $('#layer').innerHTML = '';
+  /* P2-03 关闭返焦（A2 同构）：触发元素仍在文档则回它；失存回落侧栏当前页签
+   *（与任务/cfg/通知/确认关闭同一兜底），焦点不落 body。 */
+  const back = copyReturnFocus;
+  copyReturnFocus = null;
+  if (back?.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
 }
 /* confirmSetInert 确认层键盘隔离（R2-P2-01，2026-10-29）：确认层是视觉模态，键盘
  * 不得操作被遮住的下层（此前 Shift+Tab 可落回下层「保存」钮，Enter 触发保存）。
@@ -2156,14 +2228,22 @@ function confirmModal(title, bodyHtml, okLabel, onOk) {
 }
 function closeConfirm() {
   confirmCb = null;
-  confirmSetInert(false);            // 先解除下层 inert 再返焦（inert 内 focus() 无效）
-  /* A2：确认层关闭后下层抽屉/弹层若仍在场，恢复其背景 inert——confirmSetInert
-   * 把 app/顶栏与下层 overlay 一并解除，下层还开着时主体必须补回隔离。 */
+  $('#confirm-modal')?.closest('.overlay')?.remove();   // P1-01：先移除当前确认层——剩余 overlay 判定不得把确认层自身算进去
+  confirmSetInert(false);            // 再解除下层 inert（inert 内 focus() 无效，先解除）
+  /* A2：确认层关闭后**剩余**下层抽屉/弹层若仍在场，恢复其背景 inert——confirmSetInert
+   * 把 app/顶栏与下层 overlay 一并解除，下层还开着时主体必须补回隔离。判定必须在
+   * 移除确认层之后：此前先判后删，确认层自身必然在场，页面+确认层场景（无下层）
+   * 也误判「有 overlay」→ 页面恒 inert、焦点落 body，通知渠道删除/钦定/凭证轮换/
+   * 重载配置等页面确认入口关闭后整页锁死。页面+确认层场景关闭即解除隔离，按钮可点、
+   * Tab 可达；cfg 抽屉+确认层场景抽屉隔离保持、背景仍 inert。 */
   if ($('#layer')?.querySelector('.overlay')) layerInert(true);
-  $('#confirm-modal')?.closest('.overlay')?.remove();
   const back = confirmReturnFocus;
   confirmReturnFocus = null;
   if (back?.isConnected) back.focus();   // 取消回弹层前焦点（抽屉字段或页面触发钮）
+  else {   // P1-01：触发元素失存（轮询重绘使行消失等）回落侧栏当前页签——与任务/cfg/通知关闭同构兜底，焦点不落 body
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
 }
 
 /* ---------- 事件委托 ---------- */
@@ -2228,7 +2308,17 @@ document.addEventListener('click', e => {
       case 'confirm-ok': {   // 确认弹层（B5）：先关层再执行回调——回调可能开新层/重绘
         const cb = confirmCb;
         closeConfirm();
-        if (cb) cb();
+        if (cb) {
+          /* P1-01：确认路径的回调多为异步写动作，完成后 render 重建 #app 会把
+           * closeConfirm 刚返还的焦点冲到 body——动作落定后若焦点无处安放，按 A2
+           * 同款兜底回侧栏当前页签（回调自会管理焦点时此兜底不动作）。 */
+          Promise.resolve(cb()).catch(() => {}).finally(() => {
+            if (!document.activeElement || document.activeElement === document.body) {
+              const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+              if (tab) tab.focus();
+            }
+          });
+        }
         return;
       }
       case 'close':   // shared modalHead ×/取消 同词关闭动作（与 hub 同词，notify-polish 改动三）；守护防误清其他层
