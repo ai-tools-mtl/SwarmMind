@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/localapi"
 	"github.com/mtl802/swarmmind/internal/node/runner"
 	"github.com/mtl802/swarmmind/internal/node/service"
+	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
@@ -271,6 +273,18 @@ func run(cfgPath, dataDirOverride string) error {
 	defaultHome := filepath.Join(cfg.DataDir, "home")
 	runners, artifactRoots := buildExecutors(profiles, cfg.BaseEnv, defaultHome)
 
+	// 会话内核装配（T2 持久会话，SPEC 六.五）：按 SessionAdapter 声明集构建
+	// sessionx 装配表（环境沿 base_env 干净基线 + HOME=ConfigHome，SPEC 五同
+	// runner 口径）。配置错误（未知适配器/相对路径命令/负超时）拒绝启动——宁可
+	// 不起也不带病装配（sessionx 装配纪律）。无声明 agent = 空表，会话轮任务
+	// 诚实失败 session_unsupported。热重载不换表（session_adapter 变更归
+	// structural 类，须「应用并重启」，classifyProfilesChange）。
+	sessionSpecs := buildSessionAgents(profiles, cfg.BaseEnv, defaultHome)
+	sessions, err := sessionx.NewManager(cfg.DataDir, sessionSpecs, sessionx.Options{Log: log.Default()})
+	if err != nil {
+		return fmt.Errorf("装配会话内核失败: %w", err)
+	}
+
 	// 外连客户端仅组网态装配（方案 3.1：setup/standalone 不连 hub）。service
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧
 	// 一律 transport.ErrNoEndpoint（service 按良性静默），历史 hub 条目的迟到重发
@@ -336,6 +350,9 @@ func run(cfgPath, dataDirOverride string) error {
 		// 账本终态保留（maturity-retention-config）：ParseTerminalRetention 解析值
 		// 注入，service.cleanupLoop 周期清 result_acked 超期条目（SPEC 4.6/4.8）。
 		TerminalRetention: &retention,
+		// 会话内核（T2）：hub 下发会话轮任务（Task.Session 段）与本机控制台
+		// 会话端点共用的执行内核；nil 时会话轮任务诚实失败。
+		Sessions: sessions,
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；
@@ -565,7 +582,7 @@ func openNotifyDispatcher(dataDir string) (*notify.Dispatcher, error) {
 }
 
 // waitNotifyIdle 通知在途投递收尾（对齐 cmd/hub 同名函数）：预算内尽力等待
-//（通知是出站 HTTP，独立于监听器生命周期）；超时放弃——通知本身非可靠投递
+// （通知是出站 HTTP，独立于监听器生命周期）；超时放弃——通知本身非可靠投递
 // 机制（崩溃在发出前即漏发），关闭不被它拖住。disp 为 nil（旧构造方）零开销。
 func waitNotifyIdle(disp *notify.Dispatcher, budget time.Duration) {
 	if disp == nil {
@@ -594,6 +611,40 @@ func buildExecutors(profiles []protocol.ExecProfile, baseEnv map[string]string, 
 		artifactRoots[p.Name] = p.Workdir
 	}
 	return runners, artifactRoots
+}
+
+// buildSessionAgents 由 profiles 装配会话内核配置表（T2）：仅取声明了
+// session_adapter 的能力；Command/PermissionMode/TimeoutSec 沿 ExecProfile 同源
+// 语义（权限空值由 sessionx 取适配器保守默认，绝不 yolo）；Env = base_env 展开
+// + HOME=ConfigHome（空则 defaultHome），与 runner 进程环境同口径（SPEC 五）。
+func buildSessionAgents(profiles []protocol.ExecProfile, baseEnv map[string]string, defaultHome string) map[string]sessionx.AgentSpec {
+	specs := make(map[string]sessionx.AgentSpec)
+	for _, p := range profiles {
+		if p.SessionAdapter == "" {
+			continue
+		}
+		home := p.ConfigHome
+		if home == "" {
+			home = defaultHome
+		}
+		env := make([]string, 0, len(baseEnv)+1)
+		for k, v := range baseEnv {
+			if k == "HOME" {
+				continue // HOME 固定 ConfigHome 口径，同 runner（SPEC 五）
+			}
+			env = append(env, k+"="+v)
+		}
+		sort.Strings(env) // 确定序（map 遍历无序，序列化与日志可复现）
+		env = append(env, "HOME="+home)
+		specs[p.Name] = sessionx.AgentSpec{
+			Adapter:        p.SessionAdapter,
+			Command:        p.Command,
+			PermissionMode: p.PermissionMode,
+			TimeoutSec:     p.TimeoutSec,
+			Env:            env,
+		}
+	}
+	return specs
 }
 
 // detectSupervisor 保活检测（方案 3.5「应用并重启」应答注明的依据）：

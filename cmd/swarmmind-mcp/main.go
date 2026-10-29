@@ -33,7 +33,9 @@
 // group_create / group_list / group_say / group_messages /
 // group_close（群聊协作空间，GROUP-RFC 六 MVP）+ work_create / work_get /
 // work_list（工作单，P5 W1：建单幂等/读档/列表，hub 模式专属，node 模式不装
-// 配不静默降级）。node 模式 6 个——nodes（本机节点信息单条）/ agents（本机
+// 配不静默降级）+ session_create / session_send / session_list / session_status
+// （持久会话，T2，SPEC 六.五/六.六；hub 模式专属——本机原生线程管理归主人
+// 管理面，六.六豁免⑩）。node 模式 6 个——nodes（本机节点信息单条）/ agents（本机
 // 目录）/ submit（本机派单，prime_token）/ status / wait / artifact（本机直取）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
@@ -324,6 +326,21 @@ func tools() []toolDef {
 		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选概率分布。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
 			"goal": toolStr("任务目标/需求描述（一句话说清要做什么，越具体越准；工作单步骤描述也可直接传入）"),
 		}, "goal")},
+		{Name: "swarmmind_session_create", Description: "创建持久会话：绑定远端节点上的指定能力与工作目录，建立跨轮对话线程（首轮后拿到原生会话 ID，续聊不丢上下文）。返回会话 ID；首轮用 swarmmind_session_send 提交。一次性任务不需要会话，直接 swarmmind_submit", InputSchema: toolObj(map[string]any{
+			"node_id":         toolStr("目标节点 ID（swarmmind_nodes 可查）"),
+			"agent":           toolStr("目标能力名（须声明会话支持；swarmmind_agents 可查）"),
+			"cwd":             toolStr("会话工作目录（执行节点上的绝对路径，如项目目录）"),
+			"permission_mode": toolStr("权限模式断言（可选）：须与节点侧声明一致，不符会被拒绝；缺省用节点配置。全权档位一律拒绝"),
+		}, "node_id", "agent", "cwd")},
+		{Name: "swarmmind_session_send", Description: "向持久会话投一轮输入（异步受理——立即返回轮次引用，不阻塞等待；轮终用 swarmmind_session_status 查询答复）。同一会话的多轮输入共享同一原生线程上下文；传 turn_seq+相同内容可安全重试（响应丢失不重复执行）", InputSchema: toolObj(map[string]any{
+			"session_id": toolStr("会话 ID（swarmmind_session_create 返回 / swarmmind_session_list 可查）"),
+			"prompt":     toolStr("本轮输入正文"),
+			"turn_seq":   toolNum("轮次序号（可选；缺省由 hub 分配下一序号。响应丢失重试传与上次相同的序号+原文）"),
+		}, "session_id", "prompt")},
+		{Name: "swarmmind_session_list", Description: "列出全部持久会话：ID、节点/能力绑定、状态（活跃/已关闭）、轮数与最近一轮状态。发现可续聊的线程", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_session_status", Description: "查看持久会话详情：绑定快照、逐轮状态与答复摘要（轮终查询主路径；unverified 轮=执行成立但工作结果未经证实，须自行核对后使用）", InputSchema: toolObj(map[string]any{
+			"session_id": toolStr("会话 ID"),
+		}, "session_id")},
 		{Name: "swarmmind_group_create", Description: "创建协作群：围绕一个目标把多个 agent 拉进同一持续讨论空间（有 seq 消息账本，可增量拉取）。成员由调用方指定；传 jev_host=true 时决策服务（jev）担任群内主持人，逐轮点名一名成员发言协作，成员给出 FINAL: 收敛候选或发言预算用尽即停轮、等待人工定版。返回群 ID", InputSchema: toolObj(map[string]any{
 			"goal":         toolStr("群目标（一句话说清要讨论出什么）"),
 			"members":      toolArr("成员列表（node/agent 形式，如 [\"mac-mini/coder\"]；必填，auto_members 空成员回退选人除外）"),
@@ -347,9 +364,9 @@ func tools() []toolDef {
 		}, "group_id")},
 		{Name: "swarmmind_work_create", Description: "创建工作单：把一件多步工作落成 hub 侧的正式执行记录，Prime 断线/崩溃后接管者可按单续管。步骤计划建单即定死（依赖用步骤序号声明）；同一 goal+步骤计划重复调用返回同一工作单，响应丢失重试安全。返回 w- 工作单 ID。管家拆解复合任务时传 origin_task（SWARM_TASK_ID）挂接主任务，主人可在任务详情下钻查看本工作单进度", InputSchema: toolObj(map[string]any{
 			"origin_task": toolStr("来源主任务 ID（可选；管家拆解挂接——携带派给自己的复合任务 task_id，SWARM_TASK_ID 即得。任务详情页将关联本工作单）"),
-			"goal":       toolStr("工作目标（一句话说清整件事）"),
-			"steps":      toolWorkSteps("步骤计划（1..64 步）：每步 {desc,target_node,target_agent,depends_on}；depends_on 为前置步骤序号整数数组（1..总步数，可选）"),
-			"prime_term": toolStr("当前任期标识（可选，如 prime-3；逻辑归属审计）"),
+			"goal":        toolStr("工作目标（一句话说清整件事）"),
+			"steps":       toolWorkSteps("步骤计划（1..64 步）：每步 {desc,target_node,target_agent,depends_on}；depends_on 为前置步骤序号整数数组（1..总步数，可选）"),
+			"prime_term":  toolStr("当前任期标识（可选，如 prime-3；逻辑归属审计）"),
 		}, "goal", "steps")},
 		{Name: "swarmmind_work_get", Description: "查看工作单详情：目标、步骤状态表、执行尝试（含幂等键/尝试引用/内容指纹——任务清理后凭此安全重放）、收集报告与事件时间线；since_events 游标增量拉事件（事件滚动保留最新 200 条，响应会标注已裁位置）。接管未完成工作前先读档", InputSchema: toolObj(map[string]any{
 			"work_id":      toolStr("工作单 ID（swarmmind_work_list 可查）"),
@@ -2570,6 +2587,14 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolWorkTakeover(args)
 	case "swarmmind_work_collect":
 		text, err = toolWorkCollect(args)
+	case "swarmmind_session_create":
+		text, err = toolSessionCreate(args)
+	case "swarmmind_session_send":
+		text, err = toolSessionSend(args)
+	case "swarmmind_session_list":
+		text, err = toolSessionList()
+	case "swarmmind_session_status":
+		text, err = toolSessionStatus(args)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

@@ -348,17 +348,21 @@ func TestNodeBackendReadOnlyPrimeToken(t *testing.T) {
 	}
 }
 
-// TestHubToolListRegression hub 模式回归：19 工具清单与顺序不变（P4⑤ 新增
+// TestHubToolListRegression hub 模式回归：23 工具清单与顺序不变（P4⑤ 新增
 // swarmmind_tasks，位于 artifact 之后、decide 之前；P5.1 D1 新增
 // swarmmind_dispatch_suggest，位于 decide 之后，hub 专属；P5 W1 新增工作单三工具
 // swarmmind_work_create/get/list，位于群工具之后；P5 W2 新增
 // swarmmind_work_takeover，位于工作单组末尾，hub 模式专属；P5 W3 新增
-// swarmmind_work_collect，位于 takeover 之后）；分发委托
+// swarmmind_work_collect，位于 takeover 之后；T2 持久会话新增四工具
+// swarmmind_session_create/send/list/status，位于 dispatch_suggest 之后、群工具
+// 之前，hub 模式专属——SPEC 六.六规则 18）；分发委托
 // callTool（未知工具协议错误、未配置 hub 的人话提示均保持原行为）。
 func TestHubToolListRegression(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
 		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact", "swarmmind_tasks",
 		"swarmmind_decide", "swarmmind_dispatch_suggest",
+		"swarmmind_session_create", "swarmmind_session_send",
+		"swarmmind_session_list", "swarmmind_session_status",
 		"swarmmind_group_create", "swarmmind_group_list", "swarmmind_group_say",
 		"swarmmind_group_messages", "swarmmind_group_close",
 		"swarmmind_work_create", "swarmmind_work_get", "swarmmind_work_list",
@@ -424,7 +428,7 @@ func TestInitializeServerInfoVersionLock(t *testing.T) {
 /* ---------- 子进程级：真二进制 stdio 握手 ---------- */
 
 // buildMCPBinary 编译当前包为可执行文件（子进程测试用）；可变长传 -ldflags 参数
-//（版本注入链测试用）。
+// （版本注入链测试用）。
 func buildMCPBinary(t *testing.T, ldflags ...string) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "swarmmind-mcp")
@@ -554,7 +558,7 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 // TestSubprocessInitializeVersionInjection -X main.version 注入链端到端锁
 // （TASK-maturity-version-var 回归）：go build -ldflags "-X main.version=…" 后
 // initialize 应答 serverInfo.version 必须为注入值——锁 Makefile LDFLAGS 真实生效
-//（原始缺陷形态：main 包无 version 变量，链接器静默忽略 -X 无任何报错）。
+// （原始缺陷形态：main 包无 version 变量，链接器静默忽略 -X 无任何报错）。
 func TestSubprocessInitializeVersionInjection(t *testing.T) {
 	const ver = "mat-test-002"
 	bin := buildMCPBinary(t, "-X main.version="+ver)
