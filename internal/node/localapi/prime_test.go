@@ -604,6 +604,57 @@ func TestPrimeDeclareReplacesYAMLBaselineHolder(t *testing.T) {
 	}
 }
 
+// TestOrchestratorPatchSyncFlagFollowsAssembly PATCH orchestrator 应答 hub_synced
+// 口径锁定（P1-02 残余 fix2，与 declare 应答同形）：reporter 已装配（组网）→
+// boolean 实况（true=已提交上报 / false=待同步）；未装配（standalone 未组网）→
+// 字段缺省——无上报环节不冒充已同步，控制台以「字段是否 boolean」判定（旧初值
+// true 使 standalone 重试链谎报「已提交上报 hub」，复审 :19448 实证）。
+func TestOrchestratorPatchSyncFlagFollowsAssembly(t *testing.T) {
+	mk := func(t *testing.T, reporter func([]protocol.AgentCard) error) *httptest.Server {
+		t.Helper()
+		s := New(Config{
+			NodeID: "nodeA", Agents: newState(t, t.TempDir(),
+				[]protocol.ExecProfile{echoProfileLocal(t)}),
+			LocalToken: "tok-local", LocalListen: "127.0.0.1:8445",
+			CardsReporter: reporter,
+		})
+		srv := httptest.NewServer(s.Handler())
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	call := func(t *testing.T, srv *httptest.Server) map[string]any {
+		t.Helper()
+		code, out := doJSON(t, srv, "tok-local", http.MethodPatch, "/api/v1/local/agents/echo/orchestrator", `{"orchestrator":true}`)
+		if code != http.StatusOK {
+			t.Fatalf("PATCH 应 200, got %d: %s", code, out)
+		}
+		m := map[string]any{}
+		if err := json.Unmarshal([]byte(out), &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+
+	t.Run("standalone缺省", func(t *testing.T) {
+		m := call(t, mk(t, nil))
+		if _, ok := m["hub_synced"]; ok {
+			t.Fatalf("未装配 reporter 应答不得携带 hub_synced（缺省=未组网）, got %v", m)
+		}
+	})
+	t.Run("组网上报实况true", func(t *testing.T) {
+		m := call(t, mk(t, func([]protocol.AgentCard) error { return nil }))
+		if v, ok := m["hub_synced"].(bool); !ok || !v {
+			t.Fatalf("组网+上报成功应 hub_synced=true（boolean）, got %v (%T)", m["hub_synced"], m["hub_synced"])
+		}
+	})
+	t.Run("组网待同步false", func(t *testing.T) {
+		m := call(t, mk(t, func([]protocol.AgentCard) error { return errors.New("probe hub down") }))
+		if v, ok := m["hub_synced"].(bool); !ok || v {
+			t.Fatalf("组网+上报失败应 hub_synced=false（boolean）, got %v (%T)", m["hub_synced"], m["hub_synced"])
+		}
+	})
+}
+
 // TestSetPrimeAgentYAMLReplacesAliasNode 修复 4：既有值为 AliasNode 时构造独立
 // 纯量整体替换（不原位改 Alias），重编码结果可正常解析（= 重启不炸）、prime_agent
 // 值正确、锚点定义与未知字段保留。
