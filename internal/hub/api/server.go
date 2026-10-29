@@ -146,6 +146,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/works/{id}/collect", s.auth(s.handleWorkCollect))   // 收集/关闭（P5 W3，终态闭合）
 	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
 	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
+	mux.HandleFunc("POST /api/v1/sessions", s.auth(s.handleSessionCreate))           // 会话创建（T2 持久会话，绑定快照）
+	mux.HandleFunc("GET /api/v1/sessions", s.auth(s.handleSessionList))              // 会话列表
+	mux.HandleFunc("GET /api/v1/sessions/{id}", s.auth(s.handleSessionGet))          // 详情（轮次账本 + 投影状态）
+	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.auth(s.handleSessionTurn))  // 提交轮次（异步受理）
+	mux.HandleFunc("POST /api/v1/sessions/{id}/close", s.auth(s.handleSessionClose)) // 关闭（幂等回执）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
 	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest))            // 派发建议（P5.1 D1）
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）

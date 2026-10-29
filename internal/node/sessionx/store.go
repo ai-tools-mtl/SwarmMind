@@ -23,6 +23,11 @@ const sessionsVersion = 1
 type persistedSessions struct {
 	Version  int                `json:"version"`
 	Sessions []protocol.Session `json:"sessions"`
+	// Closing 关闭墓碑（T2-R1 必修4）：映射发布前收到关闭意图的平台会话 ID 集
+	//（排序稳定）。创建发布前核验，命中则拒绝创建（ErrSessionClosed）——关闭
+	// 决定跨重启留存，「关闭成功后会话复活」无持久化缺口。可加性字段：旧文件
+	// 缺失即空表，无需迁移。
+	Closing []string `json:"closing,omitempty"`
 }
 
 // loadSessions 装载磁盘会话表并登记写者锁句柄。仅启动期（NewManager）调用，
@@ -52,6 +57,12 @@ func (m *Manager) loadSessions() {
 		m.sessions[sess.ID] = &sess
 		m.writers[sess.ID] = &sessionGate{}
 	}
+	for _, id := range p.Closing {
+		if id == "" {
+			continue // 空条目防御
+		}
+		m.closing[id] = true
+	}
 }
 
 // saveSessionsLocked 全量原子落盘（R1 审查 S3 修订、R2 复审 S3 承诺收窄：文案与
@@ -79,7 +90,12 @@ func (m *Manager) saveSessionsLocked() error {
 		}
 		return list[i].ID < list[j].ID
 	})
-	b, err := json.MarshalIndent(persistedSessions{Version: sessionsVersion, Sessions: list}, "", "  ")
+	closing := make([]string, 0, len(m.closing))
+	for id := range m.closing {
+		closing = append(closing, id)
+	}
+	sort.Strings(closing)
+	b, err := json.MarshalIndent(persistedSessions{Version: sessionsVersion, Sessions: list, Closing: closing}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -101,7 +117,7 @@ func (m *Manager) saveSessionsLocked() error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := f.Sync(); err != nil { // 文件内容落盘先于 rename（掉电不回退）
+	if err := f.Sync(); err != nil { // 文件内容落盘先于 rename（进程崩溃不丢不回退；无掉电耐久承诺见函数头）
 		f.Close()
 		os.Remove(tmp)
 		return err
@@ -114,6 +130,9 @@ func (m *Manager) saveSessionsLocked() error {
 		os.Remove(tmp) // rename 失败旧数据原样保留，不留半截 tmp
 		return err
 	}
+	// 全量快照已确认落盘（T2-R2 N2）：dirty 至此清零——此后关闭类路径的幂等
+	// 快速返回有磁盘背书；失败路径不清零，下次关闭请求继续重试并如实报错。
+	m.persistDirty = false
 	// 目录 fsync 尽力而为（R2 复审 S3：不承担掉电耐久承诺）。rename 已成功即提交，
 	// 此刻报「持久化失败」会教调用方误信磁盘没有数据（从而依赖内存态、等待下次
 	// 重写），与事实相反——任何目录打开/同步失败只记日志，不改变提交结果。

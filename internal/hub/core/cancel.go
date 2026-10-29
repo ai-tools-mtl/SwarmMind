@@ -54,6 +54,7 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 		st.Tasks[nt.ID] = nt
 		releaseWorkdirLock(st, nt.TargetNode, nt.ID) // 终态释放 workdir 互斥（P1.5）
 		writebackWorkTerminal(st, &nt, nt.UpdatedAt) // 工作单终态回写（P5 W2：cancelled 同事务落账）
+		writebackSessionTurn(st, &nt, nt.UpdatedAt)  // 会话轮终回写（T2：取消即 failed 留痕）
 		if t.Status == protocol.StatusSubmitted {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 未投递直接撤回，释放信箱配额
 		}
@@ -97,7 +98,7 @@ func (c *Core) CancelTask(taskID, reason string) (protocol.Task, bool, error) {
 // 只记日志，状态已终态不重试）——节点重新注册成功（会话层注册事务发布后回调
 // SetOnline 上线）时，对其名下 status=cancelled 且 Result==nil（真实执行数据尚待
 // node 回传合并）的任务逐个补发 task_cancel，帧携各自任务当前落库租约
-//（cancel_fence，P1-2：node 对账取大者后回执宽校验收敛）。node 侧幂等：在跑则
+// （cancel_fence，P1-2：node 对账取大者后回执宽校验收敛）。node 侧幂等：在跑则
 // 终止执行，已终态/不在账本回 task_cancelled ack；已合并结果（Result 非 nil）的
 // 任务无需再补。触发时机对齐注册成功处（session.register → SetOnline(true)），
 // membus 测试链路同口径。

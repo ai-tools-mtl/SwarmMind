@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
@@ -45,6 +46,13 @@ func offerEnvelope(t *protocol.Task, fence int64) *protocol.Envelope {
 // （依赖未满足）的 submitted 任务不投递、留信箱占配额（SPEC 4.12）。事件驱动
 // （提交/上线/started/终态）+ 清扫兜底，幂等。membus 同步分发下 Send 会嵌套执行
 // node 侧回链，循环内禁止持锁。
+//
+// 会话轮补投复核（T2-R1 必修7，SPEC 六.五/19 防线三）：会话任务在实际出队的
+// 事务内复核当前节点会话能力与绑定兼容性——受理时的检查距投递可隔任意长的离线
+// 暂存窗口，期间节点回退旧版/撤回 session_adapter 声明或改配权限，若照常下发
+// task_offer，旧 node 会丢弃未知 Session 段按普通任务经 runner 执行（降级，行为
+// 不正确）。复核不符：任务与轮行同事务落 failed 留账（错误码 session_unsupported
+// / binding_changed），绝不投递。普通任务路径零变化。
 func (c *Core) dispatch(nodeID string) {
 	if !c.isOnline(nodeID) {
 		return
@@ -52,7 +60,8 @@ func (c *Core) dispatch(nodeID string) {
 	for {
 		var (
 			offered *protocol.Task
-			fence   int64 // 派发时刻该 node 的注册代次（租约快照，事务内捕获）
+			fence   int64          // 派发时刻该 node 的注册代次（租约快照，事务内捕获）
+			blocked *protocol.Task // 会话轮补投复核不符：同事务留账失败（不投递）
 		)
 		err := c.st.Update(func(st *store.State) error {
 			// 窗口在单写事务内重检（并发 dispatch 由单写串行化收敛）
@@ -67,6 +76,26 @@ func (c *Core) dispatch(nodeID string) {
 			})
 			if !ok {
 				return errNotQueued
+			}
+			if reason := sessionDispatchRecheck(st, &t); reason != "" {
+				// 复核不符：留账失败（任务+轮行同事务终态），事务提交后旁路通知
+				// 并继续本队列（不截断后续普通任务，T2-R2 N3）
+				now := c.now()
+				nt := t.Clone()
+				nt.Status = protocol.StatusFailed
+				nt.Result = &protocol.TaskResult{
+					Status:     protocol.ResultFailed,
+					ExitCode:   protocol.ExitCodeNotRun,
+					Error:      reason,
+					FinishedAt: now,
+					Turn:       &protocol.TurnOutcome{TurnSeq: t.Session.TurnSeq, NativeIDOk: false, WorkResult: protocol.WorkUnverified},
+				}
+				nt.UpdatedAt = now
+				st.Tasks[nt.ID] = nt
+				writebackWorkTerminal(st, &nt, now) // 无 WorkRef 恒 no-op，防御对称
+				writebackSessionTurn(st, &nt, now)  // 轮行 failed 留账（与任务终态同事务）
+				blocked = &nt
+				return nil
 			}
 			nt := t.Clone()
 			nt.Status = protocol.StatusOffered
@@ -90,8 +119,23 @@ func (c *Core) dispatch(nodeID string) {
 			offered = &nt
 			return nil
 		})
-		if err != nil || offered == nil {
-			return // 无任务/窗口满/事务失败
+		if err != nil {
+			return // 事务失败：副本整体丢弃零发布（无任何变更对外可见），等下一次触发
+		}
+		if blocked != nil {
+			// 复核不符已同事务留账 failed（任务已出队、终态已提交）：终态旁路通知
+			// 后继续本投递循环——被拒会话轮绝不截断同队列普通任务（T2-R2 N3，
+			// 「普通任务路径零变化」的另一半：循环提前 return 会把队尾 submitted
+			// 普通任务饿死到下一次无关触发，Sweep 亦非无条件补投）。
+			log.Printf("[hub] 会话轮补投复核不符，留账失败旁路通知 node=%s task=%s session=%s: %s",
+				nodeID, blocked.ID, blocked.Session.SessionID, blocked.Result.Error)
+			c.noteTask(blocked)
+			c.notifyResultEvent(blocked)
+			c.fireTerminal(blocked) // 首次落终态旁路（与清扫置终态同口径）
+			continue
+		}
+		if offered == nil {
+			return // 无任务可投（含窗口满/信箱空等 benign 停止条件）
 		}
 		c.noteTask(offered)
 		if err := c.tr.Send(nodeID, offerEnvelope(offered, fence)); err != nil {
@@ -101,6 +145,32 @@ func (c *Core) dispatch(nodeID string) {
 			return
 		}
 	}
+}
+
+// sessionDispatchRecheck 会话任务补投复核（出队事务内调用，普通任务恒空串）：
+// 目标能力卡仍声明会话能力（session_adapter 非空）且与注册表绑定快照兼容
+//（turn 任务：adapter/权限严格相等；close 任务：仅能力复核——注册表已 closed，
+// 权限快照核对无意义）。不符返回留账错误文案；会话行缺失为防御放行（T2 无删除
+// 路径，正常不可达，投递交 node 侧既有 not_found 幂等收尾）。
+func sessionDispatchRecheck(st *store.State, t *protocol.Task) string {
+	if t.Session == nil {
+		return ""
+	}
+	card, ok := lookupAgent(st, t.TargetNode, t.TargetAgent)
+	if !ok || card.SessionAdapter == "" {
+		return "session_unsupported: 节点会话能力声明已不存在（旧版回退或 node.yaml 撤回 session_adapter），会话轮停止补投、拒绝降级为普通任务执行"
+	}
+	if t.Session.Op == protocol.SessionTurnOpClose {
+		return ""
+	}
+	sess, ok := st.Sessions[t.Session.SessionID]
+	if !ok {
+		return "" // 防御放行（注册表无删除路径；node 侧按 not_found 幂等收尾）
+	}
+	if card.SessionAdapter != sess.Adapter || card.PermissionMode != sess.PermissionMode {
+		return fmt.Sprintf("binding_changed: 能力卡与绑定快照漂移 持久=(%s/%s) 当前=(%s/%s)，会话轮停止补投（换绑须显式重建会话）", sess.Adapter, sess.PermissionMode, card.SessionAdapter, card.PermissionMode)
+	}
+	return ""
 }
 
 // revertOffer offer 发送失败回退：offered → submitted + 回队首（任务已持久化，

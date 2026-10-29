@@ -65,6 +65,7 @@ func (c *Core) Sweep() {
 					st.Tasks[nt.ID] = nt
 					releaseWorkdirLock(st, nt.TargetNode, nt.ID)
 					writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
+					writebackSessionTurn(st, &nt, now)  // 会话轮终回写（T2，SPEC 六.五）
 					mailbox.Remove(st, nt.TargetNode, nt.ID)
 					terminalized = append(terminalized, &nt)
 					reDispatch[nt.TargetNode] = true
@@ -83,6 +84,7 @@ func (c *Core) Sweep() {
 				st.Tasks[nt.ID] = nt
 				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
 				writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
+				writebackSessionTurn(st, &nt, now)  // 会话轮终回写（T2，SPEC 六.五）
 				mailbox.Remove(st, nt.TargetNode, nt.ID)
 				terminalized = append(terminalized, &nt)
 				reDispatch[nt.TargetNode] = true
@@ -99,6 +101,7 @@ func (c *Core) Sweep() {
 				st.Tasks[nt.ID] = nt
 				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
 				writebackWorkTerminal(st, &nt, now) // 工作单终态回写（P5 W2）
+				writebackSessionTurn(st, &nt, now)  // 会话轮终回写（T2，SPEC 六.五）
 				mailbox.Remove(st, nt.TargetNode, nt.ID)
 				terminalized = append(terminalized, &nt)
 				reDispatch[nt.TargetNode] = true

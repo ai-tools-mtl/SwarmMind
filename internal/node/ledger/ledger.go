@@ -23,6 +23,28 @@ const ledgerFileName = "ledger.json"
 // tmpFileName 落盘临时文件名：同目录写入后 rename，保证替换原子（SPEC 4.7）。
 const tmpFileName = ledgerFileName + ".tmp"
 
+// ledgerFileVersion 账本文件结构版本。v0 = 旧版裸 map（task_id → Entry，无信封），
+// v1 起为信封形态（entries + session_turn_hw；T2-R2 N4）。装载按 version 分流，
+// 旧文件零迁移直读。
+const ledgerFileVersion = 1
+
+// ledgerFile 账本磁盘形态（v1 信封）。
+type ledgerFile struct {
+	Version int              `json:"version"`
+	Entries map[string]Entry `json:"entries"`
+	// SessionTurnHW 会话已受理平台轮序号高水位（session_id → max turn_seq，含在
+	// 途轮；close 不占号不产生条目）。与受理同一事务推进并随本文件持久化——条目
+	// 过保留期清理后高水位仍在（T2-R2 N4：本机平台轮号推导的持久下界，取消/过期/
+	// 重启/清理后绝不回退复用；与内核 TurnCount 执行口径互补，谁都不替代谁）。
+	SessionTurnHW map[string]int64 `json:"session_turn_hw,omitempty"`
+}
+
+// snapshot 账本已发布状态（先写后见的发布单位；两表同事务落盘、同事务发布）。
+type snapshot struct {
+	entries map[string]Entry
+	turnHW  map[string]int64
+}
+
 // 事务故障注入阶段（与 hub store 同预设；仅包内测试设置 inject 使用，生产恒为 nil）。
 const (
 	// stageBeforeWrite 写盘前（副本已构造、尚未触盘）。
@@ -173,7 +195,7 @@ type Ledger struct {
 	tmp        string
 	lock       *Lock
 	ch         chan *txnReq
-	cur        atomic.Pointer[map[string]Entry]
+	cur        atomic.Pointer[snapshot]
 	writerDone chan struct{}
 	cancels    *cancelTombstones // 取消墓碑 sidecar（cancels.go；与账本同 data_dir/flock）
 
@@ -221,7 +243,7 @@ func open(dataDir string, inject func(op, stage string) error) (*Ledger, *Recove
 		writerDone: make(chan struct{}),
 		inject:     inject,
 	}
-	entries, err := loadEntries(l.path)
+	entries, hw, err := loadState(l.path)
 	if err != nil {
 		_ = lock.Release()
 		return nil, nil, err
@@ -232,7 +254,7 @@ func open(dataDir string, inject func(op, stage string) error) (*Ledger, *Recove
 		return nil, nil, err
 	}
 	l.cancels = cancels
-	l.cur.Store(&entries)
+	l.cur.Store(&snapshot{entries: entries, turnHW: hw})
 	go l.writeLoop()
 	rec, err := l.recover(protocol.NowUTC())
 	if err != nil {
@@ -243,25 +265,51 @@ func open(dataDir string, inject func(op, stage string) error) (*Ledger, *Recove
 	return l, rec, nil
 }
 
-// loadEntries 读取并解析账本；文件不存在视为空账本（首次启动）。
+// loadState 读取并解析账本全量状态（条目 + 会话轮高水位）。文件不存在视为空账本
+// （首次启动）。v1 信封按 version 识别；旧版裸 map（无 version 字段）零迁移直读，
+// 高水位自条目重算（受理条目本身携带 Task.Session.TurnSeq）——新旧两形态装载后
+// 都做一次「存储值 ∪ 条目扫描」取大，防手改/降级文件的高水位缺漏。
 // origin 逐条归一：旧版账本条目无 origin 字段，一律视为 hub（老条目继续走
 // hub 回传链路，行为不变）。
-func loadEntries(path string) (map[string]Entry, error) {
+func loadState(path string) (map[string]Entry, map[string]int64, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return map[string]Entry{}, nil
+		return map[string]Entry{}, map[string]int64{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("ledger: 读取账本失败: %w", err)
+		return nil, nil, fmt.Errorf("ledger: 读取账本失败: %w", err)
 	}
-	entries := map[string]Entry{}
-	if err := json.Unmarshal(b, &entries); err != nil {
-		return nil, fmt.Errorf("ledger: 账本损坏 %s: %w", path, err)
+	var entries map[string]Entry
+	var hw map[string]int64
+	var env ledgerFile
+	if json.Unmarshal(b, &env) == nil && env.Version >= 1 {
+		entries = env.Entries
+		hw = env.SessionTurnHW
+	} else if jerr := json.Unmarshal(b, &entries); jerr != nil {
+		// 兼容旧形态；两态都解析失败即账本损坏
+		return nil, nil, fmt.Errorf("ledger: 账本损坏 %s: %w", path, jerr)
+	}
+	if entries == nil {
+		entries = map[string]Entry{}
 	}
 	for id, e := range entries {
 		entries[id] = e.normalized()
 	}
-	return entries, nil
+	if hw == nil {
+		hw = map[string]int64{}
+	}
+	for _, e := range entries { // 重算兜底：max(存储高水位, 条目扫描)
+		if s := e.Task.Session; s != nil && s.TurnSeq > hw[s.SessionID] {
+			hw[s.SessionID] = s.TurnSeq
+		}
+	}
+	return entries, hw, nil
+}
+
+// loadEntries 仅读条目（磁盘核验辅助；完整状态装载走 loadState）。
+func loadEntries(path string) (map[string]Entry, error) {
+	entries, _, err := loadState(path)
+	return entries, err
 }
 
 // View 返回当前已发布账本快照（先写后见：只可能是已完整落盘的状态）。
@@ -269,7 +317,15 @@ func loadEntries(path string) (map[string]Entry, error) {
 // Entry——Task/Result 内层的 slice、map 与账本共享底层数据，原地改写即污染已发布状态；
 // 需要修改一律走 Accept/MarkXxx 等 Update(mutate) 事务，长期持有或跨 goroutine 传递
 // 请自行 Clone（Get 即返回副本）。
-func (l *Ledger) View() map[string]Entry { return *l.cur.Load() }
+func (l *Ledger) View() map[string]Entry { return l.cur.Load().entries }
+
+// SessionTurnHighWater 会话已受理平台轮序号高水位（含在途轮；close 不占号不入账
+// 恒不影响）。与受理同事务推进、随账本文件持久化、不随条目保留期清理回退
+//（T2-R2 N4）——本机平台轮号推导的持久下界，与内核 TurnCount（执行口径，不含
+// 未进 CLI 的受理轮）互补；无受理记录返回 0。
+func (l *Ledger) SessionTurnHighWater(sessionID string) int64 {
+	return l.cur.Load().turnHW[sessionID]
+}
 
 // OrphanGroups 启动恢复收集的崩溃孤儿清单（maturity-orphan-guard；Open 时固定，
 // 快照读）：started 降级时登记 pgid>0 的条目。service.New 消费做身份校验清扫。
@@ -657,15 +713,29 @@ func (l *Ledger) apply(op string, mutate func(map[string]Entry) error) (err erro
 			err = fmt.Errorf("ledger: 事务 panic（副本已丢弃）: %v", r)
 		}
 	}()
-	cur := *l.cur.Load()
-	next := make(map[string]Entry, len(cur)) // 构造新副本；此后任一步失败即整体丢弃
-	for id, e := range cur {
+	cur := l.cur.Load()
+	next := make(map[string]Entry, len(cur.entries)) // 构造新副本；此后任一步失败即整体丢弃
+	for id, e := range cur.entries {
 		next[id] = e.Clone()
+	}
+	nextHW := make(map[string]int64, len(cur.turnHW))
+	for sid, v := range cur.turnHW {
+		nextHW[sid] = v
 	}
 	if err = mutate(next); err != nil {
 		return fmt.Errorf("ledger: 事务被拒绝: %w", err)
 	}
-	if err = l.persist(op, next); err != nil {
+	// 会话轮高水位与受理同事务推进（T2-R2 N4）：账本内任何会话轮条目
+	//（Task.Session 非 nil 且 TurnSeq>0）即推进对应会话的已受理 max——与条目
+	// 同事务落盘发布，取消/过期/重启/保留期清理后不回退（高水位随文件留存，
+	// 条目可被清理）。max 扫描幂等且单调，任何操作（含恢复降级写）重复执行
+	// 不产生额外变更；close 恒 TurnSeq=0 不占号。
+	for _, e := range next {
+		if s := e.Task.Session; s != nil && s.TurnSeq > nextHW[s.SessionID] {
+			nextHW[s.SessionID] = s.TurnSeq
+		}
+	}
+	if err = l.persist(op, next, nextHW); err != nil {
 		return err
 	}
 	if err = l.injectFail(op, stageAfterRename); err != nil {
@@ -674,7 +744,7 @@ func (l *Ledger) apply(op string, mutate func(map[string]Entry) error) (err erro
 	if err = l.injectFail(op, stageBeforePublish); err != nil {
 		return err
 	}
-	l.cur.Store(&next) // 原子发布（此前失败路径均不触发布）
+	l.cur.Store(&snapshot{entries: next, turnHW: nextHW}) // 原子发布（此前失败路径均不触发布）
 	if err = l.injectFail(op, stageBeforeAck); err != nil {
 		return err
 	}
@@ -682,11 +752,11 @@ func (l *Ledger) apply(op string, mutate func(map[string]Entry) error) (err erro
 }
 
 // persist 将新账本写入临时文件并 rename 原子替换（SPEC 4.7：临时文件+rename）。
-func (l *Ledger) persist(op string, entries map[string]Entry) error {
+func (l *Ledger) persist(op string, entries map[string]Entry, hw map[string]int64) error {
 	if err := l.injectFail(op, stageBeforeWrite); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(entries, "", "  ")
+	b, err := json.MarshalIndent(ledgerFile{Version: ledgerFileVersion, Entries: entries, SessionTurnHW: hw}, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -25,14 +25,17 @@ const dbFileName = "hub_state.db"
 
 // schemaVersion 当前 schema 版本（PRAGMA user_version）。演进时 +1 并在 Open
 // 写迁移路径；库版本高于本代码认识的范围时拒绝启动（诚实失败优于误读）。
-const schemaVersion = 1
+// v2（T2 持久会话）：新增 sessions 表——schemaDDL 全 IF NOT EXISTS，旧库迁移 =
+// 重放 DDL 补建缺失表 + 盖版本号（既有表零触碰）。
+const schemaVersion = 2
 
 // jsonImportedSuffix 旧 JSON 快照导入成功后的备份改名后缀
 //（hub_state.json → hub_state.json.imported-<unix秒>）。
 const jsonImportedSuffix = ".imported-"
 
-// schemaDDL 实体分表：九类状态各一张表，行 = key（map 键，主键）+ body（条目
-// JSON 体）。prime 为单例行（key 恒 'prime'，nil = 无行）。
+// schemaDDL 实体分表：十类状态各一张表，行 = key（map 键，主键）+ body（条目
+// JSON 体）。prime 为单例行（key 恒 'prime'，nil = 无行）。全部 IF NOT EXISTS：
+// 建新库与旧库补表（版本迁移）共用同一 DDL，既有表零触碰。
 const schemaDDL = `CREATE TABLE IF NOT EXISTS nodes         (key TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS tasks          (key TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mailboxes      (key TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -41,6 +44,7 @@ CREATE TABLE IF NOT EXISTS batch_idems    (key TEXT PRIMARY KEY, body TEXT NOT N
 CREATE TABLE IF NOT EXISTS workdir_locks  (key TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS works          (key TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS work_idems     (key TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions       (key TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS prime          (key TEXT PRIMARY KEY, body TEXT NOT NULL);`
 
 // sqliteURIPath 把文件路径转成 file: URI 的路径组件（2026-10-26 复审必修2）：
@@ -172,6 +176,16 @@ func loadStateFromDB(q dbQueryer) (*State, error) {
 	if err := scanStringTable(q, "work_idems", st.WorkIdems); err != nil {
 		return nil, err
 	}
+	if err := scanTable(q, "sessions", func(k string, body []byte) error {
+		var s Session
+		if err := json.Unmarshal(body, &s); err != nil {
+			return fmt.Errorf("store: sessions.%s 条目损坏: %w", k, err)
+		}
+		st.Sessions[k] = s
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	var primeBody []byte
 	err := q.QueryRow(`SELECT body FROM prime WHERE key = 'prime'`).Scan(&primeBody)
 	switch {
@@ -267,6 +281,9 @@ func diffState(old, next *State) ([]tableDiff, error) {
 		return nil, err
 	}
 	if err := diffMap("work_idems", old.WorkIdems, next.WorkIdems, &diffs); err != nil {
+		return nil, err
+	}
+	if err := diffMap("sessions", old.Sessions, next.Sessions, &diffs); err != nil {
 		return nil, err
 	}
 	if err := diffPrime(old.Prime, next.Prime, &diffs); err != nil {
@@ -371,7 +388,7 @@ func applyDiffs(tx *sql.Tx, diffs []tableDiff) error {
 // 的全表写入只发生在这里；常规事务走 diffState，禁止全表重写）。
 func importStateTx(tx *sql.Tx, st *State) error {
 	for _, t := range []string{"nodes", "tasks", "mailboxes", "batches", "batch_idems",
-		"workdir_locks", "works", "work_idems", "prime"} {
+		"workdir_locks", "works", "work_idems", "sessions", "prime"} {
 		if _, err := tx.Exec("DELETE FROM " + t); err != nil {
 			return fmt.Errorf("store: 清空 %s 表失败: %w", t, err)
 		}
@@ -398,6 +415,9 @@ func importStateTx(tx *sql.Tx, st *State) error {
 		return err
 	}
 	if err := insertMapTx(tx, "work_idems", st.WorkIdems); err != nil {
+		return err
+	}
+	if err := insertMapTx(tx, "sessions", st.Sessions); err != nil {
 		return err
 	}
 	if st.Prime != nil {

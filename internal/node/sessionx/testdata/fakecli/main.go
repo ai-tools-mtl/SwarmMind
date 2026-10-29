@@ -91,9 +91,6 @@ func main() {
 		if p := env("FAKE_TOUCH"); p != "" {
 			_ = os.WriteFile(p, nil, 0o644)
 		}
-		if p := env("FAKE_SPAWN_DELAY_WRITER"); p != "" {
-			spawnDelayWriter(p)
-		}
 	}
 	if s := env("FAKE_STDOUT"); s != "" {
 		fmt.Println(s)

@@ -62,6 +62,13 @@ type AgentCard struct {
 	// 管家；hub 全网汇聚（恰一声明生效；多声明冲突回退名字约定并告警；零声明回退
 	// 名字约定）。混跑兼容同 StdinToArg：旧端缺字段解码零值 false。
 	Orchestrator bool `json:"orchestrator,omitempty"`
+	// SessionAdapter 会话接入声明（T2 持久会话，SPEC 六.五「会话与轮次」）：
+	// SessionAdapterCodex | SessionAdapterZcode——node.yaml 该能力配置
+	// session_adapter 后经能力卡上报（接入分级声明，VISION 四）。空 = 无持久
+	// 会话能力：hub 建会话 422 session_unsupported（旧版 node 卡缺字段解码为空，
+	// 同口径拒绝并指路升级）。混跑兼容：旧 hub 解码丢弃未知字段（目录不展示，
+	// 会话面不可用——能力发现降级，任务面不受影响）。
+	SessionAdapter string `json:"session_adapter,omitempty"`
 }
 
 // ExecProfile 本机执行配置（永不离开本机；SPEC 4.9）。
@@ -102,6 +109,11 @@ type ExecProfile struct {
 	// hub 全网汇聚：恰一声明即生效；多声明为配置漂移冲突（无生效管家，回退名字约定
 	// + 控制台警告）；零声明回退能力名含 zcode-dev 的名字约定。
 	Orchestrator bool `json:"orchestrator,omitempty"`
+	// SessionAdapter 会话适配器声明（T2 持久会话）：非空 = 该能力支持持久会话，
+	// 取值 SessionAdapterCodex | SessionAdapterZcode（经能力卡上报 hub；空 = 不
+	// 支持会话）。会话轮执行经 sessionx 内核（同 Command、PermissionMode 与
+	// TimeoutSec 语义；进程环境由装配方按 SPEC 五给干净基线）。
+	SessionAdapter string `json:"session_adapter,omitempty"`
 }
 
 // TaskInput 任务输入（SPEC 4.9）。
@@ -136,6 +148,28 @@ type TaskResult struct {
 	StartedAt time.Time `json:"started_at,omitempty"`
 	// FinishedAt 执行结束时刻（UTC）。
 	FinishedAt time.Time `json:"finished_at,omitempty"`
+	// Turn 会话轮执行产物（T2 持久会话；nil=普通任务结果，既有形态零变化）。
+	// 轮终按任务结果链回传：hub 据此写会话轮次账本（SPEC 六.五「会话与轮次」）。
+	Turn *TurnOutcome `json:"turn,omitempty"`
+}
+
+// TurnOutcome 会话轮执行产物（node→hub 随 task_result 回传；回复正文经
+// TaskResult.FinalAnswer 原样承载，不在此重复）。轮终四路判定的投影：
+//   - 执行成立（三路齐备）→ 任务终态 completed、NativeIDOk=true；
+//   - 执行不成立（退出码/解析/原生 ID/绑定守卫/内核拒绝）→ 任务终态 failed、
+//     NativeIDOk=false、错误随 TaskResult.Error 留痕；
+//   - WorkResult 沿用内核判定（T2 恒 unverified——CLI 输出无法证明工作成功，
+//     禁止文本关键词猜测；验收链路显式改判属后续批次）。
+type TurnOutcome struct {
+	// TurnSeq 平台轮序号（回显 Task.Session.TurnSeq，供 hub 定位轮次账本行）。
+	TurnSeq int64 `json:"turn_seq"`
+	// NativeIDOk 原生 ID 校验成立：create 取回非空原生 ID / send 回带与存储一致
+	//（false = 本轮未与既有原生线程确认衔接，详见 TaskResult.Error）。
+	NativeIDOk bool `json:"native_id_ok"`
+	// WorkResult 工作结果判定（protocol.WorkUnverified；四路分离第四路）。
+	WorkResult string `json:"work_result"`
+	// Usage token 用量摘要（内核解析产物，解析不出为零值）。
+	Usage TurnUsage `json:"usage"`
 }
 
 // Artifact 产物引用（SPEC 4.9）：内容保留在 node 本地，经 artifact_fetch/artifact_data 拉取。
@@ -243,6 +277,48 @@ type Task struct {
 	// Review 人工核对记录（needs_review 任务的管理面追加，SPEC 六.五；
 	// 协议层不感知，不参与状态机与 offer 下发）。
 	Review *TaskReview `json:"review,omitempty"`
+	// Session 会话轮身份段（T2 持久会话，SPEC 六.五「会话与轮次」；nil=普通任务，
+	// 既有语义零变化）。会话轮复用任务投递链（信箱/幂等/补投/租约全白拿）但身份
+	// 严格分离：本段携带平台 session id 与平台轮序号，Task.ID 仅作为本次执行的
+	// 可靠性载体——禁止把 Task ID 当会话身份，也禁止会话身份顶替 Task 身份
+	//（VISION 第三节）。幂等键按 session id + turn seq 派生（core 层会话轮键）。
+	Session *SessionTurnRef `json:"session,omitempty"`
+}
+
+// 会话轮操作取值（SessionTurnRef.Op）。
+const (
+	// SessionTurnOpCreate 首轮：node 侧执行首轮并建立平台↔原生映射（Create）。
+	SessionTurnOpCreate = "create"
+	// SessionTurnOpSend 续轮：以存储原生 ID 续接（Send）。
+	SessionTurnOpSend = "send"
+	// SessionTurnOpClose 关闭：node 侧关闭会话（Close），随任务链投递保证离线
+	// node 重连后补执行；不占轮次序号（管理动作非对话轮）。
+	SessionTurnOpClose = "close"
+)
+
+// SessionTurnRef 会话轮身份段（协议层纯数据；投递/注册表/状态机见 hub core 与
+// node service）。create 携 cwd 与绑定断言值（适配器+权限）；send/close 以
+// node 侧存储的会话绑定为唯一真相（防路径漂移与静默换绑），不重带 cwd。
+type SessionTurnRef struct {
+	// SessionID 平台会话 ID（hub 注册表分配，"s-"+16 字节 hex；与 node 侧
+	// sessionx 持久映射同键）。
+	SessionID string `json:"session_id"`
+	// TurnSeq 平台轮序号（1 起；create 恒 1 起，close 不占号恒 0）。参与幂等键。
+	TurnSeq int64 `json:"turn_seq"`
+	// Op 操作：SessionTurnOpXxx。
+	Op string `json:"op"`
+	// Cwd 会话工作目录（create 必填，node 本机绝对路径；send/close 恒空）。
+	Cwd string `json:"cwd,omitempty"`
+	// PermissionMode 权限模式断言值（create 可选；hub 侧与能力卡核对后原样下发
+	// 供 node 复核，非换绑通道——真相源是 node 侧配置；绝不注入 yolo，node 侧
+	// 对提权档位显式拒绝，SPEC 六.五）。
+	PermissionMode string `json:"permission_mode,omitempty"`
+	// Adapter 适配器断言值（create/send 携带，close 不携）：hub 注册表绑定快照的
+	// 适配器名，node 首轮执行入口与本机装配表规范化配置同口核对（T2-R2 必修2
+	// 补完——权限与适配器可独立漂移：权限不变而适配器漂移时原生会话 ID 会被
+	// 交给另一 CLI，同属换绑，须在 spawn 前拒绝）。缺省（旧版 hub 帧无此字段）
+	// = 信任本机配置；续轮不依赖本字段（node 侧存储绑定守卫已覆盖）。
+	Adapter string `json:"adapter,omitempty"`
 }
 
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。
@@ -311,6 +387,10 @@ func NewTaskID() string { return "t-" + randomHex() }
 // NewWorkID 生成工作单 ID："w-"+16 字节 hex（P5/RFC-work-resume 二.1，hub 生成）。
 func NewWorkID() string { return "w-" + randomHex() }
 
+// NewSessionID 生成平台会话 ID："s-"+16 字节 hex（T2 持久会话，hub 注册表分配；
+// 与 node 侧 sessionx 内核映射同键，格式对齐 sessionx 生成形态）。
+func NewSessionID() string { return "s-" + randomHex() }
+
 // NewMessageID 生成信封去重键 mid：16 字节 hex。
 func NewMessageID() string { return randomHex() }
 
@@ -345,6 +425,11 @@ func (t Task) Clone() Task {
 		ls := *t.Lease
 		n.Lease = &ls
 	}
+	if t.Session != nil {
+		// 写时复制纪律：*SessionTurnRef 换新指针（同 Lease 口径）
+		sr := *t.Session
+		n.Session = &sr
+	}
 	return n
 }
 
@@ -364,6 +449,11 @@ func (in TaskInput) Clone() TaskInput {
 // Clone 深拷贝结果。
 func (r TaskResult) Clone() TaskResult {
 	r.Artifacts = append([]Artifact(nil), r.Artifacts...)
+	if r.Turn != nil {
+		// 写时复制纪律：*TurnOutcome 换新指针（同 Task.Lease 口径）
+		t := *r.Turn
+		r.Turn = &t
+	}
 	return r
 }
 

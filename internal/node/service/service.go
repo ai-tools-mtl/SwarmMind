@@ -27,6 +27,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/inputs"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
+	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
 )
@@ -67,6 +68,11 @@ type Config struct {
 	// 同一实例）。service 在子进程成功启动后同步调用（实现侧做账本 MarkSpawned
 	// 落盘，失败降级为恢复时放过清扫，安全侧）；nil = 不接（测试/无需清扫的装配）。
 	OnSpawn func(task protocol.Task, pgid, procStart int64, bootIdent string)
+	// Sessions 会话内核（T2 持久会话，sessionturn.go；nil = 会话轮任务一律
+	// failed session_unsupported——诚实拒绝不降级）。装配方按
+	// ExecProfile.SessionAdapter 声明集装配（cmd/node buildSessionAgents），
+	// 启动期一次性。
+	Sessions *sessionx.Manager
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -110,6 +116,20 @@ type Service struct {
 	// 无 hub。EnableRemoteInputs 装配期一次性置位，与执行期读取同 muExec 互斥，
 	// 同 SwapExecutors 的「装配期写、执行期读」纪律）。
 	remoteRes *inputs.RemoteResolver
+
+	// sessions 会话内核（T2 持久会话，SPEC 六.五；nil = 会话轮任务一律 failed
+	// session_unsupported——未装配会话能力的 node 诚实拒绝，绝不静默降级为普通
+	// 任务执行）。装配期构建（cmd/node 按 ExecProfile.SessionAdapter 声明集），
+	// 启动期一次性；会话轮任务（Task.Session != nil）在 execute 分支进入
+	// runSessionTurn，投递/账本/回传全链与普通任务共用（身份分离见 protocol
+	// SessionTurnRef 注）。
+	sessions *sessionx.Manager
+
+	// localMu 本机会话提交互斥（T2-R1 建议3）：localSessionOp 的操作/序号推导到
+	// 账本入账之间持锁——本机平台轮号（账本 max+1）原子预留，并发提交同一会话
+	// 不再得到相同 seq/IdemKey（与 hub 侧「写事务内分配轮号」同一原则，边界为
+	// 本机提交互斥锁；锁内仅账本追加，微秒级，不同会话串行无感）。
+	localMu sync.Mutex
 }
 
 // EnableRemoteInputs 启用跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 模式
@@ -162,6 +182,7 @@ func New(cfg Config, tr transport.Transport) *Service {
 		wsLocks:           newWsMutex(),
 		runners:           cfg.Runners,
 		roots:             cfg.ArtifactRoots,
+		sessions:          cfg.Sessions,
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -429,7 +450,14 @@ func (s *Service) execute(task protocol.Task) {
 		}
 		s.sendRef(protocol.MsgTaskStarted, task.ID) // started 落盘成功后、spawn 前发（SPEC 4.7）
 
-		res := s.runTask(runCtx, task)
+		// 会话轮分支（T2，sessionturn.go）：执行器从 runner 换为 sessionx 同步
+		// 内核；投递/账本/互斥/并发/回传纪律与普通任务共用（普通任务路径零变化）。
+		var res protocol.TaskResult
+		if task.Session != nil {
+			res = s.runSessionTurn(runCtx, task)
+		} else {
+			res = s.runTask(runCtx, task)
+		}
 		// 执行结果分类：服务关闭打断了在途执行（子进程已被整组终止）——执行结果
 		// 不确定，写 needs_review/node_restarted_midway 收尾并回传；管理面取消同样
 		// 整组终止，写 cancelled/user_cancelled（仅当进程确被终止或未运行——进程已
@@ -490,7 +518,7 @@ func isExpired(t protocol.Task, now time.Time) bool {
 	return !t.ExpireAt.IsZero() && t.ExpireAt.Before(now)
 }
 
- // runTask 选择执行器并执行；未知 agent 即配置漂移（SPEC 4.3）：failed/
+// runTask 选择执行器并执行；未知 agent 即配置漂移（SPEC 4.3）：failed/
 // agent_not_found，不进重推循环（结果已入账本，重复 offer 走重发分支）。
 // maturity-orphan-guard：spawn 成功回调（pgid+procStart 落账本）经 SetSpawnHook
 // 接入——类型断言而非接口方法（Runner 最小接口不膨胀，测试桩零改动；
@@ -559,8 +587,8 @@ func (s *Service) handleResultAck(env *protocol.Envelope) {
 // closed 停止重传，记录保留作冲突审计（SPEC 4.5）。
 // P1-3（任务租约拒收的收窄）：err 结构化携带被拒的 fence_epoch 时，仅当它与
 // 账本条目当前 fence 等值才置 closed——拒收旧代次不得关闭已重臂的新租约条目
-//（新租约结果首发丢失后，周期/重启补传须继续，否则任务永久滞留）；未携 fence
-//（旧版对端、普通终态冲突）按既有规则无条件关闭。
+// （新租约结果首发丢失后，周期/重启补传须继续，否则任务永久滞留）；未携 fence
+// （旧版对端、普通终态冲突）按既有规则无条件关闭。
 func (s *Service) handleErr(env *protocol.Envelope) {
 	if env.Err == nil || env.Err.Code != protocol.CodeResultConflict {
 		log.Printf("[node] 收到 err 帧 code=%s msg=%s", errCode(env), envErrMsg(env))
@@ -599,7 +627,7 @@ func (s *Service) Execute(task protocol.Task) {
 // ResendPending 立即重发账本全部未确认结果（同步，测试与 worker 内部用）。
 // origin 过滤（方案 3.2，zcode 审查补强）：只有 hub 下发（origin=hub）的结果
 // 才回传 hub——standalone 期本地任务的结果帧在切换组网后不得成批推 hub
-//（local 来源条目落终态即自确认，正常不在队列；此处为双保险并免日志噪音）。
+// （local 来源条目落终态即自确认，正常不在队列；此处为双保险并免日志噪音）。
 func (s *Service) ResendPending() {
 	for _, e := range s.cfg.Ledger.PendingResend() {
 		if e.Origin != ledger.OriginHub {
@@ -660,7 +688,7 @@ func (s *Service) TerminalRetention() time.Duration { return s.terminalRetention
 
 // cleanupInterval 账本终态清理周期（调度节拍，非协议常量）：正确性只依赖
 // terminal_retention 配置值，节拍只影响清理时延；1 分钟固定，不做配置面
-//（maturity-retention-config 任务书纪律：避免配置膨胀）。var 仅为测试缩短
+// （maturity-retention-config 任务书纪律：避免配置膨胀）。var 仅为测试缩短
 // 节拍（真实短等待锁接线，不引入配置面）。
 var cleanupInterval = time.Minute
 
@@ -926,7 +954,8 @@ func CardsFromProfiles(profiles []protocol.ExecProfile) []protocol.AgentCard {
 			Exposed:        p.Exposed,
 			AllowArgs:      p.AllowArgs, // 输入语义声明（SPEC 4.9）：控制台/调用方据此呈现传参面
 			StdinToArg:     p.StdinToArg,
-			Orchestrator:   p.Orchestrator, // 统筹载体声明（2026-10-28 客户端声明制）
+			Orchestrator:   p.Orchestrator,   // 统筹载体声明（2026-10-28 客户端声明制）
+			SessionAdapter: p.SessionAdapter, // 会话接入声明（T2，SPEC 六.五；空=无会话能力）
 		})
 	}
 	return cards

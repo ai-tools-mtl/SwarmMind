@@ -105,6 +105,23 @@ func Open(dir string) (*Store, error) {
 			_ = db.Close()
 			return fail(err)
 		}
+	} else if version < schemaVersion {
+		// 旧库迁移：schemaDDL 全 IF NOT EXISTS，单事务补建缺失表并盖新版本号
+		//（既有表与数据零触碰；失败整体回滚，下次启动重试）。
+		tx, err := db.Begin()
+		if err != nil {
+			_ = db.Close()
+			return fail(fmt.Errorf("store: 开启迁移事务失败: %w", err))
+		}
+		if err := initSchemaTx(tx); err != nil {
+			_ = tx.Rollback()
+			_ = db.Close()
+			return fail(err)
+		}
+		if err := tx.Commit(); err != nil {
+			_ = db.Close()
+			return fail(fmt.Errorf("store: 提交迁移事务失败: %w", err))
+		}
 	}
 	st, err := loadStateFromDB(db)
 	if err != nil {

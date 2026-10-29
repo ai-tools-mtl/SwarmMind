@@ -14,7 +14,7 @@
 //     延时优雅退出靠保活拉起；裸前台在应答注明手动重启命令。
 //
 // 鉴权：读 = local_token/prime_token（authRead）；写盘与重启 = 仅 local_token
-//（authLocal，本机主人操作——写 agents.command 即执行权，与 setup 写盘同门）。
+// （authLocal，本机主人操作——写 agents.command 即执行权，与 setup 写盘同门）。
 package localapi
 
 import (
@@ -68,6 +68,10 @@ type AgentProfile struct {
 	PermissionMode string   `yaml:"permission_mode" json:"permission_mode"`
 	Exposed        *bool    `yaml:"exposed" json:"exposed"`
 	StdinToArg     bool     `yaml:"stdin_to_arg" json:"stdin_to_arg"`
+	// SessionAdapter 会话适配器声明（T2 持久会话，SPEC 六.五）：codex|zcode，
+	// 空 = 不支持持久会话。装配表启动期构建，变更须「应用并重启」
+	//（classifyProfilesChange 归 structural 类）。
+	SessionAdapter string `yaml:"session_adapter" json:"session_adapter"`
 }
 
 // ToExecProfile 转协议层 ExecProfile（kind 空 = cli、exposed 未写 = true，与
@@ -86,6 +90,7 @@ func (p AgentProfile) ToExecProfile() protocol.ExecProfile {
 		AgentArgs: p.AgentArgs, TimeoutSec: p.TimeoutSec, AllowArgs: p.AllowArgs,
 		AllowEnv: p.AllowEnv, ConfigHome: p.ConfigHome, Description: p.Description,
 		PermissionMode: p.PermissionMode, Exposed: exposed, StdinToArg: p.StdinToArg,
+		SessionAdapter: p.SessionAdapter,
 	}
 }
 
@@ -183,6 +188,9 @@ func classifyProfilesChange(cur, next []protocol.ExecProfile) []string {
 		if strings.Join(old.AgentArgs, "\x00") != strings.Join(p.AgentArgs, "\x00") {
 			structural = append(structural, p.Name+": agent_args 变更")
 		}
+		if old.SessionAdapter != p.SessionAdapter {
+			structural = append(structural, p.Name+": session_adapter 变更（会话装配表启动期构建）")
+		}
 	}
 	for _, p := range cur {
 		if !nextNames[p.Name] {
@@ -205,7 +213,7 @@ func classifyProfilesChange(cur, next []protocol.ExecProfile) []string {
 // 读盘/解析失败回退运行时基线。原实现恒回运行时旧表：PUT pending 后刷新页面，
 // 前端拿到旧表再保存即把盘上新表覆盖回旧值（丢提交）。
 // 前端约定：PUT 应答 pending_restart=true 时仍不得以本端点回包覆盖编辑副本
-//（编辑副本才是用户最新意图，见 web/app.js cfgSave）。
+// （编辑副本才是用户最新意图，见 web/app.js cfgSave）。
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	ops := s.cfg.ConfigOps
 	if ops == nil {
@@ -260,7 +268,7 @@ type configPutRequest struct {
 
 // handlePutConfig PUT /api/v1/local/config：校验 → round-trip 写盘 → 分类 →
 // 热应用或标「待应用」。写盘成功但热应用未完成时，失败步骤之前的状态保持一致
-//（热重载失败 = 基线与运行时同为旧值），应答 pending_restart=true（重启即
+// （热重载失败 = 基线与运行时同为旧值），应答 pending_restart=true（重启即
 // 收敛到新盘上配置）。
 func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	ops := s.configPreflight(w)
@@ -421,7 +429,7 @@ func (s *Server) applyParsedLocked(w http.ResponseWriter, ops *ConfigOps, raw []
 
 // applyHotConfig 普通字段热应用（顺序即失败语义）：先重建执行器换表——失败时
 // 基线与运行时一致为旧值（磁盘已是新表，重启收敛）；成功后才整表替换基线提交
-//（覆盖集一并清空——提交表即权威，否则盘上 yaml 与生效值分叉、重启回跳）。
+// （覆盖集一并清空——提交表即权威，否则盘上 yaml 与生效值分叉、重启回跳）。
 // 能力表上报（CardsReporter）不在本函数——修复 3：它在 writeConfigMu 事务锁外
 // 由 applyConfigTable 尽力执行，锁内不得阻塞于网络。须持 writeConfigMu 调用。
 func (s *Server) applyHotConfig(ops *ConfigOps, next []protocol.ExecProfile) error {
@@ -438,7 +446,7 @@ func (s *Server) applyHotConfig(ops *ConfigOps, next []protocol.ExecProfile) err
 }
 
 // handleRestart POST /api/v1/local/restart：「应用并重启」——HTTP 应答先返回
-//（JSON 已触发），再回调装配方延时优雅退出靠保活拉起（方案 3.5 同 3.3 时序）。
+// （JSON 已触发），再回调装配方延时优雅退出靠保活拉起（方案 3.5 同 3.3 时序）。
 // 裸前台（保活检测未命中）在应答注明手动重启命令与检测方式。
 func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	ops := s.cfg.ConfigOps

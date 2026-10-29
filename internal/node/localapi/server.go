@@ -260,6 +260,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
 	mux.HandleFunc("POST /api/v1/local/setup/disconnect", s.authLocal(s.handleSetupDisconnect))
+	mux.HandleFunc("POST /api/v1/local/sessions", s.authLocal(s.handleLocalSessionCreate))          // 会话新建+首轮（T2，主人管理面）
+	mux.HandleFunc("POST /api/v1/local/sessions/{id}/turns", s.authLocal(s.handleLocalSessionTurns)) // 续轮（异步受理）
+	mux.HandleFunc("GET /api/v1/local/sessions", s.authLocal(s.handleLocalSessionList))              // 列表（内核快照）
+	mux.HandleFunc("GET /api/v1/local/sessions/{id}", s.authLocal(s.handleLocalSessionGet))          // 详情（含轮次留痕）
+	mux.HandleFunc("POST /api/v1/local/sessions/{id}/close", s.authLocal(s.handleLocalSessionClose)) // 关闭（幂等）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

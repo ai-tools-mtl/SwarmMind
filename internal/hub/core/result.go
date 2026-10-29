@@ -127,6 +127,7 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		st.Tasks[nt.ID] = nt
 		releaseWorkdirLock(st, nt.TargetNode, nt.ID) // 终态释放 workdir 互斥（P1.5）
 		writebackWorkTerminal(st, &nt, nt.UpdatedAt) // 工作单终态回写（P5 W2：事实与任务终态同事务）
+		writebackSessionTurn(st, &nt, nt.UpdatedAt)  // 会话轮终回写（T2：轮行与任务终态同事务）
 		if t.Status == protocol.StatusSubmitted {
 			mailbox.Remove(st, nt.TargetNode, nt.ID) // 直达终态即释放信箱
 		}

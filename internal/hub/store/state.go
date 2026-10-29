@@ -141,6 +141,11 @@ type State struct {
 	// 返回同单，响应丢失重试安全）。与 Work 同生命周期：只在建单事务内写入，
 	// Work 无独立删除路径则映射同存（口径同 BatchIdems）。
 	WorkIdems map[string]string `json:"work_idems"`
+	// Sessions 会话注册表（T2 持久会话，SPEC 六.五「会话与轮次」）：session_id →
+	// 会话记录（绑定快照 + 轮次账本）。写时复制：事务内对副本条目整体替换，
+	// 禁止原地改；任务落库与轮次登记同事务。无自动清理（VISION 5.2：活跃会话
+	// 索引不随任务终态清理失联；独立保留策略随产品化批次设计）。
+	Sessions map[string]Session `json:"sessions"`
 	// Prime 全局统筹载体指定（2026-10-23 网页指定）；nil=未指定，前端回退名字约定。
 	// 写时复制：事务内构造新 *PrimeDesignation 整体替换，禁止原地改。
 	Prime *PrimeDesignation `json:"prime,omitempty"`
@@ -157,6 +162,7 @@ func NewState() *State {
 		WorkdirLocks: make(map[string]map[string]string),
 		Works:        make(map[string]Work),
 		WorkIdems:    make(map[string]string),
+		Sessions:     make(map[string]Session),
 	}
 }
 
@@ -189,6 +195,12 @@ func (s *State) normalize() {
 	if s.WorkIdems == nil {
 		s.WorkIdems = make(map[string]string)
 	}
+	// 旧快照迁移：Sessions 字段（T2 持久会话）落地前的快照无 sessions，反序列化
+	// 得 nil map——补成空 map 即完成迁移（既有实体不受影响），归一结果随下次
+	// 事务落盘持久化。
+	if s.Sessions == nil {
+		s.Sessions = make(map[string]Session)
+	}
 }
 
 // Clone 深拷贝整个状态（容器逐层复制；string 等不可变值共享安全），
@@ -203,6 +215,7 @@ func (s *State) Clone() *State {
 		WorkdirLocks: make(map[string]map[string]string, len(s.WorkdirLocks)),
 		Works:        make(map[string]Work, len(s.Works)),
 		WorkIdems:    make(map[string]string, len(s.WorkIdems)),
+		Sessions:     make(map[string]Session, len(s.Sessions)),
 	}
 	for id, r := range s.Nodes {
 		n.Nodes[id] = r.Clone()
@@ -231,6 +244,9 @@ func (s *State) Clone() *State {
 	}
 	for k, v := range s.WorkIdems {
 		n.WorkIdems[k] = v
+	}
+	for id, sess := range s.Sessions {
+		n.Sessions[id] = sess.Clone()
 	}
 	if s.Prime != nil {
 		// 写时复制纪律：*PrimeDesignation 换新指针，禁止与旧状态共享
