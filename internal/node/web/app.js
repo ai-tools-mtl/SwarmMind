@@ -1061,14 +1061,20 @@ function primeDoneView() {
    * hub_synced=false 本机成功、hub 待同步（重连随注册收敛）；hub_synced 缺省=
    * standalone 未组网（无上报环节）。orch 缺省=应答未带声明位（测试构造），
    * 不作任何声明承诺。一次性凭证展示不受声明态影响。 */
+  /* 失败说明（fix2 去臆测，2026-10-29 复审 P1-02 残余）：只陈述本机事实——
+   * 本次目标声明未完成 + 既有有效声明保持原样（先写后见：失败整集不发布）+
+   * 本机当前声明位实值（S.agents 同源）。不推断 hub 目录内容：落盘失败时 hub
+   * 可仍持旧有效声明，「hub 目录暂无本机声明位」属无依据断言，删除。 */
+  const declaredNow = (S.agents || []).filter(a => a.orchestrator).map(a => a.name);
+  const declList = declaredNow.length ? declaredNow.map(n => '<code>' + esc(n) + '</code>').join('、') : '无';
   const declNote = d.orch === false
-    ? `<div class="notice warn spaced"><b>凭证已交接，本机声明失败</b>：管家的 Orchestrator 声明未能落盘（${esc(d.orchErr || '原因未返回')}）。本机管家与凭证交接已生效（旧凭证已失效），但 hub 目录暂无本机声明位——点「重试声明」补写（沿用本次钦定的凭证，不重新轮换），或「换一个管家」重新走钦定。</div>`
+    ? `<div class="notice warn spaced"><b>凭证已交接，本机声明失败</b>（${esc(d.orchErr || '原因未返回')}）：本机管家与凭证交接已生效（旧凭证已失效），本次目标声明未完成；既有有效声明保持原样——本机当前声明位：${declList}。点「重试声明」补写（沿用本次钦定的凭证，不重新轮换），或「换一个管家」重新走钦定。</div>`
     : d.orch === true
       ? (d.synced === true
-        ? `<small class="muted">本机声明已随钦定一并提交上报 hub（能力目录 Orchestrator 位）；hub 全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）。</small>`
+        ? `<small class="muted decl-note">本机声明已随钦定一并提交上报 hub（能力目录 Orchestrator 位）；hub 全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）。</small>`
         : d.synced === false
           ? `<div class="notice warn spaced"><b>本机声明成功，hub 待同步</b>：能力表上报未送达（hub 离线或链路故障）；node 重连注册后会随能力表自动收敛，无需重做钦定。</div>`
-          : `<small class="muted">本机声明已生效（standalone 未组网，无 hub 上报环节）。</small>`)
+          : `<small class="muted decl-note">本机声明已生效（standalone 未组网，无 hub 上报环节）。</small>`)
       : '';
   const retryBtn = d.orch === false ? button('重试声明', 'prime-retry-orch', '', '', `data-agent="${esc(d.agent)}"`) : '';
   return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${declNote}${wiredNote}
@@ -1407,8 +1413,12 @@ async function setOrchestrator(name, orchestrator, btn) {
   try {
     const r = await api('PATCH', `/api/v1/local/agents/${encodeURIComponent(name)}/orchestrator`, { orchestrator });
     if (r.code === 200) {
+      // hub_synced 消费兼容（P1-02 残余修正，与 declare 消费同口径）：组网=boolean
+      // 实况（true 已提交上报 / false 待同步）；standalone 应答缺省该字段（无上报
+      // 环节，后端已改缺省）——存 undefined 回落初始渲染基线，不得把缺省压成
+      // false 误显「待同步」（standalone 无 hub 可待）。
       const a = S.agents.find(x => x.name === name);
-      if (a) { a.orchestrator = r.data.orchestrator; a._synced = !!r.data.hub_synced; }
+      if (a) { a.orchestrator = r.data.orchestrator; a._synced = typeof r.data?.hub_synced === 'boolean' ? r.data.hub_synced : undefined; }
       toast(orchestrator ? '已声明智行管家 · 即时生效' : '已取消智行管家声明');
     } else if (r.code === 409) {
       toast('声明被拒 · ' + errLine(r.data));
@@ -1935,7 +1945,10 @@ function primeDeclare(btn) {
 /* retryPrimeDeclare 声明失败补写（P1-02 重试入口）：不重换凭证，走既有单翻转
  * PATCH 端点——先按本机实况撤其余有效声明位（含 YAML 基线旧持有人的覆盖压制，
  * SetAgentOrchestrator 互斥按有效真相判定），再授本次钦定名。每步原子落盘；任一
- * 步失败如实提示，完成页失败态保留可再次点击（幂等收敛：重跑时其余位已空）。 */
+ * 步失败如实提示，完成页失败态保留可再次点击（幂等收敛：重跑时其余位已空）。
+ * hub_synced 消费同 declare 口径（fix2）：字段为 boolean 才写 synced（组网实况）；
+ * 缺省（standalone 未组网，PATCH 应答已改缺省）存 null——完成页随之呈现
+ * 「standalone 未组网」态，不冒充「已提交上报 hub」。 */
 async function retryPrimeDeclare(btn) {
   const agent = btn?.dataset?.agent || S.primeDecl.done?.agent;
   if (!agent) return;

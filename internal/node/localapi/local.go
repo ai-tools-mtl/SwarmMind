@@ -127,13 +127,18 @@ func (s *Server) handleSetAgentOrchestrator(w http.ResponseWriter, r *http.Reque
 		writeErr(w, http.StatusConflict, "orchestrator_conflict", err.Error())
 		return
 	}
-	synced := true
+	// hub_synced 真实语义（P1-02 残余修正，与 prime/declare 应答同口径）：reporter
+	// 已装配（组网）→ 能力表上报实况（true=已提交上报；false=待同步，重连随注册
+	// 收敛）；未装配 reporter（standalone 未组网）→ 字段缺省——无上报环节，控制台
+	// 按「未组网」呈现，绝不冒充已同步（旧初值 true 使 standalone 重试链谎报
+	// 「已提交上报 hub」）。选缺省而非 false：declare 端同形，控制台消费端以
+	// 「字段是否为 boolean」判定，缺省=未组网语义在双消费点（完成页/状态提示）
+	// 与初始渲染基线一致。
+	resp := map[string]any{"name": name, "orchestrator": p.Orchestrator}
 	if s.cfg.CardsReporter != nil {
-		synced = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
+		resp["hub_synced"] = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"name": name, "orchestrator": p.Orchestrator, "hub_synced": synced,
-	})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // localStatus 本机状态总览（旅程③）。node 只呈现本机事实：形态/总理声明/

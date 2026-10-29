@@ -213,16 +213,19 @@ func (s *AgentState) SetAgentOrchestrator(name string, orchestrator bool) (proto
 	return p, nil
 }
 
-// ReplaceOrchestratorHolder 原子替换本机声明持有人（2026-10-29 走查反馈批 P1-01）：
-// 以 baseline+orchOverride 合成的有效声明态为互斥真相，构造完整 next 覆盖集
-// （他者有效声明显式压 false、name 授 true），一次落盘后发布。替代 declare 里
-// 「先撤旧再授新」的两次独立 SetAgentOrchestrator——旧序有零声明窗口，且授新的
-// 互斥在 YAML 基线旧声明下必拒（撤旧写 override=false 不改基线，基线遍历无视
-// override）；本方法单锁合成真相后整集落盘，YAML 单/双基线声明、覆盖层声明、
-// 落盘失败四类场景统一收口：成功即本机恰一（name）；失败（含落盘 IO 错误）整集
-// 不发布，旧有效声明原样保留——凭证交接主契约是否回滚由调用方声明（declare 不
-// 回滚，SPEC 口径不变）。返回 name 的 ExecProfile 视图（Orchestrator=true）；
-// name 不在本机配置返回 ErrAgentNotFound。
+// ReplaceOrchestratorHolder 原子替换本机声明持有人（2026-10-29 走查反馈批 P1-01，
+// 同日 fix2 按复审构造契约收敛）：单锁内构造完整目标覆盖集——keys 取三源并集
+// （全部 YAML 基线声明位 ∪ 全部既有覆盖项 ∪ 新持有人），集内新持有人置 true、
+// 其余一律显式 false，一次落盘后发布。非目标项无论当前 effective 真假都必须留在
+// 集内：只压「现在有效」的项会在下次替换发布时丢掉既有 false 覆盖，被压基线声明
+// 回退复活（复审 TestCodexRepeatReplacement 三场景与 -race 并发 PATCH+declare 实
+// 证）；基线 false 且无覆盖项的 agent 无声明历史，不进集（状态文件不积累）。
+// 替代 declare 里「先撤旧再授新」的两次独立 SetAgentOrchestrator——旧序有零声明
+// 窗口，且授新的互斥在 YAML 基线旧声明下必拒；本方法单锁整集落盘，YAML 单/双
+// 基线声明、覆盖层声明、落盘失败四类场景统一收口：成功即本机恰一（name）；失败
+// （含落盘 IO 错误）整集不发布，旧有效声明原样保留——凭证交接主契约是否回滚由
+// 调用方声明（declare 不回滚，SPEC 口径不变）。返回 name 的 ExecProfile 视图
+// （Orchestrator=true）；name 不在本机配置返回 ErrAgentNotFound。
 func (s *AgentState) ReplaceOrchestratorHolder(name string) (protocol.ExecProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -236,18 +239,19 @@ func (s *AgentState) ReplaceOrchestratorHolder(name string) (protocol.ExecProfil
 	if idx < 0 {
 		return protocol.ExecProfile{}, ErrAgentNotFound
 	}
-	next := make(map[string]agentOrchRecord, len(s.baseline))
+	keys := make(map[string]struct{}, len(s.baseline)+len(s.orchOverride)+1)
 	for _, p := range s.baseline {
-		if p.Name == name || !s.effectiveOrchLocked(p.Name, p.Orchestrator) {
-			continue // 新持有人与其余未声明者不进覆盖集（状态文件不积累）
+		if p.Orchestrator {
+			keys[p.Name] = struct{}{}
 		}
-		// 旧持有人显式压 false：基线 true 须覆盖层压住，覆盖层声明则改写为 false
-		next[p.Name] = agentOrchRecord{Orchestrator: false, UpdatedAt: protocol.NowUTC()}
 	}
-	if s.baseline[idx].Orchestrator {
-		delete(next, name) // name 本就是基线声明：清掉其残留覆盖项（含历史 false），基线即真相
-	} else {
-		next[name] = agentOrchRecord{Orchestrator: true, UpdatedAt: protocol.NowUTC()}
+	for k := range s.orchOverride {
+		keys[k] = struct{}{}
+	}
+	keys[name] = struct{}{}
+	next := make(map[string]agentOrchRecord, len(keys))
+	for k := range keys {
+		next[k] = agentOrchRecord{Orchestrator: k == name, UpdatedAt: protocol.NowUTC()}
 	}
 	if err := s.persistOrch(next); err != nil {
 		return protocol.ExecProfile{}, err // 落盘失败：不发布，旧有效声明原样保留

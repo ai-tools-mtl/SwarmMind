@@ -318,6 +318,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
  * （small code 落 11.5px）都会绕过 12.5px 地板，此处成对显式覆盖。 */
 .orch-state small{font-size:12.5px}
 .orch-state small code{font-size:12.5px}
+/* 完成页声明三态说明（P2-03 残余 fix2，2026-10-29）：成功/未组网两段
+ * <small class="muted decl-note"> 不在 .orch-state 内，全局 small 档
+ * var(--fs-small)=12px 绕过地板——同类显式 12.5px。 */
+.decl-note{font-size:12.5px}
 /* svc-card 状态由 badge（网内可调用/仅本机）+ 开关 on 态承担；
  * accent 左竖线已删（colored left-bar 系 AI slop 反模式，2026-10-24 伦哥裁决全站清
  * ——层级靠表面与控件态，不靠彩色饰条）。 */

@@ -184,9 +184,10 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	// 全部落空）。P1-01 修正（同日反馈批）：不再「先撤旧、再授新」两次独立
 	// SetAgentOrchestrator——撤旧写 override=false 不改 YAML 基线，授新的互斥按
 	// 基线遍历必拒（基线单/双声明均实证复现）；改为 AgentState 单锁原子替换声明
-	// 持有人（ReplaceOrchestratorHolder）：以 baseline+override 合成有效态为真相
-	// 构造完整覆盖集，一次落盘后发布——成功即本机恰一（无零声明窗口），落盘失败
-	// 旧有效声明原样保留。声明翻转失败不回滚凭证（declare 主契约已达成，SPEC
+	// 持有人（ReplaceOrchestratorHolder）：单锁构造完整目标覆盖集——基线声明位与
+	// 既有覆盖项无论当前有效态真假一律显式压 false、新持有人授 true（fix2 收敛：
+	// 只压「现在有效」项会在下次替换时丢既有 false 覆盖致基线复活），一次落盘后
+	// 发布——成功即本机恰一（无零声明窗口），落盘失败旧有效声明原样保留。声明翻转失败不回滚凭证（declare 主契约已达成，SPEC
 	// 失败语义不变），orchestrator_error 如实带出由控制台完成页呈现。持 muPrime
 	// 串行于并发 declare/rotate；锁序 muPrime→Agents.mu，无反向路径（PATCH
 	// orchestrator 不取 muPrime）。
