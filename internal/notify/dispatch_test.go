@@ -520,3 +520,172 @@ func TestChannelTestButton(t *testing.T) {
 		t.Errorf("inbox 测试应写演示条目, got %+v unread=%d", items, unread)
 	}
 }
+
+// ---------- 渠道最近投递状态（FE-POLISH P0-3） ----------
+
+// TestDeliveryStatusRecorded 渠道卡「最近成功/最近失败」数据源回归锁：
+// ① 投递成功落 LastOKAt；② 重试穷尽落 LastFailAt+脱敏原因（不含 path/query
+// 凭证）；③ 失败后恢复可达再投递，两事实并存且成功晚于失败（卡上据此判
+// 「当前疑似失败」解除）；④ ListView 响应体带 last_ok_at/last_fail_at 字段、
+// 无记录渠道字段缺席；⑤ 「发测试」成功/失败同落状态（测试=可达性证据）。
+func TestDeliveryStatusRecorded(t *testing.T) {
+	s := newTestStore(t)
+	d, _ := newTestDispatcher(t, s)
+
+	// ① 成功投递：hook 前 0 次 500（直接 200）
+	hOK := newHookServer(t, 0)
+	chOK := mustCreate(t, s, TypeWebhook, "", "能通", nil, map[string]string{"url": hOK.srv.URL})
+	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
+	d.WaitIdle()
+	st := d.DeliveryStatuses()[chOK.ID]
+	if st.LastOKAt.IsZero() {
+		t.Fatalf("成功投递应记录 LastOKAt")
+	}
+	if !st.LastFailAt.IsZero() {
+		t.Errorf("无失败不应记录 LastFailAt")
+	}
+
+	// ② 穷尽失败：hook 恒 500（failN 极大），原因脱敏
+	hBad := newHookServer(t, 1<<30)
+	u := hBad.srv.URL + "/hook/sekret-path?token=topsecret-query"
+	chBad := mustCreate(t, s, TypeWebhook, "", "不通", nil, map[string]string{"url": u})
+	d.TaskFinal(testTask(protocol.StatusFailed, nil))
+	d.WaitIdle()
+	stBad := d.DeliveryStatuses()[chBad.ID]
+	if stBad.LastFailAt.IsZero() || stBad.LastFailReason == "" {
+		t.Fatalf("穷尽失败应记录 LastFailAt+原因, got %+v", stBad)
+	}
+	for _, secret := range []string{"sekret-path", "topsecret-query"} {
+		if strings.Contains(stBad.LastFailReason, secret) {
+			t.Errorf("失败原因不得外带凭证 %s: %q", secret, stBad.LastFailReason)
+		}
+	}
+
+	// ③ 失败后恢复：同渠道再投递成功，LastOK 更新且晚于 LastFail；两事实并存
+	before := stBad.LastFailAt
+	hBad.setFailN(0) // 切回全 200：模拟「渠道恢复可达」
+	d.TaskFinal(testTask(protocol.StatusCompleted, nil))
+	d.WaitIdle()
+	stBad2 := d.DeliveryStatuses()[chBad.ID]
+	if stBad2.LastOKAt.IsZero() {
+		t.Fatalf("恢复后成功应记录 LastOKAt")
+	}
+	if !stBad2.LastFailAt.Equal(before) {
+		t.Errorf("成功投递不得改写失败事实")
+	}
+	if !stBad2.LastOKAt.After(stBad2.LastFailAt) {
+		t.Errorf("恢复成功应晚于最近失败（渠道卡解除告警的判据）")
+	}
+
+	// ④ ListView：字段透传；无记录渠道（inbox）字段缺席
+	chInbox := mustCreate(t, s, TypeInbox, "", "站内", nil, nil)
+	d.TaskFinal(testTask(protocol.StatusCancelled, nil))
+	d.WaitIdle()
+	view := map[string]ChannelView{}
+	for _, cv := range d.ListView() {
+		view[cv.ID] = cv
+	}
+	if view[chBad.ID].LastOKAt == nil || view[chBad.ID].LastFailAt == nil || view[chBad.ID].LastFailReason == "" {
+		t.Errorf("ListView 应带失败渠道的投递状态: %+v", view[chBad.ID])
+	}
+	if view[chInbox.ID].LastOKAt != nil || view[chInbox.ID].LastFailAt != nil {
+		t.Errorf("inbox 不落投递状态（站内恒成功，不承担外部通道观测）: %+v", view[chInbox.ID])
+	}
+
+	// ⑤ 发测试：成功/失败各落状态
+	h2 := newHookServer(t, 0)
+	ch2 := mustCreate(t, s, TypeWebhook, "", "测试通", nil, map[string]string{"url": h2.srv.URL})
+	if ok, _ := d.TestChannel(ch2.ID); !ok {
+		t.Fatalf("可达渠道测试应成功")
+	}
+	if d.DeliveryStatuses()[ch2.ID].LastOKAt.IsZero() {
+		t.Errorf("测试成功应落 LastOKAt")
+	}
+	ch3 := mustCreate(t, s, TypeWebhook, "", "测试不通", nil, map[string]string{"url": "http://127.0.0.1:1/nope"})
+	if ok, _ := d.TestChannel(ch3.ID); ok {
+		t.Fatalf("不可达渠道测试应失败")
+	}
+	if d.DeliveryStatuses()[ch3.ID].LastFailAt.IsZero() {
+		t.Errorf("测试失败应落 LastFailAt")
+	}
+}
+
+// TestDeliveryStatusFailingFlag FE-POLISH P2-02 回归锁：「当前疑似失败」判定归服务端
+// 单一来源——ListView.Failing 按原始时刻（含亚毫秒纳秒差）比较，前端 Date 只保留
+// 毫秒不再自比。覆盖此前会被误判的样本：
+// ① 同毫秒先成后败（.123100s/.123900s，JS Date 视角两点相等必误判已恢复）→ Failing；
+// ② 同毫秒先败后成（恢复）与跨秒失败早于成功 → 不 Failing；
+// ③ 从无成功只有失败 → Failing；④ 仅成功/无失败事实 → 字段缺席。
+func TestDeliveryStatusFailingFlag(t *testing.T) {
+	s := newTestStore(t)
+	d, _ := newTestDispatcher(t, s)
+	base := time.Date(2026, 10, 29, 1, 0, 0, 123100000, time.UTC) // 01:00:00.123100Z
+
+	set := func(id string, st DeliveryStatus) {
+		d.dmu.Lock()
+		defer d.dmu.Unlock()
+		if d.deliv == nil {
+			d.deliv = map[string]DeliveryStatus{}
+		}
+		d.deliv[id] = st
+	}
+	view := func(id string) ChannelView {
+		for _, cv := range d.ListView() {
+			if cv.ID == id {
+				return cv
+			}
+		}
+		t.Fatalf("ListView 缺渠道 %s", id)
+		return ChannelView{}
+	}
+
+	chA := mustCreate(t, s, TypeWebhook, "", "同毫秒先成后败", nil, map[string]string{"url": "http://127.0.0.1:1/a"})
+	set(chA.ID, DeliveryStatus{LastOKAt: base, LastFailAt: base.Add(800 * time.Microsecond), LastFailReason: "connection refused"})
+	if v := view(chA.ID); !v.Failing {
+		t.Errorf("同毫秒先成后败应 Failing（失败晚于成功，纳秒差即差）: %+v", v)
+	}
+
+	chB := mustCreate(t, s, TypeWebhook, "", "同毫秒先败后成", nil, map[string]string{"url": "http://127.0.0.1:1/b"})
+	set(chB.ID, DeliveryStatus{LastOKAt: base.Add(800 * time.Microsecond), LastFailAt: base, LastFailReason: "connection refused"})
+	if v := view(chB.ID); v.Failing {
+		t.Errorf("同毫秒先败后成（恢复）不得 Failing: %+v", v)
+	}
+
+	chC := mustCreate(t, s, TypeWebhook, "", "失败早于成功", nil, map[string]string{"url": "http://127.0.0.1:1/c"})
+	set(chC.ID, DeliveryStatus{LastOKAt: base.Add(2 * time.Second), LastFailAt: base})
+	if v := view(chC.ID); v.Failing {
+		t.Errorf("失败早于成功（跨秒恢复）应解除 Failing: %+v", v)
+	}
+
+	chD := mustCreate(t, s, TypeWebhook, "", "从无成功", nil, map[string]string{"url": "http://127.0.0.1:1/d"})
+	set(chD.ID, DeliveryStatus{LastFailAt: base, LastFailReason: "boom"})
+	if v := view(chD.ID); !v.Failing {
+		t.Errorf("从无成功只有失败应 Failing: %+v", v)
+	}
+
+	chE := mustCreate(t, s, TypeWebhook, "", "仅成功", nil, map[string]string{"url": "http://127.0.0.1:1/e"})
+	set(chE.ID, DeliveryStatus{LastOKAt: base})
+	if v := view(chE.ID); v.Failing || v.LastFailAt != nil {
+		t.Errorf("无失败事实不应 Failing 且 last_fail_at 缺席: %+v", v)
+	}
+	// R2-P3-01（2026-10-29）：序列化断言固化——「仅成功渠道 failing/last_fail_at
+	// 字段缺席」是 omitempty 语义承诺，必须落在 JSON 层验证；只查结构体字段的话，
+	// 未来去掉 omitempty 本测试仍绿（codex R2 overlay 实证实现正确后要求收进仓库）。
+	// 反向样本同锁：Failing 渠道 JSON 必须真的序列化出这两个字段。
+	chEJSON, err := json.Marshal(view(chE.ID))
+	if err != nil {
+		t.Fatalf("marshal ChannelView(仅成功): %v", err)
+	}
+	for _, key := range []string{"failing", "last_fail_at", "last_fail_reason"} {
+		if strings.Contains(string(chEJSON), key) {
+			t.Errorf("仅成功渠道 JSON 不应含 %s: %s", key, chEJSON)
+		}
+	}
+	chAJSON, err := json.Marshal(view(chA.ID))
+	if err != nil {
+		t.Fatalf("marshal ChannelView(失败中): %v", err)
+	}
+	if !strings.Contains(string(chAJSON), `"failing":true`) || !strings.Contains(string(chAJSON), `"last_fail_at"`) {
+		t.Errorf("失败中渠道 JSON 应含 failing=true 与 last_fail_at: %s", chAJSON)
+	}
+}

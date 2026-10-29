@@ -31,7 +31,10 @@
   --muted:var(--ink-3); --line:var(--hairline); --blue:var(--accent); --orange:var(--heat); --white:var(--surface); --shadow:var(--sh-card);
 }
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:var(--fs-body);line-height:1.6;-webkit-font-smoothing:antialiased;font-optical-sizing:auto}
+/* 等宽数字全局落底（FE-POLISH B1，2026-10-29）：工具界面数字一律 tabular——
+ * 表格 td 已全局 tabular 证明口径成立；消灭徽标计数/时间戳/分页等表外数字宽度跳动。
+ * ID/代码/hash 保持 --mono（可复制技术字符串）；中文说明解除无差别 mono 见 .cap small。 */
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font);font-size:var(--fs-body);line-height:1.6;-webkit-font-smoothing:antialiased;font-optical-sizing:auto;font-variant-numeric:tabular-nums}
 button,input,select,textarea{font:inherit}button,a,input,select,textarea,summary{outline-offset:4px}
 /* ---- 按钮（草案 B.8）：全站灰 pill，:active 按压反馈；主操作 accent、危险描边 ---- */
 button{cursor:pointer;border:0;background:rgba(0,0,0,.05);color:var(--ink);border-radius:var(--r-pill);height:34px;padding:0 16px;font-weight:500;transition:background var(--dur-hover) ease-out,transform var(--dur-micro) ease-out}
@@ -43,6 +46,8 @@ button:disabled:active{transform:none}
 /* danger/warning 同一套描边红：红色全站只表达「失败/不可逆」（草案 A.3 拆色依据） */
 .danger,.warning{background:var(--surface);border:1px solid var(--danger-line);color:var(--danger)}
 .danger:hover,.warning:hover{background:var(--danger-bg)}
+/* busy 进行时（FE-POLISH B6）：转圈即反馈，不吃 disabled 的 .48 灰；指针隔离防双击。 */
+button.loading{opacity:1;pointer-events:none}
 a,.link{color:var(--accent);text-decoration:none;cursor:pointer}
 .link{background:transparent;border:0;padding:3px 0;height:auto;border-radius:0;font-weight:inherit}
 .link:hover{text-decoration:underline;background:transparent}
@@ -67,6 +72,9 @@ p{margin-bottom:12px}
 .deploy{font-size:11px;max-width:355px;color:var(--ink-3)}
 .top-right{margin-left:auto;display:flex;gap:12px;align-items:center;white-space:nowrap}
 #session-left{font-variant-numeric:tabular-nums}
+/* 会话临近过期提醒（FE-POLISH B8 保守版）：常驻展示撤除，仅 <10 分钟时显示
+ * （updateSessionLeft 门控），heat 提醒色；hidden 属性由 [hidden] 全局规则承担。 */
+#session-left.expiring{color:var(--heat);font-weight:600}
 .shell{display:grid;grid-template-columns:218px minmax(0,1fr);min-height:calc(100vh - 84px)}
 /* ---- 侧栏（草案 B.3）：macOS source-list 范式——灰底白 pill 选中态 ---- */
 aside{background:var(--bg);border-right:1px solid var(--hairline);padding:30px 17px;display:flex;flex-direction:column}
@@ -91,6 +99,9 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
  * 数字上（E2E E03 锚点）；「等待核对」橙左竖条废除，数字在 nr>0 时着 heat。 */
 .panel{background:var(--surface);border-radius:var(--r-panel);box-shadow:var(--sh-panel)}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr)}
+/* 总览两格统计（FE-POLISH 轮2 B 重做：等你确认→正在执行，累计大数字删除）：
+ * .half 收敛为两列，不留 4 格空位。 */
+.stat-grid.half{grid-template-columns:repeat(2,1fr)}
 .stat-grid>.stat{display:block;height:auto;padding:20px 22px;border:0;border-radius:0;background:transparent;color:inherit;font-weight:400;text-align:left;cursor:pointer}
 .stat-grid>.stat:hover{background:var(--hover)}
 .stat+.stat{border-left:1px solid var(--hairline)}
@@ -109,6 +120,11 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .notice{padding:13px 16px;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);color:var(--ink-2)}
 .notice.warn{background:var(--heat-bg)}
 .notice.warn b{color:var(--heat)}
+/* 错误就地留痕（FE-POLISH 轮2 A3，双端同值）：danger 语义错误条——失败发生在哪个
+ * 表单就留在该表单顶部（人话原因+重试指引），toast 可同时短报；语义色不扩编
+ * （danger 家族既有变量）。 */
+.notice.danger{background:var(--danger-bg);border:1px solid var(--danger-line);color:var(--ink-2)}
+.notice.danger b{color:var(--danger)}
 .enroll-ok{padding:13px 16px;background:var(--live-bg);border:0;border-radius:var(--r-thumb);color:var(--live-ink)}
 .enroll-ok p{margin:6px 0 10px;color:var(--live-ink)}
 /* ---- 状态 badge（草案 B.2/A.2）：灰阶化。视觉档位数 < 状态数是故意的——
@@ -149,6 +165,13 @@ input,select,textarea{display:block;width:100%;margin-top:7px;border:1px solid v
 textarea{resize:vertical;min-height:110px}
 input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring);outline:0}
 input:disabled,textarea:disabled,select:disabled{background:var(--track);color:var(--ink-4)}
+/* 下拉 chrome 精修（FE-POLISH B2，双端同值）：保留原生 select（键盘/读屏免费，
+ * 不自绘），只统一外观——appearance:none + 自绘 chevron（色值写死 ink-3 #6e6e73，
+ * background-image 不吃 currentColor）；padding-right 预留防文字压箭头；
+ * cursor 补 select 缺省；hover/focus 过渡随上方 input 规则自动叠加。 */
+select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236e6e73' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 13px center;padding-right:34px;cursor:pointer}
+select:hover:not(:disabled){border-color:var(--ink-4)}
+select:disabled{background-image:none;cursor:not-allowed}
 fieldset{border:0;padding:0;margin:0;min-width:0}
 details{border-top:1px solid var(--hairline);padding-top:15px;margin:20px 0}summary{cursor:pointer;font-weight:600;color:var(--ink-2)}details[open] summary{margin-bottom:18px}
 /* 任务页高级筛选容器：默认折叠收进 details，任意高级条件生效期间保持展开 */
@@ -168,6 +191,12 @@ tbody tr[data-task]:hover{background:var(--hover)}
 td strong{font-weight:600}
 td small{display:block;color:var(--ink-4);font-family:var(--mono);font-size:var(--fs-table)}
 .task-title{min-width:155px}.table-action{white-space:nowrap}.table-action button{font-size:12.5px;height:auto;padding:4px 10px}
+/* ≤680 窄屏宽表收敛（FE-POLISH R2，2026-10-29）：桌面 D6 口径（滚动归页面主滚动
+ * + sticky 表头）在 390 视口把六列表格推出卡片撑宽页面（scrollWidth 750>390，
+ * codex R2 复现）。窄屏改卡片内横向滚动：wrap overflow-x:auto + 表格 min-width
+ * 保列可读，页面不再被表撑宽；滚动容器构成后 sticky 表头会吸附在容器顶 +84px
+ * 盖住数据行（.md-table 同坑，见上方 231-234 注），窄屏表头跟随滚动改 static。 */
+@media(max-width:680px){.table-wrap{overflow-x:auto}.table-wrap table{min-width:620px}.table-wrap th{position:static}}
 code,pre{font-family:var(--mono);font-size:var(--fs-table);line-height:1.7}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);padding:15px}
 code{color:var(--ink-2)}
@@ -231,6 +260,21 @@ code{color:var(--ink-2)}
 .prompt-preview.prompt-open{max-height:none}
 .prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}
 .prompt-foot{margin-top:4px;text-align:right}
+/* zone-in 抽屉分区 one-shot 淡入（FE-POLISH B4，双端同值）：触发点在 shared block
+ * drawerZoneSwap（缓存 diff 门控——数据没变不触发，轮询不重放）；打开抽屉首轮建壳
+ * 填充即全分区一次性淡入；180ms 即 --dur-hover 值，不新增 token。 */
+@keyframes zone-in{from{opacity:.35}}
+[data-zone].zone-in{animation:zone-in 180ms var(--ease-out-quart)}
+/* 数字 bump（FE-POLISH 轮2 C1，裁决 B 试点）：值变化时 one-shot scale 反馈（判据
+ * 在 bumpCls——变了才挂类，轮询不重放）；范围仅总览 metric 与侧栏待办计数。 */
+@keyframes num-bump{0%{transform:scale(1)}35%{transform:scale(1.06)}100%{transform:scale(1)}}
+.metric.bump{animation:num-bump 150ms var(--ease-out-quart)}
+.navcount{display:inline-block}
+.navcount.bump{animation:num-bump 150ms var(--ease-out-quart)}
+/* 群消息入场（FE-POLISH 轮2 C2，裁决 B 试点）：增量追加的新消息 opacity+4px 上移
+ * 180ms（判据=pullGroupMessages 增量路径真新增节点；历史加载/翻页走整页重绘不挂类）。 */
+@keyframes msg-in{from{opacity:0;transform:translateY(4px)}}
+.msg.msg-in{animation:msg-in 180ms var(--ease-out-quart)}
 hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 /* ---- 空状态（草案 B.7） ---- */
 .empty{text-align:center;padding:56px 24px;color:var(--ink-3)}
@@ -274,6 +318,18 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .wiz-step.on{color:var(--accent)}
 .wiz-step.on .n{background:var(--accent);color:var(--white)}
 .enroll-token-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+/* 接入状态行（FE-POLISH 轮2 H07）：尚未登记/等待连接/已连接三态前置——todo 灰点、
+ * wait heat 点、ok live 绿底；点颜色全走既有语义色不扩编。字号地板：本轮新增展示
+ * 面文字显式 ≥12.5px（P1-05——var(--fs-small)=12px 会经变量绕过地板，本轮新增规则
+ * 一律显式值，不以历史小字重做为边界）。 */
+.enroll-state{display:flex;align-items:center;gap:10px;margin:6px 0 16px;padding:10px 14px;border-radius:var(--r-thumb);background:rgba(0,0,0,.04)}
+.enroll-state .dot{width:8px;height:8px;border-radius:50%;background:var(--faint);flex-shrink:0}
+.enroll-state b{font-size:12.5px}
+.enroll-state small{display:block;font-size:12.5px}
+.enroll-state.enroll-wait .dot{background:var(--heat)}
+.enroll-state.enroll-ok{background:var(--live-bg);color:var(--live-ink)}
+.enroll-state.enroll-ok .dot{background:var(--live)}
+.enroll-state.enroll-ok small{color:var(--live-ink)}
 .enroll-token-row code{user-select:all;word-break:break-all;background:var(--hover);border:1px solid var(--hairline);border-radius:var(--r-thumb);padding:10px 14px;flex:1;min-width:200px}
 .enroll-rows{border:1px solid var(--hairline);border-radius:var(--r-thumb);overflow:hidden;margin:12px 0}
 .enroll-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(190px,320px)}
@@ -311,7 +367,22 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .timeline li:before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--faint)}
 .timeline li.hl:before{background:var(--heat)}
 .artifact{padding:12px 0;border-bottom:1px solid var(--hairline)}
+/* H15 产物行详情折叠（FE-POLISH 轮2，双端同值）：行内 details 不吃全局 details
+ * 的 border-top/margin（产物行已有分隔线，避免双线噪音）；文件名+易读大小主行，
+ * 完整路径/SHA 沉折叠。task-sum 任务列表人话摘要回正文字体（td small 默认 mono
+ * 只给可复制技术串）；work-next 工作单「下一步」列同口径。 */
+.artifact .artifact-detail{border-top:0;padding-top:4px;margin:6px 0 0}
+/* P1-05 字号地板：折叠说明/大小/折叠内路径行均为本轮新增展示面，显式 12.5px
+ *（var(--fs-small)=12px 经变量绕过地板）。 */
+.artifact .artifact-detail summary{font-size:12.5px;color:var(--ink-3);font-weight:500}
+.artifact-size{color:var(--ink-3);font-size:12.5px}
+.artifact-detail small{font-size:12.5px}
+.task-sum{font-family:var(--font);color:var(--ink-3)}
+.work-next{min-width:180px}.work-next small{font-family:var(--font)}
 .cap{display:flex;align-items:baseline;gap:8px;margin-top:5px}.cap:first-child{margin-top:0}
+/* 能力描述是中文正文（B1）：解除 td small 对中文说明的无差别 mono（mono 只给
+ * 可复制技术字符串——任务 ID 等）；说明文字回正文字体。 */
+.cap small{font-family:var(--font)}
 /* ---- toast（草案 B.6 + C 预算表）：顶部玻璃胶囊；.show 类切换（hidden 属性会
  * 杀死过渡），3400ms 自动消失逻辑与 #toast id 保留（JS 已在 P1 改造）。
  * 进 320ms spring / 出 220ms ease-out-quart：过渡取目的地状态的 transition 值——
@@ -372,6 +443,10 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 @media (prefers-reduced-motion:reduce){
   .overlay,.modal,.drawer,.modal .pane,.group-card{transform:none!important;transition:opacity 200ms ease!important}
   .toast{translate:-50% 0!important;transition:opacity 200ms ease!important}
+  [data-zone].zone-in{animation:none!important}   /* B4：分区淡入关停（轮询重放面为零，但首开淡入也一并静止） */
+  .spin{animation:none!important}   /* P1-05：busy 转圈停转；忙态反馈由 .loading 底色+「进行中…」文案承担 */
+  .metric.bump,.navcount.bump{animation:none!important}   /* C1：数字 bump 静止（值变化仍即时可见） */
+  .msg.msg-in{animation:none!important}   /* C2：群消息入场静止（新消息即时全亮） */
 }
 @media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}
@@ -429,8 +504,15 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .chan-main{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 240px}
 .chan-name{font-weight:600;font-size:13.5px;overflow-wrap:anywhere}
 .chan-meta{flex-basis:100%;font-size:12px;color:var(--ink-3)}
+/* 渠道最近投递事实行（FE-POLISH P0-3，双端同值）：占满整行；「当前疑似失败」着
+ * danger。字号 12.5px=全站地板（P1-04：失败原因正是要读的事实，不缩字号）；
+ * overflow-wrap:anywhere 兜脱敏长原因（scheme://host 形态无空格可断）。 */
+.chan-deli{flex-basis:100%;font-size:12.5px;color:var(--ink-3);overflow-wrap:anywhere}
+.chan-deli.deli-fail{color:var(--danger)}
 .chan-actions{display:flex;gap:8px;margin-left:auto;flex-wrap:wrap}
-.chan-actions button{padding:6px 12px;font-size:12px}
+/* 渠道操作尺寸（FE-POLISH 轮2 A1-4，与 node style.css 同值收口）：原 12px/6-12
+ * 漂移自 node 12.5px/4-10——同组件同字号同 padding，按实际可点区域验收。 */
+.chan-actions button{font-size:12.5px;height:auto;padding:4px 10px}
 /* 渠道编辑弹层表单骨架（t20261026-notify-polish 改动二，双端同构）：hub 全局
  * .fields 是 flex 横排（向导/登录用），通知表单须与 node 控制台同构纵向堆叠——
  * 字段恒显恒位、切消息格式零跳动（DoD：#nf-type-fields 高度差=0），故本表单
@@ -450,6 +532,11 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .switch:disabled{opacity:.5;cursor:wait}
 @media(max-width:680px){.notify-panel{position:fixed;top:60px;right:10px;left:10px;width:auto}.chan-actions{margin-left:0;flex-basis:100%}}
 @media (prefers-reduced-transparency:reduce){.notify-panel{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
-/* FINAL 收敛候选高亮（DESIGN-butler 方案三，2026-10-28）：成员 FINAL: 前缀发言
- * = 最终版本候选，群页金框强调；系统注记（msg-system）不由前端判断，仅 agent 发言。 */
-.msg-body.msg-final{border-left:3px solid #d9a441;background:rgba(217,164,65,.08);border-radius:0 6px 6px 0;padding:6px 10px}
+/* FINAL 收敛候选高亮（DESIGN-butler 方案三；FE-POLISH B7 裁决 A 降金色浓度，
+ * 2026-10-29）：去金色底色，只留细竖线（2px）与「收敛候选 · 待定版」文字标识
+ *（.final-tag 暗金 #8a6a1f，无底色）——既不灭「这一棒要收敛」的信号，也不让它
+ * 看起来像已定版。金色仍限本孤例，不构成先例。系统注记（msg-system）不由前端
+ * 判断，仅 agent 发言。 */
+.msg-body.msg-final{border-left:2px solid #d9a441;border-radius:0 6px 6px 0;padding:6px 10px}
+/* final-tag 字号 12.5px=全站地板（P1-04：「待定版」是要读的状态，不缩字号）。 */
+.final-tag{display:inline-block;margin-right:8px;font-size:12.5px;font-weight:650;color:#8a6a1f;vertical-align:1px}

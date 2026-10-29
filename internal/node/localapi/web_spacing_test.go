@@ -67,7 +67,7 @@ func TestWebOverviewSpacing(t *testing.T) {
 		`<section class="card spaced"><div class="row"><div><h2>能力配置</h2></div>`,                                // 未加载态
 		`<section class="card spaced"><h2>能力配置</h2>`,                                                            // 不可用态
 		`<section class="card spaced"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>`, // 编辑态
-		`<section class="card spaced"><div class="row"><h2>我的任务</h2>`,                                           // myTasksCard
+		`<section class="card spaced" id="my-tasks-card">${myTasksZone()}</section>`,                             // myTasksCard 壳（P1-03 槽位 id + R2F-P2-01 壳/内容分层，锁测试随实现同步——spaced 顶层节奏仍锁）
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("app.js 应含 %q（顶层区块 spaced 节奏回归）", want)
