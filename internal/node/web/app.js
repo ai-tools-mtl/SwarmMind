@@ -195,6 +195,46 @@ function summarizeTask(t) {
   const src = String(t?.input?.stdin || (t?.input?.args || [])[0] || '').split('\n').map(s => s.trim()).find(Boolean) || '';
   return src.slice(0, 48) + (src.length > 48 ? '…' : '');
 }
+/* 会话词典（T3 双端会话界面，SPEC 六.五「会话与轮次」）：会话状态（hub active /
+ * node open 两键同词）+ 轮次六值状态机（hub 投影态）与本机 ok/failed 键（node
+ * 内核账本）统一取词。unverified 徽标文案即警示词「工作结果未证实」——绝不
+ * 渲染为成功（VISION 诚实呈现契约）；sessBadge 色阶走 sst-* 类（语义色四色预算
+ * 内：unverified=heat、failed=danger、running/进行中=live、终态与排队退灰），
+ * 样式规则双端同文（web_drawer_sync 锁）。SESS_TURN_ZONES 会话抽屉分区表
+ *（头部+绑定/轮次/详情/动作四分区，双端同构），复用「抽屉分区更新 shared
+ * block」泛化 names 参数。 */
+const SESS_STATES = { active: '进行中', open: '进行中', closed: '已关闭' };
+const SESS_TURN_STATES = {
+  pending: '排队中', awaiting_node: '已投递', running: '执行中',
+  done: '已完成', ok: '已完成', unverified: '工作结果未证实', failed: '执行失败',
+};
+const SESS_TURN_SIX = ['pending', 'awaiting_node', 'running', 'done', 'unverified', 'failed'];
+const SESS_TURN_ZONES = ['head', 'binding', 'turns', 'detail', 'actions'];
+function sessBadge(s) {
+  return `<span class="badge sst-${esc(s)}" title="${esc(s)}">${esc(SESS_TURN_STATES[s] || SESS_STATES[s] || s)}</span>`;
+}
+/* sessShortId 技术标识短形式（幂等指纹/追踪号/原生轮次 ID）：12 字符截断，完整值
+ * 进 title 悬停；空值兜底「—」（D16 无证据口径）。 */
+function sessShortId(s) {
+  const t = String(s || '');
+  return t ? `<code title="${esc(t)}">${esc(t.slice(0, 12))}…</code>` : '<span class="muted">—</span>';
+}
+/* SESS_UNVERIFIED_NOTE unverified 警示条正文（双端同文，T1 四路分离口径）：
+ * 执行成立 ≠ 工作成功，答复仅供参考。 */
+const SESS_UNVERIFIED_NOTE = '本轮执行成立，但 CLI 输出无法证明工作成功——答复仅供参考，重要结论须自行核对后再采纳。';
+const SESS_EMPTY_TURNS = '还没有轮次记录。';
+/* sessPermOptionsHtml 权限模式断言下拉（双端同文）：缺省「跟随节点配置」；可选项
+ * 取自 PERM_MODE_NOTES 并剔除全权档位（danger-full-access——SPEC 六.五 红线：UI
+ * 绝不提供全权选项，REST 同值 400 双防线）。显式断言与能力卡声明不符由后端 409
+ * 人话拒绝（断言仅供核对，非换绑通道）。 */
+function sessPermOptionsHtml(selected) {
+  const opts = [['', '跟随节点配置（推荐 · 能力卡声明为准）']];
+  for (const [k, note] of Object.entries(PERM_MODE_NOTES)) {
+    if (k === 'danger-full-access') continue;
+    opts.push([k, `${note}（${k}）`]);
+  }
+  return opts.map(([v, label]) => `<option value="${v}"${v === (selected || '') ? ' selected' : ''}>${esc(label)}</option>`).join('');
+}
 /* ===== 抽屉展示词典 shared block end ===== */
 
 /* ===== 抽屉时间工具 shared block begin ===== */
@@ -582,8 +622,21 @@ const S = {
   notifyAlso: null,        // 「同时通知」开关（notify-unify 改动三；null=未加载，networked toggle 用）
   notifyAlsoSaving: false, // 开关保存中（codex 审查必修 2：保存态进渲染，toggle 置灰显示目标值）
   notifyAlsoPending: null, // 保存中的目标值（保存成功/失败落定即清空；null=无在途保存）
+  sessions: [],            // 本机会话列表（localapi 内核快照；T3 本机会话视图）
+  sessLoaded: false,       // 会话列表首载落定标记（T3 R1 建议3）：false=本轮会话尚无任何应答（加载中），不冒充「还没有会话」
+  sessUnsupported: false,  // 本机未装配会话内核（503 session_unsupported 诚实降级专态）
+  sessError: '',           // 会话列表最近一次加载失败信息（空=正常）
+  sess: freshSessForm(),   // 新建/继续表单状态机（C 形；与派单表单 f 同域）
+  sessDrawer: null,        // 打开的会话详情抽屉 {id, session, zones, sel, seq, timer, returnFocus}；会话序号在模块级 sessDrawerSeq
   loadError: '',           // 最近一轮 loadAll 失败信息（A4 五态：失败不冒充空列表；成功即清）
 };
+/* freshSessForm 会话表单状态机（与 hub 同构 C 形；node 本地续轮无显式 turn_seq
+ * 契约——序号由本机内核分配，无重放保护，unknown 文案如实声明）。snap：提交参数
+ * 快照（R1 必修4）——unknown 重试从快照取参，不受锁定期间 DOM/状态变化影响。 */
+function freshSessForm() {
+  return { mode: 'new', contId: '', contSnap: null, agent: '', perm: '', cwd: '', prompt: '', stage: 'idle', message: '', ackId: '', nextSeq: 0, snap: null };
+}
+const sessIdShort = s => { const t = String(s || ''); return t.length > 14 ? t.slice(0, 14) + '…' : t; };
 /* 列表五态占位（FE-POLISH 轮2 A4，与 hub 同文案口径）：「加载中」「加载失败可重试」
  * 不再让失败冒充「还没有任务」。 */
 function listLoadingBox(label) {
@@ -606,10 +659,16 @@ function newIdem() {
    表）；loading 一并复位，边界前在途的渠道请求迟到应答直接丢弃、不遗留加载态。 */
 function resetPrimeState() {
   S.sessionEpoch++;
+  if (S.sessDrawer) closeSessionDrawer();   // 会话抽屉同属会话边界（T3 R1 必修5）：登录/登出/401/换令牌统一关层并清 timer——closeSessionDrawer 递增 sessDrawerSeq 使在途抽屉请求全部作废（抽屉自身有序号守卫，但不能代替鉴权边界清理）
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
   S.tf = { origin: '' };   // 来源筛选随会话边界重置（TASK-nav-filter A1 codex 必须修项）
+  S.sess = freshSessForm();   // 会话表单同属会话边界（T3）
+  S.sessions = [];
+  S.sessLoaded = false;   // 首载标记随会话边界复位（回到加载中，不冒充空列表）
+  S.sessUnsupported = false;
+  S.sessError = '';
   S.notifyChannels = [];
   S.notifyLoaded = false;
   S.notifyLoading = false;
@@ -732,20 +791,322 @@ async function loadMoreTasks() {
   S.tasksMoreBusy = false;
   S.snap = ''; render();
 }
+/* ---------- 本机会话（T3，SPEC 六.五「会话与轮次」+ 六.六豁免⑩） ----------
+ * 任务页内区块（独立导航裁决为不引入，避免导航膨胀）：表单（单下拉，目标须声明
+ * session_adapter）+ 列表（内核快照）+ 详情抽屉（SESSION_ZONES 四分区，与 hub
+ * 同构；数据走 localapi 五端点）。列表不入 loadAll（503 session_unsupported 是
+ * 业务专态——严格校验的 loadAll 会整轮失败拖垮任务页，故页面级独立加载+指纹门控
+ * 槽位局部更新）。关闭确认走 confirmModal 追加式叠加层（hub 为 slim modal 整层
+ * 语义——关闭确认形态差异见 SPEC 六.五白名单）。 */
+/* loadSessions 会话列表加载（R1 必修5：登录代次+请求序号双守卫先行——登出/换令牌
+ * 边界前后在途请求的迟到应答（含 error/unsupported 各写回分支）一律不写状态，防
+ * 旧 200 在清空后回灌旧会话或在登出后覆盖新登录数据；S.sessLoaded 首载落定标记
+ *（R1 建议3）：列表五态据此区分「加载中」与「真的没有」，不再先冒充空列表）。 */
+let sessListSeq = 0;   // 会话列表请求序号：新请求发出即作废更早在途应答
+async function loadSessions() {
+  const epochAtReq = S.sessionEpoch, seqAtReq = ++sessListSeq;
+  const r = await api('GET', '/api/v1/local/sessions').catch(() => null);
+  if (S.sessionEpoch !== epochAtReq || seqAtReq !== sessListSeq) return;   // 双守卫：换界或在途已被新请求顶替，本应答整体作废
+  S.sessLoaded = true;   // 首载已落定（含失败态）
+  if (!r) { S.sessError = '会话列表暂时读不到（网络）'; return; }
+  if (r.code === 503) { S.sessUnsupported = true; S.sessions = []; S.sessError = ''; return; }
+  if (r.code !== 200 || !Array.isArray(r.data?.sessions)) { S.sessError = '会话列表加载失败'; return; }
+  S.sessUnsupported = false; S.sessError = '';
+  S.sessions = r.data.sessions;
+}
+const sessCardPaint = new WeakMap();   // 列表槽位缓存（WeakMap 绑元素实例；切页重建后旧缓存天然失效）
+const sessFormPaint = new WeakMap();   // 表单槽位缓存（R1 建议3：503 降级/恢复随槽位落 DOM，指纹门控零变化零写入）
+/* paintSessionsCard 会话区块统一槽位刷新（R1 建议3 扩展为双槽）：列表与表单区各自
+ * 缓存门控局部写入——503 降级/恢复随 sessUnsupported 落表单区，输入中 DOM 不受
+ * 触碰。缓存由 render 末尾 syncSessPaintCaches 同步（关键：DOM 序列化与模板串存在
+ * 不可消除差异——布尔属性 selected→selected=""、模板尾随空格收缩——innerHTML 直比
+ * 永不命中，每轮轮询都会重写同内容 DOM 把焦点/光标冲掉，实测抓出；以 render 后
+ * 缓存同步保证首轮轮询零写入，R1 必修10 相位B 实证项）。 */
+function paintSessionsCard() {
+  const listEl = document.getElementById('sess-list-zone');
+  if (listEl) paintSessZoneEl(listEl, sessListZone(), sessCardPaint);
+  const formEl = document.getElementById('sess-form-zone');
+  if (formEl) paintSessZoneEl(formEl, sessFormZone(), sessFormPaint);
+}
+function paintSessZoneEl(el, html, cache) {
+  if (cache.get(el) === html) return;
+  cache.set(el, html);
+  el.innerHTML = html;
+}
+/* syncSessPaintCaches 整页 render 后同步会话槽位缓存：render 刚写入的 DOM 与本次
+ * 模板串一致，首轮轮询凭命中跳过，不再无谓重建（焦点/光标/滚动保持）。 */
+function syncSessPaintCaches() {
+  const listEl = document.getElementById('sess-list-zone');
+  if (listEl) sessCardPaint.set(listEl, sessListZone());
+  syncSessFormPaint();
+}
+/* syncSessFormPaint 表单槽缓存随镜像更新同步：sess-cwd/sess-prompt/sess-perm 的
+ * input/change 只镜像状态不重绘，DOM 与新模板串此刻已一致——若不同步缓存，下一轮
+ * 轮询会凭「缓存旧值 vs 模板新值」误判变化，把同内容表单重写一遍、焦点/光标被冲掉
+ *（R1 必修10 相位B 实测抓出）。 */
+function syncSessFormPaint() {
+  const formEl = document.getElementById('sess-form-zone');
+  if (formEl) sessFormPaint.set(formEl, sessFormZone());
+}
+/* sessAgentOpt 会话表单目标选项：声明 session_adapter 的能力可选；空值禁选并注明
+ *「未声明会话适配器」（对应后端 422/503 诚实降级——UI 禁选是第一道）。 */
+function sessFormZone() {
+  if (S.sessUnsupported) return `<div class="notice warn"><b>本机未装配会话内核</b>：没有能力声明 session_adapter（node.yaml 能力级配置，变更须「应用并重启」）。本机原生线程管理不可用；跨机会话请经 hub 控制台。</div>`;
+  const F = S.sess;
+  const locked = F.stage === 'submitting' || F.stage === 'unknown' || F.stage === 'acked';
+  const capable = S.catalog.filter(e => e.card.session_adapter);
+  if (!capable.length) return `<div class="empty"><h2>本机还没有会话智能体</h2><p class="muted">在 node.yaml 的能力上配置 session_adapter: codex|zcode 并「应用并重启」后，这里即可开本机持久会话。</p></div>`;
+  const opt = e => {
+    const ok = !!e.card.session_adapter;
+    const v = e.node_id + '|' + e.card.name;
+    const why = ok ? '' : '（未声明会话适配器）';
+    const tip = ok ? `${e.card.description || '（无描述）'} · 适配器 ${e.card.session_adapter}` : '该能力未配置 session_adapter，不能作为会话目标';
+    return `<option value="${esc(v)}" ${F.agent === v ? 'selected' : ''} ${ok ? '' : 'disabled'} title="${esc(tip)}">${esc(e.card.name + why)}</option>`;
+  };
+  const sel = S.catalog.find(e => e.node_id + '|' + e.card.name === F.agent);
+  const adapterVal = F.mode === 'continue' ? (F.contSnap?.adapter || '—') : sel ? (sel.card.session_adapter || '未声明会话适配器') : '先选择目标';
+  const targetField = F.mode === 'continue'
+    ? `<label>目标智能体（会话绑定 · 只读）<input readonly value="${esc(F.contSnap?.agent || F.agent.split('|')[1] || '—')}"></label>`
+    : `<label>目标智能体（须声明会话能力）<select id="sess-agent" ${locked ? 'disabled' : ''}><option value="" ${!F.agent ? 'selected' : ''} disabled>选择智能体…</option>${S.catalog.map(opt).join('')}</select></label>`;
+  const permField = F.mode === 'continue'
+    ? `<label>权限模式（绑定快照 · 只读）<input readonly value="${esc(F.contSnap?.permission_mode || '（未声明）')}"></label>`
+    : `<label>权限模式断言（可选 · 缺省用本机配置）<select id="sess-perm" ${locked ? 'disabled' : ''}>${sessPermOptionsHtml(F.perm)}</select></label>`;
+  const stageView = {
+    idle: '',
+    submitting: `<div class="statusline"><span class="badge offered">提交中…</span></div>`,
+    acked: `<div class="notice ok"><b>已受理</b>：会话 <code>${esc(sessIdShort(F.ackId || F.contId))}</code> 轮次异步执行。${button('查看会话 →', 'sess-open:' + esc(F.ackId || F.contId), 'link')}</div>`,
+    failed: `<div class="notice warn"><b>提交被拒绝</b>：${F.message}${button('修正后重试', 'sess-retry', 'link')}</div>`,
+    unknown: `<div class="notice warn"><b>结果未知 · 表单已锁定</b>：${esc(F.message)}<br>${F.mode === 'continue' ? '本机续轮无重放保护：重试可能重复投递一轮；' : '会话创建无幂等键：重试可能重复建会话；'}先到下方列表核对再决定：${button('重试', 'sess-resend', 'link')} · ${button('放弃', 'sess-abandon', 'link')}</div>`,
+  }[F.stage] || '';
+  return `<h3 class="spaced">${F.mode === 'continue' ? '继续会话' : '新建会话'}</h3>
+  ${targetField}
+  <div class="form-grid">
+    <label>${F.mode === 'continue' ? '适配器（绑定快照 · 只读）' : '适配器（能力卡声明 · 只读）'}<input readonly value="${esc(adapterVal)}"></label>
+    ${permField}
+  </div>
+  ${sel && F.mode !== 'continue' ? `<small class="muted">${esc(permLabel(sel.card.permission_mode))}</small>` : ''}
+  <label>会话工作目录（本机绝对路径）<input id="sess-cwd" value="${esc(F.cwd)}" placeholder="例如：/Users/you/demo" spellcheck="false" autocomplete="off" ${F.mode === 'continue' ? 'readonly' : ''}${locked ? ' disabled' : ''}></label>
+  <label>${F.mode === 'continue' ? `续轮消息（第 ${F.nextSeq} 轮）` : '首轮消息'}<textarea id="sess-prompt" placeholder="这一轮要做什么；上下文由本机原生线程保持。" ${locked ? 'disabled' : ''}>${esc(F.prompt)}</textarea></label>
+  <div class="row">${F.stage === 'acked' ? button('再建一会话', 'sess-new', 'primary') : button(F.stage === 'submitting' ? '提交中…' : F.mode === 'continue' ? '发送这一轮' : '创建会话并发送首轮', 'sess-submit', 'primary', F.stage === 'submitting' ? 'disabled' : '')}
+  ${F.mode === 'continue' && F.stage !== 'acked' ? button('改为新建会话', 'sess-new', 'link') : ''}</div>
+  <div class="statusline">${stageView}</div>
+  <p class="footer-note">权限模式断言仅供与本机能力卡声明核对（不符 409）；全权档位拒绝注入。轮次异步执行：状态与答复进下方列表详情。</p>`;
+}
+/* sessLastState 本机会话行状态词（node 内核账本：ok/failed + work_result 恒
+ * unverified——ok 轮如实呈现「工作结果未证实」，绝不渲染为成功）。 */
+function sessLastState(v) {
+  const t = (v.turns || [])[v.turns.length - 1];
+  if (v.status === 'closed') return 'closed';
+  if (!t) return '';
+  return t.status === 'failed' ? 'failed' : t.work_result === 'unverified' ? 'unverified' : 'ok';
+}
+function sessListZone() {
+  if (S.sessUnsupported) return '';   // 表单区已诚实降级，列表区留空（不双份占位）
+  if (!S.sessLoaded) return listLoadingBox('会话列表');   // 首载未落定：不冒充「还没有会话」（R1 建议3）
+  if (S.sessError && !S.sessions.length) return `<div class="empty"><h2>会话列表加载失败</h2><p class="muted">最近一次读取没有成功（本机 API 不可达或应答异常），不是没有数据。可点重试，轮询也会自动恢复。</p>${button('重试', 'sess-reload')}</div>`;
+  if (!S.sessions.length) return `<div class="empty"><h2>还没有会话</h2><p class="muted">用上方表单创建第一个会话。</p></div>`;
+  return (S.sessError ? listStaleBar('sess-reload', '会话列表') : '')
+    + `<div class="table-wrap"><table><thead><tr><th>会话</th><th>目标机器</th><th>绑定</th><th>状态</th><th>最近活动（UTC）</th><th>操作</th></tr></thead><tbody>
+  ${S.sessions.map(v => { const st = sessLastState(v); return `<tr data-sess="${esc(v.id)}" tabindex="0" aria-label="查看会话 ${esc(v.id)}">
+    <td><strong>${esc(v.agent_name)}</strong> <small>${sessShortId(v.id)}</small></td>
+    <td><small>${esc(S.nodeID || '本机')}</small></td>
+    <td><small>${esc(v.adapter)}${v.permission_mode ? ' · ' + esc(v.permission_mode) : ''}</small></td>
+    <td>${st ? sessBadge(st) : '<span class="muted small">待首轮</span>'}</td>
+    <td><small>${esc(fmtUTC(v.updated_at) || '—')}</small></td>
+    <td class="table-action">${v.status !== 'closed' ? button('继续', 'sess-continue:' + esc(v.id), 'link') : ''}${button('查看 →', 'sess-open:' + esc(v.id), 'link')}</td>
+  </tr>`; }).join('')}</tbody></table></div>`;
+}
+/* submitSess 表单提交（C 形状态机，与 hub 同构；本地新建=受理即建会话+投首轮，
+ * 202 异步执行）。提交参数快照（R1 必修4）：fresh 提交时对 DOM 直读结果建快照，
+ * 请求发出的就是快照内的完整参数；unknown 重试（sess-resend）携快照重入——从
+ * 快照取参重发，不重读 DOM，不受锁定期间界面变化影响。 */
+async function submitSess(snap) {
+  const F = S.sess;
+  if (F.stage === 'submitting' || F.stage === 'unknown') return;
+  if (!snap) {
+    F.cwd = $('#sess-cwd')?.value ?? F.cwd;         // DOM 直读收口（input 镜像兜底）
+    F.prompt = $('#sess-prompt')?.value ?? F.prompt;
+    if (F.mode === 'new') {
+      if (!F.agent) { toast('请先选择目标智能体'); return; }
+      if (!F.cwd.trim()) { toast('请填写会话工作目录（本机绝对路径）'); return; }
+      if (!F.prompt.trim()) { toast('请填写首轮消息'); return; }
+    } else if (!F.prompt.trim()) { toast('请填写续轮消息'); return; }
+    snap = { mode: F.mode, agent: F.agent, cwd: F.cwd.trim(), prompt: F.prompt, perm: F.perm, contId: F.contId };
+    F.snap = snap;   // 提交参数快照：unknown「重试」从此取参（R1 必修4）
+  }
+  F.stage = 'submitting'; F.message = '';
+  render();
+  try {
+    const r = snap.mode === 'new'
+      ? await api('POST', '/api/v1/local/sessions', {
+        agent: (snap.agent.split('|')[1] || snap.agent), cwd: snap.cwd, prompt: snap.prompt,
+        ...(snap.perm ? { permission_mode: snap.perm } : {}),
+      })
+      : await api('POST', '/api/v1/local/sessions/' + encodeURIComponent(snap.contId) + '/turns', { prompt: snap.prompt });
+    if (r.code === 202) {
+      F.stage = 'acked';
+      F.ackId = snap.mode === 'new' ? (r.data?.turn?.session_id || '') : snap.contId;
+      toast('已受理：轮次异步执行');
+      loadSessions().then(paintSessionsCard).catch(() => { });   // 列表即时刷新
+    } else { F.stage = 'failed'; F.message = errLine(r.data); }
+  } catch (e) {
+    if (e.unauthorized) return; // 401 已回令牌门
+    F.stage = 'unknown';
+    F.message = '网络层失败，提交是否生效不确定。';
+  }
+  render();
+}
+/* sessContinue 继续会话（抽屉动作区/列表行 → 预填表单 continue 形态）。 */
+function sessContinue(id) {
+  const src = (S.sessDrawer && S.sessDrawer.id === id ? S.sessDrawer.session : null) || S.sessions.find(x => x.id === id);
+  if (!src) { toast('会话信息不可得'); return; }
+  if (src.status === 'closed') { toast('会话已关闭：续轮请新建会话'); return; }
+  S.sess = { ...freshSessForm(), mode: 'continue', contId: src.id, contSnap: { adapter: src.adapter, permission_mode: src.permission_mode, agent: src.agent_name }, cwd: src.cwd || '', nextSeq: (src.turn_count || 0) + 1, agent: S.nodeID + '|' + src.agent_name };
+  if (S.sessDrawer) closeSessionDrawer();
+  render();
+  requestAnimationFrame(() => $('#sess-prompt')?.focus());
+}
+
+/* ---------- 本机会话详情抽屉（SESSION_ZONES 四分区；任务抽屉同族直清生命周期） ---------- */
+let sessDrawerSeq = 0;    // 抽屉会话序号：防被关/被换（openDrawer 同款）
+let sessDrawerReq = 0;    // 抽屉内请求序号：乱序应答守卫
+function sessShellHtml() { return SESS_TURN_ZONES.map(z => `<div data-zone="${z}"></div>`).join(''); }
+async function openSessionDrawer(id) {
+  /* 建议1（R1 采纳）：先捕获会话触发元素再清旧层——closeDrawer 在无任务抽屉时也会
+   * 返焦侧栏，先无条件调用会把侧栏按钮误捕为返焦目标；只在任务抽屉真实在开时执行
+   * 其关闭（含返焦）路径。 */
+  if (S.drawer) closeDrawer();   // 任务抽屉同族互斥（会话抽屉让位任务抽屉，反向同理）
+  if (S.sessDrawer) closeSessionDrawer();
+  const seq = ++sessDrawerSeq;
+  const back = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+  $('#layer').innerHTML = `<div class="overlay drawer-overlay"><section class="drawer sess-scope" id="sess-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">${sessShellHtml()}</section></div>`;
+  layerInert(true);
+  $('#sess-drawer').focus();
+  playDrawerOpen();
+  $('#layer').addEventListener('click', sessMaskClose);   // 具名引用重复注册幂等去重（drawerMaskClose 同机制）
+  S.sessDrawer = { id, session: S.sessions.find(x => x.id === id) || null, zones: {}, sel: null, seq, timer: null, returnFocus: back };
+  await refreshSessionDrawer();
+  if (!S.sessDrawer || S.sessDrawer.seq !== seq) return;
+  S.sessDrawer.timer = setInterval(() => {
+    const d = S.sessDrawer;
+    if (!d || d.seq !== seq) { clearInterval(S.sessDrawer.timer); return; }   // 被替换：自清，防泄漏
+    if (!d.session || d.session.status !== 'closed') refreshSessionDrawer();   // 已关闭为终态：停轮询（数据面事实，对齐任务抽屉终态停轮）
+  }, 5000);
+}
+function sessMaskClose(e) {
+  if (!S.sessDrawer) return;   // 抽屉已关/换成任务抽屉时本监听不动作（免隐式耦合）
+  if (e.target.classList.contains('overlay')) closeSessionDrawer();
+}
+function closeSessionDrawer() {
+  if (S.sessDrawer?.timer) clearInterval(S.sessDrawer.timer);
+  const back = S.sessDrawer?.returnFocus;
+  S.sessDrawer = null;
+  sessDrawerSeq++;   // 在途 refreshSessionDrawer 应答全部作废
+  layerInert(false);
+  $('#layer').innerHTML = '';
+  if (back && back.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
+}
+async function refreshSessionDrawer() {
+  const d = S.sessDrawer;
+  if (!d || d.seq !== sessDrawerSeq) return;
+  const req = ++sessDrawerReq;
+  const r = await api('GET', '/api/v1/local/sessions/' + encodeURIComponent(d.id)).catch(() => null);
+  if (!S.sessDrawer || S.sessDrawer.seq !== sessDrawerSeq || req !== sessDrawerReq) return;
+  if (r && r.code === 404) { closeSessionDrawer(); toast('会话不存在（本机内核无映射）'); return; }
+  if (!r || (r.code !== 200 && r.code !== 503) || !r.data?.session) return;
+  S.sessDrawer.session = r.data.session;
+  const root = $('#sess-drawer');
+  if (root) drawerZonesApply(root, sessZones(S.sessDrawer.session), S.sessDrawer.zones, SESS_TURN_ZONES);
+}
+function syncSessDrawerZones() {
+  const root = $('#sess-drawer');
+  if (root && S.sessDrawer?.session) drawerZonesApply(root, sessZones(S.sessDrawer.session), S.sessDrawer.zones, SESS_TURN_ZONES);
+}
+/* sessZones 本机会话抽屉分区内容（与 hub sessZones 同构四分区；数据形态差异：
+ * 内核账本 ok/failed + work_result，无 op/trace/幂等指纹——标识列呈现原生轮次 ID，
+ * meta 行呈现开始/完成时刻，均为端上事实如实留痕）。 */
+function sessZones(v) {
+  const sd = S.sessDrawer || {};
+  const closed = v.status === 'closed';
+  const turns = v.turns || [];
+  const sel = sd.sel != null ? turns.find(t => t.seq === sd.sel) : null;
+  return {
+    head: `<div class="row"><h2 id="drawer-title">会话详情 · ${esc(v.id)}</h2>${button('×', 'close-sess-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
+    <div class="row"><h2>${esc(v.agent_name)} @ ${esc(S.nodeID || '本机')} ${sessBadge(v.status)}</h2></div>`,
+    binding: `<h3>绑定与状态</h3>
+    <div class="table-wrap"><table><tbody>
+    <tr><td>适配器</td><td><code>${esc(v.adapter || '—')}</code></td></tr>
+    <tr><td>权限模式</td><td><small>${esc(v.permission_mode || '（未声明）')}</small></td></tr>
+    <tr><td>工作区</td><td><code>${esc(v.cwd || '—')}</code></td></tr>
+    <tr><td>原生会话</td><td>${sessShortId(v.native_id)}</td></tr>
+    <tr><td>轮次</td><td><small>${turns.length} 轮</small></td></tr>
+    <tr><td>创建</td><td><small>${esc(fmtUTC(v.created_at) || '—')}</small></td></tr>
+    </tbody></table></div>`,
+    turns: `<h3 class="spaced">轮次（${turns.length}）</h3>${turns.length
+    ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>状态</th><th>时间（UTC）</th><th>标识</th></tr></thead><tbody>
+      ${turns.map(t => { const st = t.status === 'failed' ? 'failed' : t.work_result === 'unverified' ? 'unverified' : 'ok'; return `<tr data-turn="${t.seq}" tabindex="0" aria-label="查看第 ${t.seq} 轮" class="${sd.sel === t.seq ? 'on' : ''}">
+      <td>#${t.seq}</td>
+      <td>${sessBadge(st)}${t.status === 'failed' && t.error ? ` <small class="help" title="${esc(t.error)}">ⓘ</small>` : ''}</td>
+      <td><small>${esc(fmtUTC(realTime(t.finished_at) ? t.finished_at : t.started_at) || '—')}</small></td>
+      <td>${sessShortId(t.native_turn_id)}</td>
+    </tr>`; }).join('')}</tbody></table></div>
+    <p class="footer-note">标识为原生轮次 ID 短形式（完整值进悬停与轮次详情）；点击行查看该轮答复与用量。</p>`
+    : `<p class="muted">${SESS_EMPTY_TURNS}</p>`}`,
+    detail: sessTurnDetailHtml(sel),
+    actions: `<h3 class="spaced">动作</h3>
+    <div class="actions spaced">${closed ? '<span class="muted">会话已关闭：记录仅可查看，续轮须新建会话。</span>'
+    : `${button('继续此会话', 'sess-continue:' + esc(v.id), 'primary')}${button('关闭会话', 'sess-close:' + esc(v.id), 'danger')}`}</div>
+    <p class="footer-note">轮次异步执行：状态经详情自动刷新（抽屉打开期间每 5 秒同步）；「${SESS_TURN_STATES.unverified}」表示执行成立但工作结果未经证实，重要结论须自行核对。</p>`,
+  };
+}
+/* sessTurnDetailHtml 选中轮详情（与 hub 同构：unverified 置顶 heat 警示条 shared
+ * 同文、failed danger 错误条、答复 mdAnswer shared block 渲染、用量收尾）。 */
+function sessTurnDetailHtml(sel) {
+  if (!sel) return `<h3 class="spaced">轮次详情</h3><p class="muted">在时间线选择一轮，查看答复与用量。</p>`;
+  const failed = sel.status === 'failed';
+  const unverified = !failed && sel.work_result === 'unverified';
+  const banner = unverified ? `<div class="notice warn"><b>工作结果未证实</b> · ${esc(SESS_UNVERIFIED_NOTE)}</div>`
+    : failed ? `<div class="notice danger"><b>执行失败</b> · <code>${esc(sel.error || '原因未留痕')}</code>${typeof sel.exit_code === 'number' && sel.exit_code >= 0 ? ` · 退出码 ${sel.exit_code}` : ''}</div>` : '';
+  const usage = sel.usage && (sel.usage.total_tokens || sel.usage.input_tokens || sel.usage.output_tokens)
+    ? `<p class="muted small">用量：输入 ${sel.usage.input_tokens || 0} · 输出 ${sel.usage.output_tokens || 0} · 共 ${sel.usage.total_tokens || 0} tokens</p>` : '';
+  return `<h3 class="spaced">第 ${sel.seq} 轮详情 ${sessBadge(unverified ? 'unverified' : failed ? 'failed' : 'ok')}</h3>${banner}
+  <p class="muted small">开始 ${esc(fmtUTC(sel.started_at) || '—')}${realTime(sel.finished_at) ? ' · 完成 ' + esc(fmtUTC(sel.finished_at)) : ''} · 原生轮次 ${sessShortId(sel.native_turn_id)}</p>
+  <h3 class="spaced">答复</h3>${mdAnswer(sel.response)}${usage}`;
+}
+
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   const wasStale = !!S.loadError;   // P1-03：新鲜度基线（失败→恢复转移判据）
   try {
     if (await loadAll()) {
       if (cfgEdit) return; // 能力配置编辑抽屉开着：数据照常刷，表格 DOM 不动（编辑会话不受重绘干扰）
-      /* P1-03：新鲜度转移（失败态在身→恢复成功）走任务列表槽位局部更新而非整页
-       * render——派单表单在页（2026-10-21 验收口径），同数据恢复也要撤失败态/陈旧
-       * 条，但整页重绘会打断输入；数据有变的常规恢复同样经槽位呈现（列表即最新）。
-       * 非 tasks 页维持整页 render（此前行为）。 */
-      if (wasStale && S.page === 'tasks') { paintTasksCard(); return; }
-      render();
+      /* 会话交互豁免（T3 R1 必修10；R2 必修10 收敛）：会话抽屉开放或焦点在会话表单
+       * 内（或刚从 stale 恢复）时，数据变化走双槽位局部更新（任务列表+会话列表）+
+       * 连接徽标独立直更——整页 render 会重建 #app，任务页上的会话表单焦点/光标与
+       * 抽屉下方页面 DOM 被替换；镜像草稿不满足交互 DOM 保持纪律（D22 局部刷新铁
+       * 律），表单与背景壳必须稳定。豁免只决定绘制方式、不截断资源加载：此处不
+       * return，落到函数尾公共路径照常 loadSessions（R2 N1：此前提前 return 使豁
+       * 免轮跳过会话 GET，持续变化期间列表新增/关闭/轮次推进与 503 恢复全部滞后；
+       * wasStale 恢复同样经槽位呈现不经整页 render——P1-03 原分支语义，其条件已被
+       * 本分支 wasStale 涵盖）。epoch/seq 守卫在 loadSessions 内维持（R1 必修5）。 */
+      if (S.page === 'tasks' && (wasStale || S.sessDrawer || sessFormFocused())) {
+        paintConnChip(); paintTasksCard(); paintSessionsCard();
+      } else {
+        render();
+      }
     } else if (wasStale) {
       paintTasksCard();   // 同数据恢复：指纹门控下 changed 恒 false，靠槽位更新撤陈旧条
+    }
+    if (S.page === 'tasks') {
+      /* 本机会话列表随轮询（独立于 loadAll：503 专态不拖垮任务页数据链；豁免轮
+       * 同样到达此处——R2 必修10 收敛点）；paintSessionsCard 只重写槽位，会话
+       * 表单在页不受触碰。 */
+      try { await loadSessions(); } catch (e2) { if (e2?.unauthorized) return; }
+      paintSessionsCard();
     }
   } catch (e) {
     /* 401 已由 api() 处理；其余落失败态（A4 五态：列表区分「失败可重试」与
@@ -854,6 +1215,8 @@ function route() {
     loadNotifyChannels();
     loadNotifySettings();
   }
+  // 本机会话（T3）：进任务页拉一次（轮询随 pollTick 保持新鲜；503 专态如实降级）
+  if (S.page === 'tasks' && S.authed) loadSessions().then(paintSessionsCard).catch(() => { });
   render();
 }
 window.addEventListener('hashchange', route);
@@ -898,16 +1261,28 @@ function versionFoot() {
 }
 
 /* ---------- 渲染 ---------- */
-function render() {
-  $('#conn-chip').hidden = !S.authed;
-  $('#logout').hidden = !S.authed;
-  $('#who').textContent = S.authed ? 'Bearer 令牌已就绪' : '';
+/* paintConnChip 顶栏连接徽标唯一写入点（T3 R1 必修10 自 render 提取）：会话豁免
+ * 路径（槽位局部更新）与整页 render 共用，豁免期间连接状态不滞留旧值。 */
+function paintConnChip() {
   if (S.authed && S.status?.online != null) {
     const chip = $('#conn-chip');
     chip.className = 'badge ' + (S.status.online ? 'online' : 'offline');
     chip.textContent = S.status.online ? '中心端在线 · 重连 ' + S.status.epoch + ' 次' : 'hub 离线';
   }
+}
+/* sessFormFocused 焦点是否在会话表单区内（T3 R1 必修10 豁免判据）：输入/选择进行中
+ * 不得整页重绘。 */
+function sessFormFocused() {
+  const a = document.activeElement;
+  return !!a && typeof a.closest === 'function' && !!a.closest('#sess-form-zone');
+}
+function render() {
+  $('#conn-chip').hidden = !S.authed;
+  $('#logout').hidden = !S.authed;
+  $('#who').textContent = S.authed ? 'Bearer 令牌已就绪' : '';
+  paintConnChip();
   $('#app').innerHTML = !S.authed ? gateView() : layout(pageView());
+  if (S.page === 'tasks' && S.authed) syncSessPaintCaches();   // 会话槽位缓存随 render 同步（首轮轮询零写入）
   if (S.drawer) refreshDrawer(S.drawer.seq); // 第六轮修复 3：抽屉打开时随全局数据刷新重取内容（传 seq：非当前抽屉会话的迟到应答由守卫丢弃）
 }
 // pageView 按路由出页面（setup 模式下 route() 已把页面收敛到 SETUP_PAGES）。
@@ -1280,6 +1655,7 @@ function openCfgDrawer(idx) {
   const a = S.cfg.agents[idx];
   if (!a) return;
   if (S.drawer) closeDrawer(); // 同一 #layer 互斥：任务详情抽屉让位
+  if (S.sessDrawer) closeSessionDrawer();   // 会话抽屉让位（同上）
   if (cfgEdit && S.cfg.agents[cfgEdit.idx]) S.cfg.agents[cfgEdit.idx] = cfgEdit.snap; // 换行编辑（UI 不可达，防御）：旧行先还原
   cfgEdit = { idx, snap: JSON.parse(JSON.stringify(a)) };
   const fa = document.activeElement;
@@ -1602,6 +1978,7 @@ async function saveNotifyChannel() {
 let nfReturnFocus = null;   // 通知编辑弹层打开前的触发元素（A2 关闭返焦）
 function openNotifyForm(ch) {
   if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
+  if (S.sessDrawer) closeSessionDrawer();   // 会话抽屉让位（同上）
   if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
   const fa = document.activeElement;
   nfReturnFocus = fa && fa !== document.body ? fa : null;   // A2：关闭返焦
@@ -1713,7 +2090,17 @@ function tasksPage() {
     <div class="statusline">${stageView}</div>`
       : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看服务', 'go-services', 'primary')}</div>`}
   </section>
-  ${myTasksCard()}`;
+  ${myTasksCard()}${sessionsCard()}`;
+}
+/* sessionsCard 本机会话区块壳（R2F-P2-01 壳/内容分层同款）：section 与唯一 id 只在
+ * 整页 render 时创建一次；表单区随用户动作整页重绘，列表区为槽位局部更新单元
+ *（paintSessionsCard 只写 #sess-list-zone）。 */
+function sessionsCard() {
+  return `<section class="card spaced sess-scope" id="sess-card">
+  <div class="row"><h2>本机会话</h2><small>本机原生线程：与声明会话能力的智能体多轮协作；轮次账本留痕在本机。</small></div>
+  <div id="sess-form-zone">${sessFormZone()}</div>
+  <div class="spaced" id="sess-list-zone">${sessListZone()}</div>
+</section>`;
 }
 // listStatusBadge 列表状态徽章：行内 status 直出（账本全量驱动，2026-10-26 全量
 // 审计裁决——无需点击补查）；留痕补尾行（账本中已不存在的本机派单历史）无 status，
@@ -2022,6 +2409,7 @@ let drawerSeq = 0;       // 抽屉会话序号：防被关/被换（codex 第三
 let drawerReqSeq = 0;    // 抽屉内请求序号：同抽屉多次刷新的乱序应答守卫（同上）
 async function openDrawer(taskID) {
   closeDrawer();
+  if (S.sessDrawer) closeSessionDrawer();   // 同一 #layer 四抽屉互斥：会话抽屉让位（残态会话序号不清，sessMaskClose 防耦合守卫失效）
   const seq = ++drawerSeq;
   const back = document.activeElement && document.activeElement !== document.body ? document.activeElement : null; // 关闭焦点返回（D1 对齐 hub）
   $('#layer').innerHTML = `<div class="overlay drawer-overlay"><section class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">${drawerShellHtml()}</section></div>`;
@@ -2498,14 +2886,46 @@ document.addEventListener('click', e => {
         syncDrawerZones();   // 仅 prompt 分区内容变化：缓存 diff 后只重写该分区
         return;
       }
+      /* ---------- 本机会话（T3） ---------- */
+      case 'sess-submit': submitSess(); return;
+      case 'sess-resend': S.sess.stage = 'idle'; submitSess(S.sess.snap); return;   // unknown 态重发：先落 idle 过 submitSess 守卫，携提交参数快照重入（R1 必修4：从快照取参不重读 DOM）
+      case 'sess-retry': S.sess.stage = 'idle'; S.sess.message = ''; render(); return;
+      case 'sess-abandon': S.sess.stage = 'idle'; S.sess.message = ''; toast('已放弃等待 · 表单解锁'); render(); return;
+      case 'sess-new': S.sess = freshSessForm(); render(); return;
+      case 'sess-reload': loadSessions().then(paintSessionsCard).catch(() => { }); return;
+      case 'sess-open': openSessionDrawer(arg); return;
+      case 'sess-continue': sessContinue(arg); return;
+      case 'close-sess-drawer': closeSessionDrawer(); return;
+      case 'sess-close': {
+        /* 关闭确认（confirmModal 追加式叠加层，hub slim modal 为白名单形态差异）：
+         * 会话抽屉只读视图，叠层之下原位保留，取消即回抽屉；确认后抽屉原位刷新为已关闭。 */
+        const id = arg;
+        const name = (S.sessDrawer && S.sessDrawer.id === id ? S.sessDrawer.session?.agent_name : null) || S.sessions.find(x => x.id === id)?.agent_name || '';
+        confirmModal('关闭会话 · ' + sessIdShort(id), `关闭${name ? `「${esc(name)}」的` : '此'}会话后不再接受续轮；已留痕的轮次与答复继续可查。此操作不可撤销。`, '确认关闭', async () => {
+          const r = await api('POST', '/api/v1/local/sessions/' + encodeURIComponent(id) + '/close').catch(() => null);
+          if (r && r.code === 200) {
+            toast(r.data?.dup ? '会话本就是关闭状态（幂等回执，零写入）' : '会话已关闭');
+            loadSessions().then(paintSessionsCard).catch(() => { });
+            if (S.sessDrawer) refreshSessionDrawer();
+          } else toast('关闭失败：' + (r ? errLine(r.data) : '网络异常'));
+        });
+        return;
+      }
     }
   }
   if (tr && !e.target.closest('button')) openDrawer(tr.dataset.task);
+  const trs = e.target.closest('tr[data-sess]');
+  if (trs && !e.target.closest('button')) openSessionDrawer(trs.dataset.sess);
+  const trt = e.target.closest('tr[data-turn]');
+  if (trt && S.sessDrawer && !e.target.closest('button')) { S.sessDrawer.sel = parseInt(trt.dataset.turn, 10); syncSessDrawerZones(); }   // 轮次时间线行：选中→detail 分区
 });
 document.addEventListener('input', e => {
   if (e.target.id === 'f-target') { S.f.target = e.target.value; render(); }
   if (e.target.id === 'f-stdin') S.f.stdin = e.target.value;
   if (e.target.id === 'wiz-join') S.wiz.join = e.target.value;
+  if (e.target.id === 'sess-agent') { S.sess.agent = e.target.value; render(); }   // 目标切换重绘（适配器展示随行，与 f-target 同口径）
+  if (e.target.id === 'sess-cwd') { S.sess.cwd = e.target.value; syncSessFormPaint(); }   // 镜像更新即同步表单槽缓存（防轮询误判重写冲焦点）
+  if (e.target.id === 'sess-prompt') { S.sess.prompt = e.target.value; syncSessFormPaint(); }
   // 能力配置编辑（data-cfg="<idx>.<field>"）：直写副本不重绘（保输入焦点），保存时统一提交
   const cfgT = e.target.dataset?.cfg;
   if (cfgT) {
@@ -2531,6 +2951,7 @@ document.addEventListener('keydown', e => {
     if ($('#copy-modal')) { e.preventDefault(); closeCopyModal(); return; }
     if (cfgEdit) { e.preventDefault(); closeCfgDrawer(true); return; }
     if (S.drawer) { e.preventDefault(); closeDrawer(); return; }
+    if (S.sessDrawer) { e.preventDefault(); closeSessionDrawer(); return; }
     return;
   }
   /* Tab 焦点循环：确认层分支沿用 R2-P2-01/R3-P2-01 机制；其余层（任务/能力配置
@@ -2554,6 +2975,11 @@ document.addEventListener('keydown', e => {
    * 语义；此前最近任务/列表行仅点击，键盘不可开抽屉——codex I01 漂移项）。 */
   const tr = e.target.closest?.('tr[data-task]');
   if (tr && e.target === tr && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openDrawer(tr.dataset.task); }
+  /* 会话行/轮次行键盘可达（A1-10 同款）：Enter/Space 等价点击。 */
+  const trse = e.target.closest?.('tr[data-sess]');
+  if (trse && e.target === trse && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openSessionDrawer(trse.dataset.sess); }
+  const trtu = e.target.closest?.('tr[data-turn]');
+  if (trtu && e.target === trtu && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); if (S.sessDrawer) { S.sessDrawer.sel = parseInt(trtu.dataset.turn, 10); syncSessDrawerZones(); } }
 });
 /* 通知渠道弹层：类型切换只重绘 #nf-hint 与 #nf-type-fields 两槽（shared
  * nfRepaint），名称与事件勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）；
@@ -2561,6 +2987,7 @@ document.addEventListener('keydown', e => {
  * nfSecFromDom 回填不丢（t20261026-notify-polish 恒定骨架）。 */
 document.addEventListener('change', e => {
   if (e.target.id === 'notify-also') { saveAlsoNotify(e.target); return; }
+  if (e.target.id === 'sess-perm') { S.sess.perm = e.target.value; syncSessFormPaint(); return; }   // 会话表单权限模式断言（草稿落 S.sess；镜像同步缓存）
   if (e.target.id === 'nf-type') {
     nfRepaint(e.target.value, 'generic', {});
     return;

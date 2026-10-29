@@ -138,6 +138,21 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .badge.needs_review:before{display:inline-block}
 .badge.failed{color:var(--danger)}
 .badge.cancelled,.badge.offline{color:var(--ink-4)}
+/* ---- 会话徽标色阶（T3 双端会话界面；语义色四色预算内，双端 style.css 同文，
+ * web_drawer_sync 组件样式锁）：unverified=heat（警示「工作结果未证实」）、
+ * failed=danger、running=live 脉冲、会话进行中=live 常亮、终态与排队退灰。 ---- */
+.badge.sst-active,.badge.sst-open{color:var(--live-ink)}
+.badge.sst-active:before,.badge.sst-open:before{display:inline-block;background:var(--live)}
+.badge.sst-running{color:var(--live-ink)}
+.badge.sst-running:before{display:inline-block;background:var(--live);animation:pulse-dot 2.2s infinite}
+.badge.sst-unverified{background:var(--heat-bg);color:var(--heat);font-weight:650;box-shadow:inset 0 0 0 1px var(--heat-ring)}
+.badge.sst-unverified:before{display:inline-block}
+.badge.sst-failed{color:var(--danger)}
+.badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node{color:var(--ink-4)}
+/* 会话轮次表（T3）：选中轮行 accent 淡底；输入留痕原样换行（不截断不横向滚动） */
+tr[data-turn]{cursor:pointer}
+tr[data-turn].on{background:var(--accent-bg)}
+.sess-prompt{white-space:pre-wrap;word-break:break-word}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
 /* ---- 筛选 chips（草案 B.7）：任务页强筛选=黑 pill；总览下钻 chips 复用同容器。
  * .chip-link 数量恒 8（E2E E04），类名仅作跳转语义标记。 ---- */
@@ -447,6 +462,7 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
   .spin{animation:none!important}   /* P1-05：busy 转圈停转；忙态反馈由 .loading 底色+「进行中…」文案承担 */
   .metric.bump,.navcount.bump{animation:none!important}   /* C1：数字 bump 静止（值变化仍即时可见） */
   .msg.msg-in{animation:none!important}   /* C2：群消息入场静止（新消息即时全亮） */
+  .badge.running:before,.badge.sst-running:before{animation:none!important}   /* T3 R1 必修8：running 脉冲降级（含既有 .running 同族；伪元素动效停，live 色点保留） */
 }
 @media (prefers-reduced-transparency:reduce){.topbar,.toast{background:#fff;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media (prefers-contrast:more){.topbar,.topbar.scrolled{background:#fff;border-bottom:1px solid rgba(0,0,0,.35)}.toast{background:#fff;border:1px solid rgba(0,0,0,.35)}}
@@ -540,3 +556,13 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .msg-body.msg-final{border-left:2px solid #d9a441;border-radius:0 6px 6px 0;padding:6px 10px}
 /* final-tag 字号 12.5px=全站地板（P1-04：「待定版」是要读的状态，不缩字号）。 */
 .final-tag{display:inline-block;margin-right:8px;font-size:12.5px;font-weight:650;color:#8a6a1f;vertical-align:1px}
+/* ---- 会话展示面字号地板（T3 R1 必修7，双端同文入组件样式锁）：会话表单/列表/
+ * 抽屉的 small/.small/footer-note/行内 code 显式 12.5px——全局 small=12px、
+ * footer-note=11px、句中 code .92em 缩放（small code 落 11.04px）都会绕过地板
+ *（P1-05 口径延续）。作用域：双端会话卡与抽屉挂同一 .sess-scope 类（hub 表单/
+ * 列表两卡 + 会话抽屉、node #sess-card + #sess-drawer）。置于文件末尾：与
+ * .notice code/.muted code 等 .92em 规则同特异性（平局按源序取胜，必须在后）；
+ * badge（fs-micro 11.5px）为全站既有档不在本批范围，不受影响。 ---- */
+.sess-scope small,.sess-scope .small,.sess-scope .footer-note{font-size:12.5px}
+.sess-scope code{font-size:12.5px}
+.sess-scope small code,.sess-scope .small code{font-size:12.5px}

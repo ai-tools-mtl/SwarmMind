@@ -69,6 +69,22 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 			t.Errorf("抽屉展示词典 shared block 应含 %q", want)
 		}
 	}
+	// 会话词典（T3 双端会话界面）：六值轮状态机 + node ok 键 + unverified 警示词
+	//（绝不渲染为成功）+ 权限断言下拉剔除全权档位 + 分区表同构
+	for _, want := range []string{
+		"const SESS_STATES = { active: '进行中', open: '进行中', closed: '已关闭' };",
+		"pending: '排队中', awaiting_node: '已投递', running: '执行中',",
+		"unverified: '工作结果未证实', failed: '执行失败',",
+		"const SESS_TURN_ZONES = ['head', 'binding', 'turns', 'detail', 'actions'];",
+		"function sessBadge(s) {",
+		"const SESS_UNVERIFIED_NOTE = ",
+		"if (k === 'danger-full-access') continue;",
+		"function sessPermOptionsHtml(selected) {",
+	} {
+		if !strings.Contains(dict, want) {
+			t.Errorf("抽屉展示词典 shared block 应含会话词典 %q", want)
+		}
+	}
 	// 时间工具：零值守卫（D16）+ 解析转 UTC（D17 契约禁切片硬贴后缀）
 	for _, want := range []string{
 		`!String(s).startsWith('0001-01-01')`,
@@ -368,6 +384,20 @@ func TestWebDrawerComponentStyles(t *testing.T) {
 		".prompt-preview.prompt-open{max-height:none}",
 		".prompt-fade{position:absolute;left:0;right:0;bottom:0;height:60px;background:linear-gradient(rgba(255,255,255,0),var(--surface));pointer-events:none}",
 		".prompt-foot{margin-top:4px;text-align:right}",
+		// 会话徽标色阶与轮次表（T3 双端会话界面；语义色四色预算内）
+		".badge.sst-active,.badge.sst-open{color:var(--live-ink)}",
+		".badge.sst-running:before{display:inline-block;background:var(--live);animation:pulse-dot 2.2s infinite}",
+		".badge.sst-unverified{background:var(--heat-bg);color:var(--heat);font-weight:650;box-shadow:inset 0 0 0 1px var(--heat-ring)}",
+		".badge.sst-failed{color:var(--danger)}",
+		".badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node{color:var(--ink-4)}",
+		"tr[data-turn]{cursor:pointer}",
+		"tr[data-turn].on{background:var(--accent-bg)}",
+		".sess-prompt{white-space:pre-wrap;word-break:break-word}",
+		// T3 R1 修复轮新增（必修7/必修8）：会话展示面字号地板与 running 脉冲降级，双端同文
+		".badge.running:before,.badge.sst-running:before{animation:none!important}",
+		".sess-scope small,.sess-scope .small,.sess-scope .footer-note{font-size:12.5px}",
+		".sess-scope code{font-size:12.5px}",
+		".sess-scope small code,.sess-scope .small code{font-size:12.5px}",
 	}
 	for _, r := range rules {
 		if !strings.Contains(nodeCSS, r) {
