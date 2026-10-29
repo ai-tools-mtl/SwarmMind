@@ -164,7 +164,7 @@ type TaskReview struct {
 // TaskLease 任务租约（P4/SPEC 4.11，Task.Lease 载体）：FenceEpoch 是 hub 当前
 // 派发的租约代次（派发事务内捕获的该 node 注册代次快照，重派即刷新），结果
 // 仲裁据此与 node 回带的 fence_epoch 等值比较；其余字段是 zombie 拒收审计
-//（zombie_result_rejected），零值表示无拒收。未派发/旧版记录 Lease 为 nil。
+// （zombie_result_rejected），零值表示无拒收。未派发/旧版记录 Lease 为 nil。
 type TaskLease struct {
 	// FenceEpoch 当前派发租约代次（0=未携租约，缺省宽容）。
 	FenceEpoch int64 `json:"fence_epoch"`
@@ -365,4 +365,115 @@ func (in TaskInput) Clone() TaskInput {
 func (r TaskResult) Clone() TaskResult {
 	r.Artifacts = append([]Artifact(nil), r.Artifacts...)
 	return r
+}
+
+// ---------- 会话内核契约（T1，VISION 持久会话 Session-Turn 概念模型）----------
+// 本节只含数据契约（结构与取值常量），不带行为：会话四原语与双适配器实现位于
+// internal/node/sessionx（命名避开 internal/hub/session 的节点连接语义）。上游
+// 证据：docs/TASK-agent-session-core.md 与 docs/archive/TESTREPORT-native-session-20261029.md
+//（本机双 CLI 两轮续聊探针）。
+
+// 会话适配器类型取值（Session.Adapter；实现见 internal/node/sessionx）。
+const (
+	// SessionAdapterCodex codex exec 每轮子进程：JSONL 事件流（thread.started /
+	// item / turn.completed），续轮经 resume 子命令显式携 thread id。
+	SessionAdapterCodex = "codex"
+	// SessionAdapterZcode zcode headless 每轮子进程：整份终态 JSON（sessionId /
+	// turnId / response / usage），续轮经 --resume 显式携 sessionId。
+	SessionAdapterZcode = "zcode"
+)
+
+// 会话状态取值（Session.Status）。
+const (
+	// SessionOpen 会话存活：可继续 Send 续轮。
+	SessionOpen = "open"
+	// SessionClosed 平台侧已关闭：拒绝续轮；原生线程留存在 CLI 自身存储不受影响
+	//（探针适配决策 3：每轮进程回收与会话记录保留分开管理）。
+	SessionClosed = "closed"
+)
+
+// 轮次执行结果取值（Turn.Status；四路分离的前三路——进程退出码 / 结构解析 /
+// 原生轮次完成。第四路「工作是否成功」独立建模为 Turn.WorkResult）。
+const (
+	// TurnOK 本轮执行成立：退出码 0、输出解析成功、原生轮次完成判据成立（codex=
+	// 事件流见 turn.completed / zcode=整份终态 JSON 可解析且 sessionId 在场）三路
+	// 齐备。它不声明「工作成功」——T1 无法从 CLI 输出证明工作成败（探针 zcode-r1
+	// 正文明说 Bash 无权限工作未完成而三路全过），工作结果见 Turn.WorkResult。
+	TurnOK = "ok"
+	// TurnFailed 本轮执行不成立：三路任一不成立（退出码非 0 / 输出非法 / 超时 /
+	// 原生 ID 缺失或回带不一致）。
+	TurnFailed = "failed"
+)
+
+// 工作结果取值（Turn.WorkResult；四路分离的第四路，与 Status 独立改判）。
+const (
+	// WorkUnverified 工作结果未经证实：CLI 输出中不存在可机器判定的「工作成功」
+	// 证据，内核不做文本关键词猜测，真实答复（Turn.Response）原样保留供后续验收
+	// 链路（T2+）显式改判。T1 全部轮次（含 TurnOK 与 failed）恒为此值。
+	WorkUnverified = "unverified"
+)
+
+// Session 平台会话记录（node 侧持久化 data_dir/sessions.json 的条目形态）。
+// 核心承载是平台 ID ↔ 原生会话 ID 映射：续轮一律以存储的 NativeID 显式续接，
+// 回带不一致判本轮失败且映射不动，绝不静默换线程（探针适配决策 1）。
+type Session struct {
+	// ID 平台会话 ID："s-"+16 字节 hex，sessionx 生成。
+	ID string `json:"id"`
+	// AgentName 目标 agent 名（node 内唯一，对齐 ExecProfile.Name 语义）。
+	AgentName string `json:"agent_name"`
+	// Adapter 适配器类型：SessionAdapterCodex | SessionAdapterZcode。
+	Adapter string `json:"adapter"`
+	// Cwd 会话工作目录（绝对路径；每轮 CLI 的 -C/--cwd 与进程 cwd 同值）。
+	Cwd string `json:"cwd"`
+	// NativeID 原生会话 ID（codex thread id / zcode sessionId），首轮从输出取回。
+	NativeID string `json:"native_id"`
+	// PermissionMode 权限模式（创建时的显式配置或适配器保守默认；随会话持久化供
+	// 审计。codex=沙箱名（审批策略恒 never）；zcode=--mode 值。绝不默认提权）。
+	PermissionMode string `json:"permission_mode"`
+	// Status SessionOpen | SessionClosed。
+	Status string `json:"status"`
+	// TurnCount 已执行轮数（含失败轮；平台侧自计——zcode projection.turnCount 恒 1，
+	// 探针明示不可当累计轮数）。
+	TurnCount int `json:"turn_count"`
+	// Turns 轮次留痕（按 Seq 升序，含失败轮摘要；Response 为解析后的答复正文，
+	// 上限对齐 FinalAnswerLimit）。
+	Turns []Turn `json:"turns"`
+	// CreatedAt 创建时刻（UTC）。
+	CreatedAt time.Time `json:"created_at"`
+	// UpdatedAt 最近状态变更时刻（UTC）。
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Turn 单轮摘要（同步阻塞式内核：一轮调用 = 一次 CLI 进程生命周期，全程留痕）。
+type Turn struct {
+	// Seq 轮序号：1 起，平台侧累计（Create=1，此后每个 Send 递增，含失败轮）。
+	Seq int64 `json:"seq"`
+	// NativeTurnID 原生轮次 ID（zcode turnId；codex JSONL 无独立轮次 ID，为空）。
+	NativeTurnID string `json:"native_turn_id,omitempty"`
+	// Status TurnOK | TurnFailed（仅覆盖三路：退出码 / 解析 / 原生轮次完成）。
+	Status string `json:"status"`
+	// WorkResult 工作结果判定（第四路，与 Status 分离）：T1 恒 WorkUnverified——
+	// 输出无法证明工作成功，禁止文本关键词猜测；验收链路（T2+）可显式改判。
+	WorkResult string `json:"work_result"`
+	// Response 本轮 agent 答复正文（适配器解析产物，非 stdout 原文；UTF-8 清洗后
+	// 截断至 FinalAnswerLimit）。
+	Response string `json:"response"`
+	// ExitCode 进程退出码；信号终止或未运行 = ExitCodeNotRun。
+	ExitCode int `json:"exit_code"`
+	// Error 失败原因（Status=failed 时非空；成功轮为空）。
+	Error string `json:"error,omitempty"`
+	// Usage token 用量摘要（解析不出时零值）。
+	Usage TurnUsage `json:"usage"`
+	// StartedAt 本轮开始时刻（UTC）。
+	StartedAt time.Time `json:"started_at"`
+	// FinishedAt 本轮结束时刻（UTC）。
+	FinishedAt time.Time `json:"finished_at"`
+}
+
+// TurnUsage 单轮 token 用量摘要（两家 CLI 输出字段的公共最小集）。
+type TurnUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	// TotalTokens zcode 直取 totalTokens；codex 输出无独立总数字段，取 input+output 派生。
+	TotalTokens int64 `json:"total_tokens"`
 }

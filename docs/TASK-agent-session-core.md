@@ -34,7 +34,7 @@
    - zcode：整份 JSON 解析，取 sessionId/turnId/response/usage；输出非 JSON 或字段缺失判失败。
    - 权限模式为配置字段（codex 对应 sandbox/approval_policy 组合，zcode 对应 --mode），默认保守值，由调用方显式给。
    - 超时沿用 context；超时判 turn 失败并如实标注「进程已终止、原生侧状态不确定」。
-4. 复用 runner 的进程组管理：每轮一个进程组、轮终回收；不改动 runner 现有超时/孤儿清理语义，普通 Task 路径零触碰。
+4. 复用 runner 的进程组管理（R1 审查后修订）：runner 允许**纯追加导出包装**作为本任务书唯一的范围例外——把 configureProcessGroup/launchGoverned/killProcessGroup/reapProcessGroup 以薄包装导出（不改任何现有实现与调用链），sessionx 删除复制实现、调用同一套；普通 Task 路径零触碰，进程组治理单一真相源，不以注释互指替代共享代码。
 5. 单元测试（不调真实模型）：
    - fake CLI 可执行脚本分别模拟 codex JSONL 与 zcode 整份 JSON 两种输出形态（样本取自探针 evidence 的结构）；
    - 首轮建映射、续轮 ID 一致性、ID 不一致拒绝、未知 sessionID 拒绝；
@@ -57,5 +57,6 @@
 2. 两适配器解析逻辑与 docs/evidence/native-session-20261029/ 输出结构一致（测试样本从 evidence 结构简化而来，字段对得上）。
 3. 单写者测试证明：同 session 并发 Send 严格串行。
 4. 持久化 round-trip + 原子写失败保留旧数据 + 损坏起步三态有断言。
-5. `go build ./... && go vet ./... && go test -count=1 ./...` 全绿（22 包）。
-6. 不 commit；完成后报告改动清单与验证证据，由编排方审查后执行 commit。
+5. `go build ./... && go vet ./... && go test -count=1 ./...` 全绿（当前 26 包，勘误：原稿 22 为陈旧计数）。
+6. 失败语义附加要求（R1 审查后修订）：失败轮同样持久化（含执行错误与持久化错误分离）；恢复/续接核验 agent 存在性与绑定一致性（adapter/权限模式），不兼容显式拒绝，禁止静默换绑或升权；单写者等待可响应 context 取消；zcode 必填字段（sessionId/turnId/response）缺失或类型不符判失败；进程退出、结构解析、原生轮次完成与「工作是否成功」四者分离建模，无法证明工作成功时如实标 unverified，禁止文本关键词猜测；codex 已知事件载荷损坏报错、冲突原生 ID 拒绝；落盘 rename 失败保留旧数据有断言。
+7. 不 commit；完成后报告改动清单与验证证据，由编排方审查后执行 commit。
