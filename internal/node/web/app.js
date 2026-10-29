@@ -570,7 +570,7 @@ const S = {
   wiz: { join: '', preview: null, stage: 'idle', msg: '', written: '' },       // 接入向导状态机（方案 3.3）
   primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
   primeNewWire: null,      // 轮换自动接线结果（t20261023-62a2）：{target} 命中 zcode 布局；null=降级手动配给
-  primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp,wired,target} 钦定完成一次性展示
+  primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp,wired,target,orch,orchErr,synced} 钦定完成一次性展示（orch/orchErr/synced=声明联动三态原始值，P1-02；orch/synced 缺省=应答未带该位，完成页不作声明承诺）
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
          restart_cmd: '', config_path: '', structural: [], msg: '' },  // 能力配置编辑（方案 3.5）；编辑会话在模块级 cfgEdit（t20261023-a4b1 抽屉化）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
@@ -1004,19 +1004,37 @@ function primeCard() {
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
   <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机管家</small></span>${modeStat}</div>`;
   const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入管家的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个管家」重新走钦定。` : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个管家」重新走钦定。'}</small></div>` : '';
-  /* 声明状态行（2026-10-29 走查反馈一：钦定即声明联动后，形态卡如实呈现两源
-   * 状态——本机管家=prime_agent（凭证持有者），全网声明=能力卡 Orchestrator
-   * 声明（hub 汇聚识别）。取消管家只撤声明（2026-10-28 声明制口径不变），凭证
-   * 仍在，未声明态引导「换一个管家」重新钦定即随钦定上报声明。 */
-  const declared = S.agents.find(a => a.orchestrator);
-  const orchState = declared
-    ? `<small class="muted">全网声明已生效：hub 目录据此识别智行管家。取消管家只撤全网声明，本机管家凭证仍有效（换管家时旧凭证随钦定失效）。</small>`
-    : `<small class="muted">全网声明未生效（hub 回退按能力名含 <code>zcode-dev</code> 识别）；「换一个管家」重新钦定即随钦定一并上报声明。</small>`;
+  /* 声明状态行（P2-01 双源如实，2026-10-29 走查反馈批）：本机凭证持有人=
+   * prime_agent（node.yaml），本机声明=能力卡 Orchestrator 位（agents-state
+   * 覆盖层）。两源分列实值，不一致时点名「取消管家将撤声明 B」；取消入口按
+   * 实际声明存在决定——prime_agent 为空但声明仍在（自旧声明制升级/手编 yaml
+   * 的合法态）入口保持可达。不凭本地卡位宣称「全网已生效」：本地声明随能力表
+   * 上报 hub 汇聚，全网恰一与否以 hub 目录为准（跨机冲突 hub 告警），本行不作
+   * 全网确认承诺。 */
+  const declaredList = S.agents.filter(a => a.orchestrator).map(a => a.name);
+  const orchRow = () => {
+    const names = declaredList.map(n => `<code>${esc(n)}</code>`).join('、');
+    let txt;
+    if (declaredList.length === 1 && declaredList[0] === pa) {
+      txt = `本机凭证持有人 <code>${esc(pa)}</code> · 本机声明 <code>${esc(declaredList[0])}</code>（两源一致）。声明随能力表上报 hub 汇聚，全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）；取消管家只撤本机声明，凭证不动（换管家时旧凭证随钦定失效）。`;
+    } else if (declaredList.length === 1) {
+      txt = `本机凭证持有人 <code>${esc(pa || '（未设）')}</code> / 本机声明 <code>${esc(declaredList[0])}</code>——两源不一致：「取消管家」将撤声明 <code>${esc(declaredList[0])}</code>，凭证持有人不动。`;
+    } else if (declaredList.length > 1) {
+      txt = `本机声明异常（多声明：${names}）——正常至多一个；下方按钮逐一点击撤除，或「换一个管家」重新钦定收敛为恰一。`;
+    } else {
+      txt = `本机声明未生效（hub 回退按能力名含 <code>zcode-dev</code> 识别）；「换一个管家」重新钦定即随钦定一并上报声明。`;
+    }
+    const cancels = declaredList.map(n => button(declaredList.length > 1 ? '撤除声明·' + esc(n) : '取消管家', 'orch-off:' + esc(n), 'link', '', `data-agent="${esc(n)}"`)).join('');
+    return `<div class="orch-state spaced"><small class="muted">${txt}</small>${cancels ? `<div class="row spaced">${cancels}</div>` : ''}</div>`;
+  };
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
-  if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
+  if (!pa || S.primeDecl.picking) {
+    // 选择视图（未钦定引导/换管家）：存在声明位时状态行+取消入口仍可达（P2-01）
+    return head + (declaredList.length ? orchRow() : '') + primePickView(pa) + foot + '</section>';
+  }
   return head + `<small class="muted">智行管家经 MCP（prime_token）获得的是<b>本机管家权限</b>：只管本机派单；本机主人（local_token）在网页派单同样放行。钦定/轮换/配置管理等管理操作仅主人可用。</small>
-  <div class="orch-state spaced">${orchState}</div>
-  <div class="row spaced">${button('轮换管家凭证', 'prime-rotate', 'link')}${button('换一个管家', 'prime-pick', 'link')}${declared && pa ? button('取消管家', 'orch-off:' + esc(declared.name), 'link', '', `data-agent="${esc(declared.name)}"`) : ''}</div>${newTok}${foot}</section>`;
+  ${orchRow()}
+  <div class="row spaced">${button('轮换管家凭证', 'prime-rotate', 'link')}${button('换一个管家', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
 }
 /* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
@@ -1036,10 +1054,27 @@ function primeDoneView() {
     ? `<div class="notice ok spaced"><b>已自动接线</b>：管家 MCP 连接已写入 <code>${esc(d.target)}</code>（mcpServers.swarmmind）——零手贴，agent 重连后即可本机派单；原配置备份在同目录 <code>setting.json.bak-prime</code>。</div>`
     : '';
   const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效；全网管家声明已随钦定一并上报 hub（能力目录 Orchestrator 位）。</div>${wiredNote}
+  /* 声明三态（P1-02，2026-10-29 走查反馈批）：消费 declare 应答的
+   * orchestrator/orchestrator_error/hub_synced——orch=false 凭证已交接但本机声明
+   * 失败（原因+重试入口，失败态随 done 持久展示）；orch=true & hub_synced=true
+   * 已提交上报（措辞不越界：提交成功≠hub 全网恰一确认，恰一以 hub 目录为准）；
+   * hub_synced=false 本机成功、hub 待同步（重连随注册收敛）；hub_synced 缺省=
+   * standalone 未组网（无上报环节）。orch 缺省=应答未带声明位（测试构造），
+   * 不作任何声明承诺。一次性凭证展示不受声明态影响。 */
+  const declNote = d.orch === false
+    ? `<div class="notice warn spaced"><b>凭证已交接，本机声明失败</b>：管家的 Orchestrator 声明未能落盘（${esc(d.orchErr || '原因未返回')}）。本机管家与凭证交接已生效（旧凭证已失效），但 hub 目录暂无本机声明位——点「重试声明」补写（沿用本次钦定的凭证，不重新轮换），或「换一个管家」重新走钦定。</div>`
+    : d.orch === true
+      ? (d.synced === true
+        ? `<small class="muted">本机声明已随钦定一并提交上报 hub（能力目录 Orchestrator 位）；hub 全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）。</small>`
+        : d.synced === false
+          ? `<div class="notice warn spaced"><b>本机声明成功，hub 待同步</b>：能力表上报未送达（hub 离线或链路故障）；node 重连注册后会随能力表自动收敛，无需重做钦定。</div>`
+          : `<small class="muted">本机声明已生效（standalone 未组网，无 hub 上报环节）。</small>`)
+      : '';
+  const retryBtn = d.orch === false ? button('重试声明', 'prime-retry-orch', '', '', `data-agent="${esc(d.agent)}"`) : '';
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${declNote}${wiredNote}
   <div class="notice warn spaced"><b>管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
   <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入管家 agent 的 mcpServers 即完成授权——贴入即生效'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
-  <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
+  <div class="row spaced">${retryBtn}${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
   <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权）；轮换管家凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段粘进管家 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。'}</p>`;
 }
 function recentTasksCard() {
@@ -1870,8 +1905,14 @@ function primeDeclare(btn) {
     const r = await api('POST', '/api/v1/local/prime/declare', { prime_agent: name });
     if (S.sessionEpoch !== epoch) return; // 迟到应答：会话已换代（logout/401/换令牌），一次性凭证不写回状态（busy 已随 resetPrimeState 复位）
     if (r.code === 200) {
+      // 声明联动三字段如实保存（P1-02）：orch/orchErr/synced 原始值透传完成页
+      // 三态渲染；字段缺省存 null（测试构造未装配联动 / standalone 无上报环节），
+      // 完成页对 null 不作任何声明承诺。
       S.primeDecl.done = { agent: name, token: r.data?.prime_token || '', mcp: r.data?.mcp_config || null,
-        wired: !!r.data?.wired, target: r.data?.wired_target || '' };
+        wired: !!r.data?.wired, target: r.data?.wired_target || '',
+        orch: typeof r.data?.orchestrator === 'boolean' ? r.data.orchestrator : null,
+        orchErr: r.data?.orchestrator_error || '',
+        synced: typeof r.data?.hub_synced === 'boolean' ? r.data.hub_synced : null };
       S.primeDecl.picking = false;
       S.primeNew = ''; // 轮换提示与钦定完成视图不同时堆叠
       S.primeNewWire = null;
@@ -1889,6 +1930,38 @@ function primeDeclare(btn) {
   render();
   };
   confirmModal('钦定本机管家', `钦定「${esc(name)}」为本机管家：旧管家凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`, '确认钦定', run);
+}
+
+/* retryPrimeDeclare 声明失败补写（P1-02 重试入口）：不重换凭证，走既有单翻转
+ * PATCH 端点——先按本机实况撤其余有效声明位（含 YAML 基线旧持有人的覆盖压制，
+ * SetAgentOrchestrator 互斥按有效真相判定），再授本次钦定名。每步原子落盘；任一
+ * 步失败如实提示，完成页失败态保留可再次点击（幂等收敛：重跑时其余位已空）。 */
+async function retryPrimeDeclare(btn) {
+  const agent = btn?.dataset?.agent || S.primeDecl.done?.agent;
+  if (!agent) return;
+  if (btn) btn.disabled = true;
+  try {
+    for (const a of S.agents.filter(x => x.orchestrator && x.name !== agent)) {
+      const r = await api('PATCH', '/api/v1/local/agents/' + encodeURIComponent(a.name) + '/orchestrator', { orchestrator: false });
+      if (r.code !== 200) { toast('撤旧声明失败 · ' + errLine(r.data)); return; }
+    }
+    const r = await api('PATCH', '/api/v1/local/agents/' + encodeURIComponent(agent) + '/orchestrator', { orchestrator: true });
+    if (r.code === 200 && r.data?.orchestrator) {
+      if (S.primeDecl.done && S.primeDecl.done.agent === agent) {
+        S.primeDecl.done.orch = true; S.primeDecl.done.orchErr = '';
+        S.primeDecl.done.synced = typeof r.data?.hub_synced === 'boolean' ? r.data.hub_synced : null;
+      }
+      toast('声明已补写生效');
+    } else {
+      toast('补写被拒 · ' + errLine(r.data));
+    }
+  } catch (e) {
+    if (!e?.unauthorized) toast(e.network ? '本机 API 不可达' : '重试失败');
+  } finally {
+    if (btn && document.contains(btn)) btn.disabled = false;
+  }
+  await loadAll().catch(() => {});
+  render();
 }
 
 function netDisconnect(btn) {
@@ -2291,6 +2364,7 @@ document.addEventListener('click', e => {
       case 'prime-pick': S.primeDecl.done = null; S.primeDecl.picking = true; render(); return;
       case 'prime-pick-cancel': S.primeDecl.picking = false; render(); return;
       case 'prime-declare': primeDeclare(btn); return;
+      case 'prime-retry-orch': retryPrimeDeclare(btn); return;
       case 'net-disconnect': netDisconnect(btn); return;
       case 'copy-prime-token': copyPrimeToken(); return;
       case 'copy-prime-declare': copyPrimeDeclare(); return;

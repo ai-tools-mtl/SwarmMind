@@ -89,6 +89,9 @@ type primeDeclareRequest struct {
 //	① 轮换 prime_token（写盘+内存，旧凭证立即失效）
 //	② 读改写 node.yaml prime_agent（读文件前持 writeConfigMu——修复 3 事务锁）
 //	③ SetPrimeAgent（声明即时生效；同 writeConfigMu 临界区内——第五轮收敛 2）
+//	④b 声明联动（2026-10-29 走查反馈批 P1-01：ReplaceOrchestratorHolder 单锁
+//	   原子替换声明持有人——撤旧+授新整集一次落盘，YAML 基线旧声明可正确翻转；
+//	   失败不回滚凭证，orchestrator_error 如实带出）
 //
 // 不变式：声明生效（③ 执行）时旧凭证必已失效（① 先行）——永不出现「新总理已
 // 声明、旧持有人仍有权」的组合。任一步失败：已成功步骤保留，应答 500/4xx 如实
@@ -178,29 +181,20 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	// 4b. 声明联动（2026-10-29 部署后走查反馈一：管家入口收敛形态卡后，能力卡
 	// 「设为管家」按钮退役——钦定必须同时完成卡片 Orchestrator 声明，否则 hub
 	// 目录无声明位：派发页无管家分组、工作单 origin 锚点校验被拒、双端管家分组
-	// 全部落空。先撤同机他者声明再授本名（恰一在翻转序内保持），随后 card_update
-	// 上报 hub）。声明翻转失败不回滚凭证（declare 主契约已达成），orchestrator_error
-	// 如实带出由控制台展示。持 muPrime 串行于并发 declare/rotate；锁序
-	// muPrime→Agents.mu，无反向路径（PATCH orchestrator 不取 muPrime）。
+	// 全部落空）。P1-01 修正（同日反馈批）：不再「先撤旧、再授新」两次独立
+	// SetAgentOrchestrator——撤旧写 override=false 不改 YAML 基线，授新的互斥按
+	// 基线遍历必拒（基线单/双声明均实证复现）；改为 AgentState 单锁原子替换声明
+	// 持有人（ReplaceOrchestratorHolder）：以 baseline+override 合成有效态为真相
+	// 构造完整覆盖集，一次落盘后发布——成功即本机恰一（无零声明窗口），落盘失败
+	// 旧有效声明原样保留。声明翻转失败不回滚凭证（declare 主契约已达成，SPEC
+	// 失败语义不变），orchestrator_error 如实带出由控制台完成页呈现。持 muPrime
+	// 串行于并发 declare/rotate；锁序 muPrime→Agents.mu，无反向路径（PATCH
+	// orchestrator 不取 muPrime）。
 	orchErr := ""
 	if s.cfg.Agents != nil {
-		for _, p := range s.cfg.Agents.Effective() {
-			if p.Name != name && p.Orchestrator {
-				if _, err := s.cfg.Agents.SetAgentOrchestrator(p.Name, false); err != nil {
-					orchErr = err.Error()
-					break
-				}
-			}
-		}
-	}
-	synced := true
-	if orchErr == "" && s.cfg.Agents != nil {
-		if _, err := s.cfg.Agents.SetAgentOrchestrator(name, true); err != nil {
+		if _, err := s.cfg.Agents.ReplaceOrchestratorHolder(name); err != nil {
 			orchErr = err.Error()
 		}
-	}
-	if s.cfg.Agents != nil && s.cfg.CardsReporter != nil {
-		synced = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
 	}
 
 	// 5. 自动接线（t20261023-62a2，primewire.go）：钦定即接线——被钦定 agent
@@ -214,7 +208,7 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	// 6. 应答：钦定名 + 一次性凭证 + mcp_config 片段（降级口径保留，wired 命中
 	//    时控制台优先展示已写入路径）+ wired/wired_target 接线口径 note + 声明
 	//    联动结果（orchestrator 成功位 / orchestrator_error 失败原因 /
-	//    hub_synced 上报口径——控制台声明状态行的数据源；Agents 未装配的测试
+	//    hub_synced 上报口径——控制台完成页三态的数据源；Agents 未装配的测试
 	//    构造不携带联动键）。
 	resp := map[string]any{
 		"prime_agent": name,
@@ -223,9 +217,16 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.cfg.Agents != nil {
 		resp["orchestrator"] = orchErr == ""
-		resp["hub_synced"] = synced
 		if orchErr != "" {
 			resp["orchestrator_error"] = orchErr
+		}
+		// hub_synced 真实语义（P1-02 修正）：reporter 已装配（组网）→ 能力表上报
+		// 实况的结果（true=已提交上报 hub——提交成功≠hub 全网恰一确认；false=待
+		// 同步，重连注册随能力表收敛）。翻转失败时上报照发（Cards 是本机实况，
+		// hub 收敛到真实状态比静默跳过诚实）；未装配 reporter（standalone 未组网）
+		// → 字段缺省：无上报环节，控制台按「未组网」呈现，绝不冒充已同步。
+		if s.cfg.CardsReporter != nil {
+			resp["hub_synced"] = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
 		}
 	}
 	resp["note"] = "已写入 node.yaml prime_agent 并即时生效（无需重启）；" + applyWiredFields(resp, wired, target)

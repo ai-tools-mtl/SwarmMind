@@ -54,9 +54,10 @@ func newTokenStore(dataDir string) *tokenStore {
 	return ts
 }
 
-// persist 原子写（temp + rename，0600）。
-func (ts *tokenStore) persist() error {
-	b, err := json.MarshalIndent(ts.list, "", "  ")
+// persistList 把给定列表原子落盘（temp + rename，0600）。purge 用它先写独立
+// next 列表、成功后才替换内存（P2-02）；create/revoke/verify 落当前 ts.list。
+func (ts *tokenStore) persistList(list []APIToken) error {
+	b, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -66,6 +67,9 @@ func (ts *tokenStore) persist() error {
 	}
 	return os.Rename(tmp, ts.path)
 }
+
+// persist 原子写当前列表（temp + rename，0600）。
+func (ts *tokenStore) persist() error { return ts.persistList(ts.list) }
 
 // create 生成新令牌，返回 (记录, 明文)。明文仅此处返回一次。
 func (ts *tokenStore) create(name string, now time.Time) (APIToken, string, error) {
@@ -179,6 +183,11 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 // purge 硬删除（2026-10-29 部署后走查反馈五）：仅已撤销条目可删——软撤销保留
 // 审计痕迹的既有口径不变，已撤销条目经主人显式操作连记录一并移除（不可恢复，
 // 控制台删除前二次确认）。返回（是否找到, 是否因未撤销被拒, 持久化错误）。
+//
+// P2-02 修正（2026-10-29 走查反馈批）：先构造独立 next 切片并持久化，成功后才
+// 替换 ts.list——原实现先 splice 再 persist，rename 失败时内存已删、盘上犹存，
+// 重启记录复活（写失败的探针实证 memory=0/disk=1）。也不可用「存旧 slice 头再
+// 恢复」：append 复用共享底层数组，旧头所指内容已被覆盖。
 func (ts *tokenStore) purge(id string) (found, active bool, err error) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -187,8 +196,14 @@ func (ts *tokenStore) purge(id string) (found, active bool, err error) {
 			if !ts.list[i].Revoked {
 				return true, true, nil
 			}
-			ts.list = append(ts.list[:i], ts.list[i+1:]...)
-			return true, false, ts.persist()
+			next := make([]APIToken, 0, len(ts.list)-1)
+			next = append(next, ts.list[:i]...)
+			next = append(next, ts.list[i+1:]...)
+			if err := ts.persistList(next); err != nil {
+				return true, false, err // 落盘失败：内存维持旧列表（重启语义一致）
+			}
+			ts.list = next
+			return true, false, nil
 		}
 	}
 	return false, false, nil

@@ -3,6 +3,7 @@ package localapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -467,11 +468,139 @@ func TestPrimeDeclareLinksCardDeclaration(t *testing.T) {
 		t.Fatalf("钦定后声明应翻转至 echo（恰一）, got %v", m)
 	}
 
-	// 重启保持：同 data_dir 新实例读盘后声明仍在（orchestrator 覆盖落盘）
-	// —— 直接复验盘上状态文件（newDeclareServer 的 dir 不可得，经 agents-state
-	// 行为等价口径：Effective 再读由重启用例覆盖，此处锁定 REST 视图一致）。
+	// 收尾只锁 REST 视图（status 的 prime_agent 位）；「重启保持」真测在
+	// TestPrimeDeclareLinkedRestartAndSyncFlag（P3-01，2026-10-29 走查反馈批）：
+	// 同 data_dir 重开 AgentState 核有效声明位 + 失败 reporter 覆盖 hub_synced=false。
 	if code, out = doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK || !strings.Contains(out, `"prime_agent":"echo"`) {
 		t.Fatalf("status 应反映钦定, got %d: %s", code, out)
+	}
+}
+
+// TestPrimeDeclareLinkedRestartAndSyncFlag 联动声明「重启保持」真测 + hub_synced
+// 双分支（P3-01，2026-10-29 走查反馈批）：①同 data_dir 重开 AgentState（进程重启
+// 的盘上恢复等价形态）核有效声明恰一——旧联动用例末段只 GET 同一实例 status，
+// 从未重开、从未核 orchestrator；②hub_synced=true（成功 reporter）与 =false
+// （失败 reporter）两分支——旧用例声明要验 hub_synced 却从未断言该字段。
+func TestPrimeDeclareLinkedRestartAndSyncFlag(t *testing.T) {
+	profiles := func() []protocol.ExecProfile {
+		return []protocol.ExecProfile{echoProfileLocal(t),
+			{Name: "sleeper", Kind: protocol.AgentKindCLI, Command: "/bin/sleep",
+				Workdir: t.TempDir(), TimeoutSec: 1, Exposed: false}}
+	}
+	mk := func(t *testing.T, dir string, reporter func([]protocol.AgentCard) error) *httptest.Server {
+		t.Helper()
+		cfgPath := filepath.Join(dir, "node.yaml")
+		if err := os.WriteFile(cfgPath, []byte(declareYAML), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		s := New(Config{
+			NodeID: "nodeA", Agents: newState(t, dir, profiles()),
+			LocalToken: "tok-local", PrimeToken: "tok-old",
+			LocalListen: "127.0.0.1:8445", DeclareConfigPath: cfgPath,
+			CardsReporter: reporter,
+			RotatePrime:   func() (string, error) { return "tok-declare-x", nil },
+		})
+		s.mcpCommandOverride = "/fake/swarmmind-mcp"
+		srv := httptest.NewServer(s.Handler())
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	declare := func(t *testing.T, srv *httptest.Server) string {
+		t.Helper()
+		code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
+		if code != http.StatusOK {
+			t.Fatalf("declare 应 200, got %d: %s", code, out)
+		}
+		return out
+	}
+
+	t.Run("hub_synced_true_重启保持", func(t *testing.T) {
+		dir := t.TempDir()
+		out := declare(t, mk(t, dir, func([]protocol.AgentCard) error { return nil }))
+		if !strings.Contains(out, `"orchestrator":true`) || !strings.Contains(out, `"hub_synced":true`) {
+			t.Fatalf("declare 应带声明成功+已上报, got %s", out)
+		}
+		// 真·重启保持：同 data_dir 重开 AgentState，核有效声明位（orchestrator）
+		st2, err := OpenAgentState(dir, profiles())
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, p := range st2.Effective() {
+			m[p.Name] = p.Orchestrator
+		}
+		if !m["echo"] || m["sleeper"] {
+			t.Fatalf("重启后有效声明应恰一在 echo, got %v", m)
+		}
+	})
+
+	t.Run("hub_synced_false_失败reporter", func(t *testing.T) {
+		dir := t.TempDir()
+		out := declare(t, mk(t, dir, func([]protocol.AgentCard) error { return errors.New("probe hub down") }))
+		if !strings.Contains(out, `"orchestrator":true`) || !strings.Contains(out, `"hub_synced":false`) {
+			t.Fatalf("失败 reporter 下应 orchestrator=true 且 hub_synced=false, got %s", out)
+		}
+	})
+}
+
+// TestPrimeDeclareReplacesYAMLBaselineHolder P1-01 回归（2026-10-29 走查反馈批，
+// codex overlay TestCodexBaselineFlip / TestCodexTwoBaselineFlip 场景转正入库）：
+// 旧管家声明来自 YAML 基线时钦定新管家必须成功——旧两段式（撤旧写 override=false
+// + SetAgentOrchestrator 授新）的授新互斥按原始基线遍历无视 override，基线旧声明
+// 必拒、撤旧与授新之间还有零声明窗口；ReplaceOrchestratorHolder 以 baseline+
+// override 合成有效态构造完整覆盖集一次落盘翻转。同时锁定 standalone（无
+// CardsReporter）应答不带 hub_synced 字段（未组网无上报环节，不冒充已同步）。
+func TestPrimeDeclareReplacesYAMLBaselineHolder(t *testing.T) {
+	cases := []struct {
+		name       string
+		baselineOr []string // YAML 基线里 Orchestrator=true 的 agent
+	}{
+		{"基线单声明翻转", []string{"sleeper"}},
+		{"基线历史双声明收敛", []string{"sleeper", "echo"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := map[string]bool{}
+			for _, n := range tc.baselineOr {
+				orch[n] = true
+			}
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "node.yaml")
+			if err := os.WriteFile(cfgPath, []byte("node_id: test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			echo := echoProfileLocal(t)
+			echo.Orchestrator = orch["echo"]
+			sleeper := protocol.ExecProfile{Name: "sleeper", Kind: protocol.AgentKindCLI,
+				Command: "/bin/sleep", Workdir: t.TempDir(), TimeoutSec: 1, Exposed: false,
+				Orchestrator: orch["sleeper"]}
+			st := newState(t, dir, []protocol.ExecProfile{echo, sleeper})
+			s := New(Config{NodeID: "nodeA", Agents: st,
+				LocalToken: "tok-local", PrimeToken: "tok-old",
+				LocalListen: "127.0.0.1:8445", DeclareConfigPath: cfgPath,
+				RotatePrime: func() (string, error) { return "tok-declare-y", nil }})
+			s.mcpCommandOverride = "/fake/swarmmind-mcp"
+			srv := httptest.NewServer(s.Handler())
+			t.Cleanup(srv.Close)
+
+			code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
+			if code != http.StatusOK {
+				t.Fatalf("declare 应 200, got %d: %s", code, out)
+			}
+			if !strings.Contains(out, `"orchestrator":true`) || strings.Contains(out, `"orchestrator_error"`) {
+				t.Fatalf("基线旧声明下钦定应成功翻转且无错误, got %s", out)
+			}
+			if strings.Contains(out, `"hub_synced"`) {
+				t.Fatalf("未装配 reporter（standalone）应答不得携带 hub_synced（缺省=未组网）, got %s", out)
+			}
+			m := map[string]bool{}
+			for _, p := range st.Effective() {
+				m[p.Name] = p.Orchestrator
+			}
+			if !m["echo"] || m["sleeper"] {
+				t.Fatalf("钦定后有效声明应恰一在 echo, got %v", m)
+			}
+		})
 	}
 }
 

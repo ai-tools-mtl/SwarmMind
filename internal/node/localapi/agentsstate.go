@@ -157,9 +157,21 @@ func (s *AgentState) SetExposed(name string, exposed bool) (protocol.ExecProfile
 	return p, nil
 }
 
+// effectiveOrchLocked 单 agent 的有效声明位（baseline 值与覆盖层合成；调用方持
+// mu）。互斥与展示的同一真相源——yaml 基线 true 可被覆盖层 false 压住，此时
+// 有效态就是未声明，不得再按原始基线拒绝他者授新（P1-01 根因即两套真相并存）。
+func (s *AgentState) effectiveOrchLocked(name string, baselineOrch bool) bool {
+	if rec, ok := s.orchOverride[name]; ok {
+		return rec.Orchestrator
+	}
+	return baselineOrch
+}
+
 // SetAgentOrchestrator 变更统筹载体声明（2026-10-28 客户端声明制）：镜像 SetExposed
 // 的先写后见语义——落盘成功才发布内存；回归 YAML 基线值时删除覆盖项防状态文件积累。
-// 声明即身份：本机恰一个声明由调用方（node 控制台）保证互斥（同机多声明在开关层拒绝）。
+// 授新（orchestrator=true）的互斥按有效声明态判定（effectiveOrchLocked，P1-01）；
+// 「替换持有人」的撤旧+授新须走 ReplaceOrchestratorHolder 原子操作（本方法两次
+// 独立调用之间存在零声明窗口，且撤旧不改 yaml 基线）。
 func (s *AgentState) SetAgentOrchestrator(name string, orchestrator bool) (protocol.ExecProfile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,16 +186,11 @@ func (s *AgentState) SetAgentOrchestrator(name string, orchestrator bool) (proto
 		return protocol.ExecProfile{}, ErrAgentNotFound
 	}
 	if orchestrator {
-		// 同机互斥：本机已有其他 agent 持声明则拒绝（全网多声明属跨机配置漂移，
-		// hub 聚合层告警；本机双声明在源头即可避免）。
-		for k, rec := range s.orchOverride {
-			if k != name && rec.Orchestrator {
-				return protocol.ExecProfile{}, fmt.Errorf("localapi: 本机 %q 已声明为智行管家（全网同一时刻至多一个统筹，先取消原声明）", k)
-			}
-		}
+		// 同机互斥：本机已有其他 agent 持有效声明则拒绝（全网多声明属跨机配置
+		// 漂移，hub 聚合层告警；本机双声明在源头即可避免）。
 		for _, p := range s.baseline {
-			if p.Name != name && p.Orchestrator {
-				return protocol.ExecProfile{}, fmt.Errorf("localapi: 本机 %q 已声明为智行管家（yaml 基线），先改配置再声明", p.Name)
+			if p.Name != name && s.effectiveOrchLocked(p.Name, p.Orchestrator) {
+				return protocol.ExecProfile{}, fmt.Errorf("localapi: 本机 %q 已声明为智行管家（全网同一时刻至多一个统筹，先取消原声明）", p.Name)
 			}
 		}
 	}
@@ -203,6 +210,51 @@ func (s *AgentState) SetAgentOrchestrator(name string, orchestrator bool) (proto
 	s.orchOverride = next
 	p := s.baseline[idx]
 	p.Orchestrator = orchestrator
+	return p, nil
+}
+
+// ReplaceOrchestratorHolder 原子替换本机声明持有人（2026-10-29 走查反馈批 P1-01）：
+// 以 baseline+orchOverride 合成的有效声明态为互斥真相，构造完整 next 覆盖集
+// （他者有效声明显式压 false、name 授 true），一次落盘后发布。替代 declare 里
+// 「先撤旧再授新」的两次独立 SetAgentOrchestrator——旧序有零声明窗口，且授新的
+// 互斥在 YAML 基线旧声明下必拒（撤旧写 override=false 不改基线，基线遍历无视
+// override）；本方法单锁合成真相后整集落盘，YAML 单/双基线声明、覆盖层声明、
+// 落盘失败四类场景统一收口：成功即本机恰一（name）；失败（含落盘 IO 错误）整集
+// 不发布，旧有效声明原样保留——凭证交接主契约是否回滚由调用方声明（declare 不
+// 回滚，SPEC 口径不变）。返回 name 的 ExecProfile 视图（Orchestrator=true）；
+// name 不在本机配置返回 ErrAgentNotFound。
+func (s *AgentState) ReplaceOrchestratorHolder(name string) (protocol.ExecProfile, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i := range s.baseline {
+		if s.baseline[i].Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return protocol.ExecProfile{}, ErrAgentNotFound
+	}
+	next := make(map[string]agentOrchRecord, len(s.baseline))
+	for _, p := range s.baseline {
+		if p.Name == name || !s.effectiveOrchLocked(p.Name, p.Orchestrator) {
+			continue // 新持有人与其余未声明者不进覆盖集（状态文件不积累）
+		}
+		// 旧持有人显式压 false：基线 true 须覆盖层压住，覆盖层声明则改写为 false
+		next[p.Name] = agentOrchRecord{Orchestrator: false, UpdatedAt: protocol.NowUTC()}
+	}
+	if s.baseline[idx].Orchestrator {
+		delete(next, name) // name 本就是基线声明：清掉其残留覆盖项（含历史 false），基线即真相
+	} else {
+		next[name] = agentOrchRecord{Orchestrator: true, UpdatedAt: protocol.NowUTC()}
+	}
+	if err := s.persistOrch(next); err != nil {
+		return protocol.ExecProfile{}, err // 落盘失败：不发布，旧有效声明原样保留
+	}
+	s.orchOverride = next
+	p := s.baseline[idx]
+	p.Orchestrator = true
 	return p, nil
 }
 

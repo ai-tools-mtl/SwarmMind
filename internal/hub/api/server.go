@@ -122,10 +122,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/setup", s.handleAccountSetup)
 	mux.HandleFunc("GET /api/v1/auth/account", s.handleAccountStatus) // 免鉴权：登录页需据此选表单（未登录仅返回 initialized 布尔）
 	mux.HandleFunc("POST /api/v1/auth/account/update", s.auth(s.handleAccountUpdate))
-	mux.HandleFunc("POST /api/v1/auth/tokens", s.auth(s.handleTokenCreate))
-	mux.HandleFunc("GET /api/v1/auth/tokens", s.auth(s.handleTokenList))
-	mux.HandleFunc("DELETE /api/v1/auth/tokens/{id}", s.auth(s.handleTokenRevoke))
-	mux.HandleFunc("POST /api/v1/auth/tokens/{id}/purge", s.auth(s.handleTokenPurge))
+	// 令牌管理组走 authAdmin（P1-03，2026-10-29 走查反馈批）：六.六豁免⑨「admin
+	// 会话专属」的契约落地——PAT 可调这四条=持既授予凭据者可自行增发/撤销凭据，
+	// 掏空豁免依据。此前 s.auth 的 Bearer 分支放行是越权缺口，非文档问题。
+	mux.HandleFunc("POST /api/v1/auth/tokens", s.authAdmin(s.handleTokenCreate))
+	mux.HandleFunc("GET /api/v1/auth/tokens", s.authAdmin(s.handleTokenList))
+	mux.HandleFunc("DELETE /api/v1/auth/tokens/{id}", s.authAdmin(s.handleTokenRevoke))
+	mux.HandleFunc("POST /api/v1/auth/tokens/{id}/purge", s.authAdmin(s.handleTokenPurge))
 	mux.HandleFunc("POST /api/v1/tasks", s.auth(s.handleSubmit))
 	mux.HandleFunc("GET /api/v1/tasks", s.auth(s.handleListTasks))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.auth(s.handleGetTask))
@@ -236,9 +239,58 @@ func authPrincipal(r *http.Request) string {
 	return v
 }
 
+// adminSession 会话 cookie 校验 + admin 主体注入（auth 与 authAdmin 共用的会话
+// 分支）；无效时已写 401 应答并返回 nil。惰性清理过期会话的语义保持不变。
+func (s *Server) adminSession(w http.ResponseWriter, r *http.Request) *http.Request {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "未登录（先 POST /api/v1/login）")
+		return nil
+	}
+	s.mu.Lock()
+	exp, ok := s.sessions[c.Value]
+	now := time.Now().UTC()
+	if ok && now.After(exp) {
+		delete(s.sessions, c.Value) // 惰性清理过期会话
+		ok = false
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效或已过期，请重新登录")
+		return nil
+	}
+	return r.WithContext(withAuthPrincipal(r.Context(), adminIdentity))
+}
+
+// authAdmin admin 会话专属门禁（P1-03，2026-10-29 走查反馈批）：令牌管理组
+// （创建/列表/撤销/purge，SPEC 六.六豁免⑨）只对 hub admin 会话开放。PAT 是已被
+// 授予的凭据，持它再管理令牌组 = 可自行增发/撤销凭据的提权通道，一律不放行：
+// Bearer 头在场即不进会话分支——有效 PAT 403（身份成立、授权不成立），无效凭据
+// 401；匿名（无凭据）401。生产唯一使用方是网页 admin（api() 只带会话 cookie，
+// 不发 Authorization 头），无破坏面；脚本用 PAT 调其余 Bearer 路由不受影响。
+func (s *Server) authAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			if s.tokens != nil {
+				if _, ok := s.tokens.verify(strings.TrimPrefix(h, "Bearer ")); ok {
+					writeErr(w, http.StatusForbidden, "admin_session_required",
+						"令牌管理仅限管理员会话（PAT 不得管理令牌组，请用 admin 登录 hub 控制台）")
+					return
+				}
+			}
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "令牌无效或已撤销")
+			return
+		}
+		if rr := s.adminSession(w, r); rr != nil {
+			next(w, rr)
+		}
+	}
+}
+
 // auth 会话校验中间件：无/失效会话一律 401（五端点全部受保护）。校验通过的
 // 请求把服务端验证主体注入上下文：admin 会话 → adminIdentity；Bearer PAT →
-// pat:<令牌名>（tokens.verify 命中即身份成立）。
+// pat:<令牌名>（tokens.verify 命中即身份成立）。令牌管理组不走本中间件的
+// Bearer 分支（authAdmin 专属，见上）。
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		/* 优先级：会话 cookie → Bearer PAT（2026-10-21 验收：GitHub 式子令牌）。 */
@@ -252,24 +304,9 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "令牌无效或已撤销")
 			return
 		}
-		c, err := r.Cookie(sessionCookie)
-		if err != nil || c.Value == "" {
-			writeErr(w, http.StatusUnauthorized, "unauthorized", "未登录（先 POST /api/v1/login）")
-			return
+		if rr := s.adminSession(w, r); rr != nil {
+			next(w, rr)
 		}
-		s.mu.Lock()
-		exp, ok := s.sessions[c.Value]
-		now := time.Now().UTC()
-		if ok && now.After(exp) {
-			delete(s.sessions, c.Value) // 惰性清理过期会话
-			ok = false
-		}
-		s.mu.Unlock()
-		if !ok {
-			writeErr(w, http.StatusUnauthorized, "unauthorized", "会话无效或已过期，请重新登录")
-			return
-		}
-		next(w, r.WithContext(withAuthPrincipal(r.Context(), adminIdentity)))
 	}
 }
 
@@ -606,7 +643,7 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 // handlePrimeGet GET /api/v1/prime：统筹指定汇聚展示（2026-10-28 客户端声明制——
 // 指定权在 node（AgentCard.Orchestrator 随能力表上报），hub 只读汇聚：
 // 恰一声明 → designation=该条目；多声明 → designation=null + conflicts 清单
-//（回退名字约定，控制台告警）；零声明 → designation=null（回退名字约定）。
+// （回退名字约定，控制台告警）；零声明 → designation=null（回退名字约定）。
 // 中心端写入口（PUT /api/v1/prime）已随客户端声明制退役。
 func (s *Server) handlePrimeGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
