@@ -233,8 +233,8 @@ func TestWebTaskFilterBehavior(t *testing.T) {
 
 	// ---- node 侧 harness：esc 原文行 + 桩 + 抽屉展示词典 shared block（含
 	// ORIGIN_WORDS）+ 抽取的真实函数（badge/listStatusBadge/originBadge/originOf/
-	// myTasksCard），场景驱动（无反引号，容纳 Go 原始字面量；sharedBlock 抽块起点在
-	// 注释体内，组装时补回 /* 使其成合法注释）。 ----
+	// myTasksCard/myTasksZone——壳/内容分层后两函数同抽），场景驱动（无反引号，
+	// 容纳 Go 原始字面量；sharedBlock 抽块起点在注释体内，组装时补回 /* 使其成合法注释）。 ----
 	var escLine string
 	for _, l := range strings.Split(nodeJS, "\n") {
 		if strings.HasPrefix(l, "const esc = v =>") {
@@ -253,6 +253,7 @@ func TestWebTaskFilterBehavior(t *testing.T) {
 		"function originBadge(origin) {",
 		"function originOf(e) {",
 		"function myTasksCard() {",
+		"function myTasksZone() {",
 	} {
 		nodeFns += "\n" + extractTopFunc(t, nodeJS, marker)
 	}

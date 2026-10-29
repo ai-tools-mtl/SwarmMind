@@ -769,18 +769,23 @@ async function pollTick() {
  * 撤陈旧条）不经整页 render——派单表单在页（2026-10-21 验收口径），表单焦点与
  * 草稿不受触碰。内容与上次写入一致不碰 DOM（稳定轮询零重绘，动画/焦点/滚动不受
  * 影响）；焦点在卡内（列表行/重试钮/加载更早）时按 data-task/data-act 回位，
- * 失存回落侧栏当前页签（与 closeDrawer 兜底同构）。 */
-let tasksCardPaint = '';   // 上次写入 #my-tasks-card 的内容（变了才写）
+ * 失存回落侧栏当前页签（与 closeDrawer 兜底同构）。
+ * P1-03 残余 A（r2 复审）：缓存以 WeakMap 绑卡元素实例而非跨页面字符串——切页
+ * 整页 render 重建 DOM 后新卡无记录，旧缓存天然失效；否则「失败→切走→恢复→切回
+ * →再失败」的第二次失败提示会被旧缓存命中吞掉。
+ * R2F-P2-01（r2 复审）：只写卡内内容 myTasksZone()——壳 section 与唯一 id 由
+ * myTasksCard() 在整页 render 时创建一次，不把完整壳写回自身（重复 ID/双层卡片）。 */
+const tasksCardPaint = new WeakMap();   // 卡元素实例 → 上次写入的 HTML（变了才写）
 function paintTasksCard() {
   const card = document.getElementById('my-tasks-card');
   if (!card) return;
-  const html = myTasksCard();
-  if (tasksCardPaint === html) return;
+  const html = myTasksZone();
+  if (tasksCardPaint.get(card) === html) return;
   const active = document.activeElement;
   const mark = active && card.contains(active)
     ? { task: active.closest('[data-task]')?.getAttribute('data-task') || '', act: active.getAttribute('data-act') || '' }
     : null;
-  tasksCardPaint = html;
+  tasksCardPaint.set(card, html);
   card.innerHTML = html;
   if (mark) {
     const el = mark.task
@@ -1670,7 +1675,13 @@ function originBadge(origin) {
 // originOf 行来源归一（与 taskOrigin 回退同口径）：origin 恒有值；缺省/留痕行按 local
 // 计（本机控制台默认本机语义，hub 任务误归本机只会误导产物指引，反向无此风险）。
 function originOf(e) { return e?.origin === 'hub' ? 'hub' : 'local'; }
-// myTasksCard 任务列表 + 来源筛选（TASK-nav-filter A1）：卡头部三枚 chip（全部/本机
+// myTasksCard 任务卡壳（R2F-P2-01 壳/内容分层）：section 与唯一 id 只在整页
+// render 时创建一次；卡内内容 myTasksZone 为 P1-03 槽位局部更新单元（paintTasksCard
+// 共用同一函数，初始渲染与局部更新 DOM 层级同构，不再把含 id 的完整壳写回自身）。
+function myTasksCard() {
+  return `<section class="card spaced" id="my-tasks-card">${myTasksZone()}</section>`;
+}
+// myTasksZone 任务列表 + 来源筛选内容区（TASK-nav-filter A1）：卡头部三枚 chip（全部/本机
 // 派单/hub 下发，带已载计数；视觉对齐 hub .filters 形态，零计数退灰）。筛选为渲染层
 // 过滤已载入条目（陷阱④：轮询只刷首页、翻页保序并入都在数据层，筛选随每次渲染从
 // 全量已载列表现算，不缓存筛选结果）。零命中出空态+清除筛选，但「加载更早」翻页以
@@ -1678,7 +1689,9 @@ function originOf(e) { return e?.origin === 'hub' ? 'hub' : 'local'; }
 // 消失——空快照+激活筛选时控件必须在位可清除，S.tf 不自动重置）；空态二分：激活筛选
 // →筛选空态，未激活+真无任务→首次派单空态。终审必修3：footer 口径三数分离——
 // 「命中 X 条；筛选作用于已载入的 N / 共 M 条」（X=rows，N=all，M=tasksTotal）。
-function myTasksCard() {
+// 头部行在本区（P1-03 残余 A 同批裁定）：恢复路径 paintTasksCard 带数据变化重写
+// 本区时「已载 X / 共 Y」计数随之更新，不滞留整页 render 之前的旧值。
+function myTasksZone() {
   const all = S.tasks;
   const origin = S.tf.origin;
   const rows = origin ? all.filter(e => originOf(e) === origin) : all;
@@ -1691,7 +1704,7 @@ function myTasksCard() {
    * ⇒ 失败态（就地重试）；S.status 缺失 ⇒ 首刷未落定加载中；其余按既有空态。 */
   const failed = !!S.loadError && !all.length;
   const loading = !S.status && !all.length;
-  return `<section class="card spaced" id="my-tasks-card"><div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
+  return `<div class="row"><h2>我的任务</h2><small>${loaded} · 本机执行过的全部任务（本机派单 + hub 下发）</small></div>
   <div class="filters">${chips}</div>
   ${failed ? listErrorBox('reload-all', '任务列表')
   : loading ? listLoadingBox('任务列表')
@@ -1702,7 +1715,7 @@ function myTasksCard() {
     : origin ? `<div class="empty"><h2>没有符合筛选的任务</h2><p class="muted">当前筛选下已载入的任务无命中；清除筛选，或用下方入口加载更早的任务。</p>${button('清除筛选', 'tf-clear')}</div>`
     : `<div class="empty"><h2>本机还没有执行过任务</h2><p class="muted">上方表单派第一单；hub 下发任务入账后同样出现在这里。</p>${button('＋ 派单', 'focus-form', 'primary')}</div>`)}
   ${more ? `<div class="row">${button(S.tasksMoreBusy ? '加载中…' : `加载更早的任务（还有 ${S.tasksTotal - all.length} 条）`, 'tasks-more', '', S.tasksMoreBusy ? 'disabled' : '')}</div>` : ''}
-  ${(all.length || origin) ? `<p class="footer-note">${origin ? `命中 ${rows.length} 条；筛选作用于已载入的 ${all.length} / 共 ${S.tasksTotal} 条 · ` : ''}列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>` : ''}</section>`;
+  ${(all.length || origin) ? `<p class="footer-note">${origin ? `命中 ${rows.length} 条；筛选作用于已载入的 ${all.length} / 共 ${S.tasksTotal} 条 · ` : ''}列表即本机账本全量——本机派单与 hub 下发一律在列（全量审计，更早历史翻页载入）；状态随列表直出。「仅存留痕」= 账本中已不存在的本机派单历史，详情不再可查。</p>` : ''}`;
 }
 
 /* ---------- 派单表单动作 ---------- */

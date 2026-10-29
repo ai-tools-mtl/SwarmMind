@@ -1198,18 +1198,21 @@ function listErrorBox(res, label, polled = true) {
  * 但失败态出现/同数据恢复撤陈旧条必须落 DOM。槽位只重写列表区域本身（任务页筛选
  * 输入/高级筛选开合、总览关注区、机器页头部不受触碰，守住局部刷新契约）；内容与
  * 上次写入一致不碰 DOM（稳定轮询零重绘）。豁免页（派单表单视图/群详情/设置）无
- * 这些槽位，自然跳过，切页时 render 呈现。 */
-const listPaintCache = {};
+ * 这些槽位，自然跳过，切页时 render 呈现。
+ * P1-03 残余 A（r2 复审）：缓存以 WeakMap 绑槽位元素实例而非按 id 记字符串——
+ * 切页整页 render 重建 DOM 后新元素在 WeakMap 中无记录，旧缓存天然失效；否则
+ * 「失败→切走→恢复→切回→再失败」的第二次失败提示会被跨世代旧缓存命中吞掉。 */
+const listPaintCache = new WeakMap();   // 槽位元素实例 → 上次写入的 HTML
 function freshSig() { return listState('tasks') + '|' + listState('nodes'); }
 function paintListFreshness() {
-  const id = S.page === 'overview' ? 'recent-tasks-card'
+  const id = S.page === 'overview' ? 'recent-tasks-zone'
     : S.page === 'tasks' ? 'tasks-list-zone'
     : S.page === 'nodes' ? 'nodes-list-zone' : '';
   if (!id) return;
-  const html = S.page === 'overview' ? recentTasksHtml() : S.page === 'tasks' ? tasksListZone() : nodesListZone();
+  const html = S.page === 'overview' ? recentTasksZone() : S.page === 'tasks' ? tasksListZone() : nodesListZone();
   const el = document.getElementById(id);
-  if (!el || listPaintCache[id] === html) return;
-  listPaintCache[id] = html;
+  if (!el || listPaintCache.get(el) === html) return;
+  listPaintCache.set(el, html);
   el.innerHTML = html;
 }
 /* pendingReviewCount 待办口径（FE-POLISH P0-1「核对完待办不减」，2026-10-29）：
@@ -1421,13 +1424,22 @@ function overviewPage() {
     </div>`
     + recentTasksHtml();
 }
-/* recentTasksHtml 总览最近任务卡（P1-03 槽位局部更新单元）：A4 五态分支与任务页
- * 同口径；总览在列时新鲜度转移同样经 paintListFreshness 落本卡，不经整页 render。 */
+/* recentTasksHtml 总览最近任务卡：壳（section + 唯一 id）只在整页 render 时创建
+ * （R2F-P2-01 壳/内容分层——局部更新只写 #recent-tasks-zone 内部，不把含 id 的
+ * 完整 section 写回自身造成重复 ID/双层卡片）。recentTasksZone 为 P1-03 槽位局部
+ * 更新单元：A4 五态与任务页同口径，error 且有快照出陈旧条（P1-03 残余 B——原实现
+ * 只有「失败且无任务」分支，有旧任务时失败态永不呈现）；总览在列时新鲜度转移经
+ * paintListFreshness 落本区，不经整页 render。头部行数据只在整页 render 时求值，
+ * 而总览的 paint 仅在数据指纹未变时运行（freshSig 转移），计数不会因此变陈旧。 */
 function recentTasksHtml() {
   return `<section class="card spaced" id="recent-tasks-card"><div class="row"><h2>最近任务</h2>${button(`全部 ${S.tasks.length} 条任务 →`, 'go', 'link', 'data-page="tasks"')}</div>
-  ${listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
+  <div id="recent-tasks-zone">${recentTasksZone()}</div></section>`;
+}
+function recentTasksZone() {
+  return listState('tasks') === 'error' && !S.tasks.length ? listErrorBox('tasks', '任务列表')
   : listState('tasks') === 'loading' && !S.tasks.length ? listLoadingBox('任务列表')
-  : S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`}</section>`;
+  : (listState('tasks') === 'error' ? listStaleBar('tasks', '任务列表') : '')
+    + (S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`);
 }
 
 /* ---------- 机器（添加机器 / 已登记机器列表） ---------- */
