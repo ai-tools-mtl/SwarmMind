@@ -125,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/tokens", s.auth(s.handleTokenCreate))
 	mux.HandleFunc("GET /api/v1/auth/tokens", s.auth(s.handleTokenList))
 	mux.HandleFunc("DELETE /api/v1/auth/tokens/{id}", s.auth(s.handleTokenRevoke))
+	mux.HandleFunc("POST /api/v1/auth/tokens/{id}/purge", s.auth(s.handleTokenPurge))
 	mux.HandleFunc("POST /api/v1/tasks", s.auth(s.handleSubmit))
 	mux.HandleFunc("GET /api/v1/tasks", s.auth(s.handleListTasks))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.auth(s.handleGetTask))

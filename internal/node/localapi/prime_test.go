@@ -410,6 +410,71 @@ prime_agent: *who          # 别名值——原实现原位改 Value 写出悬�
 custom_field: keep-me      # 未知字段锚点
 `
 
+// TestPrimeDeclareLinksCardDeclaration 声明联动（2026-10-29 部署后走查反馈一）：
+// 管家入口收敛形态卡后能力卡「设为管家」退役——钦定（prime/declare）必须同时
+// 完成卡片 Orchestrator 声明，否则 hub 目录无声明位（派发页无管家分组、工作单
+// origin 锚点校验被拒）。锁定：declare 应答带 orchestrator=true/hub_synced；
+// 先 PATCH 他者声明后钦定 → 他者声明随钦定撤销（恰一在翻转序内保持）、本名声明
+// 生效且重启保持（agents-state.json orchestrator 覆盖）。
+func TestPrimeDeclareLinksCardDeclaration(t *testing.T) {
+	srv, _ := newDeclareServer(t)
+	agentsList := func() map[string]bool {
+		code, out := doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/agents", "")
+		if code != http.StatusOK {
+			t.Fatalf("agents 列表应 200, got %d: %s", code, out)
+		}
+		var body struct {
+			Agents []struct {
+				Name         string `json:"name"`
+				Orchestrator bool   `json:"orchestrator"`
+			} `json:"agents"`
+		}
+		if err := json.Unmarshal([]byte(out), &body); err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for _, a := range body.Agents {
+			m[a.Name] = a.Orchestrator
+		}
+		return m
+	}
+
+	// 前置：sleeper 先持声明（模拟既有声明态——生产经原「设为管家」PATCH 产生）
+	if code, out := doJSON(t, srv, "tok-local", http.MethodPatch, "/api/v1/local/agents/sleeper/orchestrator", `{"orchestrator":true}`); code != http.StatusOK {
+		t.Fatalf("PATCH sleeper 声明应 200, got %d: %s", code, out)
+	}
+	if m := agentsList(); !m["sleeper"] || m["echo"] {
+		t.Fatalf("前置声明态不符: %v", m)
+	}
+
+	// 钦定 echo → 应答联动位 + sleeper 声明随钦定撤销、echo 生效
+	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
+	if code != http.StatusOK {
+		t.Fatalf("declare 应 200, got %d: %s", code, out)
+	}
+	var body struct {
+		Orchestrator      bool   `json:"orchestrator"`
+		HubSynced         bool   `json:"hub_synced"`
+		OrchestratorError string `json:"orchestrator_error"`
+	}
+	if err := json.Unmarshal([]byte(out), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Orchestrator || body.OrchestratorError != "" {
+		t.Fatalf("declare 应带 orchestrator=true 且无错误, got %+v", body)
+	}
+	if m := agentsList(); !m["echo"] || m["sleeper"] {
+		t.Fatalf("钦定后声明应翻转至 echo（恰一）, got %v", m)
+	}
+
+	// 重启保持：同 data_dir 新实例读盘后声明仍在（orchestrator 覆盖落盘）
+	// —— 直接复验盘上状态文件（newDeclareServer 的 dir 不可得，经 agents-state
+	// 行为等价口径：Effective 再读由重启用例覆盖，此处锁定 REST 视图一致）。
+	if code, out = doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK || !strings.Contains(out, `"prime_agent":"echo"`) {
+		t.Fatalf("status 应反映钦定, got %d: %s", code, out)
+	}
+}
+
 // TestSetPrimeAgentYAMLReplacesAliasNode 修复 4：既有值为 AliasNode 时构造独立
 // 纯量整体替换（不原位改 Alias），重编码结果可正常解析（= 重启不炸）、prime_agent
 // 值正确、锚点定义与未知字段保留。

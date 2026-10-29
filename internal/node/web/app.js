@@ -981,7 +981,10 @@ function overviewPage() {
 }
 /* 本机管家 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换管家走选择视图
  * → declare → 钦定完成视图（一次性凭证 + MCP 配置片段）→ 已钦定常态（轮换 +
- * 换管家入口）；setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
+ * 换管家 + 取消管家入口）。2026-10-29 部署后走查反馈一：能力卡管家按钮全退役
+ * （能力卡只留「管家·本机」徽标做身份展示），钦定/换/取消/轮换唯一入口收敛到
+ * 本卡；取消管家沿用 2026-10-28 声明制口径（弱化文字链，PATCH orchestrator=false）。
+ * setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
 function primeCard() {
   const st = S.status;
   const pa = st?.prime_agent || '';
@@ -1001,10 +1004,19 @@ function primeCard() {
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
   <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机管家</small></span>${modeStat}</div>`;
   const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入管家的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个管家」重新走钦定。` : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个管家」重新走钦定。'}</small></div>` : '';
+  /* 声明状态行（2026-10-29 走查反馈一：钦定即声明联动后，形态卡如实呈现两源
+   * 状态——本机管家=prime_agent（凭证持有者），全网声明=能力卡 Orchestrator
+   * 声明（hub 汇聚识别）。取消管家只撤声明（2026-10-28 声明制口径不变），凭证
+   * 仍在，未声明态引导「换一个管家」重新钦定即随钦定上报声明。 */
+  const declared = S.agents.find(a => a.orchestrator);
+  const orchState = declared
+    ? `<small class="muted">全网声明已生效：hub 目录据此识别智行管家。取消管家只撤全网声明，本机管家凭证仍有效（换管家时旧凭证随钦定失效）。</small>`
+    : `<small class="muted">全网声明未生效（hub 回退按能力名含 <code>zcode-dev</code> 识别）；「换一个管家」重新钦定即随钦定一并上报声明。</small>`;
   if (S.primeDecl.done) return head + primeDoneView() + foot + '</section>';
   if (!pa || S.primeDecl.picking) return head + primePickView(pa) + foot + '</section>';
   return head + `<small class="muted">智行管家经 MCP（prime_token）获得的是<b>本机管家权限</b>：只管本机派单；本机主人（local_token）在网页派单同样放行。钦定/轮换/配置管理等管理操作仅主人可用。</small>
-  <div class="row spaced">${button('轮换管家凭证', 'prime-rotate', 'link')}${button('换一个管家', 'prime-pick', 'link')}</div>${newTok}${foot}</section>`;
+  <div class="orch-state spaced">${orchState}</div>
+  <div class="row spaced">${button('轮换管家凭证', 'prime-rotate', 'link')}${button('换一个管家', 'prime-pick', 'link')}${declared && pa ? button('取消管家', 'orch-off:' + esc(declared.name), 'link', '', `data-agent="${esc(declared.name)}"`) : ''}</div>${newTok}${foot}</section>`;
 }
 /* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
@@ -1024,7 +1036,7 @@ function primeDoneView() {
     ? `<div class="notice ok spaced"><b>已自动接线</b>：管家 MCP 连接已写入 <code>${esc(d.target)}</code>（mcpServers.swarmmind）——零手贴，agent 重连后即可本机派单；原配置备份在同目录 <code>setting.json.bak-prime</code>。</div>`
     : '';
   const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${wiredNote}
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效；全网管家声明已随钦定一并上报 hub（能力目录 Orchestrator 位）。</div>${wiredNote}
   <div class="notice warn spaced"><b>管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
   <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入管家 agent 的 mcpServers 即完成授权——贴入即生效'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
   <div class="row spaced">${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
@@ -1308,18 +1320,15 @@ function svcCard(a) {
         ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录（经 hub）。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
   return `<section class="card svc-card spaced ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
-    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span></h2>
+    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span>${a.orchestrator ? ' <span class="badge online">管家 · 本机</span>' : ''}</h2>
       <small class="muted">${esc(a.description || '（无描述）')} · ${esc(permLabel(a.permission_mode))} · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
-    <div class="actions"><div class="toggle" role="group" aria-label="开放给其他机器调用" title="开放给其他机器调用：关闭后只停止接收外部新任务——不停已在执行/排队的任务（本控制台暂无停止入口，hub 来源任务可在 hub 管理台取消）">
-      ${button('开放', `expose-on:${esc(a.name)}`, 'on-btn' + (on ? ' selected' : ''), '', `data-agent="${esc(a.name)}"`)}
-      ${button('停止接受新任务', `expose-off:${esc(a.name)}`, 'off-btn' + (on ? '' : ' selected'), '', `data-agent="${esc(a.name)}"`)}
-    </div><div class="toggle" role="group" aria-label="智行管家声明" title="智行管家：接收复合目标拆解派发汇总（全网同一时刻至多一个，由各机器客户端声明、hub 汇聚）">
-    ${/* 管家开关状态化单按钮（DESIGN-butler v4 试用反馈二，2026-10-28）：已声明
-        只留绿徽标+弱化文字链（「设为管家」不再出现，双按钮并排视觉混乱退役）；
-        未声明只留一颗中性灰按钮（非实心蓝主操作，与开放/停止开放区分）。 */
-    a.orchestrator
-    ? `<span class="badge online">管家 · 本机</span>${button('取消管家', `orch-off:${esc(a.name)}`, 'link', '', `data-agent="${esc(a.name)}"`)}`
-    : button('设为管家', `orch-on:${esc(a.name)}`, '', '', `data-agent="${esc(a.name)}"`)}
+    <div class="actions"><div class="expose-ctl">
+    ${/* 开放控件单开关化（2026-10-29 部署后走查反馈二）：开放/停止双按钮视觉权重
+        * 不对称退役——单拨动开关+标签（复用通知渠道 .switch 同家族组件，on=开放中）；
+        * off 态开关旁一行 muted 小字保留「已停止接受新任务」语义要素。setExposed
+        * 行为语义原样（暴露/收起只换皮）；role=switch + aria-checked 可达语义。 */
+    `<label class="checkline" title="开放给其他机器调用：关闭后只停止接收外部新任务——不停已在执行/排队的任务（本控制台暂无停止入口，hub 来源任务可在 hub 管理台取消）">开放给其他机器调用<button type="button" role="switch" aria-checked="${on}" class="switch${on ? ' on' : ''}" data-act="expose-toggle:${esc(a.name)}" data-agent="${esc(a.name)}"></button></label>`}
+      ${on ? '' : '<small class="muted">已停止接受新任务；在途任务不受影响</small>'}
     </div></div></div>${syncNote}${orchNote(a)}
     <details><summary>配置详情（只读 · 来自本机 ExecProfile）</summary>
       <div class="table-wrap"><table><tbody>
@@ -2355,8 +2364,11 @@ document.addEventListener('click', e => {
         localStorage.removeItem(TOKEN_KEY); S.token = ''; S.authed = false; S.snap = '';
         resetPrimeState(); // 修复 5：登出清一次性凭证
         render(); return;
-      case 'expose-on': case 'expose-off': setExposed(arg, act === 'expose-on', btn); return;
-      case 'orch-on': case 'orch-off': setOrchestrator(arg, act === 'orch-on', btn); return;
+      case 'expose-toggle': {
+        const a = S.agents.find(x => x.name === arg);
+        setExposed(arg, !(a && a.exposed), btn); return;
+      }
+      case 'orch-off': setOrchestrator(arg, false, btn); return;
       case 'form-submit': submitForm(); return;
       case 'form-retry': // 新幂等键开新单
         S.f = { stage: 'idle', target: S.f.target, stdin: S.f.stdin, idem: newIdem(), message: '' };

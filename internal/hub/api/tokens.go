@@ -175,3 +175,41 @@ func (s *Server) handleTokenRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// purge 硬删除（2026-10-29 部署后走查反馈五）：仅已撤销条目可删——软撤销保留
+// 审计痕迹的既有口径不变，已撤销条目经主人显式操作连记录一并移除（不可恢复，
+// 控制台删除前二次确认）。返回（是否找到, 是否因未撤销被拒, 持久化错误）。
+func (ts *tokenStore) purge(id string) (found, active bool, err error) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	for i := range ts.list {
+		if ts.list[i].ID == id {
+			if !ts.list[i].Revoked {
+				return true, true, nil
+			}
+			ts.list = append(ts.list[:i], ts.list[i+1:]...)
+			return true, false, ts.persist()
+		}
+	}
+	return false, false, nil
+}
+
+// handleTokenPurge POST /api/v1/auth/tokens/{id}/purge：硬删除已撤销令牌。
+// DELETE 已被软撤销占用（保留审计的既有契约），硬删走动词后缀路由不混语义；
+// 未撤销条目 409 拒绝（先撤销再删除）。
+func (s *Server) handleTokenPurge(w http.ResponseWriter, r *http.Request) {
+	found, active, err := s.tokens.purge(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", "令牌删除失败")
+		return
+	}
+	if !found {
+		writeErr(w, http.StatusNotFound, "token_not_found", "令牌不存在")
+		return
+	}
+	if active {
+		writeErr(w, http.StatusConflict, "token_active", "令牌尚未撤销：先撤销再删除")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

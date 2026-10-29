@@ -359,7 +359,7 @@ func (c *Core) CreateWork(req WorkCreateRequest, actor string) (*WorkView, bool,
 				return fmt.Errorf("%w: origin_task %q 不存在（须为账本内主任务 ID；任务 24h 保留期后已清理不可挂接）", ErrInvalid, origin)
 			}
 			if !orchestratorCardInState(st, task.TargetNode, task.TargetAgent) {
-				return fmt.Errorf("%w: origin_task %q 的派发目标 %s/%s 不是带统筹声明的能力卡（声明入口在各机器 node 控制台「设为管家」开关）", ErrInvalid, origin, task.TargetNode, task.TargetAgent)
+				return fmt.Errorf("%w: origin_task %q 的派发目标 %s/%s 不是带统筹声明的能力卡（声明入口在各机器 node 控制台总览页「本机管家 · 形态」卡）", ErrInvalid, origin, task.TargetNode, task.TargetAgent)
 			}
 		}
 		w := store.Work{

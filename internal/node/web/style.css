@@ -306,12 +306,14 @@ hr{border:0;border-top:1px solid var(--hairline);margin:20px 0}
 .ledger-line{margin:9px 0 0;color:var(--ink-3);font-size:var(--fs-small)}.ledger-line b{color:var(--ink-2);font-weight:600;font-variant-numeric:tabular-nums}
 .step{display:flex;gap:13px;align-items:flex-start;margin-bottom:12px}.step>span{border-radius:50%;background:var(--accent-bg);color:var(--accent);width:28px;height:28px;display:grid;place-items:center;flex-shrink:0}
 .warn-text{color:var(--heat)}
-/* 开关（exposed toggle）：pill 形态，on=蓝 off=灰 */
-.toggle{display:inline-flex;border-radius:var(--r-pill);padding:3px;background:var(--track);gap:2px}
-.toggle button{border:0;border-radius:var(--r-pill);height:auto;padding:5px 13px;background:transparent;color:var(--ink-3);font-size:var(--fs-small);font-weight:600}
-.toggle .on-btn.selected{background:var(--accent);color:var(--white)}.toggle .off-btn.selected{background:var(--ink-3);color:var(--white)}
-.toggle button:disabled{opacity:.6}
-/* svc-card 状态由 badge（网内可调用/仅本机）+ toggle selected 态承担；
+/* 开放控件（2026-10-29 部署后走查反馈二）：单拨动开关+标签（.switch 同家族，
+ * 通知渠道同值），off 态附一行 muted 小字；原 pill 双按钮 .toggle 形态随按钮
+ * 退役删除（唯一用点 svcCard）。字号地板：新增展示面显式 12.5px（--fs-small
+ * 12px 经变量绕过已封，FE-POLISH 轮2 P1-05 口径延续）。 */
+.expose-ctl{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+.expose-ctl small{font-size:12.5px;text-align:right}
+.expose-ctl .checkline{font-size:var(--fs-small);font-weight:600;color:var(--ink-2);cursor:pointer}
+/* svc-card 状态由 badge（网内可调用/仅本机）+ 开关 on 态承担；
  * accent 左竖线已删（colored left-bar 系 AI slop 反模式，2026-10-24 伦哥裁决全站清
  * ——层级靠表面与控件态，不靠彩色饰条）。 */
 .readonly{font-size:11px;background:rgba(0,0,0,.05);padding:4px 9px;border-radius:var(--r-chip);color:var(--ink-4)}

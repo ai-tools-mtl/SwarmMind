@@ -2417,27 +2417,19 @@ function pickerNodeOptions(selected) {
     return `<option value="${esc(n.node_id)}" ${dead ? 'disabled' : ''} ${selected === n.node_id ? 'selected' : ''} title="${esc(tip)}">${esc(n.node_id + why)}</option>`;
   }).join('');
 }
-/* orchLineHtml 派发页统筹状态条：显眼的独立一行（不再藏在帮助长文尾部——
- * 2026-10-23 伦哥反馈「找不到统筹怎么设置」，入口可见性失败重做）。 */
+/* orchLineHtml 派发页统筹状态条（2026-10-29 部署后走查反馈三收敛为仅错误态）：
+ * 常态管家提示行整行退役——agent 下拉的「智行管家」optgroup 分组、选项前缀与
+ * 选中后摘要行的管家徽标已承载管家可见性（零信息量重复一行属视觉噪音）；剩
+ * 声明冲突告警一行（错误态，有价值）。 */
 function orchLineHtml() {
-  /* 2026-10-28 客户端声明制：指定权在 node（机器控制台「设为管家」开关），hub 只
-   * 接收汇聚展示——中心端不再提供配置入口。冲突态（多机同时声明）无生效管家，
+  /* 2026-10-28 客户端声明制：指定权在 node（总览页「本机管家 · 形态」卡），hub 只
+   * 接收汇聚展示——中心端不提供配置入口。冲突态（多机同时声明）无生效管家，
    * 回退名字约定并列出冲突双方，提示到对应机器取消多余声明。 */
   if (S.primeConflicts && S.primeConflicts.length) {
     const list = S.primeConflicts.map(c => `<b>${esc(c.agent_name)}</b> @ ${esc(c.node_id)}`).join('、');
     return `<div class="orch-line"><span class="badge">智行管家</span> <span><b>声明冲突</b>：${list} 同时声明为智行管家——无生效管家，已回退默认识别（能力名含 <code>zcode-dev</code>）。请到多余机器的控制台取消声明，只保留一台。</span></div>`;
   }
-  const body = S.prime
-    ? `<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)} · 复合目标交给它拆解派发并汇总（由该机器客户端声明）`
-    : `未声明（默认识别能力名含 <code>zcode-dev</code> 的智能体）；如需指定，请到目标机器控制台将该能力「设为管家」`;
-  return `<div class="orch-line">${S.prime ? '<span class="badge orch">智行管家</span>' : '<span class="badge">智行管家</span>'} <span>${body}</span></div>`;
-}
-/* pickerHelpText 派发页机器选择的补充说明（已精简：统筹信息移至 orchLineHtml 独立状态条）。 */
-function pickerHelpText() {
-  const src = S.prime
-    ? `已由网页指定智行管家：<b>${esc(S.prime.agent_name)}</b> @ ${esc(S.prime.node_id)}`
-    : `未指定智行管家（默认按能力名 <code>zcode-dev</code> 识别）`;
-  return `离线机器暂不可选：本页提交对离线机器直接跳过、不暂存；经支持暂存的入口提交的任务，重连后自动送达。智行管家：复合目标交给它拆解派发并汇总；单点任务选普通智能体即可。${src}`;
+  return '';
 }
 /* pickerAgentOptions 两级下拉 · 智能体选项：只列所选机器上 exposed 的智能体
  * （S.directory 按 node 过滤）；未选机器时占位项即「请先选择机器」。
@@ -2509,7 +2501,7 @@ function agentPickerHtml(opts = {}) {
   <label>第一步 · 执行机器<select id="${ids}-node" data-picker="node" data-picker-prefix="${ids}">${pickerNodeOptions(node)}</select></label>
   <label>第二步 · 执行智能体<select id="${ids}-agent" data-picker="agent" data-picker-prefix="${ids}" ${node ? '' : 'disabled'}>${pickerAgentOptions(node, agent)}</select></label>
   </div>
-  ${opts.nodeHelp ? `<small class="muted">${opts.nodeHelp}</small>` : ''}   <!-- nodeHelp 为内部常量 HTML（动态值已在 pickerHelpText 内 esc），不再转义以支持内嵌入口按钮 -->
+  ${opts.nodeHelp ? `<small class="muted">${opts.nodeHelp}</small>` : ''}   <!-- nodeHelp 为调用方内部常量 HTML，不再转义以支持内嵌入口按钮 -->
   <div class="row spaced" id="${ids}-summary-line">${pickerSummaryHtml(node, agent)}</div>`;
 }
 /* syncAgentPicker 机器切换联动（DOM 级更新）：按当前机器重建智能体选项，恢复此前
@@ -2719,7 +2711,9 @@ function tokenListHtml() {
       <td><small>${esc(fmtTime(t.created_at))}</small></td>
       <td><small>${t.last_used_at ? esc(fmtTime(t.last_used_at)) : '从未使用'}</small></td>
       <td>${t.revoked ? '<span class="badge offline">已撤销</span>' : '<span class="badge online">有效</span>'}</td>
-      <td class="table-action">${t.revoked ? '' : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
+      <td class="table-action">${t.revoked
+        ? button('删除', 'token-purge', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)
+        : button('撤销', 'token-revoke', 'danger', `data-id="${esc(t.id)}" data-name="${esc(t.name)}"`)}</td>
     </tr>`).join('') : '<tr><td colspan="6" class="muted">还没有创建过令牌。</td></tr>'}
     </tbody></table></div>` + (S.tokens.length ? pagerHtml('tokens', page, pages, S.tokens.length) : '');
 }
@@ -3269,7 +3263,7 @@ function workStepBadge(s) { return `<span class="badge ${esc(s)}" title="${esc(s
 function worksPage() {
   return head('工作单', '多步工作的执行档案：计划、尝试与收集报告在 hub 持久，统筹中断后可按单续管。建单与派发由统筹智能体经 MCP 进行，这里查看与处置。')
     + `<section class="card">
-    ${S.works.length ? workTable(S.works) : `<div class="empty"><h2>还没有工作单</h2><p class="muted">统筹智能体拆解多步目标时会经 MCP 创建工作单；单步小任务直接派发、不建单。</p></div>`}
+    ${S.works.length ? workTable(S.works) : `<div class="empty"><h2>还没有工作单</h2><p class="muted">统筹智能体拆解多步目标时经 MCP 建单；单步任务直接派发，不建单。</p></div>`}
     <p class="footer-note">${S.works.length} 个工作单 · 时间为 UTC · 未完成的工作单不会清理；已关闭的保留 30 天。</p></section>`;
 }
 /* workNextLine 工作单下一步人话（FE-POLISH 轮2 H18）：列表只回答「下一步做什么」
@@ -3494,7 +3488,8 @@ function workStepPicked() {
 
 /* ---------- 动作表（事件委托） ---------- */
 /* prime-manage/prime-save/prime-clear 已退役（2026-10-28 客户端声明制）：
- * 统筹指定入口移至各机器 node 控制台「设为管家」开关，hub 只读汇聚展示。 */
+ * 统筹指定入口在各机器 node 控制台（2026-10-29 起收敛总览页「本机管家 · 形态」卡），
+ * hub 只读汇聚展示。 */
 const ACT = {
   go: b => go(b.dataset.page, b.dataset.status || ''),
   fchip: b => { S.f.status = b.dataset.fchip || ''; S.pages.tasks = 1; render(); },
@@ -3762,6 +3757,25 @@ const ACT = {
       if (r && r.code === 200) {
         await loadTokens(); closeLayer(); render(); toast('令牌已撤销');
       } else toast('撤销失败：' + (r ? errLine(r.data) : '网络异常'));
+    } finally {
+      S.busy.delete(key);
+      idleBtn(b);
+    }
+  },
+  /* 删除已撤销令牌记录（2026-10-29 部署后走查反馈五）：仅已撤销条目出现（未撤销
+   * 行只有撤销），POST {id}/purge 硬删；确认弹层写实——数据模型无「撤销理由」
+   * 字段，删除移除的是该令牌全部记录（名称/前缀/时间）。 */
+  'token-purge': b => openLayerPlain(`${modalHead('删除令牌记录 · ' + esc(b.dataset.name))}<div class="notice warn">删除后此令牌的记录（名称、前缀、创建与使用时间）一并移除，不可恢复。只对已撤销的令牌可用。</div><div class="actions spaced">${button('确认删除', 'token-purge-confirm', 'danger', `data-id="${esc(b.dataset.id)}"`)}${button('取消', 'close', 'link')}</div>`, true),
+  'token-purge-confirm': async b => {
+    const key = 'token-purge:' + b.dataset.id;
+    if (S.busy.has(key)) return;   // 忙态键在状态层：重绘重建按钮也拦得住（P0.5）
+    S.busy.add(key);
+    busyBtn(b, '删除中…');
+    try {
+      const r = await api('POST', '/api/v1/auth/tokens/' + encodeURIComponent(b.dataset.id) + '/purge').catch(() => null);
+      if (r && r.code === 200) {
+        await loadTokens(); closeLayer(); render(); toast('令牌记录已删除');
+      } else toast('删除失败：' + (r ? errLine(r.data) : '网络异常'));
     } finally {
       S.busy.delete(key);
       idleBtn(b);

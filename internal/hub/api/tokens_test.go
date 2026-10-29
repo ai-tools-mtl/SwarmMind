@@ -134,6 +134,66 @@ func TestTokenPersistAcrossRestart(t *testing.T) {
 	}
 }
 
+// purge 硬删除（2026-10-29 部署后走查反馈五）：未撤销 409 拒绝、已撤销 200 删除、
+// 不存在 404、重启（同 DataDir 新实例）不复活。
+func TestTokenPurge(t *testing.T) {
+	sv := New(Config{AdminToken: "admin-tok", DataDir: t.TempDir()})
+	tokActive, _, err := sv.tokens.create("未撤销", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokRevoked, _, err := sv.tokens.create("已撤销", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sv.tokens.revoke(tokRevoked.ID) {
+		t.Fatal("撤销应成功")
+	}
+
+	purge := func(id string) *http.Response {
+		req := httptest.NewRequest("POST", "/api/v1/auth/tokens/"+id+"/purge", nil)
+		// 直调 handler 时 ServeMux 未路由：手动注入路径参数（同 TestTokenLifecycle）
+		req.SetPathValue("id", id)
+		w := httptest.NewRecorder()
+		sv.handleTokenPurge(w, req)
+		return w.Result()
+	}
+
+	// 1) 未撤销 → 409 拒绝（先撤销再删除），条目保留
+	if res := purge(tokActive.ID); res.StatusCode != http.StatusConflict {
+		t.Fatalf("未撤销 purge 应 409, got %d", res.StatusCode)
+	}
+	if got := len(sv.tokens.listSafe()); got != 2 {
+		t.Fatalf("未撤销拒绝后列表应仍 2 条, got %d", got)
+	}
+
+	// 2) 已撤销 → 200 删除，列表不再包含
+	if res := purge(tokRevoked.ID); res.StatusCode != http.StatusOK {
+		t.Fatalf("已撤销 purge 应 200, got %d", res.StatusCode)
+	}
+	for _, t2 := range sv.tokens.listSafe() {
+		if t2.ID == tokRevoked.ID {
+			t.Fatal("purge 后列表不应再含已删条目")
+		}
+	}
+
+	// 3) 不存在的 ID → 404
+	if res := purge("tk-absent"); res.StatusCode != http.StatusNotFound {
+		t.Fatalf("不存在 ID purge 应 404, got %d", res.StatusCode)
+	}
+
+	// 4) 重启（同 DataDir 新实例）不复活
+	sv2 := New(Config{AdminToken: "a", DataDir: sv.cfg.DataDir})
+	for _, t2 := range sv2.tokens.listSafe() {
+		if t2.ID == tokRevoked.ID {
+			t.Fatal("重启后已 purge 条目不应复活")
+		}
+	}
+	if got := len(sv2.tokens.listSafe()); got != 1 {
+		t.Fatalf("重启后应剩 1 条（未撤销那条）, got %d", got)
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

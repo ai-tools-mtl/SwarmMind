@@ -11,7 +11,7 @@
 //
 // 钦定即接线（t20261023-62a2，2026-10-23）：declare/rotate 成功后自动把
 // swarmmind MCP 配置合并写入被钦定 agent 影子 home 的宿主配置文件
-//（primewire.go，zcode 布局命中时零手贴；应答带 wired/wired_target 口径），
+// （primewire.go，zcode 布局命中时零手贴；应答带 wired/wired_target 口径），
 // 探测未命中降级手动片段——mcp_config 始终随应答给出，降级时人工粘贴兜底。
 //
 // 换总理原三步（文档口径：改 node.yaml prime_agent 声明 → 轮换 → 新总理配新
@@ -82,7 +82,7 @@ type primeDeclareRequest struct {
 // 会出现盘上声明、内存声明、内存凭证、盘上凭证四方分叉（rotate 返工 #4 同型）。
 // muPrime 覆盖 writeConfigMu：包内无「持 writeConfigMu 再取 muPrime」的路径，
 // 无锁序反转；yaml 写盘（②）与声明生效（③）同处一个 writeConfigMu 临界区
-//（第五轮收敛 2）。
+// （第五轮收敛 2）。
 //
 // 步骤次序（安全审查修复 2：失败语义一致化）——先轮换、再写声明、最后生效：
 //
@@ -94,7 +94,7 @@ type primeDeclareRequest struct {
 // 声明、旧持有人仍有权」的组合。任一步失败：已成功步骤保留，应答 500/4xx 如实
 // 说明进行到哪一步，重试 declare 即收敛（yaml 写幂等，每次重试重新轮换）；②
 // 失败时不调 SetPrimeAgent（内存声明保持旧值），新凭证已在 data_dir/prime_token
-//（0600）但未随应答展示——持有人未变的旧 MCP 连接已 401，重试 declare 换发。
+// （0600）但未随应答展示——持有人未变的旧 MCP 连接已 401，重试 declare 换发。
 func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.DeclareConfigPath == "" {
 		writeErr(w, http.StatusServiceUnavailable, "declare_disabled", "钦定未装配（装配方未接线 DeclareConfigPath）")
@@ -175,6 +175,34 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	s.SetPrimeAgent(name)
 	writeConfigMu.Unlock()
 
+	// 4b. 声明联动（2026-10-29 部署后走查反馈一：管家入口收敛形态卡后，能力卡
+	// 「设为管家」按钮退役——钦定必须同时完成卡片 Orchestrator 声明，否则 hub
+	// 目录无声明位：派发页无管家分组、工作单 origin 锚点校验被拒、双端管家分组
+	// 全部落空。先撤同机他者声明再授本名（恰一在翻转序内保持），随后 card_update
+	// 上报 hub）。声明翻转失败不回滚凭证（declare 主契约已达成），orchestrator_error
+	// 如实带出由控制台展示。持 muPrime 串行于并发 declare/rotate；锁序
+	// muPrime→Agents.mu，无反向路径（PATCH orchestrator 不取 muPrime）。
+	orchErr := ""
+	if s.cfg.Agents != nil {
+		for _, p := range s.cfg.Agents.Effective() {
+			if p.Name != name && p.Orchestrator {
+				if _, err := s.cfg.Agents.SetAgentOrchestrator(p.Name, false); err != nil {
+					orchErr = err.Error()
+					break
+				}
+			}
+		}
+	}
+	synced := true
+	if orchErr == "" && s.cfg.Agents != nil {
+		if _, err := s.cfg.Agents.SetAgentOrchestrator(name, true); err != nil {
+			orchErr = err.Error()
+		}
+	}
+	if s.cfg.Agents != nil && s.cfg.CardsReporter != nil {
+		synced = s.cfg.CardsReporter(s.cfg.Agents.Cards()) == nil
+	}
+
 	// 5. 自动接线（t20261023-62a2，primewire.go）：钦定即接线——被钦定 agent
 	//    影子 home 命中 zcode 布局（.zcode/cli/setting.json）则合并写入
 	//    mcpServers.swarmmind，纸条不经人的手；布局未命中降级手动片段，不影响
@@ -184,11 +212,21 @@ func (s *Server) handlePrimeDeclare(w http.ResponseWriter, r *http.Request) {
 	wired, target, _ := s.wirePrime(name, mcp)
 
 	// 6. 应答：钦定名 + 一次性凭证 + mcp_config 片段（降级口径保留，wired 命中
-	//    时控制台优先展示已写入路径）+ wired/wired_target 接线口径 note。
+	//    时控制台优先展示已写入路径）+ wired/wired_target 接线口径 note + 声明
+	//    联动结果（orchestrator 成功位 / orchestrator_error 失败原因 /
+	//    hub_synced 上报口径——控制台声明状态行的数据源；Agents 未装配的测试
+	//    构造不携带联动键）。
 	resp := map[string]any{
 		"prime_agent": name,
 		"prime_token": tok,
 		"mcp_config":  mcp,
+	}
+	if s.cfg.Agents != nil {
+		resp["orchestrator"] = orchErr == ""
+		resp["hub_synced"] = synced
+		if orchErr != "" {
+			resp["orchestrator_error"] = orchErr
+		}
 	}
 	resp["note"] = "已写入 node.yaml prime_agent 并即时生效（无需重启）；" + applyWiredFields(resp, wired, target)
 	writeJSON(w, http.StatusOK, resp)
