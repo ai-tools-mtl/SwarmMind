@@ -19,6 +19,7 @@
 | 文档 | 当前定位 |
 |---|---|
 | [SPEC](../SPEC.md) | 协议、接口、可靠性契约（4.7 持久化事务：hub SQLite + node JSON）与已知实现差异 |
+| [远程原生 agent 与持久会话协作](VISION-persistent-agent-collaboration.md) | 2026-10-29 核心目标澄清：跨机复用原生环境、同线程续聊、编写审查循环；含实现差距与未来验收用例 |
 | [项目计划](PLAN.md) | 技术决策、阶段目标、验收与发布条件 |
 | [产品方向](PRODUCT-DIRECTION-v2.md) | 场景、优先级、术语说明与后续范围 |
 | [交互设计](INTERACTION.md) | 当前页面职责、任务流程与反馈要求 |

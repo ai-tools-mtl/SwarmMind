@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_0f95c375-87da-48b6-95a8-6108e1493bcf",
+  "traceId": "88a54dad-13ce-4b72-8f11-ac76676482cc",
+  "turnId": "turn_db6cc86f-8054-4618-a648-65b4c9497ea4",
+  "response": "```json\n{\n  \"回忆内容\": {\n    \"暗号\": \"038139e1b3085ab1\",\n    \"金额规则\": \"答复使用中文；金额乘以7\",\n    \"13对应的金额\": \"13 × 7 = 91\",\n    \"上轮Bash执行结果\": \"未执行成功：python3 生成 TOOL_MARK 的命令两次调用均返回错误 'No permission client configured for Bash'\",\n    \"TOOL_MARK是否真实产生\": false,\n    \"说明\": \"以上全部凭会话历史回忆，未搜索日志、提示词或其他目录；暗号与规则未写入任何文件\"\n  },\n  \"计算结果\": {\n    \"表达式\": \"13 × 7\",\n    \"值\": 91\n  },\n  \"文件\": {\n    \"路径\": \"/tmp/swarmmind-session-probe.39sOyz/zcode/state.txt\",\n    \"修改前\": \"stage=1\",\n    \"修改后\": \"stage=2\"\n  },\n  \"限制\": {\n    \"Bash\": \"不可用（无权限客户端 'No permission client configured for Bash'），按指示未重试\",\n    \"MCP\": \"未使用\",\n    \"外部服务\": \"未使用\",\n    \"子agent\": \"未使用\",\n    \"操作范围\": \"仅当前目录 /tmp/swarmmind-session-probe.39sOyz/zcode\",\n    \"备注\": \"读取调用被系统判定为冗余（文件自上次写入后未变化），直接基于上下文完成修改\"\n  }\n}\n```",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 3,
+    "inputTokens": 63981,
+    "outputTokens": 1044,
+    "totalTokens": 65025,
+    "cacheReadTokens": 62208,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 1022,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 65025,
+    "contextUsed": 21987,
+    "contextWindow": 1000000
+  }
+}

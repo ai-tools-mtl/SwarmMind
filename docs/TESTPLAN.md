@@ -1,5 +1,19 @@
 # SwarmMind 功能测试文档
 
+## 产品目标澄清文档专项（2026-10-29）
+
+本轮仅修改文档，不实现持久会话。独立会话从文件读取需求，按以下步骤检查，结论写入 `docs/archive/TESTREPORT-vision-20261029.md`。现有其他未提交文件不属于本轮。
+
+| ID | 操作 | 通过条件 |
+|---|---|---|
+| VDOC-01 | 读取 VISION-persistent-agent-collaboration.md 一至四节及 README 开头 | 覆盖远端原生环境、模型组合保留、多线程续聊与编写审查循环；明确无头不等于无状态、不保证内部思维链恢复 |
+| VDOC-02 | 对照 protocol/types.go、node/runner/runner.go、hub/core/work*.go 与 submit.go | 现状表的路径存在且描述有源码依据；区分 Task、Work、Group、网络会话与拟新增原生会话 |
+| VDOC-03 | 检查方案五至七节及其他入口文档 | 包含网络前提、单写者、幂等/不确定窗口、版本证据、停止规则、Work 固定步骤限制、REST/MCP 和双端一致要求；新能力均标为未实现/待验收 |
+| VDOC-04 | 检查本轮八份文档的相对 Markdown 文件链接；执行 `git diff --check` | 文件目标存在，无空白错误；原有无关文件未修改 |
+| VDOC-05 | `go build -mod=readonly ./... && go test -count=1 ./...` | 均退出 0；按 SPEC 七逐条记录边界，未执行的 demo/真实双机不冒充通过 |
+
+未来功能用例 S-01–S-10 定义在方案中，本轮只检查其可验收性，全部功能状态为未执行。
+
 ## Logo 接入专项（2026-10-26）
 
 测试使用本轮重新构建的 hub/node 二进制、独立临时配置和空闲端口。独立执行者按下表验证，记录到 `docs/archive/TESTREPORT-logo.md`。用户既有通知界面等改动保留；不提交、不推送、不操作现有部署。

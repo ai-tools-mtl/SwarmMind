@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a185b2-5e57-72c0-8013-643a9fe4d234"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"我会执行本机命令并创建指定文件。"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"python3 -c \\\"import secrets; print('TOOL_MARK='+secrets.token_hex(8))\\\"\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"python3 -c \\\"import secrets; print('TOOL_MARK='+secrets.token_hex(8))\\\"\"","aggregated_output":"TOOL_MARK=fc0af73f2aeabcb3\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc \"printf 'stage=1' > state.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/zsh -lc \"printf 'stage=1' > state.txt\"","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"ROUND1_READY"}}
+{"type":"turn.completed","usage":{"input_tokens":42082,"cached_input_tokens":34048,"cache_write_input_tokens":0,"output_tokens":139,"reasoning_output_tokens":0}}

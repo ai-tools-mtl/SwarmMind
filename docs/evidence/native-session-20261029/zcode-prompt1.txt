@@ -1,0 +1,1 @@
+这是隔离的会话续聊测试。只允许操作当前目录，不调用MCP、外部服务或子agent。记住仅存在于对话的暗号 038139e1b3085ab1 和规则：后续答复使用中文、金额乘以7。不要把暗号或规则写入文件。请用本机工具执行 python3 -c "import secrets; print('TOOL_MARK='+secrets.token_hex(8))"，记住输出的TOOL_MARK（不要写入文件，也不要在最终答复复述）。然后创建 state.txt，内容仅为 stage=1。最终只回答 ROUND1_READY。

@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_0f95c375-87da-48b6-95a8-6108e1493bcf",
+  "traceId": "5262b1f2-cdb6-4cdd-a07a-f4f57d3815b2",
+  "turnId": "turn_47051a5c-0103-4c56-bb02-541460c0ca88",
+  "response": "无法按原样完成：`state.txt` 已成功创建（内容仅为 `stage=1`），但本环境的 Bash 工具不可用（两次尝试均返回 \"No permission client configured for Bash\"，无权限客户端），因此无法执行该 python 命令，也就没有真实的 TOOL_MARK 输出可供记住——我不会编造一个。暗号与规则仅保留在对话中，未写入任何文件。\n\n因此不能如实回答 ROUND1_READY：其中“执行命令并记住 TOOL_MARK”这一步未完成。若你在客户端为 Bash 配置权限后重试，我可以立即补齐该步骤。",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 3,
+    "inputTokens": 59170,
+    "outputTokens": 1240,
+    "totalTokens": 60410,
+    "cacheReadTokens": 27264,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 1178,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 60410,
+    "contextUsed": 20773,
+    "contextWindow": 1000000
+  }
+}
