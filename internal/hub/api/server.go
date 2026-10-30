@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}/artifacts/{index}", s.auth(s.handleArtifact))
 	mux.HandleFunc("GET /api/v1/agents", s.auth(s.handleAgents))
 	mux.HandleFunc("GET /api/v1/nodes", s.auth(s.handleNodes))
+	mux.HandleFunc("GET /api/v1/capabilities", s.auth(s.handleCapabilities))    // 能力元信息（W02-02，swarmmind_capabilities hub 面数据源）
 	mux.HandleFunc("GET /api/v1/nodes/enroll-info", s.auth(s.handleEnrollInfo)) // 节点接入入口地址（第六轮修复 2，enroll.go）
 	mux.HandleFunc("POST /api/v1/nodes/enroll-bundle", s.auth(s.handleEnroll))  // 部署包生成（enroll.go）
 	mux.HandleFunc("POST /api/v1/tasks/{id}/review", s.auth(s.handleReview))

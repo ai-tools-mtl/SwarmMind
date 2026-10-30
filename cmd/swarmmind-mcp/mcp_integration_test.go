@@ -156,8 +156,10 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	srv, led, workdir := newLocalNode(t, "echo")
 	bd := newNodeBackendFor(srv.URL)
 
-	// 工具清单：本机十件套（六件套 + W01-04 会话四工具；无 hub 专属工具），
-	// submit 描述明示接入即总理
+	// 工具清单：本机十一件套（六件套 + W01-04 会话四工具 + W02-02 capabilities；
+	// 无 hub 专属工具）。W02-02 契约改写：submit 描述按新授权语义断言（mcpaccess
+	// 授权门 + 403 mcp_disabled 指路），「接入即统筹」旧话术退役
+	// （docs/tasks/v3/W02-01-rfc.md §4.2 / W02-mcp-access.md W02-02 行）。
 	names := []string{}
 	for _, td := range bd.tools() {
 		names = append(names, td.Name)
@@ -165,20 +167,21 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
 		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact",
 		"swarmmind_session_create", "swarmmind_session_send",
-		"swarmmind_session_list", "swarmmind_session_status"}
+		"swarmmind_session_list", "swarmmind_session_status", "swarmmind_capabilities"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("node 工具清单不符: %v", names)
 	}
 	for _, td := range bd.tools() {
-		if td.Name == "swarmmind_submit" && !strings.Contains(td.Description, "接入即统筹：本机编排") {
-			t.Fatalf("submit 描述未明示「接入即统筹：本机编排」: %s", td.Description)
+		if td.Name == "swarmmind_submit" && (!strings.Contains(td.Description, "MCP 编排授权") || !strings.Contains(td.Description, "mcp_disabled")) {
+			t.Fatalf("submit 描述未按 W02-01 授权语义明示（授权门 + mcp_disabled）: %s", td.Description)
 		}
 	}
 
-	// ① nodes：本机信息单条（形态/统筹/账本计数）
+	// ① nodes：本机信息单条（形态/管家声明/账本计数；W02-02 话术改写：管家声明
+	// 仅展示，编排调用权以 MCP 编排授权为准）
 	text, isErr := callText(t, bd, "swarmmind_nodes", nil)
 	if isErr || !strings.Contains(text, "nodeA") || !strings.Contains(text, "standalone") ||
-		!strings.Contains(text, "本机统筹：echo") {
+		!strings.Contains(text, "本机管家：echo") {
 		t.Fatalf("nodes 应答不符（isErr=%v）: %s", isErr, text)
 	}
 
@@ -365,6 +368,8 @@ func TestNodeBackendReadOnlyPrimeToken(t *testing.T) {
 // 之前，hub 模式专属——SPEC 六.六规则 18）；分发委托
 // callTool（未知工具协议错误、未配置 hub 的人话提示均保持原行为）。
 func TestHubToolListRegression(t *testing.T) {
+	// W02-02：末位追加 swarmmind_capabilities（能力元信息，两模式装配；
+	// docs/tasks/v3/W02-mcp-access.md W02-02 行），其余顺序不变。
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
 		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact", "swarmmind_tasks",
 		"swarmmind_decide", "swarmmind_dispatch_suggest",
@@ -373,7 +378,7 @@ func TestHubToolListRegression(t *testing.T) {
 		"swarmmind_group_create", "swarmmind_group_list", "swarmmind_group_say",
 		"swarmmind_group_messages", "swarmmind_group_close",
 		"swarmmind_work_create", "swarmmind_work_get", "swarmmind_work_list",
-		"swarmmind_work_takeover", "swarmmind_work_collect"}
+		"swarmmind_work_takeover", "swarmmind_work_collect", "swarmmind_capabilities"}
 	got := []string{}
 	for _, td := range (hubBackend{}).tools() {
 		got = append(got, td.Name)
@@ -513,7 +518,8 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 		return resp
 	}
 
-	// initialize：协议版本 + node instructions（接入即总理）
+	// initialize：协议版本 + node instructions（W02-02 契约改写：新授权语义 +
+	// 能力发现指引；「接入即统筹」旧话术退役——W02-01 RFC §4.2）
 	writeRPC(w, 1, "initialize", map[string]any{})
 	resp := next(1)
 	var initRes struct {
@@ -527,11 +533,14 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 		t.Fatalf("initialize 应答解析失败: %v: %s", err, resp.Result)
 	}
 	if initRes.ProtocolVersion != "2024-11-05" || initRes.ServerInfo.Name != "swarmmind-node" ||
-		!strings.Contains(initRes.Instructions, "接入即统筹：本机编排") {
+		!strings.Contains(initRes.Instructions, "调用权与管家角色解耦") ||
+		!strings.Contains(initRes.Instructions, "swarmmind_capabilities") ||
+		!strings.Contains(initRes.Instructions, "tools/list") {
 		t.Fatalf("initialize 应答不符: %+v", initRes)
 	}
 
-	// tools/list：node 模式十件套（六件套 + W01-04 会话四工具）
+	// tools/list：node 模式十一件套（六件套 + W01-04 会话四工具 + W02-02 capabilities），
+	// 清单含 swarmmind_capabilities 且描述写「查看当前调用范围与可用能力」
 	writeRPC(w, 2, "tools/list", map[string]any{})
 	resp = next(2)
 	var listRes struct {
@@ -540,15 +549,38 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &listRes); err != nil {
 		t.Fatalf("tools/list 应答解析失败: %v", err)
 	}
-	if len(listRes.Tools) != 10 {
-		t.Fatalf("node 模式应 10 工具, got %d", len(listRes.Tools))
+	if len(listRes.Tools) != 11 {
+		t.Fatalf("node 模式应 11 工具, got %d", len(listRes.Tools))
+	}
+	var hasCap bool
+	for _, td := range listRes.Tools {
+		if td.Name == "swarmmind_capabilities" {
+			hasCap = true
+			if !strings.Contains(td.Description, "查看当前调用范围与可用能力") {
+				t.Fatalf("capabilities 描述不符任务书原话: %s", td.Description)
+			}
+		}
+	}
+	if !hasCap {
+		t.Fatalf("tools/list 应含 swarmmind_capabilities: %d 个", len(listRes.Tools))
 	}
 
-	// tools/call：nodes 打到真 localapi
+	// tools/call：nodes 打到真 localapi（W02-02 话术改写：本机管家声明行）
 	writeRPC(w, 3, "tools/call", map[string]any{"name": "swarmmind_nodes", "arguments": map[string]any{}})
 	resp = next(3)
-	if !bytes.Contains(resp.Result, []byte("nodeA")) || !bytes.Contains(resp.Result, []byte("本机统筹：echo")) {
+	if !bytes.Contains(resp.Result, []byte("nodeA")) || !bytes.Contains(resp.Result, []byte("本机管家：echo")) {
 		t.Fatalf("tools/call nodes 应答不符: %s", resp.Result)
+	}
+
+	// tools/call：swarmmind_capabilities 打到真 localapi（真实能力标记：夹具
+	// enabled=true → 已启用；standalone 范围；实查不硬编码）
+	writeRPC(w, 4, "tools/call", map[string]any{"name": "swarmmind_capabilities", "arguments": map[string]any{}})
+	resp = next(4)
+	if !bytes.Contains(resp.Result, []byte("服务端：node")) ||
+		!bytes.Contains(resp.Result, []byte("本机 MCP 编排授权：已启用")) ||
+		!bytes.Contains(resp.Result, []byte("持久会话：未提供")) || // 该夹具未装配会话内核——如实标注
+		!bytes.Contains(resp.Result, []byte("不替代 tools/list")) {
+		t.Fatalf("tools/call capabilities 应答不符: %s", resp.Result)
 	}
 
 	// 优雅收尾：关 stdin → 循环自然退出

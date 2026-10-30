@@ -15,10 +15,11 @@
 //	SWARM_TARGET=node——连本机 node（standalone 单机编排入口，端点契约
 //	  对照 internal/node/localapi；stdio 传输天然仅本机可达）：
 //	  SWARM_NODE_URL         本机 node 地址（默认 http://127.0.0.1:8445）
-//	  SWARM_NODE_PRIME_TOKEN prime_token（唯一凭证：编排 submit + 只读六工具
+//	  SWARM_NODE_PRIME_TOKEN prime_token（唯一凭证：编排 submit + 只读工具
 //	    全走它——安全审查修复 1：不再读取 SWARM_NODE_TOKEN，local_token 是本机
-//	    主人管理凭证（declare/rotate/restart/PUT config），不随总理连接下发；
-//	    prime 认证级 ⊇ 只读，单凭证覆盖全部工具）
+//	    主人管理凭证（declare/rotate/restart/PUT config），不进编排面下发；
+//	    prime 认证级 ⊇ 只读，单凭证覆盖全部工具。W02-01 起 prime_token 编排
+//	    还需本机主人显式启用 MCP 编排授权（mcpaccess，与管家角色解耦））
 //
 // 通用（两模式）：
 //
@@ -27,7 +28,7 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具：hub 模式 23 个——nodes / agents / submit / status / wait / artifact /
+// 工具：hub 模式 24 个——nodes / agents / submit / status / wait / artifact /
 // tasks（任务列表，P4⑤：正在跑/最近完成/失败速览，hub 视角，node 模式不设）/
 // decide + dispatch_suggest（派发建议，P5.1 D1，hub 决策服务，node 模式不装配）/
 // session_create / session_send / session_list / session_status（持久会话，T2，
@@ -35,11 +36,13 @@
 // group_create / group_list / group_say / group_messages /
 // group_close（群聊协作空间，GROUP-RFC 六 MVP）+ work_create / work_get /
 // work_list / work_takeover / work_collect（工作单，P5 W1–W3：hub 模式专属，
-// node 模式不装配不静默降级）。node 模式 10 个——nodes（本机节点信息单条）/
-// agents（本机目录）/ submit（本机派单，prime_token）/ status / wait /
-// artifact（本机直取）+ session_create / session_send / session_list /
-// session_status（W01-04：node_sessions.go 投影本机 agent 面 /api/v1/sessions*，
-// 与 hub 同参语义同词表；不含 cancel/close——六.六豁免⑬，终局干预归本机主人）。
+// node 模式不装配不静默降级）+ capabilities（能力元信息，W02-02，两模式装配）。
+// node 模式 11 个——nodes（本机节点信息单条）/
+// agents（本机目录）/ submit（本机派单，prime_token + mcpaccess 授权门）/
+// status / wait / artifact（本机直取）+ session_create / session_send /
+// session_list / session_status（W01-04：node_sessions.go 投影本机 agent 面
+// /api/v1/sessions*，与 hub 同参语义同词表；不含 cancel/close——六.六豁免⑬，
+// 终局干预归本机主人）+ capabilities（本机能力与授权态元信息，capabilities.go）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
 // 失败自动降级 L2 本地规则分配（关键词匹配 + inflight 负载决胜），永不停摆，响应标注 used_level。
@@ -158,11 +161,13 @@ type backend interface {
 	tools() []toolDef
 	// call 单工具分发（tools/call 应答体；rpcErr 非 nil 时回协议错误）。
 	call(name string, args map[string]any) (map[string]any, *rpcError)
-	// initResult initialize 应答体（node 模式附 instructions 说明总理语义）。
+	// initResult initialize 应答体（附 instructions：编排语义与能力发现指引——
+	// W02-02 起两 backend 都写明「先 capabilities 看范围、工具面以 tools/list
+	// 实际发现为准」）。
 	initResult() map[string]any
 }
 
-// hubBackend hub 模式（默认）：全网派发中枢管理面，现有 12 工具行为零变化。
+// hubBackend hub 模式（默认）：全网派发中枢管理面，既有工具行为零变化。
 type hubBackend struct{}
 
 func (hubBackend) tools() []toolDef { return tools() }
@@ -171,18 +176,28 @@ func (hubBackend) call(name string, args map[string]any) (map[string]any, *rpcEr
 	return callTool(name, args)
 }
 
+// capDiscoverHint 能力发现指引（两 backend instructions 共用段，单源防漂移——
+// W02-02：先 capabilities 实查范围与能力，工具面以 tools/list 实际发现为准，
+// 不硬编码工具数量替代 tools/list）。
+const capDiscoverHint = "开始前可先用 swarmmind_capabilities 查看当前调用范围与服务端能力（元信息，不替代 tools/list）；" +
+	"实际可用的工具以 tools/list 发现结果为准。"
+
 func (hubBackend) initResult() map[string]any {
 	return map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "swarmmind", "version": version},
+		"instructions": "SwarmMind 全网管理面（hub）：可发现并编排网内全部节点上的 exposed 能力。" +
+			capDiscoverHint,
 	}
 }
 
 // nodeBackend node 模式（standalone 单机编排入口，方案 3.4）：全部工具直连本机
-// 回环 localapi（端点契约见 internal/node/localapi），不经 hub。接入即总理——
-// 六工具全走 SWARM_NODE_PRIME_TOKEN 单凭证（安全审查修复 1：编排 submit 与只读
-// 查询共用；local_token 是本机主人管理凭证，不随总理连接下发）。
+// 回环 localapi（端点契约见 internal/node/localapi），不经 hub。六工具全走
+// SWARM_NODE_PRIME_TOKEN 单凭证（安全审查修复 1：编排 submit 与只读查询共用；
+// local_token 是本机主人管理凭证，不进编排面下发。W02-01 起 prime_token 编排
+// 受 mcpaccess 授权门控——调用权与 prime_agent 管家声明解耦，未启用时编排
+// 403 mcp_disabled 指路主人控制台）。
 type nodeBackend struct {
 	baseURL    string // 本机 node 地址（SWARM_NODE_URL，默认 http://127.0.0.1:8445）
 	primeToken string // prime_token（唯一凭证：submit 编排 + 只读工具；localapi authRead 同收）
@@ -203,8 +218,10 @@ func (nodeBackend) initResult() map[string]any {
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{"tools": map[string]any{}},
 		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": version},
-		"instructions": "SwarmMind 本机编排入口（接入即统筹：本机编排）。工具只作用于本机节点：" +
-			"全部工具共用统筹凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
+		"instructions": "SwarmMind 本机编排入口。工具只作用于本机节点：" +
+			"全部工具共用共享编排凭据 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；编排调用权由本机主人经 MCP 编排授权开关控制——" +
+			"调用权与管家角色解耦，未启用时编排返回 403 mcp_disabled，由主人在控制台启用，无需钦定管家）。" +
+			capDiscoverHint +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。" +
 			"会话四工具（session_create/send/list/status）投影本机 agent 会话面：会话固定建在本机，" +
 			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。",
@@ -215,9 +232,9 @@ func (nodeBackend) initResult() map[string]any {
 // 为 hub 专属——决策服务在 hub 内嵌，node 无此能力，不静默降级）。
 func (nodeBackend) tools() []toolDef {
 	return []toolDef{
-		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机统筹、hub 连接、执行账本三态计数与账本终态保留生效值", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机管家声明、hub 连接、执行账本三态计数与账本终态保留生效值", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看本机可用能力（agent 目录）：本机提供哪些可调用的 agent、各自描述与今日执行次数", InputSchema: toolObj(map[string]any{})},
-		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（接入即统筹：本机编排，需 SWARM_NODE_PRIME_TOKEN；返回 403 prime_required 即统筹未钦定或凭证不符）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（本机编排：需共享编排凭据 SWARM_NODE_PRIME_TOKEN，且本机主人已启用 MCP 编排授权——授权未启用返回 403 mcp_disabled，由主人在控制台启用，与管家角色无关；swarmmind_capabilities 可查当前授权态）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
 			"agent":    toolStr("目标 agent 名（swarmmind_agents 可查；只能是本机 agent）"),
 			"args":     toolArr("命令行参数（可选；agent 须 allow_args）"),
 			"stdin":    toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
@@ -255,6 +272,8 @@ func (nodeBackend) tools() []toolDef {
 		{Name: "swarmmind_session_status", Description: "查看本机持久会话详情：绑定快照、逐轮状态与答复摘要（轮终查询主路径）。unverified 轮=执行成立但工作结果未经证实——禁止基于未核对轮次下结论（与 hub 同词表强制提醒）。登记中会话（首轮未发布）可见 request_id、标题与受理轮态", InputSchema: toolObj(map[string]any{
 			"session_id": toolStr("会话 ID"),
 		}, "session_id")},
+		// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
+		capToolDef(),
 	}
 }
 
@@ -318,7 +337,7 @@ func tools() []toolDef {
 			"agent":      toolStr("目标 agent 名（swarmmind_agents 可查）"),
 			"args":       toolArr("命令行参数（可选）"),
 			"stdin":      toolStr("任务指令正文/标准输入（可选，推荐把完整任务描述写在这里）"),
-			"trace_id":   toolStr("追踪号（可选，便于关联；统筹任期建议 prime-<任期号>-<序号>）"),
+			"trace_id":   toolStr("追踪号（可选，便于关联；任期追踪建议 prime-<任期号>-<序号>）"),
 			"idem_key":   toolStr("幂等键（可选；同键同内容重试不会重复执行，重派时沿用原键。绑定派发时建议必传：同键重放命中原尝试，换新键=新执行尝试）"),
 			"group_ref":  toolStr("协作群 ID（可选；swarmmind_group_list 可查。任务与群关联：群里注入创建系统消息，终态结果自动回流该群）"),
 			"depends_on": toolArr("上游任务幂等键列表（可选，P4.3 任务依赖）：全部上游 completed 后本任务才投递；上游 failed/needs_review/cancelled 则保持阻塞（blocked_reason=upstream_failed）。请传上游 idem_key（跨重跑稳定），勿传 task_id"),
@@ -409,6 +428,8 @@ func tools() []toolDef {
 			"report":     toolStr("收集报告（必填）：逐步骤执行结果与结论摘要；处置关闭时写明放弃理由"),
 			"outcome":    toolStr("关闭方式：省略或 \"done\"=完成关闭（要求全部步骤 done）；\"abandoned\"=处置放弃剩余步骤"),
 		}, "work_id", "prime_term", "report")},
+		// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
+		capToolDef(),
 	}
 }
 
@@ -1130,19 +1151,25 @@ func (b nodeBackend) nodeAPI(method, path string, body any, tok string) (int, []
 }
 
 // nodeAPIErr node 端非 2xx → error：服务端 JSON 错误体 {error,message} 的原话
-// 透传；403 prime_required 特判附「检查总理配置」提示（接入即总理的故障入口）。
+// 透传；两个鉴权门可达码（W02-01 新授权语义，W01-03 RFC §7 同表登记）复用
+// sessionErrHints 共享词典——会话与非会话工具同词表单源防漂移：
+//   - 403 mcp_disabled（prime_token + 编排授权未启用）：指路本机主人在控制台
+//     启用（调用权与管家角色解耦，启用无需钦定管家）；
+//   - 403 prime_required（W02-01 后仅 setup 模式可达，码与文案逐字节保留——
+//     服务端兼容锚点）：指路完成接入；旧「检查统筹配置/prime_agent 钦定」话术
+//     随解耦退役（docs/tasks/v3/W02-01-rfc.md §4.2，本批 W02-02 改造）。
 func nodeAPIErr(code int, data []byte) error {
 	var e struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(data, &e)
-	if e.Error == "prime_required" {
-		msg := e.Message
-		if msg == "" {
-			msg = truncate(data)
+	switch e.Error {
+	case "mcp_disabled", "prime_required":
+		if hint := sessionErrHints()[e.Error]; hint != "" {
+			hint = strings.ReplaceAll(hint, "{{msg}}", e.Message)
+			return fmt.Errorf("本机 node %d %s：%s", code, e.Error, hint)
 		}
-		return fmt.Errorf("本机 node 403 prime_required：%s\n请检查统筹配置：node.yaml 已声明 prime_agent，且 SWARM_NODE_PRIME_TOKEN 与本机 data_dir/prime_token 一致（轮换后须同步新凭证）。", msg)
 	}
 	if e.Message != "" {
 		return fmt.Errorf("本机 node 返回 %d（%s）：%s", code, e.Error, e.Message)
@@ -1181,10 +1208,12 @@ func (b nodeBackend) toolNodes() (string, error) {
 	}
 	var bld strings.Builder
 	fmt.Fprintf(&bld, "本机节点 %s\n形态：%s\nhub 连接：%s（epoch %d）\n", st.NodeID, mode, map[bool]string{true: "在线", false: "离线"}[st.Online], st.Epoch)
+	// 管家声明仅展示（W02-01：prime_agent 不再参与编排门——「声明即激活编排」的
+	// 接入即总理话术退役，编排调用权以 mcpaccess 授权开关为准，capabilities 可查）。
 	if st.PrimeAgent != "" {
-		fmt.Fprintf(&bld, "本机统筹：%s（编排接口已激活，接入即统筹）\n", st.PrimeAgent)
+		fmt.Fprintf(&bld, "本机管家：%s（声明展示；编排调用权以 MCP 编排授权为准——与管家角色解耦，swarmmind_capabilities 可查授权态）\n", st.PrimeAgent)
 	} else {
-		bld.WriteString("本机统筹：未钦定（编排接口未激活，submit 将 403 prime_required）\n")
+		bld.WriteString("本机管家：未声明（编排调用权与管家角色解耦，以 MCP 编排授权为准——swarmmind_capabilities 可查授权态）\n")
 	}
 	fmt.Fprintf(&bld, "执行账本三态：accepted %d / started %d / finished %d\n",
 		st.Ledger["accepted"], st.Ledger["started"], st.Ledger["finished"])
@@ -1264,7 +1293,7 @@ func (b nodeBackend) toolSubmit(args map[string]any) (string, error) {
 		return "", fmt.Errorf("agent 必填（目标只能是本机 agent）")
 	}
 	if b.primeToken == "" {
-		return "", fmt.Errorf("未配置 SWARM_NODE_PRIME_TOKEN：本机编排需统筹凭证（接入即统筹：本机编排）")
+		return "", fmt.Errorf("未配置 SWARM_NODE_PRIME_TOKEN：本机编排需共享编排凭据（由本机主人在启用授权或轮换时一次性取得，注入本连接环境）")
 	}
 	nodeID, err := b.localNodeID()
 	if err != nil {
@@ -1400,6 +1429,8 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		text, err = b.toolSessionList()
 	case "swarmmind_session_status":
 		text, err = b.toolSessionStatus(args)
+	case "swarmmind_capabilities":
+		text, err = b.toolCapabilities()
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}
@@ -1409,7 +1440,7 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 	return callResult(text), nil
 }
 
-/* ---------- swarmmind_decide：总理分配决策（L0 云端 → L2 规则兜底） ---------- */
+/* ---------- swarmmind_decide：分配决策（L0 云端 → L2 规则兜底） ---------- */
 
 // 设计依据 PRIME-DESIGN 三级降级策略与影子原则：L0（bamboonode 云端
 // StartLux-Decision）默认；L0 任一环失败（key 空/超时/非 200/解析失败）自动降级
@@ -2628,6 +2659,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolSessionList()
 	case "swarmmind_session_status":
 		text, err = toolSessionStatus(args)
+	case "swarmmind_capabilities":
+		text, err = toolCapabilities()
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

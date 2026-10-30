@@ -261,6 +261,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.authOrchestrate(s.handleAgentSessionTurns))             // 投轮 202（与 hub 同语义）
 	mux.HandleFunc("POST /api/v1/sessions/{id}/turns/{seq}/cancel", s.authLocal(s.handleAgentSessionTurnCancel)) // 轮取消（W01-03，人工专属·六.六豁免⑬）
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
+	mux.HandleFunc("GET /api/v1/capabilities", s.authRead(s.handleCapabilities)) // 能力元信息（W02-02，swarmmind_capabilities node 面数据源；只读无凭据）
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
 	mux.HandleFunc("GET /api/v1/local/config", s.authRead(s.handleGetConfig))
 	mux.HandleFunc("PUT /api/v1/local/config", s.authLocal(s.handlePutConfig))
