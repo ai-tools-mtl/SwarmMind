@@ -1,13 +1,21 @@
 // SwarmMind 控制台 E2E 测试（Playwright，真实浏览器交互）
 // 运行：node tests/e2e-console.mjs
+// 安全门（v3 纪律，全部套件生效）：E2E_BASE 必须显式设置且指向批准的本地目标
+//   （http(s)://localhost|127.0.0.1|[::1]:端口）——缺失或非法在浏览器启动、任何
+//   fetch/网络调用之前立即非零退出（零网络退出）；历史默认线上 hub 地址已删除，
+//   绝不运行生产默认目标。
+// 本地启动示例：
+//   hub full 套件：E2E_BASE=http://127.0.0.1:8444 node tests/e2e-console.mjs
+//   node 模式：    E2E_BASE=http://127.0.0.1:8445 local_token=<本机管理令牌> node tests/e2e-console.mjs
+//   会话套件：     E2E_SUITE=sessions E2E_BASE=http://127.0.0.1:8444 node tests/e2e-console.mjs
+//   会话套件 node 端：E2E_SUITE=sessions E2E_BASE=http://127.0.0.1:8445 local_token=<本机管理令牌> node tests/e2e-console.mjs
 //   hub 模式（默认）：E2E_BASE 指向 hub 管理面，账户密码登录，跑 E01-E20 系列。
 //   node 模式（终审必修4）：E2E_BASE 指向 node local API 且设置 local_token 环境变量
 //     （本机管理令牌，令牌门登录）→ 跑 N01-N03/E-NAV3/E-N1~N3 系列：来源筛选行恒在、
 //     轮询保持筛选、翻页叠加筛选、登出后 S.tf 重置。
 //   会话套件（T3 双端会话界面；R1 必修6 重写）：E2E_SUITE=sessions 切换——hub 模式跑
-//     S01-S10，node 模式跑 SN01-SN06。安全门（R1 必修1）：会话套件会创建/关闭真实
-//     会话，E2E_BASE 必须显式指向批准的本地目标（localhost/127.0.0.1/[::1]），缺失
-//     或非法在启动浏览器前立即非零退出，绝不发起任何网络请求。
+//     S01-S10，node 模式跑 SN01-SN06。会话套件会创建/关闭真实会话（其安全门自
+//     R1 必修1 先行，v3 起判定逻辑统一扩展到全部套件）。
 //     受控数据：全部经 REST 构造并绑定创建回执的唯一 session ID，所有行/详情/关闭
 //     断言按该 ID 定位；unverified（真实成功轮次）与 failed（坏工作目录）分别覆盖；
 //     实按键断言 activeElement/Esc/返焦；DOM 功能、整页视觉、深层交互三层分开报告
@@ -21,17 +29,18 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 
-let BASE = process.env.E2E_BASE || 'http://1.13.158.180:8444';
+let BASE = process.env.E2E_BASE || '';   // v3 安全门：无任何默认值，main() 顶部统一过 assertLocalBase 后才可用
 const USER = process.env.E2E_USER || 'admin';
 const PASS = process.env.E2E_PASS || 'Swarm@2026';
 const NODE_TOKEN = process.env.local_token || '';
 const NODE_MODE = !!NODE_TOKEN;
 const SUITE = process.env.E2E_SUITE || 'full';   // full=既有 E/N 系列；sessions=T3 会话系列
 
-// ---------- 会话套件安全门（R1 必修1）----------
-// 会话套件会登录、创建会话并关闭会话（真实注册表写入）。E2E_BASE 必须显式设置且
-// 指向批准的本地测试目标；缺失/非法在 chromium.launch() 之前非零退出——浏览器都
-// 不启动，保证缺参路径零网络请求。既有 full/N 套件行为不变（历史默认仅其沿用）。
+// ---------- E2E_BASE 安全门（R1 必修1 立，v3 起统一适用于全部套件）----------
+// 所有套件都可能写真实状态（会话套件更会登录、创建会话并关闭会话）。E2E_BASE 必须
+// 显式设置且指向批准的本地测试目标；缺失/非法在 chromium.launch() 与一切 fetch/
+// 网络调用之前非零退出——浏览器都不启动，保证缺参路径零网络请求，绝不运行生产
+// 默认目标。判定强度与 R1 必修1 既有实现一致（显式 http(s) + 批准本地主机名）。
 const APPROVED_LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 function assertLocalBase(suite) {
   const raw = process.env.E2E_BASE || '';
@@ -40,7 +49,11 @@ function assertLocalBase(suite) {
   const host = u ? u.hostname.toLowerCase() : '';
   const ok = !!u && (u.protocol === 'http:' || u.protocol === 'https:') && APPROVED_LOCAL_HOSTS.has(host);
   if (!ok) {
-    console.error(`[会话套件安全门] E2E_SUITE=${suite} 拒绝启动：E2E_BASE 必须显式指向批准的本地目标（http(s)://localhost|127.0.0.1|[::1]:端口），当前值：${raw || '（未设置）'}。会话套件会创建/关闭真实会话，禁止默认线上 hub。`);
+    if (suite === 'sessions') {
+      console.error(`[会话套件安全门] E2E_SUITE=${suite} 拒绝启动：E2E_BASE 必须显式指向批准的本地目标（http(s)://localhost|127.0.0.1|[::1]:端口），当前值：${raw || '（未设置）'}。会话套件会创建/关闭真实会话，禁止默认线上 hub。`);
+    } else {
+      console.error(`[E2E_BASE 安全门] E2E_SUITE=${suite} 拒绝启动：E2E_BASE 必须显式指向批准的本地目标（http(s)://localhost|127.0.0.1|[::1]:端口），当前值：${raw || '（未设置）'}。全部套件缺显式本地目标一律零网络退出，绝不运行生产默认目标（历史默认线上 hub 已删除）。`);
+    }
     process.exit(1);
   }
   return raw.replace(/\/+$/, '');
@@ -931,7 +944,7 @@ async function nodeSessFlow(browser) {
 }
 
 async function main() {
-  if (SUITE === 'sessions') BASE = assertLocalBase(SUITE);   // R1 必修1：会话套件先过安全门，浏览器启动前拦截
+  BASE = assertLocalBase(SUITE);   // v3 安全门：全部套件先过 E2E_BASE 本地目标门——浏览器启动与任何 fetch 之前拦截
   const browser = await chromium.launch();
   if (NODE_MODE) {
     if (SUITE === 'sessions') await nodeSessFlow(browser);   // 套件内自调 summarize
