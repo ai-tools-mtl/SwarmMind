@@ -156,13 +156,16 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	srv, led, workdir := newLocalNode(t, "echo")
 	bd := newNodeBackendFor(srv.URL)
 
-	// 工具清单：本机六件套（无 hub 专属工具），submit 描述明示接入即总理
+	// 工具清单：本机十件套（六件套 + W01-04 会话四工具；无 hub 专属工具），
+	// submit 描述明示接入即总理
 	names := []string{}
 	for _, td := range bd.tools() {
 		names = append(names, td.Name)
 	}
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
-		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact"}
+		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact",
+		"swarmmind_session_create", "swarmmind_session_send",
+		"swarmmind_session_list", "swarmmind_session_status"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("node 工具清单不符: %v", names)
 	}
@@ -528,7 +531,7 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 		t.Fatalf("initialize 应答不符: %+v", initRes)
 	}
 
-	// tools/list：node 模式六件套
+	// tools/list：node 模式十件套（六件套 + W01-04 会话四工具）
 	writeRPC(w, 2, "tools/list", map[string]any{})
 	resp = next(2)
 	var listRes struct {
@@ -537,8 +540,8 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &listRes); err != nil {
 		t.Fatalf("tools/list 应答解析失败: %v", err)
 	}
-	if len(listRes.Tools) != 6 {
-		t.Fatalf("node 模式应 6 工具, got %d", len(listRes.Tools))
+	if len(listRes.Tools) != 10 {
+		t.Fatalf("node 模式应 10 工具, got %d", len(listRes.Tools))
 	}
 
 	// tools/call：nodes 打到真 localapi

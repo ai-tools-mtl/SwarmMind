@@ -1,6 +1,8 @@
 // sessions.go 会话（Session）工具组（T2 持久会话，SPEC 六.五「会话与轮次」节 +
-// 六.六映射表四行 + 同步声明 18/19）。hub 模式专属（node 模式不装配不静默降级——
-// node 本机原生线程管理是主人管理面，agent 面合法能力 = hub 会话组全量）。
+// 六.六映射表四行 + 同步声明 18/19/20）。本文件为 hub 面实现（连 hub 管理面 REST）；
+// node 面同参语义投影见 node_sessions.go（W01-04，投影本机 agent 面
+// /api/v1/sessions*）。两后端共享同词表：sessionStatusCN / sessionErrHints 单源
+// 实现（防双端漂移——任何一端改动即双端同时生效）。
 // 使用心智与 submit/status/wait 同构：create 拿会话引用 → send 投轮（受理即回
 // 引用，异步）→ status 查轮终（unverified 为合法完成态：执行成立但工作结果未经
 // 证实，禁止 agent 冒充工作成功结论）。
@@ -14,6 +16,8 @@ import (
 
 // sessionStatusCN 轮次状态人话（与 REST 投影态同词表；unverified 必须带
 // 「未经证实」提示——4.8 语义的会话面镜像，禁止折叠为已完成）。
+// hub/node 两后端共用（node 面内核/登记投影先归一到本词表键再进本表，见
+// node_sessions.go nodeTurnStatusCN）。
 func sessionStatusCN(st string) string {
 	switch st {
 	case "pending":
@@ -32,30 +36,53 @@ func sessionStatusCN(st string) string {
 	return st
 }
 
-// sessionErrHint 会话错误 → 人话（含处理指引；错误统一 isError 文本不泄内部）。
-func sessionErrHint(code int, data []byte) error {
+// sessionErrHints 会话错误码 → 人话指引（hub/node 两后端共享同词表，W01-04 起
+// 单源实现防双端漂移；W01-03 RFC §7 映射表覆盖的双端错误码同表登记）。文案保持
+// 后端中立（受理方差异由各后端的标注前缀承担，不点名 hub/node 专属机制）；
+// 未收录码由调用方回退服务端原话。
+func sessionErrHints() map[string]string {
+	return map[string]string{
+		"session_not_found":   "会话不存在（swarmmind_session_list 可查现有会话）",
+		"session_closed":      "会话已关闭（拒绝续轮；原生线程留存节点侧不受影响）。继续协作请 swarmmind_session_create 新建会话",
+		"session_unsupported": "会话能力不可用（目标未声明 session_adapter 或会话内核未装配/版本过旧）：{{msg}}",
+		"binding_mismatch":    "绑定不一致（禁止静默换绑/升权）：{{msg}}。换绑定须显式新建会话",
+		"turn_seq_conflict":   "轮次序号冲突：{{msg}}。响应丢失重试须原样重发同一 turn_seq 与同一 prompt；新输入用下一个序号（或不传由受理侧分配）",
+		"turn_in_flight":      "首轮尚未成立（在途执行中）：{{msg}}。等 swarmmind_session_status 显示首轮终态后再投下一轮",
+		"turn_queue_full":     "会话排队轮已达上限（非终态受理轮 16 条）：等待在途轮终态后再投，或由主人在管理面取消排队轮（人工专属动作）：{{msg}}",
+		"request_conflict":    "{{msg}}",
+		"workspace_denied":    "会话工作目录越界（不在授权工作区内）：{{msg}}。请改用授权工作区内的目录（授权根由本机主人在 node.yaml session_workspace_roots 配置）",
+		"agent_not_found":     "目标能力不存在或未声明会话能力（不在会话装配表）：{{msg}}",
+		"agent_not_exposed":   "目标节点/能力不可达（未注册或已下线）：{{msg}}",
+		"mailbox_full":        "目标节点信箱已满（稍后重试）：{{msg}}",
+		"storage_full":        "hub 存储预算已满：{{msg}}",
+		"frame_too_large":     "请求体超限（prompt 过长）：{{msg}}",
+		"input_invalid":       "{{msg}}",
+		"invalid_request":     "{{msg}}",
+	}
+}
+
+// sessionErrHintAt 会话错误 → 人话（含处理指引；错误统一 isError 文本不泄内部）。
+// label 为后端标注前缀（hub 面 "hub" / node 面 "本机 node"）；hint 模板中 {{msg}}
+// 以服务端 message 原话代入。两后端共用本实现——同词表由构造保证。
+func sessionErrHintAt(label string, code int, data []byte) error {
 	var e struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
 	_ = json.Unmarshal(data, &e)
-	hint := map[string]string{
-		"session_not_found":   "会话不存在（swarmmind_session_list 可查现有会话）",
-		"session_closed":      "会话已关闭（拒绝续轮；原生线程留存节点侧不受影响）。继续协作请 swarmmind_session_create 新建会话",
-		"session_unsupported": "目标能力未声明会话支持（session_adapter 未配置或节点版本过旧）：" + e.Message,
-		"binding_mismatch":    "绑定不一致（禁止静默换绑/升权）：" + e.Message + "。换绑定须显式新建会话",
-		"turn_seq_conflict":   "轮次序号冲突：" + e.Message + "。响应丢失重试须原样重发同一 turn_seq 与同一 prompt；新输入用下一个序号（或不传由 hub 分配）",
-		"turn_in_flight":      "首轮尚未成立（在途执行中）：" + e.Message + "。等 swarmmind_session_status 显示首轮终态后再投下一轮",
-		"agent_not_exposed":   "目标节点/能力不可达（未注册或已下线）：" + e.Message,
-		"mailbox_full":        "目标节点信箱已满（稍后重试）：" + e.Message,
-		"storage_full":        "hub 存储预算已满：" + e.Message,
-		"frame_too_large":     "请求体超限（prompt 过长）：" + e.Message,
-		"invalid_request":     e.Message,
-	}[e.Error]
+	hint := sessionErrHints()[e.Error]
 	if hint == "" {
 		hint = truncate(data)
+	} else {
+		hint = strings.ReplaceAll(hint, "{{msg}}", e.Message)
 	}
-	return fmt.Errorf("hub %d：%s", code, hint)
+	return fmt.Errorf("%s %d：%s", label, code, hint)
+}
+
+// sessionErrHint hub 面会话错误提示（hub 工具组入口；node 面经
+// sessionErrHintAt("本机 node", …) 共用同表）。
+func sessionErrHint(code int, data []byte) error {
+	return sessionErrHintAt("hub", code, data)
 }
 
 // toolSessionCreate swarmmind_session_create：新建会话（绑定远端节点/能力/工作区，

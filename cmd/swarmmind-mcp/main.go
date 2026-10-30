@@ -27,16 +27,19 @@
 //	SWARM_STARTLUX_MODEL        决策模型（默认 startlux-decision-27b-autothink）
 //	SWARM_STARTLUX_TIMEOUT_SEC  云端查询单次超时秒数（默认 5）
 //
-// 工具：hub 模式 17 个——nodes / agents / submit / status / wait / artifact /
+// 工具：hub 模式 23 个——nodes / agents / submit / status / wait / artifact /
 // tasks（任务列表，P4⑤：正在跑/最近完成/失败速览，hub 视角，node 模式不设）/
 // decide + dispatch_suggest（派发建议，P5.1 D1，hub 决策服务，node 模式不装配）/
+// session_create / session_send / session_list / session_status（持久会话，T2，
+// SPEC 六.五/六.六；本文件 sessions.go 为 hub 面实现）/
 // group_create / group_list / group_say / group_messages /
 // group_close（群聊协作空间，GROUP-RFC 六 MVP）+ work_create / work_get /
-// work_list（工作单，P5 W1：建单幂等/读档/列表，hub 模式专属，node 模式不装
-// 配不静默降级）+ session_create / session_send / session_list / session_status
-// （持久会话，T2，SPEC 六.五/六.六；hub 模式专属——本机原生线程管理归主人
-// 管理面，六.六豁免⑩）。node 模式 6 个——nodes（本机节点信息单条）/ agents（本机
-// 目录）/ submit（本机派单，prime_token）/ status / wait / artifact（本机直取）。
+// work_list / work_takeover / work_collect（工作单，P5 W1–W3：hub 模式专属，
+// node 模式不装配不静默降级）。node 模式 10 个——nodes（本机节点信息单条）/
+// agents（本机目录）/ submit（本机派单，prime_token）/ status / wait /
+// artifact（本机直取）+ session_create / session_send / session_list /
+// session_status（W01-04：node_sessions.go 投影本机 agent 面 /api/v1/sessions*，
+// 与 hub 同参语义同词表；不含 cancel/close——六.六豁免⑬，终局干预归本机主人）。
 // 等待语义：wait 轮询至终态；needs_review 作为终态返回并明确提示需人工核对。
 // swarmmind_decide（StartLux 归属，PRIME-DESIGN 三级降级）：L0 云端 StartLux 建议 →
 // 失败自动降级 L2 本地规则分配（关键词匹配 + inflight 负载决胜），永不停摆，响应标注 used_level。
@@ -202,7 +205,9 @@ func (nodeBackend) initResult() map[string]any {
 		"serverInfo":      map[string]any{"name": "swarmmind-node", "version": version},
 		"instructions": "SwarmMind 本机编排入口（接入即统筹：本机编排）。工具只作用于本机节点：" +
 			"全部工具共用统筹凭证 SWARM_NODE_PRIME_TOKEN（submit 编排 + 只读查询；node.yaml 声明 prime_agent 后编排接口才激活）。" +
-			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。",
+			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。" +
+			"会话四工具（session_create/send/list/status）投影本机 agent 会话面：会话固定建在本机，" +
+			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。",
 	}
 }
 
@@ -230,6 +235,26 @@ func (nodeBackend) tools() []toolDef {
 			"task_id": toolStr("任务 ID"),
 			"index":   toolNum("产物序号（从 0 开始，默认 0）"),
 		}, "task_id")},
+		// 会话四工具（W01-04）：投影本机 agent 面 /api/v1/sessions*，与 hub 同名
+		// 同参语义（差异如实写进描述——本机面无远端寻址、绑定由声明决定、登记态
+		// 可查）；不含 cancel/close（豁免⑬：终局干预归本机主人，工具面无绕行通道）。
+		{Name: "swarmmind_session_create", Description: "在本机创建持久会话（仅登记：不执行模型不投轮，返回平台会话 ID；首轮用 swarmmind_session_send 提交）。绑定本机能力与工作目录建立跨轮对话线程；request_id 可选幂等（同键同文返回原会话、异文 409）。会话固定建在本机——跨机会话请经 hub 模式。一次性任务不需要会话，直接 swarmmind_submit", InputSchema: toolObj(map[string]any{
+			"node_id":    toolStr("本机面语义（可省略）：会话固定建在本机；传入时须为本机节点 ID（swarmmind_nodes 可查），传其他节点会被显式拒绝——跨机寻址仅 hub 模式支持"),
+			"agent":      toolStr("目标能力名（须声明会话支持；swarmmind_agents 可查）"),
+			"cwd":        toolStr("会话工作目录（本机绝对路径；越界授权工作区将被 403 workspace_denied 拒绝）"),
+			"title":      toolStr("会话标题（可选；首轮发布前的登记期可见，详情/列表如实展示）"),
+			"request_id": toolStr("稳定创建请求 ID（可选）：同键同文返回原会话、异文 409 request_conflict；缺省自动生成（响应丢失重试安全）"),
+		}, "agent", "cwd")},
+		{Name: "swarmmind_session_send", Description: "向本机持久会话投一轮输入（异步受理——立即返回轮次引用，不阻塞等待；轮终用 swarmmind_session_status 查询答复）。同一会话多轮共享同一原生线程上下文；响应丢失重试传相同 turn_seq（已知序号+原文）或相同 request_id+相同内容，命中回执不重复执行。排队轮达上限（非终态 16 条）会被 409 turn_queue_full 拒绝——等在途轮终态再投", InputSchema: toolObj(map[string]any{
+			"session_id": toolStr("会话 ID（swarmmind_session_create 返回 / swarmmind_session_list 可查）"),
+			"prompt":     toolStr("本轮输入正文"),
+			"turn_seq":   toolNum("轮次序号（可选；缺省由本机受理推导下一序号。仅支持重放：传已知序号+原文命中回执，未知/跳号 409 turn_seq_conflict）"),
+			"request_id": toolStr("稳定受理请求 ID（可选）：同键同文回原受理回执、异文 409 request_conflict（响应丢失重试安全）"),
+		}, "session_id", "prompt")},
+		{Name: "swarmmind_session_list", Description: "列出本机全部持久会话：ID、能力绑定、状态（活跃/已关闭/登记中——创建登记后首轮发布前为登记态）、轮数与最近一轮状态。登记中会话如实标注并附 request_id/标题", InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_session_status", Description: "查看本机持久会话详情：绑定快照、逐轮状态与答复摘要（轮终查询主路径）。unverified 轮=执行成立但工作结果未经证实——禁止基于未核对轮次下结论（与 hub 同词表强制提醒）。登记中会话（首轮未发布）可见 request_id、标题与受理轮态", InputSchema: toolObj(map[string]any{
+			"session_id": toolStr("会话 ID"),
+		}, "session_id")},
 	}
 }
 
@@ -1367,6 +1392,14 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		text, err = waitLoop(args, b.taskStatus)
 	case "swarmmind_artifact":
 		text, err = b.toolArtifact(args)
+	case "swarmmind_session_create":
+		text, err = b.toolSessionCreate(args)
+	case "swarmmind_session_send":
+		text, err = b.toolSessionSend(args)
+	case "swarmmind_session_list":
+		text, err = b.toolSessionList()
+	case "swarmmind_session_status":
+		text, err = b.toolSessionStatus(args)
 	default:
 		return nil, &rpcError{Code: -32602, Message: "未知工具: " + name}
 	}

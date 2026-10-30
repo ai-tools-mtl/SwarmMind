@@ -1,7 +1,8 @@
-// sessions_test.go 会话工具组 MCP 层实测（SPEC 六.六 同步开发规则③ + 规则 18）：
+// sessions_test.go 会话工具组 MCP 层实测（SPEC 六.六 同步开发规则③ + 规则 18/20）：
 // 真实 api server 全链（工具函数 → HTTP → core → 投递链 → 假 node 回结果），
-// 覆盖 hub-only 装配（node 模式不装配）、四工具输出语义、幂等重放人话、
-// 错误指引（closed/conflict/unsupported）、参数本地校验拒绝。
+// 覆盖双端装配（hub 全量 + node 投影本机 agent 面，W01-04 起双端同装）、四工具
+// 输出语义、幂等重放人话、错误指引（closed/conflict/unsupported）、参数本地校验
+// 拒绝。node 面全链与同词表锁定见 node_sessions_test.go。
 package main
 
 import (
@@ -13,26 +14,32 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// TestSessionToolsHubOnly 装配：hub 模式含四会话工具；node 模式不含（本机原生
-// 线程管理归主人管理面，六.六豁免⑩——hub-only 同 works 形态，不静默降级）。
-func TestSessionToolsHubOnly(t *testing.T) {
-	want := map[string]bool{
-		"swarmmind_session_create": false, "swarmmind_session_send": false,
-		"swarmmind_session_list": false, "swarmmind_session_status": false,
-	}
+// TestSessionToolsBothBackends 装配（W01-04 起双端同装，取代原 TestSessionToolsHubOnly
+// 的「node 不装配」断言——v3 node agent 会话面 W01-03 定稿后，node 模式四工具投影
+// 本机 agent 面 /api/v1/sessions*，与 hub 同参语义同词表；node_sessions.go）：
+// hub 与 node 模式均含四会话工具；两模式会话工具组均不含 cancel/close（豁免⑬：
+// 终局干预归主人，工具面无此能力即无绕行通道）。
+func TestSessionToolsBothBackends(t *testing.T) {
+	want := []string{"swarmmind_session_create", "swarmmind_session_send",
+		"swarmmind_session_list", "swarmmind_session_status"}
+	lists := map[string][]string{"hub": {}, "node": {}}
 	for _, td := range tools() {
-		if _, ok := want[td.Name]; ok {
-			want[td.Name] = true
-		}
-	}
-	for name, found := range want {
-		if !found {
-			t.Fatalf("hub 模式工具清单缺 %s", name)
-		}
+		lists["hub"] = append(lists["hub"], td.Name)
 	}
 	for _, td := range (nodeBackend{}).tools() {
-		if _, ok := want[td.Name]; ok {
-			t.Fatalf("node 模式不应装配 %s（hub-only 不静默降级）", td.Name)
+		lists["node"] = append(lists["node"], td.Name)
+	}
+	for mode, names := range lists {
+		for _, w := range want {
+			if !contains(names, w) {
+				t.Fatalf("%s 模式工具清单缺 %s", mode, w)
+			}
+		}
+		for _, name := range names {
+			if strings.HasPrefix(name, "swarmmind_session_") &&
+				(strings.HasSuffix(name, "_cancel") || strings.HasSuffix(name, "_close")) {
+				t.Fatalf("%s 模式会话工具组不应含取消/关闭（豁免⑬）: %s", mode, name)
+			}
 		}
 	}
 }
