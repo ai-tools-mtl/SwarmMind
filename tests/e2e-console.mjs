@@ -46,7 +46,9 @@ function assertLocalBase(suite) {
   const raw = process.env.E2E_BASE || '';
   let u = null;
   try { u = new URL(raw); } catch { }
-  const host = u ? u.hostname.toLowerCase() : '';
+  // URL 对 IPv6 主机名的 hostname 保留方括号（http://[::1]:8444 → "[::1]"），
+  // 须剥除后方能与白名单 ::1 匹配（codex 联审必修项：原实现 IPv6 回环恒误拒）。
+  const host = u ? u.hostname.toLowerCase().replace(/^\[(.+)\]$/, '$1') : '';
   const ok = !!u && (u.protocol === 'http:' || u.protocol === 'https:') && APPROVED_LOCAL_HOSTS.has(host);
   if (!ok) {
     if (suite === 'sessions') {
