@@ -187,7 +187,7 @@ func (s *Server) handleMcpVerifyV0(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"check": check, "board": s.mcpVerifyModel().Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"check": check, "guidance": mcpVerifyCheckGuidance(check), "board": s.mcpVerifyModel().Snapshot()})
 }
 
 // —— POST verify/v2：服务端视角鉴权探测 ——
@@ -230,7 +230,48 @@ func (s *Server) handleMcpVerifyV2(w http.ResponseWriter, r *http.Request) {
 		ServiceURL: req.ServiceURL, Credential: tok, ConfigVersion: m.ConfigVersion(),
 	})
 	m.RecordV2(check)
-	writeJSON(w, http.StatusOK, map[string]any{"check": check, "board": s.mcpVerifyModel().Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"check": check, "guidance": mcpVerifyCheckGuidance(check), "board": s.mcpVerifyModel().Snapshot()})
+}
+
+// mcpVerifyCheckGuidance 本次结果对应指引（终审建议①：RFC §1.1 契约兑现——v0
+// 逐失败/警示项、v2 按 FailKind；not_checked 给「未检查」口径）。双态共用入口按
+// 动态类型分派（仅本包两种 check 形态；未收录组合经 GuidanceFor ok=false 跳过
+// 不猜测）。诊断抽屉消费该字段，不再恒显 not_checked 版文案。
+func mcpVerifyCheckGuidance(check any) []VerifyGuidance {
+	var layer, kind string
+	var items []V0CheckItem
+	switch c := check.(type) {
+	case V0Check:
+		layer = LayerV0
+		if c.Status == VerifyStatusNotChecked {
+			kind = VerifyStatusNotChecked
+		}
+		items = c.Checks
+	case V2Check:
+		layer = LayerV2
+		kind = c.FailKind
+		if c.Status == VerifyStatusNotChecked {
+			kind = VerifyStatusNotChecked
+		}
+	default:
+		return nil
+	}
+	var out []VerifyGuidance
+	if layer == LayerV0 {
+		for _, it := range items {
+			if it.Status == VerifyStatusFail || it.Status == VerifyStatusWarn {
+				if g, ok := GuidanceFor(layer, it.Key); ok {
+					out = append(out, g)
+				}
+			}
+		}
+	}
+	if kind != "" {
+		if g, ok := GuidanceFor(layer, kind); ok {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // —— POST verify/confirm：用户确认登记 ——

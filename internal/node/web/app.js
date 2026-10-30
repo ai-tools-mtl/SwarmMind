@@ -2723,7 +2723,7 @@ function cfgSection() {
   const c = S.cfg;
   if (!c.loaded) {
     return `<section class="card spaced"><div class="row"><div><h2>能力配置</h2></div>
-      ${button('加载配置', 'cfg-load', '')}</div><span id="capability-config"></span><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。</p></section>`;
+      ${button('加载配置', 'cfg-load', '')}</div><span id="capability-config"></span><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。${linkTo('mcp-access', 'MCP 接入（P07：生成宿主配置与分层验证）')}经「MCP 授权」区或总览页进入。</p></section>`;
   }
   if (c.unavailable) {
     return `<section class="card spaced"><h2>能力配置</h2><span id="capability-config"></span><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;

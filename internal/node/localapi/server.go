@@ -277,17 +277,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/local/config", s.authLocal(s.handlePutConfig))
 	mux.HandleFunc("POST /api/v1/local/agents/reload", s.authLocal(s.handleAgentsReload))
 	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
-	mux.HandleFunc("POST /api/v1/local/mcp/access/rotate", s.authLocal(s.handleMcpAccessRotate)) // 换发共享编排凭据（W02-01，一次明文/No-store）
-	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))      // 旧别名 → 同一实现（兼容不删，RFC §3.3）
-	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))            // 授权状态（凭据仅脱敏）
-	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))            // 主人显式启停
-	mux.HandleFunc("POST /api/v1/local/mcp/config/preview", s.authLocal(s.handleMcpCfgPreview))  // 宿主 MCP 配置预览（W03-02，主人专属·六.六豁免⑭，零写盘）
-	mux.HandleFunc("POST /api/v1/local/mcp/config/apply", s.authLocal(s.handleMcpCfgApply))      // 宿主 MCP 配置应用（版本核对→备份→原子合并，单条目）
-	mux.HandleFunc("POST /api/v1/local/mcp/config/revert", s.authLocal(s.handleMcpCfgRevert))    // 宿主 MCP 配置撤回（只撤本次条目，版本不符 409）
-	mux.HandleFunc("GET /api/v1/local/mcp/verify", s.authLocal(s.handleMcpVerifyGet))            // 分层验证板快照（W03-04，主人专属·六.六豁免⑮，零写盘）
-	mux.HandleFunc("POST /api/v1/local/mcp/verify/v0", s.authLocal(s.handleMcpVerifyV0))         // 服务端 V0 配置就绪检查（RunV0Checks→RecordV0，零写盘）
-	mux.HandleFunc("POST /api/v1/local/mcp/verify/v2", s.authLocal(s.handleMcpVerifyV2))         // 服务端视角鉴权探测（恒标 server_side_view，零写盘）
-	mux.HandleFunc("POST /api/v1/local/mcp/verify/confirm", s.authLocal(s.handleMcpVerifyConfirm)) // 用户确认登记（v1/v3/v4/v5，绑定配置版本，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/access/rotate", s.authLocal(s.handleMcpAccessRotate))          // 换发共享编排凭据（W02-01，一次明文/No-store）
+	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))               // 旧别名 → 同一实现（兼容不删，RFC §3.3）
+	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))                     // 授权状态（凭据仅脱敏）
+	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))                     // 主人显式启停
+	mux.HandleFunc("POST /api/v1/local/mcp/config/preview", s.authLocal(s.handleMcpCfgPreview))           // 宿主 MCP 配置预览（W03-02，主人专属·六.六豁免⑭，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/config/apply", s.authLocal(s.handleMcpCfgApply))               // 宿主 MCP 配置应用（版本核对→备份→原子合并，单条目）
+	mux.HandleFunc("POST /api/v1/local/mcp/config/revert", s.authLocal(s.handleMcpCfgRevert))             // 宿主 MCP 配置撤回（只撤本次条目，版本不符 409）
+	mux.HandleFunc("GET /api/v1/local/mcp/verify", s.authLocal(s.handleMcpVerifyGet))                     // 分层验证板快照（W03-04，主人专属·六.六豁免⑮，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/v0", s.authLocal(s.handleMcpVerifyV0))                  // 服务端 V0 配置就绪检查（RunV0Checks→RecordV0，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/v2", s.authLocal(s.handleMcpVerifyV2))                  // 服务端视角鉴权探测（恒标 server_side_view，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/confirm", s.authLocal(s.handleMcpVerifyConfirm))        // 用户确认登记（v1/v3/v4/v5，绑定配置版本，零写盘）
 	mux.HandleFunc("POST /api/v1/local/mcp/verify/config-version", s.authLocal(s.handleMcpVerifyVersion)) // 配置版本锚更新（apply/revert 后页面驱动，零写盘）
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
