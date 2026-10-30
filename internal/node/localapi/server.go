@@ -270,6 +270,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))      // 旧别名 → 同一实现（兼容不删，RFC §3.3）
 	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))            // 授权状态（凭据仅脱敏）
 	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))            // 主人显式启停
+	mux.HandleFunc("POST /api/v1/local/mcp/config/preview", s.authLocal(s.handleMcpCfgPreview))  // 宿主 MCP 配置预览（W03-02，主人专属·六.六豁免⑭，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/config/apply", s.authLocal(s.handleMcpCfgApply))      // 宿主 MCP 配置应用（版本核对→备份→原子合并，单条目）
+	mux.HandleFunc("POST /api/v1/local/mcp/config/revert", s.authLocal(s.handleMcpCfgRevert))    // 宿主 MCP 配置撤回（只撤本次条目，版本不符 409）
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
 	mux.HandleFunc("POST /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelCreate))
