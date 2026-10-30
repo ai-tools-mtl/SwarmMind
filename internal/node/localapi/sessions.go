@@ -164,7 +164,7 @@ func writeLocalSessionErr(w http.ResponseWriter, err error) {
 			code = http.StatusBadRequest
 		case protocol.CodeAgentNotFound, "session_not_found":
 			code = http.StatusNotFound
-		case "session_closed", "turn_in_flight", "binding_mismatch":
+		case "session_closed", "turn_in_flight", "binding_mismatch", "close_in_flight": // close_in_flight 为 W01-03 行为变更（在途拒绝关闭 409），主人旧面映射此处补齐（W01-04 实测发现漏项）
 			code = http.StatusConflict
 		case "session_unsupported":
 			code = http.StatusServiceUnavailable
