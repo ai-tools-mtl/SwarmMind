@@ -211,6 +211,19 @@ func (s *Service) sessionTurnWsKey(task protocol.Task) string {
 	return agentid.WorkspaceID(cwd)
 }
 
+// taskWsKey 任务的 workdir 互斥键——启动重建占锁（New 的 seed）与执行取锁
+//（execute 的 reserve）唯一键派生口径（W01-02 codex 终审必修②：两处必须同键，
+// 否则重建按产物根占的锁在执行按会话 cwd 键取/放时永不释放，同根后续任务永久
+// 等待）：会话受理轮按 sessionTurnWsKey（会话 cwd 真实路径），close 轮与普通任
+// 务沿 agent 产物根键。键派生不出的会话轮（如 send 无 cwd 且内核无绑定）返回 ""
+// ——重建不占锁、执行不取锁，两处口径仍一致。
+func (s *Service) taskWsKey(task protocol.Task) string {
+	if k := s.sessionTurnWsKey(task); k != "" {
+		return k
+	}
+	return s.wsByAgent[task.TargetAgent]
+}
+
 // regCancelOnce 登记在途取消开关（幂等）：本机提交互斥段内已登记的沿用（受理先
 // 于 execute，取消触发自受理时刻起可达），避免 execute 重复登记覆盖既有开关。
 func (s *Service) regCancelOnce(taskID string) *cancelEntry {

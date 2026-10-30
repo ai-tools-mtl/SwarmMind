@@ -110,6 +110,15 @@ type Service struct {
 	mu    sync.Mutex
 	turns map[string]map[int64]*turnHandle
 
+	// 未收敛阻断集（W01-02 codex 终审必修①）：收敛尝试过但终态未确认落盘的受
+	// 理轮（键 → 受理 taskID）。阻断集条目的恢复重投一律不得进入执行（service
+	// execute 入口经 RecoveryBlocked 守卫拒绝，保持 accepted、绝不 spawn），直至
+	// 某次收敛成功消除（RetryUncertainTurn）——「MarkStarted 必败」只在收敛成功
+	// 后成立，收敛失败红线由本集独立封死。进程内态：重启由 RecoverUncertainTurns
+	// 重新收敛或重新阻断。
+	blockMu sync.Mutex
+	blocked map[turnKey]string
+
 	// 请求登记（requests.go）
 	reqMu    sync.Mutex
 	reqPath  string
@@ -161,7 +170,8 @@ func New(dataDir string, led *ledger.Ledger, opt Options) (*Service, error) {
 	// 允许根与 cwd 走同一归一策略（同一 resolveWorkspace 函数，codex 终审必修
 	// 项）：根尚不存在且祖先含符号链接时，若根整体回退 Abs+Clean 保留别名形态而
 	// cwd 消解了别名，同一路径会出现「根对不上 cwd」的自相矛盾授权失败——统一
-	// 走最近已存在祖先策略后两者恒归一为同一真身。
+	// 走最近已存在祖先策略后，同一文件系统状态下两者归一为同一真身（两次归一之
+	// 间符号链接目标变化不承诺一致，codex 终审建议修②）。
 	roots := make([]string, 0, len(opt.AllowedWorkspaceRoots))
 	for _, r := range opt.AllowedWorkspaceRoots {
 		if strings.TrimSpace(r) == "" {
@@ -181,6 +191,7 @@ func New(dataDir string, led *ledger.Ledger, opt Options) (*Service, error) {
 		log:        log,
 		confirm:    confirm,
 		turns:      map[string]map[int64]*turnHandle{},
+		blocked:    map[turnKey]string{},
 		reqPath:    filepath.Join(dataDir, requestsFileName),
 		reqs:       map[string]RequestRecord{},
 		reqLog:     log,
@@ -255,10 +266,11 @@ func (s *Service) AuthorizeWorkspace(cwd string) error {
 	return fmt.Errorf("%w: %q（归一 %q 不在任何允许根内）", ErrWorkspaceDenied, cwd, resolved)
 }
 
-// resolveWorkspace 会话工作区路径归一（根与 cwd 同一函数同一策略——允许根装配
-// 与授权判定对同一路径必须得到同一归一结果，否则「根留别名、cwd 消别名」令同
-// 路径自身授权失败，codex 终审必修项）：优先整体 EvalSymlinks；失败（路径尚不
-// 存在等）向上找最近的已存在祖先解析其真实路径后拼接剩余段——防止 /var→
+// resolveWorkspace 会话工作区路径归一（根与 cwd 同一函数同一策略——同一文件系
+// 统状态下允许根装配与授权判定对同一路径归一结果一致；两次归一之间符号链接目
+// 标变化不承诺一致，codex 终审建议修②。策略不一致时「根留别名、cwd 消别名」
+// 令同一路径自身授权失败，codex 终审必修项）：优先整体 EvalSymlinks；失败（路
+// 径尚不存在等）向上找最近的已存在祖先解析其真实路径后拼接剩余段——防止 /var→
 // /private/var 这类前缀别名让新建子目录被误判越界，且祖先为文件系统根 "/" 时拼
 // 接经 Join（内建 Clean）不产生 "//xxx" 双斜杠形态（codex 终审必修项，实测
 // /__missing/a/b 曾归一为 //__missing/a/b）；连祖先都解析不了（全链不存在）回

@@ -6,15 +6,21 @@ package service
 // 全部 fake CLI（testdata 资产，FAKE_* 驱动），绝不真实模型/网络；时间 UTC。
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/sessionop"
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
@@ -555,117 +561,322 @@ func TestW01WorkspaceAuthAndMutex(t *testing.T) {
 	}
 }
 
-// TestW01RestartConvergence N06：中断残留非终态轮 → 重启落待核对、无重跑。
-// 真 sessionx 内核（fake CLI）在场且留痕面接通：恢复重投路径 MarkStarted 必败、
-// fake CLI 零执行（标记文件不存在/留痕无 start/内核零会话）；普通任务不在收敛
-// 范围（codex 终审必修项 4：证据必须来自装配了内核的执行链）。
-func TestW01RestartConvergence(t *testing.T) {
-	ledDir := filepath.Join(t.TempDir(), "ledger")
-	led1, _, err := ledger.Open(ledDir)
+// ---------- 重启收敛两代夹具（N06 必修③重写 + 必修①失败注入共用） ----------
+
+// restartFixture 两代「重启」夹具：代 1 真内核建立会话（fake CLI 快跑，sessions.json
+// 持久）+ 账本预置残留 accepted send 轮与正对照普通任务；代 2 同 dataDir 重开内核
+//（残留轮在内核有真实绑定，守卫/阻断判定真实可达，杜绝 session_not_found 空转路
+// 径）、重开账本（可注入）。残留轮 cwd 与产物根分离（必修②回归前提），普通任务
+// 正对照用真实派生进程的 markerRunner（证明夹具能观察到执行真实发生）。
+type restartFixture struct {
+	t            *testing.T
+	fake         string
+	sessDir      string // sessionx 内核存储（两代共用）
+	ledDir       string // 账本（两代共用，代间 Close/Open 模拟重启）
+	ws           string // 会话工作目录（≠ 产物根）
+	artifactRoot string // coder/ctrl 共用产物根（必修②：残留轮旧 seed 键悬挂面）
+	sid          string
+	sendTask     protocol.Task // accepted send 残留轮（seq=2，CreatedAt 早于正对照）
+	ctrlTask     protocol.Task // 合法普通任务（正对照）
+	runLog       string        // 代 2 fake CLI 留痕面
+	touch        string        // 代 2 fake CLI 启动标记
+	ctrlMarker   string        // 正对照进程标记
+}
+
+// markerRunner 正对照执行器：真实派生进程写标记文件后返回 completed——「夹具能
+// 观察到真实执行」的基准面（负断言的零执行才有意义）。
+type markerRunner struct{ marker string }
+
+func (r markerRunner) Run(ctx context.Context, task protocol.Task) protocol.TaskResult {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/c", fmt.Sprintf("echo ok>%s", r.marker))
+	} else {
+		cmd = exec.Command("sh", "-c", "echo ok > '"+r.marker+"'")
+	}
+	if err := cmd.Run(); err != nil {
+		return protocol.TaskResult{Status: protocol.ResultFailed, ExitCode: 1, Error: "marker_runner: " + err.Error(), FinishedAt: protocol.NowUTC()}
+	}
+	return protocol.TaskResult{Status: protocol.ResultCompleted, ExitCode: 0, FinishedAt: protocol.NowUTC()}
+}
+
+// syncLogger 捕获 sessionop 运维日志（阻断集断言用）。
+type syncLogger struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *syncLogger) Printf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Fprintf(&l.b, format, args...)
+	l.b.WriteByte('\n')
+}
+
+func (l *syncLogger) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+func newRestartFixture(t *testing.T) *restartFixture {
+	t.Helper()
+	f := &restartFixture{
+		sessDir:      t.TempDir(),
+		ledDir:       filepath.Join(t.TempDir(), "ledger"),
+		ws:           filepath.Join(t.TempDir(), "ws"),
+		artifactRoot: t.TempDir(),
+		sid:          "s-restart00000000000000000000000000000000000001",
+		runLog:       filepath.Join(t.TempDir(), "run.log"),
+		touch:        filepath.Join(t.TempDir(), "touched.marker"),
+		ctrlMarker:   filepath.Join(t.TempDir(), "ctrl.marker"),
+	}
+	f.fake = buildSessionFakeCLI(t)
+	if err := os.MkdirAll(f.ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 代 1：真内核建立会话（快跑 fake，无留痕面）——代 2 内核按 sessions.json 续
+	// 接，残留 send 轮若误入执行链必然真实 spawn（负断言因此非空转）。
+	mgr1, err := sessionx.NewManager(f.sessDir, f.genSpecs(false), sessionx.Options{})
+	if err != nil {
+		t.Fatalf("代 1 装配内核: %v", err)
+	}
+	if _, _, err := mgr1.CreateWithID(context.Background(), f.sid, "coder", f.ws, "首轮"); err != nil {
+		t.Fatalf("代 1 建立会话: %v", err)
+	}
+	// 账本代 1：残留 accepted send 轮（cwd 与产物根分离）+ 正对照普通任务（同产
+	// 物根、CreatedAt 晚于残留轮——旧实现按产物根 seed 时残留轮为先到持有者）。
+	led1, _, err := ledger.Open(f.ledDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const sid = "s-restart00000000000000000000000000000000000001"
-	mk := func(id string, seq int64) protocol.Task {
-		now := protocol.NowUTC()
-		return protocol.Task{ID: id, TraceID: "tr-" + id, TargetNode: "n1", TargetAgent: "coder",
-			Input: protocol.TaskInput{Stdin: "p"}, SubmittedBy: "local",
-			IdemKey: "lsturn:" + sid + ":" + itoa64(seq), Status: protocol.StatusSubmitted,
-			CreatedAt: now, UpdatedAt: now, ExpireAt: now.Add(protocol.TaskRetention),
-			Session: &protocol.SessionTurnRef{SessionID: sid, TurnSeq: seq, Op: protocol.SessionTurnOpSend}}
-	}
 	now := protocol.NowUTC()
-	normal := protocol.Task{ID: "t-restart-normal", TraceID: "tr-n", TargetNode: "n1", TargetAgent: "coder",
+	f.sendTask = protocol.Task{ID: "t-restart-acc", TraceID: "tr-acc", TargetNode: "n1", TargetAgent: "coder",
+		Input: protocol.TaskInput{Stdin: "续轮"}, SubmittedBy: "local",
+		IdemKey: "lsturn:" + f.sid + ":2", Status: protocol.StatusSubmitted,
+		CreatedAt: now, UpdatedAt: now, ExpireAt: now.Add(protocol.TaskRetention),
+		Session: &protocol.SessionTurnRef{SessionID: f.sid, TurnSeq: 2, Op: protocol.SessionTurnOpSend, Cwd: f.ws}}
+	f.ctrlTask = protocol.Task{ID: "t-restart-normal", TraceID: "tr-n", TargetNode: "n1", TargetAgent: "ctrl",
 		Input: protocol.TaskInput{Stdin: "p"}, SubmittedBy: "local", Status: protocol.StatusSubmitted,
-		CreatedAt: now, UpdatedAt: now, ExpireAt: now.Add(protocol.TaskRetention)}
-	for _, tt := range []struct {
-		id  string
-		seq int64
-	}{{"t-restart-acc", 2}, {"t-restart-started", 3}} {
-		if err := led1.AcceptOrigin(mk(tt.id, tt.seq), ledger.OriginLocal); err != nil {
+		CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second), ExpireAt: now.Add(protocol.TaskRetention)}
+	for _, task := range []protocol.Task{f.sendTask, f.ctrlTask} {
+		if err := led1.AcceptOrigin(task, ledger.OriginLocal); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := led1.MarkStarted("t-restart-started"); err != nil {
-		t.Fatal(err)
-	}
-	if err := led1.AcceptOrigin(normal, ledger.OriginLocal); err != nil {
-		t.Fatal(err)
 	}
 	if err := led1.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return f
+}
 
-	// 「重启」：新账本 + 新 service（sessionop 注入 + 真 sessionx 内核）——恢复在
-	// Open/New 内完成。强化（codex 终审必修项 4）：内核与 fake CLI 真实在场且
-	// FAKE_LOG/FAKE_TOUCH 接到留痕面，「日志无 spawn」升级为「装了内核也不会
-	// spawn」的实证——恢复重投若误入执行链，fake CLI 启动必留 start 行与标记文件。
-	runLog := filepath.Join(t.TempDir(), "run.log")
-	touch := filepath.Join(t.TempDir(), "touched.marker")
-	mgr, err := sessionx.NewManager(t.TempDir(), map[string]sessionx.AgentSpec{"coder": {
-		Adapter: protocol.SessionAdapterCodex, Command: buildSessionFakeCLI(t),
-		PermissionMode: "workspace-write", TimeoutSec: 30,
-		Env: []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex,
-			"FAKE_THREAD_ID=thr-restart-1", "FAKE_LOG=" + runLog, "FAKE_TOUCH=" + touch},
-	}}, sessionx.Options{})
-	if err != nil {
-		t.Fatalf("装配内核: %v", err)
+// genSpecs 会话装配表：withTrail = 代 2（fake CLI 接留痕面）；两代适配器/权限相
+// 同（内核绑定守卫不许漂移），仅留痕环境不同。
+func (f *restartFixture) genSpecs(withTrail bool) map[string]sessionx.AgentSpec {
+	env := []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex, "FAKE_THREAD_ID=thr-restart-1"}
+	if withTrail {
+		env = append(env, "FAKE_LOG="+f.runLog, "FAKE_TOUCH="+f.touch)
 	}
-	led2, rec, err := ledger.Open(ledDir)
+	return map[string]sessionx.AgentSpec{"coder": {
+		Adapter: protocol.SessionAdapterCodex, Command: f.fake,
+		PermissionMode: "workspace-write", TimeoutSec: 30, Env: env,
+	}}
+}
+
+// openGen2 代 2「重启」：重开账本（可注入）+ 同 dataDir 内核 + sessionop + service
+//（正对照 runner 挂 ctrl agent，两 agent 共用产物根）。返回恢复清单交生产同构的
+// 恢复重投循环使用。
+func (f *restartFixture) openGen2(t *testing.T, inject func(op, stage string) error, opsLog sessionop.Logger) (*Service, *sessionx.Manager, *ledger.Ledger, *ledger.Recovery, *sessionop.Service) {
+	t.Helper()
+	var led *ledger.Ledger
+	var rec *ledger.Recovery
+	var err error
+	if inject != nil {
+		led, rec, err = ledger.OpenForTest(f.ledDir, inject)
+	} else {
+		led, rec, err = ledger.Open(f.ledDir)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = led2.Close() })
-	ops, err := sessionop.New(t.TempDir(), led2, sessionop.Options{})
+	t.Cleanup(func() { _ = led.Close() })
+	mgr, err := sessionx.NewManager(f.sessDir, f.genSpecs(true), sessionx.Options{})
+	if err != nil {
+		t.Fatalf("代 2 装配内核: %v", err)
+	}
+	ops, err := sessionop.New(t.TempDir(), led, sessionop.Options{Log: opsLog})
 	if err != nil {
 		t.Fatal(err)
 	}
 	bus := transport.NewBus()
-	svc := New(Config{Ledger: led2, Runners: map[string]Runner{},
-		ArtifactRoots: map[string]string{"coder": t.TempDir()}, Sessions: mgr, SessionOps: ops}, bus.Endpoint("n1"))
+	svc := New(Config{
+		Ledger:        led,
+		Runners:       map[string]Runner{"ctrl": markerRunner{marker: f.ctrlMarker}},
+		ArtifactRoots: map[string]string{"coder": f.artifactRoot, "ctrl": f.artifactRoot},
+		Sessions:      mgr,
+		SessionOps:    ops,
+	}, bus.Endpoint("n1"))
 	t.Cleanup(svc.Close)
+	return svc, mgr, led, rec, ops
+}
 
-	// started 残留：ledger.recover 既有降级（needs_review/node_restarted_midway）
-	e3, ok := led2.Get("t-restart-started")
-	if !ok || e3.State != ledger.StateFinished || e3.Result.Status != protocol.ResultNeedsReview ||
-		e3.Result.Error != protocol.CodeNodeRestartedMidway {
-		t.Fatalf("started 残留应降级待核对: ok=%v state=%v", ok, e3.State)
+// waitCtrlFinished 正对照有界完成信号：普通任务真实执行并落 completed 终态。
+func (f *restartFixture) waitCtrlFinished(t *testing.T, led *ledger.Ledger) {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, ok := led.Get(f.ctrlTask.ID); ok && e.State == ledger.StateFinished && e.Result != nil && e.Result.Status == protocol.ResultCompleted {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	// accepted 残留：sessionop 收敛为待核对（不重跑）
-	e2, ok := led2.Get("t-restart-acc")
-	if !ok || e2.State != ledger.StateFinished || e2.Result.Status != protocol.ResultNeedsReview ||
-		e2.Result.Error != protocol.CodeNodeRestartedMidway {
-		t.Fatalf("accepted 会话残留应落待核对: ok=%v state=%v", ok, e2.State)
+	e, _ := led.Get(f.ctrlTask.ID)
+	t.Fatalf("8s 内正对照任务未完成（夹具无法观察真实执行，负断言失据）: %+v", e)
+}
+
+// waitHolderEmpty 有界等待互斥键持有者清空（执行 goroutine 走完取锁/放锁全程的
+// 完成信号，替代裸 sleep；超时即锁悬挂）。
+func waitHolderEmpty(t *testing.T, svc *Service, key string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.wsLocks.holder(key) == "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	// 普通任务不在收敛范围（既有恢复语义保持）
-	if en, _ := led2.Get("t-restart-normal"); en.State != ledger.StateAccepted {
+	t.Fatalf("5s 内互斥键 %s 持有者未清空（锁悬挂）: %q", key[:8], svc.wsLocks.holder(key))
+}
+
+// assertNoSessionExecution 负断言（内核在场实证）：残留会话轮零执行——启动标记
+// 不存在、留痕无 start、内核轮数不增（残留轮在内核有真实绑定，任何绕过守卫的执
+// 行都会在此留痕）。
+func (f *restartFixture) assertNoSessionExecution(t *testing.T, mgr *sessionx.Manager) {
+	t.Helper()
+	if _, serr := os.Stat(f.touch); serr == nil {
+		t.Fatal("残留会话轮不得执行 fake CLI（启动标记文件存在 = 误入执行链）")
+	}
+	if b, rerr := os.ReadFile(f.runLog); rerr == nil && strings.Contains(string(b), "start") {
+		t.Fatalf("残留会话轮不得重跑 CLI: %s", b)
+	}
+	if sess, ok := mgr.Status(f.sid); !ok || sess.TurnCount != 1 {
+		t.Fatalf("内核轮数不得虚增（守卫必须真实拦住续轮）: ok=%v turnCount=%d", ok, sess.TurnCount)
+	}
+}
+
+// TestW01RestartConvergence N06（必修③重写）：两代夹具下重启收敛、恢复重投不重
+// 跑——正对照普通任务被正常重投执行（有界完成 + 进程标记，证明夹具能观察到真实
+// 执行）；会话残留轮（内核有真实绑定）收敛后重投 MarkStarted 必败、fake CLI 零执
+// 行、内核轮数不增；cwd 锁与产物根锁均无悬挂（必修②：cwd ≠ 产物根，残留轮收敛
+// 退出后普通任务正常获得产物根锁执行，不悬挂）。
+func TestW01RestartConvergence(t *testing.T) {
+	f := newRestartFixture(t)
+	svc, mgr, led, rec, _ := f.openGen2(t, nil, nil)
+
+	// 收敛：残留 accepted send 轮已落待核对终态；普通任务不在收敛范围
+	e, ok := led.Get(f.sendTask.ID)
+	if !ok || e.State != ledger.StateFinished || e.Result == nil ||
+		e.Result.Status != protocol.ResultNeedsReview || e.Result.Error != protocol.CodeNodeRestartedMidway {
+		t.Fatalf("accepted 会话残留应落待核对终态: ok=%v state=%v result=%+v", ok, e.State, e.Result)
+	}
+	if en, _ := led.Get(f.ctrlTask.ID); en.State != ledger.StateAccepted {
 		t.Fatalf("普通 accepted 任务不得被收敛: %+v", en)
 	}
-	// 绝不重跑：恢复清单中的会话轮重投不 spawn（内核在场实证）——先证恢复重投
-	// 路径 MarkStarted 必败（条目已收敛终态，账本拒绝 started 态迁移，执行链在
-	// spawn 前如实终止），再真实重投并断言 fake CLI 零执行（启动标记文件不存在、
-	// 留痕无 start、内核零会话，codex 终审必修项 4）。
+
+	// 恢复重投（生产同构：Reschedule 清单全量交回执行，不跳过任何任务——消除
+	// 「未调度任务占锁」干扰）
 	for _, task := range rec.Reschedule {
-		if task.Session == nil {
-			continue // 普通任务恢复归既有调度语义，本用例不覆盖
-		}
-		if err := led2.MarkStarted(task.ID); !errors.Is(err, ledger.ErrWrongState) {
-			t.Fatalf("已收敛终态条目恢复重投 MarkStarted 必败: task=%s err=%v", task.ID, err)
-		}
 		svc.Execute(task)
 	}
-	time.Sleep(300 * time.Millisecond)
-	if _, serr := os.Stat(touch); serr == nil {
-		t.Fatal("恢复重投不得执行 fake CLI（启动标记文件存在 = 误入执行链）")
+	// 正对照有界完成：普通任务真实执行（进程标记落盘 + completed 终态）
+	f.waitCtrlFinished(t, led)
+	if _, err := os.Stat(f.ctrlMarker); err != nil {
+		t.Fatalf("正对照进程标记未落盘（夹具未观察到真实执行）: %v", err)
 	}
-	if b, rerr := os.ReadFile(runLog); rerr == nil && strings.Contains(string(b), "start") {
-		t.Fatalf("恢复重投不得重跑 CLI: %s", b)
+	// 负断言：会话残留轮零执行（标记不存在/留痕无 start/内核轮数不增）
+	f.assertNoSessionExecution(t, mgr)
+	// 锁不悬挂（必修②）：会话 cwd 键与产物根键持有者均清空
+	waitHolderEmpty(t, svc, agentid.WorkspaceID(f.ws))
+	waitHolderEmpty(t, svc, agentid.WorkspaceID(f.artifactRoot))
+	// 直接状态断言（补充而非替代执行链证据）：已收敛条目 MarkStarted 必败
+	if err := led.MarkStarted(f.sendTask.ID); !errors.Is(err, ledger.ErrWrongState) {
+		t.Fatalf("已收敛终态条目 MarkStarted 必败: %v", err)
 	}
-	if n := len(mgr.List()); n != 0 {
-		t.Fatalf("重启收敛后内核不得新建任何会话: %d", n)
-	}
-	if e, _ := led2.Get("t-restart-acc"); e.State != ledger.StateFinished {
+	if e, _ := led.Get(f.sendTask.ID); e.State != ledger.StateFinished {
 		t.Fatalf("收敛终态应保持: %+v", e)
+	}
+}
+
+// TestW01RestartConvergeFailBlocksRerun 必修①：收敛落盘失败 → 残留条目进未收敛
+// 阻断集 → 恢复重投被 execute 入口守卫拒绝（保持 accepted、fake CLI 零执行、
+// 阻断日志在、seed 锁随拒绝释放）；注入解除后重投入口就地重试收敛成功 → 消除阻
+// 断、条目转待核对终态，仍不执行。正对照证明零执行观察非空转。
+func TestW01RestartConvergeFailBlocksRerun(t *testing.T) {
+	f := newRestartFixture(t)
+	var failMarkFinished atomic.Bool
+	failMarkFinished.Store(true)
+	logs := &syncLogger{}
+	svc, mgr, led, _, ops := f.openGen2(t, func(op, stage string) error {
+		if op == "MarkFinished" && failMarkFinished.Load() {
+			return errors.New("boom: disk full")
+		}
+		return nil
+	}, logs)
+
+	// 装配期收敛落盘失败：条目保持 accepted 且进入阻断集（阻断日志在）
+	if e, _ := led.Get(f.sendTask.ID); e.State != ledger.StateAccepted {
+		t.Fatalf("收敛落盘失败条目应保持 accepted: %+v", e)
+	}
+	if !ops.RecoveryBlocked(f.sid, 2) {
+		t.Fatal("收敛失败条目应进入未收敛阻断集")
+	}
+	if s := logs.String(); !strings.Contains(s, "未收敛阻断集") {
+		t.Fatalf("阻断登记日志缺失: %s", s)
+	}
+
+	// 恢复重投（阻断态）：守卫拒绝执行——条目保持非终态、fake CLI 零执行、重试
+	// 收敛仍失败日志在、重建 seed 锁随拒绝释放（不悬挂同键后续任务）。拒绝判定
+	// 在 execute 调用方 goroutine 内同步完成；有界等待兜底任何残余在途 goroutine，
+	// 保证负断言观察到的是尘埃落定后的实物。
+	svc.Execute(f.sendTask)
+	waitHolderEmpty(t, svc, agentid.WorkspaceID(f.ws))
+	if e, _ := led.Get(f.sendTask.ID); e.State != ledger.StateAccepted {
+		t.Fatalf("被阻断重投不得落终态也不得执行（应保持 accepted）: %+v", e)
+	}
+	if !ops.RecoveryBlocked(f.sid, 2) {
+		t.Fatal("重试收敛失败后应保持阻断")
+	}
+	if s := logs.String(); !strings.Contains(s, "重试收敛仍失败") {
+		t.Fatalf("重试收敛失败日志缺失: %s", s)
+	}
+	f.assertNoSessionExecution(t, mgr)
+	if h := svc.wsLocks.holder(agentid.WorkspaceID(f.ws)); h != "" {
+		t.Fatalf("被拒绝执行的残留轮不得悬挂重建 seed 锁: holder=%q", h)
+	}
+
+	// 注入解除：同任务再次重投 → 守卫就地重试收敛成功 → 消除阻断、转待核对终
+	// 态，MarkStarted 必败仍拦住执行
+	failMarkFinished.Store(false)
+	svc.Execute(f.sendTask)
+	waitHolderEmpty(t, svc, agentid.WorkspaceID(f.ws))
+	if ops.RecoveryBlocked(f.sid, 2) {
+		t.Fatal("重试收敛成功后应消除阻断")
+	}
+	e, _ := led.Get(f.sendTask.ID)
+	if e.State != ledger.StateFinished || e.Result == nil ||
+		e.Result.Status != protocol.ResultNeedsReview || e.Result.Error != protocol.CodeNodeRestartedMidway {
+		t.Fatalf("重试收敛应落待核对终态: %+v", e)
+	}
+	if s := logs.String(); !strings.Contains(s, "重试收敛成功") {
+		t.Fatalf("重试收敛成功日志缺失: %s", s)
+	}
+	f.assertNoSessionExecution(t, mgr)
+
+	// 正对照：合法普通任务被正常重投执行（证明零执行断言非空转）
+	svc.Execute(f.ctrlTask)
+	f.waitCtrlFinished(t, led)
+	if _, err := os.Stat(f.ctrlMarker); err != nil {
+		t.Fatalf("正对照进程标记未落盘（夹具未观察到真实执行）: %v", err)
 	}
 }
 
@@ -702,7 +913,7 @@ func TestW01CancelPersistFail(t *testing.T) {
 	}
 }
 
-// itoa64 测试用序号转十进制串。
+// itoa64 测试用序号转十进制串（仅供需要十进制幂等键拼装的用例使用）。
 func itoa64(n int64) string {
 	if n == 0 {
 		return "0"

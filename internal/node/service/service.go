@@ -202,27 +202,19 @@ func New(cfg Config, tr transport.Transport) *Service {
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
 	}
-	// 互斥表账本重建（P1.5/SPEC 4.10）：accepted/started 未终态条目按 (created_at,
-	// id) 确定序 seed——同 workspace 多条目时最早任务成为持有者，其余恢复任务
-	// 在 Reschedule 同序交回后 FIFO 排队，恢复执行序确定（账本 map 遍历无序，
-	// 任取持有者会破坏确定序，P1.5 二轮必修2）。
-	var reseed []ledger.Entry
-	for _, e := range cfg.Ledger.View() {
-		if e.State != ledger.StateAccepted && e.State != ledger.StateStarted {
-			continue
-		}
-		reseed = append(reseed, e)
-	}
-	sort.Slice(reseed, func(i, j int) bool {
-		a, b := reseed[i].Task, reseed[j].Task
-		if !a.CreatedAt.Equal(b.CreatedAt) {
-			return a.CreatedAt.Before(b.CreatedAt)
-		}
-		return a.ID < b.ID
-	})
-	for _, e := range reseed {
-		if ws := s.wsByAgent[e.Task.TargetAgent]; ws != "" {
-			s.wsLocks.seed(ws, e.Task.ID) // 同键多条目时首个（最早）占锁
+	// 会话轮重启不确定收敛（W01-02 RFC §6）——先于互斥表重建（W01-02 codex 终审
+	// 必修②）：收敛成功的条目转终态，下方重建占锁按账本现态跳过（不占「永不执
+	// 行」条目的锁）；收敛失败条目留在未收敛阻断集（sessionop），仍 accepted 被
+	// 占锁，恢复重投被 execute 入口守卫拒绝时随守卫释放。装配期一次性把非终态受
+	// 理轮落待核对终态——先于任何恢复重投（Reschedule 清单虽在 ledger.Open 内先
+	// 期生成，执行入口对已终态条目 MarkStarted 必败、对阻断条目守卫拒绝），绝不
+	// 自动重跑、绝不重投 CLI。
+	if s.sessionOps != nil {
+		n, err := s.sessionOps.RecoverUncertainTurns(protocol.NowUTC())
+		if err != nil {
+			log.Printf("[node] 会话轮重启收敛未完成（已收敛 %d 条，剩余条目已阻断恢复执行、下次启动重试）: %v", n, err)
+		} else if n > 0 {
+			log.Printf("[node] 会话轮重启收敛：非终态受理轮 %d 条已落待核对终态（不重跑）", n)
 		}
 	}
 	// 孤儿清扫（maturity-orphan-guard）：崩溃重启后，账本 recover 收集的孤儿
@@ -246,15 +238,28 @@ func New(cfg Config, tr transport.Transport) *Service {
 	// 诚实声明（R2 建议修）：降级持久化与本次清扫之间若再次崩溃，内存清扫清单
 	// 丢失且下次启动条目已终态不再收集——清扫是一次性尽力动作（安全侧漏清扫），
 	// 非必达保证；任务终态已由 recover 降级收敛，主人可见。
-	// 会话轮重启不确定收敛（W01-02 RFC §6）：装配期一次性把非终态受理轮落待核对
-	// 终态——先于任何恢复重投（Reschedule 清单虽在 ledger.Open 内先期生成，恢复
-	// 执行入口 MarkStarted 对已终态条目必败），绝不自动重跑、绝不重投 CLI。
-	if s.sessionOps != nil {
-		n, err := s.sessionOps.RecoverUncertainTurns(protocol.NowUTC())
-		if err != nil {
-			log.Printf("[node] 会话轮重启收敛未完成（已收敛 %d 条，剩余条目下次启动重试）: %v", n, err)
-		} else if n > 0 {
-			log.Printf("[node] 会话轮重启收敛：非终态受理轮 %d 条已落待核对终态（不重跑）", n)
+	// 互斥表账本重建（P1.5/SPEC 4.10）：accepted/started 未终态条目按 (created_at,
+	// id) 确定序 seed——同 workspace 多条目时最早任务成为持有者，其余恢复任务
+	// 在 Reschedule 同序交回后 FIFO 排队，恢复执行序确定（账本 map 遍历无序，
+	// 任取持有者会破坏确定序，P1.5 二轮必修2）。占锁键与执行取锁同口径
+	//（taskWsKey，必修②：会话轮按会话 cwd 键，普通任务按产物根键）。
+	var reseed []ledger.Entry
+	for _, e := range cfg.Ledger.View() {
+		if e.State != ledger.StateAccepted && e.State != ledger.StateStarted {
+			continue
+		}
+		reseed = append(reseed, e)
+	}
+	sort.Slice(reseed, func(i, j int) bool {
+		a, b := reseed[i].Task, reseed[j].Task
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.Before(b.CreatedAt)
+		}
+		return a.ID < b.ID
+	})
+	for _, e := range reseed {
+		if ws := s.taskWsKey(e.Task); ws != "" {
+			s.wsLocks.seed(ws, e.Task.ID) // 同键多条目时首个（最早）占锁
 		}
 	}
 	tr.Subscribe(s.HandleFrame)
@@ -369,6 +374,36 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 	s.execute(task)
 }
 
+// rejectUnconvergedRecovery 会话恢复轮的未收敛阻断守卫（W01-02 RFC §6 定案，
+// codex 终审必修①）：收敛尝试过但终态未确认落盘的条目留在 sessionop 阻断集，
+// 其恢复重投一律不得进入执行——「MarkStarted 必败」只在收敛成功后成立，收敛失
+// 败（磁盘满等）条目仍 accepted，不阻断就会二次执行已中断的 CLI 轮。命中即先就
+// 地重试收敛一次（成功 → 消除阻断放行，条目已终态由 MarkStarted 必败拦住）；
+// 仍阻断则保持 accepted 拒绝执行（绝不 spawn，句柄未登记、CancelTurn 走既有
+// bounded 等待如实报未登记），并释放启动重建占有的互斥锁（必修②：拒绝执行条目
+// 不得悬挂 seed 锁）。返回 true 表示已拒绝（调用方直接返回）。
+func (s *Service) rejectUnconvergedRecovery(task protocol.Task) bool {
+	if task.Session == nil || task.Session.TurnSeq <= 0 || s.sessionOps == nil {
+		return false
+	}
+	sid, seq := task.Session.SessionID, task.Session.TurnSeq
+	if !s.sessionOps.RecoveryBlocked(sid, seq) {
+		return false
+	}
+	if s.sessionOps.RetryUncertainTurn(sid, seq, task.ID, protocol.NowUTC()) {
+		log.Printf("[node] 会话恢复轮重试收敛成功（阻断消除，条目已终态不再执行）task=%s session=%s seq=%d", task.ID, sid, seq)
+		return false
+	}
+	log.Printf("[node] 会话恢复轮被阻断（收敛终态未落盘），保持 accepted 不执行不 spawn task=%s session=%s seq=%d", task.ID, sid, seq)
+	// hub 重投入口在 handleOffer 相邻语句已登记句柄：拒绝执行即收敛（防 CancelTurn
+	// 等待悬挂）；恢复重投路径无句柄时为 no-op。
+	s.abortSessionTurn(task)
+	if ws := s.taskWsKey(task); ws != "" {
+		s.wsLocks.release(ws, task.ID) // 重建 seed 锁随拒绝执行释放（非持有者为 no-op）
+	}
+	return true
+}
+
 // execute 异步执行单任务（并发受信号量限制）：started 落盘 → 发 task_started →
 // spawn；finished+result 落盘 → 发 task_result。任务 ctx 独立于会话（重连不断
 // 任务，SPEC 五）但随服务关闭（Close→stop）取消——取消即整组终止子进程，并按
@@ -386,13 +421,14 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 // 取消则账本落 cancelled 终态（不再恢复执行）。授予与取消/关闭竞态时按持有
 // 走下方检查退出（defer 释放，无执行副作用）。
 func (s *Service) execute(task protocol.Task) {
-	ws := s.wsByAgent[task.TargetAgent]
-	// 会话轮互斥键扩展（W01-02 RFC §5，同一 wsMutex 不建第二套互斥）：create/send
-	// 按会话 cwd 真实路径派生（符号链接别名同键），同工作区的会话与会话、会话与
-	// 普通任务同键串行；close 任务与普通任务沿 agent 产物根键（既有行为零变化）。
-	if k := s.sessionTurnWsKey(task); k != "" {
-		ws = k
+	if s.rejectUnconvergedRecovery(task) {
+		return
 	}
+	// workdir 互斥键（W01-02 codex 终审必修②）：与启动重建占锁同一 taskWsKey 口
+	// 径——会话受理轮按会话 cwd 真实路径派生（符号链接别名同键），同工作区的会
+	// 话与会话、会话与普通任务同键串行；close 任务与普通任务沿 agent 产物根键
+	//（既有行为零变化）。
+	ws := s.taskWsKey(task)
 	var wake <-chan struct{} // 非 nil：已登记排队，release 授予时关闭
 	if ws != "" {
 		wake = s.wsLocks.reserve(ws, task.ID) // nil=已持有（含自持重投）
