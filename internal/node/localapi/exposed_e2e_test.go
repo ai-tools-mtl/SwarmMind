@@ -120,6 +120,7 @@ func TestExposedToggleE2E(t *testing.T) {
 		LocalToken:       "tok-local",
 		PrimeToken:       "tok-prime",
 		PrimeAgent:       "echo",
+		McpAccess:        NewMcpAccessMemory(true), // W02-01：prime_token 编排断言前提=显式启用授权态（AC20 按新规则改写，RFC §八）
 	}).Handler())
 	t.Cleanup(srv.Close)
 

@@ -62,6 +62,10 @@ func TestLocalAuthGate(t *testing.T) {
 		LocalToken: "tok-local",
 		PrimeToken: "tok-prime",
 		PrimeAgent: "echo",
+		// W02-01（AC20 按新规则改写，RFC §八）：prime_token 编排断言的前提是显式
+		// 启用授权态；禁用缺省 403 mcp_disabled 由
+		// TestMcpAccessAuthorizationMatrix 锁定。
+		McpAccess: NewMcpAccessMemory(true),
 	}).Handler())
 	t.Cleanup(srv.Close)
 
@@ -174,6 +178,7 @@ func TestSubmitCrossNodeRejected(t *testing.T) {
 		LocalToken: "tok-local",
 		PrimeToken: "tok-prime",
 		PrimeAgent: "echo",
+		McpAccess:  NewMcpAccessMemory(true), // W02-01：prime 过编排门需显式启用态（同 TestLocalAuthGate 改写理由）
 	}).Handler())
 	t.Cleanup(srv.Close)
 

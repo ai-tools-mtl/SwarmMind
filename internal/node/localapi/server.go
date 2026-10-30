@@ -75,9 +75,13 @@ type Config struct {
 	// prime_token，轮换经 SetPrimeToken 即时更新）。空 = 编排接口恒 403。
 	PrimeToken string
 	// PrimeAgent node.yaml prime_agent 声明（唯一总理，仅展示与激活开关；空 =
-	// 尚未钦定，编排接口保持 403，矩阵 #15）。构造初值；运行期经 SetPrimeAgent
-	// 即时更新（declare 钦定端点，prime.go）。
+	// 尚未钦定。构造初值；运行期经 SetPrimeAgent 即时更新（declare 钦定端点，
+	// prime.go）。W02-01 起声明与调用权解耦：本字段不再参与编排门判定）。
 	PrimeAgent string
+	// McpAccess MCP 编排授权状态（W02-01：调用权与管家角色解耦的持久开关，
+	// mcpaccess.go；prime_token 编排请求需显式 enabled，local_token 恒放行）。
+	// nil = 内存缺省禁用（显式 enabled 是唯一启用态；门按禁用判定，PUT 端点 503）。
+	McpAccess *McpAccess
 	// DeclareConfigPath node.yaml 路径（declare 钦定 round-trip 写盘目标，与
 	// ConfigOps/SetupOps 同纪律写启动时 --config 原路径；空 = declare 端点 503）。
 	DeclareConfigPath string
@@ -248,7 +252,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/local/config", s.authLocal(s.handlePutConfig))
 	mux.HandleFunc("POST /api/v1/local/agents/reload", s.authLocal(s.handleAgentsReload))
 	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
-	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handlePrimeRotate))
+	mux.HandleFunc("POST /api/v1/local/mcp/access/rotate", s.authLocal(s.handleMcpAccessRotate)) // 换发共享编排凭据（W02-01，一次明文/No-store）
+	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))     // 旧别名 → 同一实现（兼容不删，RFC §3.3）
+	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))           // 授权状态（凭据仅脱敏）
+	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))           // 主人显式启停
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
 	mux.HandleFunc("POST /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelCreate))
@@ -299,10 +306,13 @@ func (s *Server) authLocal(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// authOrchestrate 编排门（方案 3.2.1 v2，2026-10-22 鉴权模型裁决）：local_token
-// 与 prime_token 双凭证皆可（网页是主人的操作界面，主人派单天然合法；总理经
-// MCP 用 prime_token）。先认证（401）后鉴权（403），拒绝理由按优先级人话给出
-// ——setup 模式未接入 > 未钦定总理 > 总理凭证未配置。凭证级别不再是拒绝理由。
+// authOrchestrate 编排门（W02-01 解耦重写，docs/tasks/v3/W02-01-rfc.md §四；
+// 2026-10-22 双凭证裁决延续）：先认证（401）后鉴权（403）。local_token（主人）
+// 恒放行——调用权不依赖管家声明与授权开关；prime_token（共享编排凭据）需显式
+// mcpaccess enabled（禁用 → 403 mcp_disabled 人话指路主人控制台；调用权与管家
+// 角色解耦，启用无需钦定管家）。setup 模式编排一律未激活（403 prime_required
+// 码与文案逐字节保留——旧客户端兼容锚点，RFC §4.2）。只读面（authRead）不受
+// 开关门控：disabled 只拦编排不拦查询。
 func (s *Server) authOrchestrate(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, ok := bearer(r)
@@ -318,12 +328,14 @@ func (s *Server) authOrchestrate(next http.HandlerFunc) http.HandlerFunc {
 			writeErr(w, http.StatusForbidden, "prime_required", "setup 模式编排接口未激活：请先在「接入中心端」完成接入并配置 agents")
 			return
 		}
-		if s.primeAgent() == "" {
-			writeErr(w, http.StatusForbidden, "prime_required", "尚未钦定统筹，编排接口未激活；本机主人可在控制台「本机统筹」区钦定（写入 node.yaml prime_agent 即时生效，无需重启）")
+		if level == levelRead { // local_token：主人恒放行
+			next(w, r)
 			return
 		}
-		if s.primeToken() == "" {
-			writeErr(w, http.StatusForbidden, "prime_required", "统筹凭证未配置（data_dir/prime_token 缺失且生成失败），编排接口未激活")
+		// prime_token：共享编排凭据，显式启用是唯一放行态。
+		if !s.cfg.McpAccess.Enabled() {
+			writeErr(w, http.StatusForbidden, "mcp_disabled",
+				"编排授权未启用：请由本机主人在控制台启用 MCP 编排授权后重试（调用权与管家角色已解耦，启用无需钦定管家；本机主人 local_token 派单不受影响）")
 			return
 		}
 		next(w, r)

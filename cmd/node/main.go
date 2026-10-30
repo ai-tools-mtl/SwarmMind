@@ -384,14 +384,37 @@ func run(cfgPath, dataDirOverride string) error {
 		log.Printf("[node] 未配置 local_token：已生成随机令牌并存 %s（0600）", localTokenPath)
 	}
 	primeTokenPath := filepath.Join(cfg.DataDir, "prime_token")
+	// MCP 编排授权状态（W02-01，docs/tasks/v3/W02-01-rfc.md §二）：迁移先于
+	// prime_token 自动生成——「只有启动自动生成的 token 文件不能视为授权」要求
+	// 迁移判定时点在生成之前（旧配置=node.yaml 已声明 prime_agent 且盘上已有
+	// 旧 prime_token → enabled；其余含全新实例一律 disabled）。落盘后显式状态
+	// 即唯一真相：重启/管家增删不再重推导。
+	mcpAccess, migrated, err := localapi.OpenMcpAccess(cfg.DataDir, cfg.PrimeAgent, primeTokenPath)
+	if err != nil {
+		return fmt.Errorf("初始化 MCP 编排授权状态失败: %w", err)
+	}
 	primeTok, err := ensureTokenFile(primeTokenPath)
 	if err != nil {
 		return fmt.Errorf("生成 prime_token 失败: %w", err)
 	}
-	if cfg.PrimeAgent == "" {
-		log.Printf("[node] 尚未钦定总理（prime_agent 未声明）：prime_token 已生成于 %s 但不分发，编排接口保持 403", primeTokenPath)
+	accessStateWord := "禁用"
+	if mcpAccess.Enabled() {
+		accessStateWord = "启用"
+	}
+	accessStatePath := filepath.Join(cfg.DataDir, "mcp_access.json")
+	if migrated {
+		if cfg.PrimeAgent != "" {
+			log.Printf("[node] MCP 编排授权迁移：旧配置（prime_agent=%s、prime_token 文件在位）推导为%s，已落盘 %s——此后显式状态为唯一真相，重启/管家增删不再重推导", cfg.PrimeAgent, accessStateWord, accessStatePath)
+		} else {
+			log.Printf("[node] MCP 编排授权迁移：未声明 prime_agent，推导为禁用（默认禁用），已落盘 %s", accessStatePath)
+		}
 	} else {
-		log.Printf("[node] 本机总理：%s（编排凭证 %s，0600）", cfg.PrimeAgent, primeTokenPath)
+		log.Printf("[node] MCP 编排授权：%s（%s）", accessStateWord, accessStatePath)
+	}
+	if cfg.PrimeAgent == "" {
+		log.Printf("[node] 尚未钦定管家（prime_agent 未声明）：prime_token 已生成于 %s（0600）；外部调用权由 MCP 编排授权开关独立决定（主人可不选管家启用）", primeTokenPath)
+	} else {
+		log.Printf("[node] 本机管家：%s（共享编排凭据 %s，0600；可用性由 MCP 编排授权开关决定）", cfg.PrimeAgent, primeTokenPath)
 	}
 	// 轮换回调（方案 3.2.1 一键轮换）：重生成 + 原子写盘，返回新凭证；内存重载
 	// 由 localapi 在同一 muPrime 互斥段内完成——生成→写盘→更新不交错（返工 #4）。
@@ -429,6 +452,7 @@ func run(cfgPath, dataDirOverride string) error {
 		LocalToken: localToken,
 		PrimeToken: primeTok,
 		PrimeAgent: cfg.PrimeAgent,
+		McpAccess:  mcpAccess, // 编排授权开关（W02-01：prime_token 门控真相源）
 		// declare 钦定端点（方案 3.2.1 网页化）：写启动时 --config 原路径 +
 		// 回填本机监听（应答 mcp_config 的 SWARM_NODE_URL 数据源）。
 		DeclareConfigPath: cfgPath,

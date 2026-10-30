@@ -53,11 +53,12 @@ func doJSON(t *testing.T, srv *httptest.Server, token, method, path, body string
 }
 
 // TestAuthPrime403Priority 编排门 403 分支（server.go authOrchestrate，先认证后
-// 鉴权、拒绝理由按优先级给出）：setup 态 > 未钦定总理 > 总理凭证未配置，各自
-// 人话信息可区分。2026-10-22 鉴权模型裁决后编排双凭证（local/prime 皆可），
-// 原「凭证级别不足」403 分支已删除——三种拒绝分支均在编排门内拒绝（Service 可
-// 为 nil）。双凭证放行行为由 TestPrimeDeclareImmediateEffect /
-// TestPrimeRotateInvalidatesOldToken 的 202 断言覆盖。
+// 鉴权）。W02-01 解耦重写（AC20 按新规则改写，RFC §八）：setup 态 403
+// prime_required 逐字节保留（旧客户端兼容锚点）；原「未钦定总理」分支随解耦退役
+// ——改断言为 prime_token 禁用态 403 mcp_disabled（人话指路主人控制台）；原
+// 「统筹凭证未配置」分支退役——local_token（主人）恒放行，断言直达业务层（无
+// Service 构造下 503 internal 即门已放行的证明）。禁用态/启用态全矩阵见
+// TestMcpAccessAuthorizationMatrix。
 func TestAuthPrime403Priority(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -72,16 +73,16 @@ func TestAuthPrime403Priority(t *testing.T) {
 			want:  "setup 模式编排接口未激活",
 		},
 		{
-			name:  "未钦定统筹",
+			name:  "prime_token禁用态_mcp_disabled",
 			cfg:   Config{NodeID: "nodeA", PrimeAgent: "", PrimeToken: "tok-prime", LocalToken: "tok-local"},
 			token: "tok-prime",
-			want:  "尚未钦定统筹",
+			want:  "mcp_disabled",
 		},
 		{
-			name:  "统筹凭证未配置",
+			name:  "主人恒放行_直达业务层",
 			cfg:   Config{NodeID: "nodeA", PrimeAgent: "echo", PrimeToken: "", LocalToken: "tok-local"},
-			token: "tok-local", // local_token 过认证（levelRead），命中 PrimeToken 空分支
-			want:  "统筹凭证未配置",
+			token: "tok-local",
+			want:  "任务服务未装配",
 		},
 	}
 	for _, tc := range cases {
@@ -90,6 +91,18 @@ func TestAuthPrime403Priority(t *testing.T) {
 			t.Cleanup(srv.Close)
 			code, out := doJSON(t, srv, tc.token, http.MethodPost, "/api/v1/tasks",
 				`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
+			if tc.want == "mcp_disabled" {
+				if code != http.StatusForbidden || !strings.Contains(out, tc.want) {
+					t.Fatalf("禁用态 prime 编排应 403 mcp_disabled, got %d: %s", code, out)
+				}
+				return
+			}
+			if tc.want == "任务服务未装配" {
+				if code != http.StatusServiceUnavailable || !strings.Contains(out, tc.want) {
+					t.Fatalf("主人编排应恒放行（无 Service 构造下 503 即已过门）, got %d: %s", code, out)
+				}
+				return
+			}
 			if code != http.StatusForbidden {
 				t.Fatalf("应 403, got %d: %s", code, out)
 			}
@@ -101,9 +114,13 @@ func TestAuthPrime403Priority(t *testing.T) {
 }
 
 // TestPrimeRotateInvalidatesOldToken 轮换失效（复审 #8）：rotate 后旧 prime_token
-// 调编排被拒——旧凭证已不属于任何已知令牌，按 authPrime 先认证后鉴权的次序在
-// 认证层 401（403 语义是「已认证但级别不足」，与 prime.go 注释「401/403」一致）；
-// 新凭证 202；rotate 端点仅 local_token 可调（prime_token → 401）。
+// 调编排被拒——旧凭证已不属于任何已知令牌，按 authOrchestrate 先认证后鉴权的次
+// 序在认证层 401（403 语义是「已认证但授权未启用」，与 prime.go 注释「401/403」
+// 一致）；新凭证 202；rotate 端点仅 local_token 可调（prime_token → 401）。
+// W02-01 改写（RFC §八）：夹具加显式启用授权态（prime_token 编排现需 enabled——
+// 轮换测试的「可编排」前提在新门下即启用态）；旧别名 /local/prime/rotate 保留
+// 并锁定与 /local/mcp/access/rotate 同一实现（新路径行为在
+// TestMcpAccessRotateOneTimePlaintext 全量覆盖）。
 func TestPrimeRotateInvalidatesOldToken(t *testing.T) {
 	bus := transport.NewBus()
 	led, _, err := ledger.Open(filepath.Join(t.TempDir(), "ledger"))
@@ -119,6 +136,7 @@ func TestPrimeRotateInvalidatesOldToken(t *testing.T) {
 	srv := httptest.NewServer(New(Config{
 		NodeID: "nodeA", Service: svc, Ledger: led,
 		LocalToken: "tok-local", PrimeToken: "tok-old", PrimeAgent: "echo",
+		McpAccess:   NewMcpAccessMemory(true), // W02-01：prime 编排需显式启用态
 		RotatePrime: func() (string, error) { return "tok-new", nil },
 	}).Handler())
 	t.Cleanup(srv.Close)
@@ -246,9 +264,13 @@ func newDeclareServerHome(t *testing.T, home string) (*httptest.Server, string) 
 			{Name: "sleeper", Kind: protocol.AgentKindCLI, Command: "/bin/sleep",
 				Workdir: t.TempDir(), TimeoutSec: 1, Exposed: false}}),
 		LocalToken:        "tok-local",
-		PrimeToken:        "tok-old", // 未钦定态预生成凭证（矩阵 #15：生成不分发）
+		PrimeToken:        "tok-old", // 未钦定态预生成凭证（W02-01 后仍恒生成，兼容）
 		LocalListen:       "127.0.0.1:8445",
 		DeclareConfigPath: cfgPath,
+		// W02-01（AC20 按新规则改写，RFC §八）：编排断言类用例的前提是显式启用
+		// 态（prime_token 编排需 enabled）；declare 不改写该状态，对纯声明类断言
+		// 无影响。
+		McpAccess: NewMcpAccessMemory(true),
 		ConfigOps: &ConfigOps{ // 修复 3 并发测试用：与 declare 同一 node.yaml 读改写
 			ConfigPath:      cfgPath,
 			ReloadExecutors: func([]protocol.ExecProfile) error { return nil },
@@ -266,9 +288,10 @@ func newDeclareServerHome(t *testing.T, home string) (*httptest.Server, string) 
 }
 
 // TestPrimeDeclareValidation 校验与应答结构：不存在 400（人话 + 可选名单）、
-// 空 400、prime_token 调用 401（本机主人门）、合法 200 三字段带全且
-// mcp_config 三 env 键值正确（安全审查修复 1：不含 SWARM_NODE_TOKEN——
-// local_token 是本机主人管理凭证，不随总理 MCP 片段下发）。
+// 空 400、prime_token 调用 401（本机主人门）、合法 200。W02-01 改写（RFC §五兼
+// 容表，AC20 按新规则改写）：prime_token 兼容位恒空串（declare 不再换发/展示
+// 凭据）、mcp_config 三 env 键保留但 SWARM_NODE_PRIME_TOKEN 为脱敏引用、仍不含
+// SWARM_NODE_TOKEN（local_token 是本机主人管理凭证，不随管家 MCP 片段下发）。
 func TestPrimeDeclareValidation(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	declare := func(token, body string) (int, string) {
@@ -288,15 +311,18 @@ func TestPrimeDeclareValidation(t *testing.T) {
 	if code, _ = declare("tok-local", `not-json`); code != http.StatusBadRequest {
 		t.Fatalf("非法体应 400, got %d", code)
 	}
-	// prime_token 不可调（钦定即凭据授予，本机主人专属；凭旧编排凭证 → 401）
+	// prime_token 不可调（管家声明是本机主人操作，本机主人门；凭旧编排凭证 → 401）
 	if code, _ = declare("tok-old", `{"prime_agent":"echo"}`); code != http.StatusUnauthorized {
 		t.Fatalf("prime_token 调 declare 应 401, got %d", code)
 	}
 
-	// 合法钦定：200 + prime_agent/prime_token/mcp_config 三字段
+	// 合法钦定：200 + prime_agent/prime_token 兼容位/mcp_config 三字段
 	code, out = declare("tok-local", `{"prime_agent":"echo"}`)
 	if code != http.StatusOK {
 		t.Fatalf("合法钦定应 200, got %d: %s", code, out)
+	}
+	if strings.Contains(out, "tok-old") || strings.Contains(out, "tok-declare-") {
+		t.Fatalf("declare 应答不得含任何明文凭据（去换发）: %s", out)
 	}
 	var body struct {
 		PrimeAgent string `json:"prime_agent"`
@@ -309,8 +335,8 @@ func TestPrimeDeclareValidation(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &body); err != nil {
 		t.Fatalf("应答解析失败: %v\n%s", err, out)
 	}
-	if body.PrimeAgent != "echo" || body.PrimeToken != "tok-declare-1" {
-		t.Fatalf("应答应含钦定名与新凭证: %s", out)
+	if body.PrimeAgent != "echo" || body.PrimeToken != "" {
+		t.Fatalf("应答应含钦定名；prime_token 兼容位应恒空串（不随钦定换发）: %s", out)
 	}
 	if body.MCPConfig.Command == "" {
 		t.Fatalf("mcp_config.command 缺失: %s", out)
@@ -318,10 +344,10 @@ func TestPrimeDeclareValidation(t *testing.T) {
 	wantEnv := map[string]string{
 		"SWARM_TARGET":           "node",
 		"SWARM_NODE_URL":         "http://127.0.0.1:8445",
-		"SWARM_NODE_PRIME_TOKEN": "tok-declare-1",
+		"SWARM_NODE_PRIME_TOKEN": "to********", // 当前凭据 tok-old 的脱敏引用
 	}
 	if len(body.MCPConfig.Env) != len(wantEnv) {
-		t.Fatalf("mcp_config.env 应恰三键（修复 1：不再下发 SWARM_NODE_TOKEN）, got %v", body.MCPConfig.Env)
+		t.Fatalf("mcp_config.env 应恰三键, got %v", body.MCPConfig.Env)
 	}
 	for k, want := range wantEnv {
 		if body.MCPConfig.Env[k] != want {
@@ -370,37 +396,36 @@ func TestPrimeDeclareRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPrimeDeclareImmediateEffect 即时生效语义：声明前编排 403（尚未钦定）→
-// declare 后新 prime_token 可编排（202）→ status 端点即时反映新总理（读动态值，
-// 不等重启）。
+// TestPrimeDeclareImmediateEffect 即时生效语义（W02-01 重写，RFC §八；夹具为
+// 显式启用授权态）：declare 只改管家不改调用权——声明前后 prime_token 编排均
+// 202（共享凭据与授权开关不被 declare 触碰）、local_token（主人）恒放行 →
+// status 端点即时反映新管家（读动态值，不等重启）。禁用态前提的同向断言见
+// TestDeclareKeepsTokenAndAccessState/disabled。
 func TestPrimeDeclareImmediateEffect(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	submit := func(token string) (int, string) {
 		return doJSON(t, srv, token, http.MethodPost, "/api/v1/tasks",
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	}
-	// 前置：未钦定时持预生成凭证调编排 → 403 prime_required（尚未钦定）
-	if code, out := submit("tok-old"); code != http.StatusForbidden || !strings.Contains(out, "尚未钦定统筹") {
-		t.Fatalf("声明前编排应 403 尚未钦定, got %d: %s", code, out)
+	// 前置（启用态）：prime_token 编排 202
+	if code, out := submit("tok-old"); code != http.StatusAccepted {
+		t.Fatalf("声明前 prime 编排应 202, got %d: %s", code, out)
 	}
 	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`)
 	if code != http.StatusOK {
 		t.Fatalf("declare 应 200, got %d: %s", code, out)
 	}
-	var body struct {
-		PrimeToken string `json:"prime_token"`
+	// 声明后：调用权状态不变（declare 不改写授权）——prime 仍 202、主人恒放行
+	if code, out = submit("tok-old"); code != http.StatusAccepted {
+		t.Fatalf("declare 不得改写调用权：prime 编排应仍 202, got %d: %s", code, out)
 	}
-	if err := json.Unmarshal([]byte(out), &body); err != nil {
-		t.Fatal(err)
-	}
-	// 声明后：新凭证 202（编排接口即时激活）
-	if code, out = submit(body.PrimeToken); code != http.StatusAccepted {
-		t.Fatalf("声明后新凭证应 202, got %d: %s", code, out)
+	if code, out = submit("tok-local"); code != http.StatusAccepted {
+		t.Fatalf("declare 后主人（local_token）编排应恒放行 202, got %d: %s", code, out)
 	}
 	// status 即时反映（handleLocalStatus 读 s.primeAgent() 动态值）
 	code, out = doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", "")
 	if code != http.StatusOK || !strings.Contains(out, `"prime_agent":"echo"`) {
-		t.Fatalf("status 应即时反映新总理, got %d: %s", code, out)
+		t.Fatalf("status 应即时反映新管家, got %d: %s", code, out)
 	}
 }
 
@@ -722,59 +747,61 @@ func TestPrimeDeclareAliasValueEndToEnd(t *testing.T) {
 	}
 }
 
-// TestPrimeDeclareRotatesToken 钦定即换凭证：首次钦定前的旧凭证失效；换总理
-// 再钦定后上一任凭证同步失效——任一时刻恰一张有效编排凭证。
-func TestPrimeDeclareRotatesToken(t *testing.T) {
+// TestPrimeDeclareKeepsTokenAcrossButlerSwitches 钦定去换发（W02-01 核心语义，
+// RFC §八；原 TestPrimeDeclareRotatesToken 的「钦定即换凭证：任一时刻恰一张有效
+// 编排凭证」断言随解耦退役——「普通选择管家不得暗中换发全体调用者共享密钥」）。
+// 新不变式：多次 declare / 换管家，共享凭据与调用权状态均不变（启用的前提旧
+// token 始终可编排），轮换回调一次都不触发；作废改由显式「轮换」承担。
+func TestPrimeDeclareKeepsTokenAcrossButlerSwitches(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	submit := func(token string) (int, string) {
 		return doJSON(t, srv, token, http.MethodPost, "/api/v1/tasks",
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	}
-	declare := func(agent string) string {
+	declare := func(agent string) {
+		t.Helper()
 		code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"`+agent+`"}`)
 		if code != http.StatusOK {
 			t.Fatalf("declare %s 应 200, got %d: %s", agent, code, out)
 		}
-		var body struct {
-			PrimeToken string `json:"prime_token"`
+		if strings.Contains(out, "tok-old") || strings.Contains(out, "tok-declare-") {
+			t.Fatalf("declare 应答不得含明文凭据: %s", out)
 		}
-		if err := json.Unmarshal([]byte(out), &body); err != nil {
-			t.Fatal(err)
-		}
-		return body.PrimeToken
 	}
-	tok1 := declare("echo")
-	// 首次钦定：预生成旧凭证（tok-old）被轮换作废
-	if code, _ := submit("tok-old"); code != http.StatusUnauthorized {
-		t.Fatalf("钦定后预生成旧凭证应 401, got %d", code)
+	// 启用态下旧凭据可编排；declare echo → 换 sleeper → 凭据始终不变
+	if code, _ := submit("tok-old"); code != http.StatusAccepted {
+		t.Fatalf("前置旧凭据应 202")
 	}
-	if code, _ := submit(tok1); code != http.StatusAccepted {
-		t.Fatalf("首任凭证应 202, got %d", code)
+	declare("echo")
+	if code, _ := submit("tok-old"); code != http.StatusAccepted {
+		t.Fatalf("declare 后共享凭据应不变（旧 token 仍 202）")
 	}
-	// 换总理：上一任凭证（tok1）立即失效，新凭证生效
-	tok2 := declare("sleeper")
-	if code, _ := submit(tok1); code != http.StatusUnauthorized {
-		t.Fatalf("换总理后旧凭证应 401, got %d", code)
+	declare("sleeper")
+	if code, _ := submit("tok-old"); code != http.StatusAccepted {
+		t.Fatalf("换管家后共享凭据应仍不变（旧 token 仍 202）")
 	}
-	if code, _ := submit(tok2); code != http.StatusAccepted {
-		t.Fatalf("新总理凭证应 202, got %d", code)
+	// 调用权状态未被 declare 触碰：GET 仍 enabled
+	if code, out := doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/mcp/access", ""); code != http.StatusOK || !strings.Contains(out, `"enabled":true`) {
+		t.Fatalf("declare 不得改写调用权状态, got %d: %s", code, out)
+	}
+	// status 反映最终管家
+	if code, out := doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK || !strings.Contains(out, `"prime_agent":"sleeper"`) {
+		t.Fatalf("status 应反映最终管家, got %d: %s", code, out)
 	}
 }
 
-// TestPrimeDeclareRotateConcurrent 交错并发（返工收口：declare 与 rotate 共享
-// muPrime 互斥段，混合调用不得出现盘上/内存凭证分叉——每次应答凭证唯一且
-// 全部 200；任一时刻恰一张有效编排凭证由 declare 即换凭证语义保证）。
-// 修复 6 加强断言：收尾后 status 查询 prime_agent 正确；用最终凭证调 submit
-// 断言 202（「任一时刻恰一张有效凭证」的行为级验证——n 张应答凭证中恰一张可编排）。
-// 修复轮 R5 加强：echo 影子 home 预置 zcode 布局——并发收尾后真实 setting.json
-// 内凭证必须等于唯一存活凭证（轮换+接线同互斥段，最后落盘的必是最后换发的），
-// 且无任何旧凭证残留（否则统筹载体拿旧 token 401）。
+// TestPrimeDeclareRotateConcurrent 交错并发（返工收口，W02-01 重写，RFC §八）：
+// declare 与 rotate 共享 muPrime 互斥段——W02-01 后 declare 不再产凭证也不失效
+// 存量（应答 prime_token 恒空），仅 rotate 换发：n/2 次 rotate 各得唯一新凭证、
+// n/2 次 declare 不产生凭证；混合并发后任一时刻恰一张有效编排凭证（最后一次
+// rotate 的）、status 反映管家、setting.json 内是唯一存活凭证且无任何作废凭证
+// 残留（轮换+接线同互斥段的语义保留项）。
 func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 	home := t.TempDir()
 	setting := writeZcodeSetting(t, home, `{"mcpServers":{"other":{"command":"keep-me"}}}`)
 	srv, _ := newDeclareServerHome(t, home)
 	const n = 6
-	tokens := make([]string, n)
+	tokens := make([]string, n) // declare 位为空串，rotate 位为新凭证
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
 		wg.Add(1)
@@ -800,25 +827,35 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
+	// declare 位应答凭证恒空（去换发）；rotate 位各得唯一新凭证
+	rotated := make([]string, 0, n)
 	seen := map[string]bool{}
-	for _, tok := range tokens {
+	for i, tok := range tokens {
+		if i%2 == 0 { // declare 位
+			if tok != "" {
+				t.Fatalf("declare 应答凭证应恒空串（去换发）, got %q", tok)
+			}
+			continue
+		}
 		if tok == "" || seen[tok] {
-			t.Fatalf("并发 declare×rotate 应各得唯一凭证（互斥段无分叉）, got %q", tokens)
+			t.Fatalf("并发 rotate 应各得唯一凭证（互斥段无分叉）, got %q", tokens)
 		}
 		seen[tok] = true
+		rotated = append(rotated, tok)
 	}
 	// 加强①：收尾后 status 查询 prime_agent 正确（全部 declare 均钦定 echo）
 	if code, out := doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/status", ""); code != http.StatusOK || !strings.Contains(out, `"prime_agent":"echo"`) {
 		t.Fatalf("收尾后 status 应反映 prime_agent=echo, got %d: %s", code, out)
 	}
-	// 加强②：n 张应答凭证中恰一张可编排（202）——其余被后续轮换作废（401）。
+	// 加强②：rotate 产出的凭证中恰一张可编排（202）——其余被后续轮换作废（401）；
+	// declare 全程未失效任何存量、也未产生凭证。
 	submit := func(token string) int {
 		code, _ := doJSON(t, srv, token, http.MethodPost, "/api/v1/tasks",
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 		return code
 	}
 	live, liveTok := 0, ""
-	for _, tok := range tokens {
+	for _, tok := range rotated {
 		if code := submit(tok); code == http.StatusAccepted {
 			live++
 			liveTok = tok
@@ -827,7 +864,7 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 		}
 	}
 	if live != 1 {
-		t.Fatalf("任一时刻应恰一张有效编排凭证, got %d 张可 202: %q", live, tokens)
+		t.Fatalf("任一时刻应恰一张有效编排凭证, got %d 张可 202: %q", live, rotated)
 	}
 	// 加强③（修复轮 R5）：命中布局后真实 setting.json 的最终凭证——盘上必须
 	// 是唯一存活凭证，且 n-1 张已作废凭证一个都不残留、无关条目原样。
@@ -836,7 +873,7 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 		t.Fatalf("并发收尾后 setting.json 内 token=%q, want 存活凭证 %q", tok, liveTok)
 	}
 	raw := mustRead(t, setting)
-	for _, tok := range tokens {
+	for _, tok := range rotated { // 仅核 rotate 产出的凭证（declare 位为空串占位）
 		if tok != liveTok && strings.Contains(raw, tok) {
 			t.Fatalf("旧凭证 %q 不得残留在宿主配置", tok)
 		}
@@ -847,16 +884,20 @@ func TestPrimeDeclareRotateConcurrent(t *testing.T) {
 }
 
 // TestPrimeTokenCannotCallOwnerEndpoints 修复 1 行为级验证：仅持 prime_token 的
-// 调用方（总理）不可触达本机主人管理面——declare/rotate/restart/PUT config 全部
-// 401（authLocal 只认 local_token）；prime_token 仍可只读（authRead 双收，
-// prime ⊇ read）——MCP 连接单凭证够用，无需下发 local_token。
+// 调用方（管家/编排凭据持有者）不可触达本机主人管理面——declare/rotate（含
+// W02-01 新路径）/restart/PUT config/MCP 授权查看与启停全部 401（authLocal 只
+// 认 local_token）；prime_token 仍可只读（authRead 双收，prime ⊇ read）——MCP
+// 六工具单凭证够用，无需下发 local_token。
 func TestPrimeTokenCannotCallOwnerEndpoints(t *testing.T) {
 	srv, _ := newDeclareServer(t)
 	for _, tc := range []struct {
 		name, method, path, body string
 	}{
 		{"declare", http.MethodPost, "/api/v1/local/prime/declare", `{"prime_agent":"echo"}`},
-		{"rotate", http.MethodPost, "/api/v1/local/prime/rotate", ""},
+		{"rotate旧别名", http.MethodPost, "/api/v1/local/prime/rotate", ""},
+		{"rotate新路径", http.MethodPost, "/api/v1/local/mcp/access/rotate", ""},
+		{"mcp access get", http.MethodGet, "/api/v1/local/mcp/access", ""},
+		{"mcp access put", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":true}`},
 		{"restart", http.MethodPost, "/api/v1/local/restart", ""},
 		{"put config", http.MethodPut, "/api/v1/local/config", `{"agents":[]}`},
 	} {

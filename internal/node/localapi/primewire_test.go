@@ -449,9 +449,11 @@ func doDeclare(t *testing.T, srv *httptest.Server, agent string) (*wireResp, int
 	return &resp, code
 }
 
-// TestPrimeDeclareWiresShadowHome 钦定即接线：影子 home 命中 zcode 布局 →
-// 应答 wired=true + wired_target 绝对路径 + note 告知已写入路径 + mcp_config
-// 仍在；文件内 token 与应答一致、其他 MCP 条目保留。
+// TestPrimeDeclareWiresShadowHome 钦定即接线（W02-01 语义保留项，RFC §八）：
+// declare 不再换发凭据（应答 prime_token 恒空），接线写入的是*当前*共享凭据
+// tok-old——影子 home 命中 zcode 布局 → 应答 wired=true + wired_target 绝对路径
+// + note 告知已写入路径 + mcp_config（凭据位脱敏）；文件内 token=当前凭据、
+// 其他 MCP 条目保留。
 func TestPrimeDeclareWiresShadowHome(t *testing.T) {
 	home := t.TempDir()
 	setting := writeZcodeSetting(t, home, `{"mcpServers":{"other":{"command":"keep"}}}`)
@@ -469,12 +471,15 @@ func TestPrimeDeclareWiresShadowHome(t *testing.T) {
 	if !strings.Contains(resp.Note, setting) {
 		t.Fatalf("note 应告知已自动写入的路径: %s", resp.Note)
 	}
+	if resp.PrimeToken != "" {
+		t.Fatalf("declare 应答 prime_token 兼容位应恒空（不换发不展示）, got %q", resp.PrimeToken)
+	}
 	if resp.MCPConfig == nil {
 		t.Fatalf("mcp_config 片段应保留（降级兜底与手工迁移口径）: %+v", resp)
 	}
 	doc := readSettingDoc(t, setting)
-	if tok := entryToken(t, doc); tok != resp.PrimeToken || tok != "tok-wire-1" {
-		t.Fatalf("文件内 token=%q 应等于应答新凭证 tok-wire-1", tok)
+	if tok := entryToken(t, doc); tok != "tok-old" {
+		t.Fatalf("文件内 token=%q 应为当前共享凭据 tok-old（declare 不换发，接线写当前值）", tok)
 	}
 	entry, ok := serversOf(t, doc)["swarmmind"].(map[string]any)
 	if !ok {
@@ -489,36 +494,43 @@ func TestPrimeDeclareWiresShadowHome(t *testing.T) {
 }
 
 // TestPrimeDeclareRepeatNoDup 撤销/重钦定幂等：同 agent 反复 declare 全 200、
-// 不产生重复条目、文件内始终最新凭证。
+// 不产生重复条目、文件内始终是当前共享凭据（W02-01：declare 不换发，凭据恒
+// tok-old 不随钦定变化）。
 func TestPrimeDeclareRepeatNoDup(t *testing.T) {
 	home := t.TempDir()
 	setting := writeZcodeSetting(t, home, `{}`)
 	srv, _ := newWireServer(t, home, "")
-	var last *wireResp
 	for i := 0; i < 3; i++ {
 		resp, code := doDeclare(t, srv, "echo")
 		if code != http.StatusOK || !resp.Wired {
 			t.Fatalf("第 %d 次 declare 应 200 且 wired（幂等不报错）: code=%d resp=%+v", i+1, code, resp)
 		}
-		last = resp
+		if resp.PrimeToken != "" {
+			t.Fatalf("第 %d 次 declare 应答不得携带明文凭据, got %q", i+1, resp.PrimeToken)
+		}
 	}
 	doc := readSettingDoc(t, setting)
 	if len(serversOf(t, doc)) != 1 {
 		t.Fatalf("反复 declare 不得堆重复条目: %v", serversOf(t, doc))
 	}
-	if tok := entryToken(t, doc); tok != last.PrimeToken {
-		t.Fatalf("文件内 token=%q 应为最新凭证 %q", tok, last.PrimeToken)
+	if tok := entryToken(t, doc); tok != "tok-old" {
+		t.Fatalf("文件内 token=%q 应恒为当前共享凭据 tok-old（declare 不换发）", tok)
 	}
 }
 
-// TestPrimeRotateRefreshesWiredToken rotate 后 token 刷新进配置：旧 token 不留
-// 在宿主配置里（否则统筹载体下一请求 401）；rotate 应答带 wired 同口径字段。
+// TestPrimeRotateRefreshesWiredToken rotate 后 token 刷新进配置（W02-01：declare
+// 不再消耗轮换计数，declare 接线写当前凭据 tok-old，此后首次 rotate 得
+// tok-wire-1）：旧 token 不留在宿主配置里（否则管家载体下一请求 401）；rotate
+// 应答带 wired 同口径字段与一次性新明文。
 func TestPrimeRotateRefreshesWiredToken(t *testing.T) {
 	home := t.TempDir()
 	setting := writeZcodeSetting(t, home, `{}`)
 	srv, _ := newWireServer(t, home, "")
 	if _, code := doDeclare(t, srv, "echo"); code != http.StatusOK {
 		t.Fatalf("declare 应 200, got %d", code)
+	}
+	if tok := entryToken(t, readSettingDoc(t, setting)); tok != "tok-old" {
+		t.Fatalf("declare 后配置内 token=%q 应为当前凭据 tok-old", tok)
 	}
 	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/rotate", "")
 	if code != http.StatusOK {
@@ -531,11 +543,11 @@ func TestPrimeRotateRefreshesWiredToken(t *testing.T) {
 	if !resp.Wired || resp.WiredTarget != setting {
 		t.Fatalf("rotate 应带 wired 同口径字段: %+v", resp)
 	}
-	if tok := entryToken(t, readSettingDoc(t, setting)); tok != resp.PrimeToken || tok != "tok-wire-2" {
+	if tok := entryToken(t, readSettingDoc(t, setting)); tok != resp.PrimeToken || tok != "tok-wire-1" {
 		t.Fatalf("rotate 后配置内 token=%q 应刷新为 %q（旧 token 不得残留）", tok, resp.PrimeToken)
 	}
-	if strings.Contains(mustRead(t, setting), "tok-wire-1") {
-		t.Fatal("旧凭证 tok-wire-1 不得残留在宿主配置")
+	if strings.Contains(mustRead(t, setting), "tok-old") {
+		t.Fatal("旧凭证 tok-old 不得残留在宿主配置")
 	}
 }
 
@@ -566,14 +578,16 @@ func TestPrimeDeclarePlaceholderCommandDegrade(t *testing.T) {
 	if resp.MCPConfig == nil || resp.MCPConfig["command"] != mcpCommandPlaceholder {
 		t.Fatalf("降级应保留含占位 command 的 mcp_config 片段（手贴时自行补路径）: %+v", resp)
 	}
-	if !strings.Contains(resp.Note, "请立即配给统筹的 MCP 连接") {
-		t.Fatalf("降级应保留手动指引 note: %s", resp.Note)
+	if !strings.Contains(resp.Note, "手动配置") || !strings.Contains(resp.Note, "不再换发") {
+		t.Fatalf("降级应保留 declare 去换发口径的手动指引 note: %s", resp.Note)
 	}
 }
 
-// TestPrimeRotateDegradeManualFlow R3+R5：rotate 降级分支——布局未命中时
-// 应答仍带 mcp_config 片段（与 declare 两口径一致，主人拿得到手贴内容），
-// env 三键与新凭证同值，note 走手动指引口径。
+// TestPrimeRotateDegradeManualFlow R3+R5（W02-01 计数修正，RFC §八）：rotate 降
+// 级分支——布局未命中时应答仍带 mcp_config 片段（与 declare 两口径一致，主人拿
+// 得到手贴内容），env 三键与新凭证同值（declare 不再消耗轮换计数，此处首次轮换
+// 即 tok-wire-1），note 走手动指引+旧凭证失效口径（rotate=凭据授予事件，明文一
+// 次展示）。
 func TestPrimeRotateDegradeManualFlow(t *testing.T) {
 	home := t.TempDir() // 存在但无 .zcode 布局
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -601,8 +615,8 @@ func TestPrimeRotateDegradeManualFlow(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcp_config.env 缺失: %+v", resp.MCPConfig)
 	}
-	if tok, _ := env["SWARM_NODE_PRIME_TOKEN"].(string); tok != resp.PrimeToken || resp.PrimeToken != "tok-wire-2" {
-		t.Fatalf("rotate 降级片段应带新凭证 tok-wire-2: env=%v prime_token=%q", env, resp.PrimeToken)
+	if tok, _ := env["SWARM_NODE_PRIME_TOKEN"].(string); tok != resp.PrimeToken || resp.PrimeToken != "tok-wire-1" {
+		t.Fatalf("rotate 降级片段应带新凭证 tok-wire-1: env=%v prime_token=%q", env, resp.PrimeToken)
 	}
 	if url, _ := env["SWARM_NODE_URL"].(string); url != "http://127.0.0.1:8445" {
 		t.Fatalf("SWARM_NODE_URL=%q", url)
@@ -622,8 +636,9 @@ func mustRead(t *testing.T, path string) string {
 	return string(b)
 }
 
-// TestPrimeDeclareDegradeManualFlow 降级口径：影子 home 无 zcode 布局 →
-// wired=false、保留 mcp_config 片段与手动指引 note、绝不创建宿主目录。
+// TestPrimeDeclareDegradeManualFlow 降级口径（W02-01 note 更新，RFC §八）：影子
+// home 无 zcode 布局 → wired=false、保留 mcp_config 片段（凭据位脱敏）与去换发
+// 口径的手动指引 note、绝不创建宿主目录。
 func TestPrimeDeclareDegradeManualFlow(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "empty-home") // 存在但无 .zcode
 	if err := os.MkdirAll(home, 0o755); err != nil {
@@ -637,8 +652,8 @@ func TestPrimeDeclareDegradeManualFlow(t *testing.T) {
 	if resp.Wired || resp.WiredTarget != "" {
 		t.Fatalf("未命中布局应 wired=false: %+v", resp)
 	}
-	if resp.MCPConfig == nil || !strings.Contains(resp.Note, "请立即配给统筹的 MCP 连接") {
-		t.Fatalf("降级应保留 mcp_config 片段与手动指引 note: %+v", resp)
+	if resp.MCPConfig == nil || !strings.Contains(resp.Note, "手动配置") || !strings.Contains(resp.Note, "不再换发") {
+		t.Fatalf("降级应保留 mcp_config 片段与去换发口径手动指引 note: %+v", resp)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".zcode")); !os.IsNotExist(err) {
 		t.Fatal("降级绝不创建宿主目录（.zcode 不应存在）")
@@ -655,7 +670,8 @@ func TestPrimeDeclareDegradeManualFlow(t *testing.T) {
 }
 
 // TestPrimeDeclareConfigHomeFallback ConfigHome 为空时兜底 data_dir/home：
-// 路径与 runner HOME 同口径，接线落在 data_dir/home/.zcode/cli/setting.json。
+// 路径与 runner HOME 同口径，接线落在 data_dir/home/.zcode/cli/setting.json
+// （W02-01：写入的是当前共享凭据 tok-old，declare 不换发）。
 func TestPrimeDeclareConfigHomeFallback(t *testing.T) {
 	dataDir := t.TempDir()
 	setting := writeZcodeSetting(t, filepath.Join(dataDir, "home"), `{"theme":"dark"}`)
@@ -667,8 +683,8 @@ func TestPrimeDeclareConfigHomeFallback(t *testing.T) {
 	if code != http.StatusOK || !resp.Wired || resp.WiredTarget != setting {
 		t.Fatalf("兜底 home 应接线成功: code=%d resp=%+v", code, resp)
 	}
-	if tok := entryToken(t, readSettingDoc(t, setting)); tok != resp.PrimeToken {
-		t.Fatalf("兜底 home 内 token=%q 应为 %q", tok, resp.PrimeToken)
+	if tok := entryToken(t, readSettingDoc(t, setting)); tok != "tok-old" {
+		t.Fatalf("兜底 home 内 token=%q 应为当前共享凭据 tok-old", tok)
 	}
 }
 

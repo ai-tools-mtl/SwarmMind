@@ -3,7 +3,8 @@ package main
 // MCP 集成测试（方案 3.4 node backend 真实实现，第三轮返工必须修 1）：
 //   - 进程内：nodeBackend × 真 localapi（internal/node/localapi 全装配：真账本、
 //     真服务（桩执行器）、AgentState、TaskLog、FetchArtifactLocal）——node 六工具
-//     端到端、幂等重派、403 prime_required 原话透传、hub 工具清单回归；
+//     端到端、幂等重派、403 mcp_disabled 原话透传（W02-01 授权解耦后新产品规则）、
+//     hub 工具清单回归；
 //   - 子进程：go build 出真二进制，exec stdio 握手（initialize/tools/list/
 //     tools/call 全走 backend 分发）+ SWARM_TARGET 非法值启动即退出。
 
@@ -45,7 +46,8 @@ func (okRunner) Run(ctx context.Context, task protocol.Task) protocol.TaskResult
 
 // newLocalNode 起真 localapi 全装配（与 cmd/node 装配同源：账本/服务/AgentState/
 // TaskLog/ArtifactFetch）。返回 server 与账本、产物根目录；primeAgent 空 = 未钦定
-// 总理（编排接口恒 403 prime_required，透传用例用）。
+// 管家（W02-01 授权解耦后编排门按 mcpaccess 判定：夹具映射 enabled=primeAgent
+// 非空——声明场景编排放行，未启用场景 403 mcp_disabled，透传用例用）。
 func newLocalNode(t *testing.T, primeAgent string) (*httptest.Server, *ledger.Ledger, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -90,6 +92,7 @@ func newLocalNode(t *testing.T, primeAgent string) (*httptest.Server, *ledger.Le
 		LocalToken:    "tok-local",
 		PrimeToken:    "tok-prime",
 		PrimeAgent:    primeAgent,
+		McpAccess:     localapi.NewMcpAccessMemory(primeAgent != ""), // W02-01：调用权与管家解耦，夹具按声明态映射授权开关
 		ArtifactFetch: svc.FetchArtifactLocal,
 	}).Handler())
 	t.Cleanup(srv.Close)
@@ -258,17 +261,18 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	}
 }
 
-// TestNodeBackendPrimeRequiredPassthrough 403 prime_required 透传：服务端原话进
-// isError 消息并附检查总理配置提示；凭证缺失给客户端侧可行动错误。
-func TestNodeBackendPrimeRequiredPassthrough(t *testing.T) {
-	srv, _, _ := newLocalNode(t, "") // 未钦定总理 → 编排接口恒 403
+// TestNodeBackendOrchestrateDeniedPassthrough 403 mcp_disabled 透传（W02-01 授权
+// 解耦后新产品规则：prime_token + 授权未启用 → 403 mcp_disabled）：服务端原话进
+// isError 消息并附启用指引；凭证缺失给客户端侧可行动错误。
+func TestNodeBackendOrchestrateDeniedPassthrough(t *testing.T) {
+	srv, _, _ := newLocalNode(t, "") // 未启用编排授权 → prime_token 编排 403 mcp_disabled
 	bd := newNodeBackendFor(srv.URL)
 
 	text, isErr := callText(t, bd, "swarmmind_submit", map[string]any{"agent": "echo", "stdin": "hi"})
 	if !isErr {
-		t.Fatalf("未钦定总理时 submit 应 isError: %s", text)
+		t.Fatalf("编排授权未启用时 submit 应 isError: %s", text)
 	}
-	for _, want := range []string{"prime_required", "尚未钦定统筹", "请检查统筹配置"} {
+	for _, want := range []string{"mcp_disabled", "编排授权未启用", "local_token"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("403 透传缺 %q: %s", want, text)
 		}

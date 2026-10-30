@@ -165,12 +165,19 @@ func (s *Server) agentShadowHome(agent string) string {
 
 // applyWiredFields declare/rotate 应答公共段：接线结果落 wired/wired_target
 // 字段并返回该口径的接线说明（wired：已自动写入的路径 + 重连即生效；降级：
-// 手动配给指引）。凭证「仅此一次展示」提示两口径通用，由调用方拼接。
+// 轮换口径的一次性展示指引）。凭证「仅此一次展示」提示两口径通用，由调用方拼接。
 func applyWiredFields(resp map[string]any, wired bool, target string) string {
+	return applyWiredFieldsHint(resp, wired, target,
+		"新凭证仅此一次展示，请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）")
+}
+
+// applyWiredFieldsHint applyWiredFields 的提示参数化形态（W02-01）：declare 去
+// 换发后降级口径不再是「新凭证展示」——由调用方传入符合自身事件的指引文案。
+func applyWiredFieldsHint(resp map[string]any, wired bool, target, degradeHint string) string {
 	resp["wired"] = wired
 	if wired {
 		resp["wired_target"] = target
 		return "统筹 MCP 连接已自动写入 " + target + "（无需手贴；agent 重连后生效）"
 	}
-	return "新凭证仅此一次展示，请立即配给统筹的 MCP 连接（SWARM_NODE_PRIME_TOKEN）"
+	return degradeHint
 }
