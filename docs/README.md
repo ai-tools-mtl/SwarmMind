@@ -22,6 +22,8 @@
 | [远程原生 agent 与持久会话协作](VISION-persistent-agent-collaboration.md) | 2026-10-29 核心目标澄清：跨机复用原生环境、同线程续聊、编写审查循环；含实现差距与未来验收用例 |
 | [项目计划](PLAN.md) | 技术决策、阶段目标、验收与发布条件 |
 | [产品方向](PRODUCT-DIRECTION-v2.md) | 场景、优先级、术语说明与后续范围 |
+| [产品方案 v3](PRODUCT-PLAN-v3.md) | 可拆单产品基线：双端页面P00–P10、MCP接入、流程F/异常E、验收AC与开发包W；目标能力不代表已实现 |
+| [v3 开发任务总入口](tasks/v3/README.md) | 2026-10-30实现盘点、W01–W08任务书、子任务依赖、REST/MCP/双端与验收；按现有T1–T3增量开发 |
 | [交互设计](INTERACTION.md) | 当前页面职责、任务流程与反馈要求 |
 | [Prime 设计](PRIME-DESIGN.md) | 编排职责、重试语义、建议接口与模板差异 |
 | [文件协作](FILE-COLLAB.md) | 已有互斥/依赖/挂载，及尚未实现的 Git 集成 |
