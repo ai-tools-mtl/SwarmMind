@@ -151,6 +151,16 @@ type Server struct {
 	// 态，重启清零——未发现过=not_checked 如实，不落盘、不外发）。
 	detectMu    sync.Mutex
 	detectCache map[string]detectCacheEntry
+
+	// verifyMu / verifyModel / verifySeenTok MCP 分层验证板（W03-04 接线，
+	// mcpverifyapi.go；W03-03 模型 McpVerifyModel 的进程内存实例，惰性初始化——
+	// 重启清零即六层如实回落 not_checked，模型层契约）。verifySeenTok 为最近一次
+	// 秘密就位登记时观测到的完整凭据值（仅内存漂移比对用，绝不进任何应答/日志——
+	// 脱敏引用仅保留前 2 字符，不同令牌可撞同一脱敏形态，漂移检测须全长比对）。
+	// 字段纯加法：既有装配与行为零变化。
+	verifyMu      sync.Mutex
+	verifyModel   *McpVerifyModel
+	verifySeenTok string
 }
 
 // New 构造本地 API 服务。
@@ -274,6 +284,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/mcp/config/preview", s.authLocal(s.handleMcpCfgPreview))  // 宿主 MCP 配置预览（W03-02，主人专属·六.六豁免⑭，零写盘）
 	mux.HandleFunc("POST /api/v1/local/mcp/config/apply", s.authLocal(s.handleMcpCfgApply))      // 宿主 MCP 配置应用（版本核对→备份→原子合并，单条目）
 	mux.HandleFunc("POST /api/v1/local/mcp/config/revert", s.authLocal(s.handleMcpCfgRevert))    // 宿主 MCP 配置撤回（只撤本次条目，版本不符 409）
+	mux.HandleFunc("GET /api/v1/local/mcp/verify", s.authLocal(s.handleMcpVerifyGet))            // 分层验证板快照（W03-04，主人专属·六.六豁免⑮，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/v0", s.authLocal(s.handleMcpVerifyV0))         // 服务端 V0 配置就绪检查（RunV0Checks→RecordV0，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/v2", s.authLocal(s.handleMcpVerifyV2))         // 服务端视角鉴权探测（恒标 server_side_view，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/confirm", s.authLocal(s.handleMcpVerifyConfirm)) // 用户确认登记（v1/v3/v4/v5，绑定配置版本，零写盘）
+	mux.HandleFunc("POST /api/v1/local/mcp/verify/config-version", s.authLocal(s.handleMcpVerifyVersion)) // 配置版本锚更新（apply/revert 后页面驱动，零写盘）
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
 	mux.HandleFunc("POST /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelCreate))

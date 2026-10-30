@@ -799,6 +799,7 @@ const S = {
   inboxUnread: 0,              // 站内未读数（badge）
   bellOpen: false,             // 铃铛面板开合
   workDrawer: null,            // 打开的工作单详情抽屉（P5 W3）{id, work, zones, forms, seq}
+  mcpOnboard: null,            // MCP 接入子页会话（W03-04 P07；纯前端零自动写）：{draft, verify, gen, zonesCache}
 };
 function freshControl() {
   /* node/agent 分开存（两级选择：先机器后智能体）。统筹不再是勾选框：选中智能体
@@ -1088,7 +1089,7 @@ function route() {
     syncSessPageZones();   // 已有快照即绘（分区缓存随 DOM 身份对账失效重写）
     fetchSessionPage();   // 详情页数据即取（后续随 pollTick 每 5s 同步）
   }
-  if (S.authed && S.page === 'tokens') { loadTokens(); loadNotifyChannels(); }   // D2：完成后只局部更新子树，不整页重绘（表单保护）
+  if (S.authed && S.page === 'tokens') { paintMcpOnboard(); loadTokens(); loadNotifyChannels(); }   // D2：完成后只局部更新子树，不整页重绘（表单保护）；MCP 接入六分区随进页绘制（W03-04）
   if (S.authed && S.page === 'groups') {
     loadGroups().then(() => { if (S.page === 'groups') { render(); if (S.groupId) scrollMsgToBottom(); } });
     if (S.groupId) enterGroupView();
@@ -1133,6 +1134,9 @@ function render() {
   delete app.dataset.loginPage;   // 指纹只描述登录 DOM（终审必修1）：业务态不清除，退出/401 再进登录分支时同指纹命中跳过写入，登录表单出不来
   app.innerHTML = shell(PAGES[S.page]());
   syncDrawer();
+  /* W03-04 P07：整页重绘重建 #sec-mcp 分区容器——缓存清零全量重绘一次；页内局部
+   * 更新走 paintMcpOnboard（分区 diff，不整页）。 */
+  if (S.authed && S.page === 'tokens') { const ob = S.mcpOnboard; if (ob) ob.zonesCache = {}; paintMcpOnboard(); }
 }
 function renderChrome() {
   $('#logout').hidden = !S.authed;
@@ -2859,7 +2863,7 @@ function tokensPage() {
   /* 页内导航（t20261026-webfix，伦哥反馈「令牌较多时不知道通知入口位置」）：三区块
    * 重排为 账户 → 通知 → 令牌（通知是高频入口不再沉底）+ 页内跳转；scrollIntoView
    * 实现，禁 hash 锚点（hash 路由是 #/xxx 形态，会撞路由）。 */
-  + `<nav class="page-jump" aria-label="设置页分区导航">${button('账户信息', 'jump-to', 'link', 'data-target="sec-account"')}${button('通知', 'jump-to', 'link', 'data-target="sec-notify"')}${button('访问令牌', 'jump-to', 'link', 'data-target="sec-tokens"')}</nav>`
+  + `<nav class="page-jump" aria-label="设置页分区导航">${button('账户信息', 'jump-to', 'link', 'data-target="sec-account"')}${button('通知', 'jump-to', 'link', 'data-target="sec-notify"')}${button('访问令牌', 'jump-to', 'link', 'data-target="sec-tokens"')}${button('MCP 接入', 'jump-to', 'link', 'data-target="sec-mcp"')}</nav>`
   + `<section class="card" id="sec-account"><h2>账户信息</h2>
     <div id="account-info">${accountInfoHtml()}</div>
     <form id="account-form" class="fields" onsubmit="return false">
@@ -2887,7 +2891,8 @@ function tokensPage() {
       <div class="actions" style="align-self:end"><button class="primary" type="submit">生成新令牌</button></div>
     </form>
     <div id="token-list" class="spaced">${tokenListHtml()}</div>
-    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`;
+    <p class="footer-note">令牌以 <code>Authorization: Bearer</code> 方式调用 API，权限与你的登录相同；撤销立即生效，不影响已登录的浏览器会话。</p></section>`
+  + mcpOnboardSection();
 }
 async function submitToken(form) {
   const name = $('#token-name')?.value.trim();
@@ -2903,6 +2908,243 @@ async function submitToken(form) {
       toast('令牌已生成 · 请立即保存明文');
     } else toast('创建失败：' + (r ? errLine(r.data) : '网络异常'));
   } finally { S.busy.delete('token-create'); }
+}
+
+/* ---------- MCP 接入（P07 六分区子页，W03-04；docs/tasks/v3/W03-04-rfc.md §3/§5） ----------
+ * hub 形态=中心配置+PAT 人工入口+手动指引：①范围固定「调用中心」（默认调用机在外部）；
+ * ②调用环境远端不探测（零网络请求）；③PAT 人工入口指路同页「访问令牌」；④只复制/
+ * 下载不自动应用（前端模板生成，中心网页绝不写外部机器文件）；⑤V0=页面校验（恒标
+ * 「非服务端验证」），V1/V3/V4/V5 用户确认仅存本页会话（刷新如实回落「未验证」并
+ * 注明——无中心存储端点，绝不伪造持久验证状态）；⑥维护故障+可复制提示词。
+ * 分区局部更新复用 drawerZonesApply（shared block 只消费不改，自定义分区表同 node
+ * 页机制）；换配置即重置相关验证（配置指纹=前端模板散列，标注非文件版本 hash）。
+ * 复制提示词与 node 端逐字节同文（web 结构测试锁定）；复制零副作用。 */
+const MCP_ZONES = ['scope', 'env', 'auth', 'gen', 'verify', 'maint'];
+const MCP_LAYER_ORDER = ['v0', 'v1', 'v2', 'v3', 'v4', 'v5'];
+const MCP_PROMPT_V4 = '请通过我配置的 SwarmMind MCP 列出当前目标的机器与 agent，明确它是本机还是中心范围；只查询，不创建任务、不启动模型工作。若工具不可用，报告缺少的工具或错误。';
+const MCP_PROMPT_V5 = '请通过我配置的 SwarmMind MCP 向测试 agent「在此填写能力名」提交一条低影响验证任务：使用独立工作区，只做只读观察并报告结果，不修改项目、不执行发布。注意：执行验证会消耗模型额度——请先向我复述你将提交的内容，等我确认后再提交；完成后按四类结局如实报告：任务被接受 / 执行失败 / 工具权限拒绝 / 工作失败。';
+const MCP_VERIFY_WORDS = { not_checked: '未验证', pass: '通过', fail: '未通过', warn: '警示', user_confirmed: '用户确认' };
+const MCP_SOURCE_WORDS = { server_side_view: '服务端视角', user_confirmed: '用户确认' };
+const MCP_LAYER_FALLBACK = { v0: 'V0 配置就绪', v1: 'V1 调用机连接', v2: 'V2 授权有效', v3: 'V3 宿主工具发现', v4: 'V4 无副作用查询', v5: 'V5 可选执行验证' };
+const MCP_HOST_WORDS = { verified_zcode: '已实测适配布局（节点端自动接线同布局；hub 端只生成不写盘）', manual_generic_codex: '通用手动（未实测适配）', manual_generic: '通用手动（未验证）' };
+const MCP_CRED_PLACEHOLDER = '<凭据占位：粘贴管理员签发的 PAT 明文后使用，本模板不含明文>';
+function mcpIsCustomHost(h) { return h !== 'zcode' && h !== 'codex'; }
+function mcpShortHash(v) { return v ? String(v).slice(0, 12) + '…' : '—'; }
+function mcpHash(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = (((h << 5) + h) + s.charCodeAt(i)) >>> 0; return 'fe-' + h.toString(16); }
+function freshMcpOnboard() {
+  return { draft: { host: 'zcode', custom_host: '', name: '', url: '', cmd: '' }, gen: null, verify: {}, zonesCache: {} };
+}
+/* mcpOnboardEnsure 惰性初始化子页会话（页面会话内存态；登出整体清空）。 */
+function mcpOnboardEnsure() { if (!S.mcpOnboard) S.mcpOnboard = freshMcpOnboard(); return S.mcpOnboard; }
+/* mcpobBuild 前端模板生成（hub 形态=前端模板：零服务端请求、零写盘；凭据位恒为
+ * 占位，粘贴前由用户替换为 PAT 明文）。zcode/未知宿主=JSON（顶层 mcpServers，
+ * 与节点端模板同布局）；codex=TOML（通用手动，未实测适配）。 */
+function mcpobBuild(d) {
+  const name = d.name.trim() || 'swarmmind-hub';
+  const url = d.url.trim();
+  const cmd = d.cmd.trim() || '<调用机上的 swarmmind-mcp 绝对路径（本页不代填服务器路径，待填写）>';
+  let snippet, format;
+  if (d.host === 'codex') {
+    format = 'toml';
+    snippet = `[mcp_servers.${name}]\ncommand = ${JSON.stringify(cmd)}\n\n[mcp_servers.${name}.env]\nSWARM_TARGET = "hub"\nSWARM_HUB_URL = ${JSON.stringify(url)}\nSWARM_HUB_TOKEN = ${JSON.stringify(MCP_CRED_PLACEHOLDER)}\n`;
+  } else {
+    format = 'json';
+    snippet = JSON.stringify({ mcpServers: { [name]: { command: cmd, env: { SWARM_TARGET: 'hub', SWARM_HUB_URL: url, SWARM_HUB_TOKEN: MCP_CRED_PLACEHOLDER } } } }, null, 2) + '\n';
+  }
+  return { name, cmd, url, snippet, format, cfgKey: mcpHash(snippet) };
+}
+/* mcpobV0Checks V0 页面校验（纯前端逐项；恒标「非服务端验证」——中心端不读取、
+ * 不探测任何调用机文件与网络，宿主配置合法性以宿主自身解析为准）。 */
+function mcpobV0Checks(d, g) {
+  const items = [];
+  const u = g.url.trim();
+  let host = '', scheme = '';
+  try { const p = new URL(u); host = p.hostname; scheme = p.protocol.replace(':', ''); } catch (e) { }
+  items.push({ k: 'service_url', ok: !!(scheme === 'http' || scheme === 'https') && !!host, txt: scheme && host ? '服务地址格式合法（http/https + host）。' : '服务地址须为 http/https 且带主机地址（指向字段 service_url）。' });
+  const loop = host === 'localhost' || host === '::1' || host === '0.0.0.0' || host === '127.0.0.1' || host.startsWith('127.');
+  items.push({ k: 'topology', ok: !loop, txt: loop ? '危险拓扑：服务地址为回环地址——127.0.0.1 属 MCP 进程所在机器（即外部调用机自身），从调用机连不到中心端；请改用调用机可达的中心地址。' : '服务地址非回环，未见拓扑陷阱（127.0.0.1 属 MCP 进程所在机器）。' });
+  const cmdOk = !!g.cmd.trim() && !g.cmd.startsWith('<');
+  items.push({ k: 'command_path', ok: cmdOk, txt: cmdOk ? '适配进程路径已填（外部调用机路径本页无法核实存在性，属调用机侧事实）。' : '缺路径：请填调用机上的 swarmmind-mcp 绝对路径（本页不代填服务器路径）。' });
+  items.push({ k: 'config_name', ok: !!g.name.trim(), txt: g.name.trim() ? '配置名已填：' + g.name + '。' : '配置名为空：将按默认名 swarmmind-hub 生成（同一宿主可本机/中心并存）。' });
+  items.push({ k: 'credential', ok: false, warn: true, txt: '凭据位为占位：生成模板不含明文——粘贴前须替换为管理员签发的 PAT 明文，否则不可直接调用。' });
+  const lvl = d.host === 'zcode' ? 'verified_zcode' : d.host === 'codex' ? 'manual_generic_codex' : 'manual_generic';
+  items.push({ k: 'host_support', ok: d.host === 'zcode', warn: d.host !== 'zcode', txt: '宿主 ' + (mcpIsCustomHost(d.host) ? d.host || '（自定义）' : d.host) + '：' + (MCP_HOST_WORDS[lvl] || lvl) + '；格式兼容性以宿主文档为准。' });
+  const fail = items.some(i => i.ok === false && !i.warn);
+  return { status: fail ? 'fail' : 'warn', items, cfgKey: g.cfgKey };
+}
+function mcpOnboardSection() {
+  const ob = mcpOnboardEnsure();
+  return `<div id="sec-mcp">${MCP_ZONES.map(z => `<section class="card spaced" data-zone="${z}"></section>`).join('')}</div>`;
+}
+/* paintMcpOnboard 六分区绘制（drawerZonesApply 分区 diff；tokens 页局部更新纪律：
+ * 只碰 #sec-mcp 子树，不触表单/账户/令牌区）。进设置页与动作落定后调用。 */
+function paintMcpOnboard() {
+  const root = document.getElementById('sec-mcp');
+  if (!root || S.page !== 'tokens' || !S.authed) return;
+  const ob = mcpOnboardEnsure();
+  drawerZonesApply(root, {
+    scope: mcpobScopeZone(), env: mcpobEnvZone(ob), auth: mcpobAuthZone(),
+    gen: mcpobGenZone(ob), verify: mcpobVerifyZone(ob), maint: mcpobMaintZone(),
+  }, ob.zonesCache, MCP_ZONES);
+}
+function mcpobScopeZone() {
+  return `<div class="row"><h2>① 范围与拓扑</h2></div>
+  <div class="mini-stat spaced"><span><b>调用中心（hub）</b><small>目标范围（本页固定）</small></span><span><b>外部调用机（默认）</b><small>MCP 适配进程位置</small></span></div>
+  <p class="muted small">拓扑事实：MCP 适配进程（swarmmind-mcp）运行在<b>调用者机器</b>上，它经 HTTPS 访问中心 hub；<b>127.0.0.1 属 MCP 进程所在的那台机器</b>（即调用机自身）——调用中心时服务地址不能填回环地址。调用本机 node 的接入配置在各机器的 node 控制台「MCP 接入」页（本页不代管）。</p>`;
+}
+function mcpobEnvZone(ob) {
+  const g = ob.gen;
+  return `<div class="row"><h2>② 调用环境</h2><div class="actions">${button('打开配置生成…', 'mcpob-open', 'primary')}</div></div>
+  ${g ? `<div class="table-wrap"><table><tbody>
+    <tr><th>宿主</th><td>${esc(ob.draft.host === 'codex' ? 'codex（通用手动，未实测适配）' : ob.draft.host === 'zcode' ? 'zcode（已实测适配布局）' : esc(ob.draft.custom_host || '自定义') + '（通用手动，未验证）')}</td></tr>
+    <tr><th>配置名</th><td>${esc(g.name)}</td></tr>
+    <tr><th>服务地址</th><td>${esc(g.url || '—')}</td></tr>
+    <tr><th>适配进程路径</th><td>${esc(g.cmd)}（待外部验证——远端路径中心端不探测）</td></tr>
+    <tr><th>配置指纹</th><td><code>${esc(g.cfgKey)}</code><small>（前端模板散列，非宿主文件版本 hash）</small></td></tr>
+  </tbody></table></div>` : '<p class="muted">尚未生成配置：点「打开配置生成」填写宿主、配置名、服务地址与调用机路径（纯前端生成，可反复改参）。</p>'}
+  <p class="footer-note">外部调用机路径与可达性中心端一律不探测：远端路径标「待外部验证」，服务器探测成功不代表外部可达。</p>`;
+}
+function mcpobAuthZone() {
+  return `<div class="row"><h2>③ 人工授权</h2><div class="actions">${button('前往「访问令牌」签发/管理 PAT →', 'jump-to', 'link', 'data-target="sec-tokens"')}</div></div>
+  <p class="muted small">中心范围凭据为管理员签发的访问令牌（PAT）：在上方「访问令牌」区人工创建（明文仅展示一次）、撤销或删除。模板中凭据位为占位——把 PAT 明文粘贴进调用机配置时才落地，本页绝不收集、不回显、不存储 PAT。PAT 撤销/换发即旧配置失效；管理密钥（admin_token）与 Web 登录会话绝不进入 MCP 配置。</p>`;
+}
+function mcpobGenZone(ob) {
+  const g = ob.gen;
+  return `<div class="row"><h2>④ 配置生成</h2><div class="actions">${button('打开配置生成…', 'mcpob-open', 'primary')}</div></div>
+  ${g ? `<div class="row spaced">${button('复制模板（凭据位为占位）', 'mcpob-copy', 'link')}${button('下载模板', 'mcpob-download', 'link')}</div>` : '<p class="muted">尚未生成模板。</p>'}
+  <p class="muted small">中心网页只生成配置模板与指引：<b>不写任何外部机器文件、不自动应用</b>——把模板按宿主布局粘贴进调用机配置文件由你完成。生成配置不安装二进制、不自动开放网络；调用机缺 swarmmind-mcp 时先完成安装。</p>
+  <p class="footer-note">同一宿主允许本机/中心并存：默认名 swarmmind-hub 与本机条目不冲突；撞名时请改配置名，不要静默覆盖。</p>`;
+}
+function mcpobVerifyZone(ob) {
+  const v0 = ob.verify.v0;
+  const v0Html = v0
+    ? `<span class="badge ${v0.status === 'fail' ? 'offline' : v0.status === 'pass' ? 'online' : ''}">${v0.status === 'fail' ? '未通过' : v0.status === 'pass' ? '通过' : '警示'}</span>
+       <details class="spaced"><summary>逐项校验（${v0.items.length} 项）</summary><div class="table-wrap"><table><tbody>${v0.items.map(i =>
+        `<tr><th>${esc(i.k)}</th><td><span class="badge ${i.ok && !i.warn ? 'online' : !i.ok && !i.warn ? 'offline' : ''}">${i.ok && !i.warn ? '通过' : !i.ok && !i.warn ? '未通过' : '警示'}</span> <small class="muted">${esc(i.txt)}</small></td></tr>`).join('')}</tbody></table></div></details>`
+    : '<span class="badge">未验证</span> <small class="muted">生成配置后自动出页面校验结果。</small>';
+  const rows = MCP_LAYER_ORDER.filter(l => l !== 'v0').map(l => {
+    if (l === 'v2') {
+      return `<div class="chan-card spaced"><div class="row"><div><b>${MCP_LAYER_FALLBACK[l]}</b> <span class="badge">不代证</span></div></div>
+      <small class="muted">中心端不代证外部授权：PAT 是否被接受以调用机实际调用为准（撤销/换发即时失效）——中心网页不做任何远端探测。</small></div>`;
+    }
+    const st = ob.verify[l];
+    const externalHint = {
+      v1: '你已在外部调用机上确认中心服务地址可达（连接/TLS 通过）。',
+      v3: '你已在外部宿主中看到 MCP 初始化成功与工具列表（tools/list）。',
+      v4: '你已在外部宿主中调用目录/状态工具，并核对返回范围与来源。',
+      v5: '你已明确发起一项低影响执行验证，并核对了它的结局（默认不运行，消耗模型额度）。',
+    }[l];
+    return `<div class="chan-card spaced"><div class="row"><div><b>${MCP_LAYER_FALLBACK[l]}</b> <span class="badge ${st ? 'online' : ''}">${st ? '用户确认' : '未验证'}</span></div>
+    <div class="actions">${st ? '' : button('登记我的确认', 'mcpob-ask-confirm:' + l, 'link')}</div></div>
+    ${st ? `<small class="muted">用户确认 · 登记于 ${esc(fmtTime(st.at))} · 绑定配置指纹 <code>${esc(mcpShortHash(st.cfgKey))}</code>（仅本页会话记录，刷新或更换配置后如实回落「未验证」）</small>` : `<small class="muted">等待外部验证：本层服务端不可自证；可由你在外部核对后登记确认（标注为用户确认，非服务端验证）。</small>`}
+    </div>`;
+  }).join('');
+  return `<div class="row"><h2>⑤ 分层验证（V0–V5）</h2></div>
+  <p class="muted small">状态不是单一绿灯：任一层结果不推断下一层。本页 V0 为<b>页面校验（非服务端验证）</b>；用户确认非服务端验证、仅存本页会话。节点范围的六层验证板（服务端检查+持久状态）在各机器 node 控制台「MCP 接入」页。</p>
+  <div class="chan-card spaced"><div class="row"><div><b>${MCP_LAYER_FALLBACK.v0}（页面校验·非服务端验证）</b> ${v0Html}</div></div></div>
+  ${rows}`;
+}
+function mcpobMaintZone() {
+  return `<div class="row"><h2>⑥ 维护与故障</h2></div>
+  <div class="spaced">
+  <p class="muted small"><b>PAT 撤销 / 换发 → 重新配置</b>：在「访问令牌」区撤销或删除令牌后，引用它的调用机配置即失效——生成新配置并更新调用机，不要用旧结果点亮新配置。</p>
+  <p class="muted small"><b>常见故障</b>：调用机连不上=V1（转发/防火墙/证书）；401=PAT 过期或撤销、403=权限不足（回「访问令牌」重签）；宿主没出现工具=V3（配置未重载/适配进程启动失败——apply 类写入成功不等于宿主已重载）。</p>
+  </div>
+  <div class="row spaced">${button('复制 V4 无副作用查询提示词', 'mcpob-copy-v4', 'link')}${button('复制 V5 执行验证提示词（默认不运行）', 'mcpob-copy-v5', 'link')}</div>
+  <p class="muted small">复制动作零副作用：仅写入剪贴板，不发起任何验证或任务。V4 只查询；V5 会消耗模型额度，默认不运行，须你明确发起并指定测试 agent 与独立工作区。</p>`;
+}
+
+/* ---------- MCP 接入配置生成弹层（居中 modal；纯前端，零请求零写盘） ---------- */
+function openMcpobModal() {
+  mcpOnboardEnsure();
+  openLayerPlain(mcpobModalHtml());
+}
+function mcpobModalHtml() {
+  const ob = S.mcpOnboard;
+  const d = ob.draft;
+  const custom = mcpIsCustomHost(d.host);
+  const g = ob.gen;
+  const fld = (k, label, ph = '') => `<label>${esc(label)}<input data-mcpob="${k}" value="${esc(d[k] ?? '')}" placeholder="${esc(ph)}"></label>`;
+  const preview = g ? `<div class="table-wrap"><table><tbody>
+    <tr><th>模板（${g.format}；凭据位为占位）</th><td><pre style="user-select:all;max-height:220px;overflow:auto">${esc(g.snippet)}</pre></td></tr>
+  </tbody></table></div>
+  <div class="actions spaced">${button('复制模板（凭据位为占位）', 'mcpob-copy', '')}${button('下载模板', 'mcpob-download', 'link')}</div>
+  <p class="footer-note">占位凭据不可直接调用：粘贴进调用机配置前，把 ${esc(MCP_CRED_PLACEHOLDER)} 替换为管理员签发的 PAT 明文。</p>` : '<p class="muted small">填写后点「生成配置模板」（纯前端，零请求零写盘）。</p>';
+  return `${modalHead('MCP 接入 · 配置生成（调用中心）')}
+  <p class="muted small">中心网页只生成模板与指引，不写任何外部机器文件、不做远端探测；凭据不入本页（模板凭据位为占位）。</p>
+  <div class="fields">
+    <label>宿主类型<select id="mcpob-host">
+      <option value="zcode"${d.host === 'zcode' ? ' selected' : ''}>zcode（已实测适配布局）</option>
+      <option value="codex"${d.host === 'codex' ? ' selected' : ''}>codex（通用手动，未实测适配）</option>
+      <option value="__custom"${mcpIsCustomHost(d.host) ? ' selected' : ''}>其他宿主（通用手动模板，未验证）</option>
+    </select></label>
+    ${custom ? fld('custom_host', '其他宿主标识', '如 warp / cursor 等（按宿主文档核对合并点）') : ''}
+    ${fld('name', '配置名（空=默认 swarmmind-hub；同一宿主可与本机条目并存）', 'swarmmind-hub')}
+    ${fld('url', '服务地址（外部调用机可达的中心地址；127.0.0.1 属调用机自身，不可用）', 'https://hub.example.com')}
+    ${fld('cmd', 'swarmmind-mcp 绝对路径（调用机上的；本页不代填服务器路径）', '/usr/local/bin/swarmmind-mcp')}
+  </div>
+  <div class="actions spaced">${button('生成配置模板', 'mcpob-gen', 'primary')}${button('关闭', 'close', 'link')}</div>
+  <div class="spaced">${preview}</div>`;
+}
+function mcpobGenerate() {
+  const ob = mcpOnboardEnsure();
+  const d = ob.draft;
+  const g = mcpobBuild(d);
+  ob.gen = g;
+  const v0 = mcpobV0Checks(d, g);
+  // 换配置即重置相关验证（配置指纹变化=旧结果不点亮新配置）；同模板重出保持已登记确认。
+  for (const k of Object.keys(ob.verify)) {
+    const st = ob.verify[k];
+    if (k === 'v0' || !st || st.cfgKey !== g.cfgKey) delete ob.verify[k];
+  }
+  ob.verify.v0 = v0;
+  openLayerPlain(mcpobModalHtml(), false, true);   // 弹层内容原位换步（层生命周期不重开）
+  paintMcpOnboard();
+  toast(v0.status === 'fail' ? '模板已生成，但页面校验有未通过项——请核对⑤区/弹层内逐项事实' : '配置模板已生成（凭据位为占位）');
+}
+/* mcpobCopy 模板复制（自带占位提示 toast；剪贴板被拒落手动复制弹层——与 hub
+ * copyText 同兜底形态，不直接复用因其固定 toast 无占位警示）。 */
+async function mcpobCopy(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    toast('模板已复制（凭据位为占位——粘贴前须替换为 PAT 明文）');
+  } catch {
+    openLayerPlain(`${modalHead('手动复制MCP模板')}<p>浏览器未允许剪贴板访问，可选中以下内容复制。</p><textarea readonly rows="12">${esc(value)}</textarea>${button('完成，返回 →', 'close', 'link')}`);
+  }
+}
+function mcpobCopySnippet() {
+  const g = S.mcpOnboard?.gen;
+  if (!g) { toast('先在「配置生成」里生成模板'); return; }
+  mcpobCopy(g.snippet);
+}
+function mcpobDownloadSnippet() {
+  const g = S.mcpOnboard?.gen;
+  if (!g) { toast('先在「配置生成」里生成模板'); return; }
+  downloadBlob(new Blob([g.snippet], { type: 'text/plain' }), g.name + '.' + (g.format === 'toml' ? 'toml' : 'json'));
+  toast('模板已下载（凭据位为占位——使用前须替换为 PAT 明文）');
+}
+function mcpobAskConfirm(layer) {
+  const ob = mcpOnboardEnsure();
+  const g = ob.gen;
+  if (!g) { toast('先在「配置生成」里生成模板，再登记确认'); return; }
+  const desc = {
+    v1: '你已在外部调用机上确认中心服务地址可达（连接/TLS 通过）。',
+    v3: '你已在外部宿主中看到 MCP 初始化成功与工具列表（tools/list）。',
+    v4: '你已在外部宿主中调用目录/状态工具，并核对返回范围与来源。',
+    v5: '你已明确发起一项低影响执行验证，并核对了它的结局（默认不运行，消耗模型额度）。',
+  }[layer];
+  if (!desc) return;
+  openLayerPlain(`${modalHead('登记用户确认 · ' + (MCP_LAYER_FALLBACK[layer] || layer))}
+  <div class="notice warn">${esc(desc)}<br><small class="muted">本登记标注为「用户确认」（非服务端验证），绑定当前配置指纹 <code>${esc(g.cfgKey)}</code>；仅保存在本页会话——刷新页面或更换配置后如实回落「未验证」（中心端不持久化外部验证状态）。</small></div>
+  <div class="actions spaced"><button type="button" class="danger" data-act="mcpob-do-confirm" data-layer="${esc(layer)}">我确认，登记</button><button type="button" data-act="close" class="link">取消</button></div>`, true);
+}
+function mcpobDoConfirm(layer) {
+  const ob = mcpOnboardEnsure();
+  if (!ob.gen) return;
+  ob.verify[layer] = { status: 'user_confirmed', at: new Date().toISOString(), cfgKey: ob.gen.cfgKey };
+  closeLayer(true);
+  paintMcpOnboard();
+  toast('已登记用户确认（' + (MCP_LAYER_FALLBACK[layer] || layer) + '；仅本页会话）');
 }
 
 /* ---------- 通知中心（P4③ 控制台化升级） ----------
@@ -4257,6 +4499,15 @@ const ACT = {
   'copy-token': () => copyText($('#new-token-plain')?.textContent || '', '令牌明文'),
   'tokens-retry': () => loadTokens(),   // 设置页加载失败重试（D2/FE-06）：只局部更新两个子树
   'token-done': () => { S.newToken = null; render(); toast('已关闭 · 明文不再显示'); },
+  /* ---------- MCP 接入（W03-04 P07；设置页 sec-mcp 分区，纯前端零自动写） ---------- */
+  'mcpob-open': () => openMcpobModal(),
+  'mcpob-gen': () => mcpobGenerate(),
+  'mcpob-copy': () => mcpobCopySnippet(),
+  'mcpob-download': () => mcpobDownloadSnippet(),
+  'mcpob-copy-v4': () => mcpobCopy(MCP_PROMPT_V4),
+  'mcpob-copy-v5': () => mcpobCopy(MCP_PROMPT_V5),
+  'mcpob-ask-confirm': b => mcpobAskConfirm(b.dataset.layer || ''),
+  'mcpob-do-confirm': b => mcpobDoConfirm(b.dataset.layer || ''),
   /* ---------- 会话（W01-05）：列表/详情页/modal/取消/关闭动作 ---------- */
   'sess-chip': b => { S.sessFilter = b.dataset.chip || ''; paintSessionsView(); },   // R1 必修3：筛选切换走统一槽位入口，modal/搜索 DOM 不重建
   'sess-clear-filter': () => { S.sessFilter = ''; S.sessQuery = ''; const q = $('#sess-query'); if (q) q.value = ''; paintSessionsView(); toast('已清除筛选'); },
@@ -4784,6 +5035,7 @@ function bindEvents() {
     if (b?.id === 'logout') {
       closeLayer();
       S.authed = false; S.loaded = false; S.C = freshControl(); S.groupView = null;
+      S.mcpOnboard = null;   // MCP 接入子页会话（含用户确认记录）不跨登录残留（W03-04）
       S.f = blankFilters();   // 筛选不跨会话（TASK-nav-filter A2：登出重置同步覆盖）
       S.drafts = {}; S.busy.clear();   // 草稿不跨会话（FE-08）；在途操作随登出作废
       closeBellPanel();
@@ -4860,6 +5112,9 @@ function bindEvents() {
     if (e.target.id === 'sess-prompt') S.sessForm.prompt = e.target.value;
     if (e.target.id === 'sess-title') S.sessForm.title = e.target.value;   // 会话标题草稿镜像（W01-05；hub 创建端点无 title 字段，本端不渲染该输入位）
     if (e.target.id === 'sess-query') { S.sessQuery = e.target.value; paintSessionsView(); }   // P01 搜索：镜像 + 列表/chips 槽位局部刷新（输入框自身不受触碰）
+    /* MCP 接入配置生成表单（data-mcpob，W03-04）：直写草稿不重绘（保输入焦点）。 */
+    const mk = e.target.dataset?.mcpob;
+    if (mk && S.mcpOnboard) { S.mcpOnboard.draft[mk] = e.target.value; return; }
   });
   document.addEventListener('change', e => {
     const k = e.target.dataset.f;
@@ -4880,6 +5135,15 @@ function bindEvents() {
     if (e.target.id === 'wa-step') workStepPicked();
     /* 会话表单：权限模式断言选择（草稿落 S.sessForm，重绘恢复）。 */
     if (e.target.id === 'sess-perm') { S.sessForm.perm = e.target.value; return; }
+    /* MCP 接入配置生成：宿主切换即失效旧模板与相关验证（换配置重置，W03-04）。 */
+    if (e.target.id === 'mcpob-host' && S.mcpOnboard) {
+      S.mcpOnboard.draft.host = e.target.value;
+      S.mcpOnboard.gen = null;
+      S.mcpOnboard.verify = {};
+      openLayerPlain(mcpobModalHtml(), false, true);
+      paintMcpOnboard();
+      return;
+    }
   });
   /* 智能体选择公共组件（派单 ctrl / 建群 gnew / 转任务 task）：机器切换联动、
    * 摘要行与计数行统一走组件；派单页把选择持久化到 S.C（整页重绘后恢复），
