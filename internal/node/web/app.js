@@ -1758,8 +1758,11 @@ function detectGlyphHtml(label, v, reason) {
 function detectBadgeHtml(a) {
   const d = a?.detect;
   if (!d) return '';
+  // 就绪徽标 tooltip 强制携带「模型未验证」（终审建议修：卡头一眼层面不得让
+  // 「就绪=模型可用」误读成立；W06-resources.md 检测模型节该层 pass 必带口径）。
+  const readyTip = d.execution_ready === 'pass' ? '执行前置检查通过（模型未验证）' : '';
   return ` ${detectGlyphHtml('安装', d.installed, '')}${detectGlyphHtml('配置', d.config_recognized, '')}` +
-    detectGlyphHtml('就绪', d.execution_ready, '') + detectGlyphHtml('调用', d.call_allowed, '');
+    detectGlyphHtml('就绪', d.execution_ready, readyTip) + detectGlyphHtml('调用', d.call_allowed, '');
 }
 /* detectSummaryRow 配置详情表「检测摘要」行：四值 + 检查时间 + 未验证原因；
  * execution_ready pass 时强制带原注记（执行前置检查通过（模型未验证））。 */
