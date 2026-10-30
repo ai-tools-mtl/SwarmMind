@@ -112,8 +112,8 @@ func cancelTurnsViaMaster(srv *httptest.Server, sid string, upto int64) {
 // closeMasterWithRetry 主人面关闭（测试夹具动作）：CloseGuard 在途防护存在「内核
 // 轮终已投影、账本终态落盘在途」的窄窗口（内核发布先于账本 MarkFinished，全库
 // 并行测试负载下窗口可观，实测踩中）——close_in_flight 时短暂重试至窗口收束。
-// 已知服务端实况：主人旧面 writeLocalSessionErr 未收录 close_in_flight 落 500
-// （RFC §7 定 409，localapi 面本批禁区不改）——重试按错误体判定，不依赖状态码。
+// 主人旧面 writeLocalSessionErr 已收录 close_in_flight→409（W01-03 漏项经
+// 9f48440 补录，映射另有 localapi 定向断言锁定）——重试按状态码+错误体双判。
 func closeMasterWithRetry(t *testing.T, srv *httptest.Server, sid string) {
 	t.Helper()
 	cl := &http.Client{Timeout: 10 * time.Second}
@@ -361,7 +361,7 @@ func TestNodeBackendSessionQueueFull(t *testing.T) {
 // TestSessionErrHintSharedVocabulary hub/node 会话错误同词表锁定（防双端漂移，
 // W01-04）：两后端共用 sessionErrHints 单源实现——同一错误体在两端的提示仅差标注
 // 前缀；RFC §7 映射表中工具面可达的错误码全员有人话（落 JSON 原话回退=未收录，
-// 即失败）。
+// 即失败）。mcp_disabled/prime_required 为鉴权门可达码（终审建议②补入表与循环）。
 func TestSessionErrHintSharedVocabulary(t *testing.T) {
 	body := []byte(`{"error":"session_closed","message":"已关闭的会话"}`)
 	hub := sessionErrHint(409, body).Error()
@@ -372,12 +372,18 @@ func TestSessionErrHintSharedVocabulary(t *testing.T) {
 	if node != strings.Replace(hub, "hub 409", "本机 node 409", 1) {
 		t.Fatalf("node 提示应与 hub 同词表仅差前缀:\n hub=%s\nnode=%s", hub, node)
 	}
+	// unverified 提醒单源断言（终审建议①）：node 别名与共享 const 恒等由构造
+	// 保证，此处锁 hub status 输出含同一 const 文本（防未来 hub 侧回退内联字面量）。
+	if !strings.Contains(sessionUnverifiedReminder, "禁止基于未经核对的轮次下结论") {
+		t.Fatalf("sessionUnverifiedReminder 单源文本漂移: %s", sessionUnverifiedReminder)
+	}
 	for _, code := range []string{"session_not_found", "session_closed", "session_unsupported",
 		"binding_mismatch", "turn_seq_conflict", "turn_in_flight", "turn_queue_full",
 		"request_conflict", "workspace_denied", "agent_not_found",
+		"mcp_disabled", "prime_required",
 		"input_invalid", "invalid_request"} {
 		b := []byte(fmt.Sprintf(`{"error":%q,"message":"服务端原话"}`, code))
-		text := sessionErrHintAt("本机 node", 409, b).Error()
+		text := sessionErrHintAt("本机 node", 403, b).Error()
 		if strings.Contains(text, `{"error"`) {
 			t.Fatalf("错误码 %q 未入同词表（落 JSON 原话回退）: %s", code, text)
 		}

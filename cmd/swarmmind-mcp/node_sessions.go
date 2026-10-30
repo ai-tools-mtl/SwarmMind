@@ -95,9 +95,9 @@ func nodeTurnStatusCN(t nodeSessionTurnView) string {
 	return "已完成"
 }
 
-// nodeUnverifiedReminder 未经证实强制提醒（与 hub toolSessionStatus 同词表原句——
-// 两种 backend 输出同款，任务书硬性要求；禁止改写弱化）。
-const nodeUnverifiedReminder = "\n\n注意：最近一轮工作结果未经证实（平台只证明执行成立，不证明工作成功）——需要你自行核对答复内容，禁止基于未经核对的轮次下结论。"
+// nodeUnverifiedReminder 未经证实强制提醒（= sessionUnverifiedReminder 单源别名：
+// 两种 backend 输出同款由同一 const 构造保证，任务书硬性要求；禁止改写弱化）。
+const nodeUnverifiedReminder = sessionUnverifiedReminder
 
 // toolSessionCreate swarmmind_session_create（node 面）：本机创建登记（201，不执行
 // 模型不投轮——首轮经 session_send 显式提交）。request_id 可选幂等（同键同文 200+dup

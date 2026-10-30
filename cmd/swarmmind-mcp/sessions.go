@@ -40,6 +40,11 @@ func sessionStatusCN(st string) string {
 // 单源实现防双端漂移；W01-03 RFC §7 映射表覆盖的双端错误码同表登记）。文案保持
 // 后端中立（受理方差异由各后端的标注前缀承担，不点名 hub/node 专属机制）；
 // 未收录码由调用方回退服务端原话。
+// sessionUnverifiedReminder 未经证实强制提醒（单源共享：hub status 内联与 node
+// nodeUnverifiedReminder 曾是两份独立字面量——同文但无锁定，漂移面残留；终审
+// 建议①收口为同一 const，两种 backend 输出同款，任务书硬性要求禁止改写弱化）。
+const sessionUnverifiedReminder = "\n\n注意：最近一轮工作结果未经证实（平台只证明执行成立，不证明工作成功）——需要你自行核对答复内容，禁止基于未经核对的轮次下结论。"
+
 func sessionErrHints() map[string]string {
 	return map[string]string{
 		"session_not_found":   "会话不存在（swarmmind_session_list 可查现有会话）",
@@ -57,6 +62,8 @@ func sessionErrHints() map[string]string {
 		"storage_full":        "hub 存储预算已满：{{msg}}",
 		"frame_too_large":     "请求体超限（prompt 过长）：{{msg}}",
 		"input_invalid":       "{{msg}}",
+		"mcp_disabled":        "本机 MCP 编排授权未启用：请由本机主人在控制台启用后重试（调用权与管家角色解耦，启用无需钦定管家；local_token 派单不受影响）：{{msg}}",
+		"prime_required":      "本机编排接口未激活（setup 模式未完成接入）：{{msg}}",
 		"invalid_request":     "{{msg}}",
 	}
 }
@@ -291,7 +298,7 @@ func toolSessionStatus(args map[string]any) (string, error) {
 	if len(s.Turns) > 0 {
 		last := s.Turns[len(s.Turns)-1]
 		if last.Status == "unverified" {
-			b.WriteString("\n\n注意：最近一轮工作结果未经证实（平台只证明执行成立，不证明工作成功）——需要你自行核对答复内容，禁止基于未经核对的轮次下结论。")
+			b.WriteString(sessionUnverifiedReminder) // 单源（终审建议①：双字面量漂移面残留，与 node 面同 const）
 		}
 	}
 	if s.Status == "active" {

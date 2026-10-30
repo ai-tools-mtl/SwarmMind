@@ -219,3 +219,26 @@ func TestLocalSessionsUnsupportedDowngrade(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteLocalSessionErrCloseInFlight409 锁定 close_in_flight→409 映射（W01-03
+// 行为变更；9f48440 补录前此码落 500——终审建议④：曾被漏一次的映射须有测试锁，
+// 防未来重构再丢）。
+func TestWriteLocalSessionErrCloseInFlight409(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want int
+	}{
+		{"close_in_flight", http.StatusConflict},
+		{"session_closed", http.StatusConflict},
+		{"turn_in_flight", http.StatusConflict},
+		{"binding_mismatch", http.StatusConflict},
+		{"session_not_found", http.StatusNotFound},
+		{"session_unsupported", http.StatusServiceUnavailable},
+	} {
+		rec := httptest.NewRecorder()
+		writeLocalSessionErr(rec, &service.RemoteError{Code: tc.code, Msg: "测试"})
+		if rec.Code != tc.want {
+			t.Fatalf("writeLocalSessionErr(%q) 状态码 = %d, want %d", tc.code, rec.Code, tc.want)
+		}
+	}
+}
