@@ -145,11 +145,12 @@ func mcpCfgLayoutFor(host string) (mcpCfgLayout, bool) {
 
 // mcpCfgFileState 宿主配置文件事实（preview file 字段数据源；来自真实 Lstat/Open 观测）。
 type mcpCfgFileState struct {
-	Path     string `json:"path"`
-	Exists   bool   `json:"exists"`
-	Symlink  bool   `json:"symlink"`
-	Writable bool   `json:"writable"`
-	Version  string `json:"version"` // sha256 hex（原始字节）；文件不存在=空串哨兵
+	Path     string   `json:"path"`
+	Exists   bool     `json:"exists"`
+	Symlink  bool     `json:"symlink"`
+	Writable bool     `json:"writable"`
+	Version  string   `json:"version"`          // sha256 hex（原始字节）；文件不存在=空串哨兵
+	Issues   []string `json:"issues,omitempty"` // 文件态问题清单（W03-04 终审发现缺口闭环：注释承诺「file.issues 如实呈现」此前收集未附应答）
 }
 
 // mcpCfgVersionHash 文件版本 hash（SHA-256 hex；防 TOCTOU 口径的版本语义，RFC §4）。
@@ -642,6 +643,11 @@ func (s *Server) mcpCfgPreviewResponse(req *mcpCfgRequest) (map[string]any, *mcp
 		"notes":              notes,
 	}
 	if fileState != nil {
+		if fileState != nil && len(fileState.Issues) == 0 {
+			// 收集期 issues 附进文件事实（W03-04 终审发现缺口闭环——收集未附应答，
+			// 注释与实现不一致；此处统一收敛，codex 探测注记类 issues 一并如实呈现）
+			fileState.Issues = issues
+		}
 		payload["file"] = fileState
 	}
 	if diff != nil {
