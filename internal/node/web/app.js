@@ -915,7 +915,15 @@ function nodeSessionTurns(v) {
     if (!m || m[1] !== v.id) continue;
     const seq = parseInt(m[2], 10), st = String(e.status || '');
     if (bySeq.has(seq)) {
-      if (st === 'cancelled' && bySeq.get(seq).status === 'failed') bySeq.get(seq).cancelBooked = true;   // 执行取消已证停止（账本记账码为准）
+      const tv = bySeq.get(seq);
+      if (st === 'cancelled' && tv.status === 'failed') {
+        tv.cancelBooked = true;   // 本机账本取消记账（终审必修1：内核行取消分类判据；三态由 nodeTurnKind 依治理证据细分）
+      } else if (st === 'failed' && tv.status === 'failed' && !tv.cancelBooked) {
+        const ec = tv.raw?.exit_code;
+        if (String(tv.error || '').startsWith('timeout:') && !(typeof ec === 'number' && ec >= 0)) {
+          tv.probeTask = e.task_id || '';   // 治理形态失败轮：自然超时/unknown 取消在内核留痕上不可区分——探针依任务详情记账码判定（probeSessCancelUnknowns）
+        }
+      }
       continue;
     }
     if (st === 'acknowledged') rows.push({ seq, status: 'pending', error: '', inflight: true });
@@ -925,11 +933,63 @@ function nodeSessionTurns(v) {
   }
   return rows.sort((a, b) => a.seq - b.seq);
 }
-/* nodeTurnKind 轮行取消三态判定（node 形态）：cancelled 无内核行=queued（进入执
- * 行前撤销）；cancelled 有内核行/账本记账=executed；unknown 沿 shared 判定。 */
+/* nodeTurnKind 轮行取消三态判定（node 形态；W01-05 终审必修1/2 修正）：
+ * 1) cancelled 投影行（pending 受理投影 / 账本扫描无内核行）：Error 首段记账码为
+ *    准——turn_cancelled_executed→executed（执行取消：进程组已整组终止并回收，
+ *    绝无「未运行」字样）；turn_cancelled_queued 或裸 cancelled→queued（进入执行
+ *    前撤销，「未运行」文案仅此分支）。
+ * 2) 内核行 + cancelBooked（本机账本取消记账）：分类与 sessionop.ClassifyCancelTurn
+ *    同源（证据口径同式：error 前缀 timeout: 且无真实退出码=runner 治理已整组终止
+ *    并回收 → executed；其余错误形态=停止事实未证实 → unknown 待核对——徽标+答复区
+ *    警示条，绝不渲染「执行失败」冒认进程错误语义）。
+ * 3) 内核行无 cancelBooked 但治理形态（timeout:+退出码 -1）且探针判为 unknown
+ *    （任务详情账本记账码 turn_cancel_outcome_unknown，sessCancelProbe 缓存）→
+ *    unknown。其余沿 shared 判定（failed + turn_cancel_outcome_unknown → unknown）。 */
 function nodeTurnKind(tv) {
-  if (tv.status === 'cancelled') return tv.kernel || tv.cancelBooked ? 'executed' : 'queued';
+  const err = String(tv.error || '');
+  if (tv.status === 'cancelled') {
+    if (err.startsWith('turn_cancel_outcome_unknown')) return 'unknown';   // 防御位：unknown 记账恒投影 failed，若记账码在案绝不按 queued 出「未运行」文案
+    return err.startsWith('turn_cancelled_executed') ? 'executed' : 'queued';
+  }
+  if (tv.status === 'failed') {
+    const ec = tv.raw?.exit_code;
+    const governed = err.startsWith('timeout:') && !(typeof ec === 'number' && ec >= 0);
+    if (tv.cancelBooked) return governed ? 'executed' : 'unknown';
+    if (governed && tv.probeTask && sessCancelProbe.get(tv.probeTask) === 'unknown') return 'unknown';
+  }
   return sessCancelKind(tv);
+}
+/* nodeTurnBadge 轮行状态徽标（取消三态感知，终审必修1）：executed/queued → 已取消
+ * 徽标；unknown → 待核对徽标（绝不渲染「执行失败」冒认进程错误语义）；其余按投影
+ * 态直出。 */
+function nodeTurnBadge(tv) {
+  const kind = nodeTurnKind(tv);
+  if (kind === 'unknown') return `<span class="badge sst-unverified" title="turn_cancel_outcome_unknown">待核对</span>`;
+  if (kind === 'executed' || kind === 'queued') return sessBadge('cancelled');
+  return sessBadge(tv.status);
+}
+/* sessCancelProbe 治理形态失败轮的取消探针缓存（task_id → 'unknown'|'natural'）：
+ * 内核轮行 timeout:+退出码-1 与自然超时在内核留痕上不可区分，取消是否在案以任务
+ * 详情账本记账码（turn_cancel_outcome_unknown）为唯一判据——每 task 至多探一次。 */
+const sessCancelProbe = new Map();
+let sessCancelProbeBusy = false;
+async function probeSessCancelUnknowns() {
+  if (sessCancelProbeBusy || !S.sessId || S.page !== 'sessions' || !S.sessPage?.session) return;
+  const targets = nodeSessionTurns(S.sessPage.session)
+    .filter(t => t.kernel && !t.cancelBooked && t.probeTask && !sessCancelProbe.has(t.probeTask))
+    .map(t => t.probeTask);
+  if (!targets.length) return;
+  sessCancelProbeBusy = true;
+  let changed = false;
+  try {
+    for (const tid of targets) {
+      const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(tid)).catch(() => null);
+      const err = String(r?.data?.result?.error || '');
+      sessCancelProbe.set(tid, err.startsWith('turn_cancel_outcome_unknown') ? 'unknown' : 'natural');
+      if (err.startsWith('turn_cancel_outcome_unknown')) changed = true;
+    }
+  } finally { sessCancelProbeBusy = false; }
+  if (changed) { syncSessPageZones(); syncSessTurnDrawerFromPage(); }   // 待核对判定落定：详情/抽屉即绘
 }
 /* sessStateBadge 会话注册表状态徽标（详情页头；pending 键双义分流：会话级登记态
  * 取 SESS_STATES「登记中（首轮未发布）」，轮级 pending=排队中走 sessBadge——徽标词
@@ -940,10 +1000,14 @@ function sessStateBadge(v) {
 }
 function sessRowState(v) {
   if (v.pending) return 'pending';   // 登记中（会话级；chip 词取 SESS_STATES）
-  if (v.status === 'closed') { const t = nodeSessionTurns(v).slice(-1)[0]; return t ? t.status : ''; }
   const t = nodeSessionTurns(v).slice(-1)[0];
-  if (!t) return '';
+  if (!t) return '';   // 关闭且无轮次：无筛选态（徽标「待首轮」如实）
   if (t.status === 'pending') return 'running';   // 在途排队并入「执行中」口径（时间线行仍精确显示排队中）
+  if (t.status === 'failed' || t.status === 'cancelled') {
+    const k = nodeTurnKind(t);   // 取消三态感知（终审必修1）：执行/排队取消入「已取消」，待核对入「执行失败」chip 计数（时间线/详情展示待核对徽标）
+    if (k === 'executed' || k === 'queued') return 'cancelled';
+    if (k === 'unknown') return 'failed';
+  }
   return t.status;
 }
 /* ---------- P01 会话列表主入口 ---------- */
@@ -977,12 +1041,13 @@ function filteredSessions() {
  * ——endpoint 能力差异，白名单登记）。 */
 function sessChipsNode() {
   const counts = sessStateCounts();
-  return ['pending'].concat(SESS_TURN_SEVEN.filter(x => x !== 'pending')).map(s => {   // 登记中 chip 独立（会话级）；轮投影 pending（排队中）并入登记口径计数
+  const all = `<button data-act="sess-chip" data-chip="" class="${!S.sessFilter ? 'on' : ''}">全部 (${S.sessions.length})</button>`;   // 终审必修3：全部 chip 恒在（与 hub 同构；任一筛选态的主返回路径）
+  return [all].concat(['pending'].concat(SESS_TURN_SEVEN.filter(x => x !== 'pending')).map(s => {   // 登记中 chip 独立（会话级）；轮投影 pending（排队中）并入登记口径计数
     const n = counts[s] || 0;
     const word = s === 'pending' ? SESS_STATES.pending : (SESS_TURN_STATES[s] || s);
     const bd = n ? (s === 'pending' ? `<span class="badge sst-pending" title="pending">${esc(SESS_STATES.pending)}</span>` : sessBadge(s)) : `<span class="badge">${esc(word)}</span>`;
     return `<button data-act="sess-chip" data-chip="${s}" class="${S.sessFilter === s ? 'on' : ''}${n ? '' : ' zero'}" title="${esc(s)}">${bd} ${n}</button>`;
-  });
+  }));
 }
 function sessListZone() {
   if (S.sessUnsupported) return `<div class="empty"><h2>本机未装配会话内核</h2><p class="muted">没有能力声明 session_adapter（node.yaml 能力级配置，变更须「应用并重启」）。本机原生线程管理不可用；跨机会话请经 hub 控制台。</p></div>`;
@@ -993,12 +1058,12 @@ function sessListZone() {
     + `<div class="empty"><h2>${S.sessions.length ? '没有符合筛选的会话' : '还没有会话'}</h2>${S.sessions.length ? button('清除筛选', 'sess-clear-filter') : `<p class="muted">与声明会话能力的智能体开启多轮协作；轮次账本留痕在本机，未证实的工作结果如实标注。</p>${button('新建会话', 'sess-new', 'primary')}`}</div>`;
   return (S.sessError ? listStaleBar('sess-reload', '会话列表') : '')
     + `<div class="table-wrap"><table><thead><tr><th>标题</th><th>agent</th><th>机器</th><th>工作区</th><th>状态</th><th>最近活动（UTC）</th><th>操作</th></tr></thead><tbody>
-  ${list.map(v => { const st = sessRowState(v); const closed = v.status === 'closed' && !v.pending; return `<tr data-sess="${esc(v.id)}" tabindex="0" aria-label="查看会话 ${esc(v.id)}">
+  ${list.map(v => { const turns = nodeSessionTurns(v); const lastT = turns[turns.length - 1]; const st = sessRowState(v); const closed = v.status === 'closed' && !v.pending; return `<tr data-sess="${esc(v.id)}" tabindex="0" aria-label="查看会话 ${esc(v.id)}">
     <td class="task-title">${v.title ? `<strong>${esc(v.title)}</strong>` : '<span class="muted">（无标题）</span>'}<small class="task-sum">${sessShortId(v.id)}</small></td>
     <td><strong>${esc(v.agent_name)}</strong></td>
     <td><small>${esc(S.nodeID || '本机')}</small></td>
     <td><small title="${esc(v.cwd || '')}">${esc(sessWsSummary(v.cwd))}</small></td>
-    <td>${v.pending ? sessStateBadge(v) : st ? sessBadge(st) : '<span class="muted small">待首轮</span>'}</td>
+    <td>${v.pending ? sessStateBadge(v) : lastT ? nodeTurnBadge(lastT) : '<span class="muted small">待首轮</span>'}</td>
     <td><small>${esc(fmtUTC(v.updated_at) || '—')}</small></td>
     <td class="table-action">${!closed ? button('继续', 'sess-continue:' + esc(v.id), 'link') : ''}${button('查看 →', 'sess-open:' + esc(v.id), 'link')}</td>
   </tr>`; }).join('')}</tbody></table></div>`;
@@ -1035,6 +1100,7 @@ async function fetchSessionPage() {
   if (S.sessPage.sel != null && !seqs.includes(S.sessPage.sel)) S.sessPage.sel = null;
   $('#sess-detail-loading')?.remove();
   syncSessPageZones();
+  probeSessCancelUnknowns();   // 治理形态失败轮的取消探针（unknown 待核对判定；有判定变更时内部即绘）
 }
 function syncSessPageZones() {
   const root = document.getElementById('sess-detail');
@@ -1068,9 +1134,9 @@ function sessPageZones(v) {
     </tbody></table></div>`,
     turns: `<h3 class="spaced">轮次（${turns.length}）</h3>${turns.length
     ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>状态</th><th>时间（UTC）</th><th>标识</th><th>操作</th></tr></thead><tbody>
-      ${turns.map(t => { const time = t.kernel && t.raw ? (realTime(t.raw.finished_at) ? t.raw.finished_at : t.raw.started_at) : ''; return `<tr data-turn="${t.seq}" tabindex="0" aria-label="查看第 ${t.seq} 轮" class="${sp.sel === t.seq ? 'on' : ''}">
+      ${turns.map(t => { const time = t.kernel && t.raw ? (realTime(t.raw.finished_at) ? t.raw.finished_at : t.raw.started_at) : ''; const k = nodeTurnKind(t); return `<tr data-turn="${t.seq}" tabindex="0" aria-label="查看第 ${t.seq} 轮" class="${sp.sel === t.seq ? 'on' : ''}">
       <td>#${t.seq}</td>
-      <td>${sessBadge(t.status)}${nodeTurnKind(t) === 'unknown' ? ' <span class="badge sst-unverified" title="turn_cancel_outcome_unknown">待核对</span>' : ''}${t.status === 'failed' && t.error && !nodeTurnKind(t) ? ` <small class="help" title="${esc(t.error)}">ⓘ</small>` : ''}</td>
+      <td>${nodeTurnBadge(t)}${t.status === 'failed' && t.error && !k ? ` <small class="help" title="${esc(t.error)}">ⓘ</small>` : ''}</td>
       <td><small>${esc(fmtUTC(time) || '—')}</small></td>
       <td>${sessShortId(t.kernel ? t.raw.native_turn_id : '')}</td>
       <td class="table-action">${t.inflight ? button('取消', 'sess-turn-cancel', 'link', '', `data-id="${esc(v.id)}" data-seq="${t.seq}"`) : ''}${button('明细', 'sess-turn-detail', 'link', '', `data-seq="${t.seq}"`)}</td>
@@ -1094,17 +1160,17 @@ function sessTurnAnswerHtml(tv, v) {
   const banner = kind === 'unknown'
     ? `<div class="notice warn"><b>取消结果待核对</b> · ${esc(SESS_CANCEL_WORDS.turn_cancel_outcome_unknown)}；本记录绝不记为成功或已停止，请核对本机实际状态。</div>`
     : kind === 'queued' ? `<div class="notice"><b>已取消（进入执行前撤销）</b> · 本轮未运行，确定性终止；平台序号已受理消耗。</div>`
-    : kind === 'executed' ? `<div class="notice"><b>已取消（执行已终止）</b> · 进程组已整组回收。</div>`
+    : kind === 'executed' ? `<div class="notice"><b>已取消（执行取消）</b>：进程组已整组终止并回收。</div>`
     : tv.status === 'unverified' && (tv.kernel || tv.raw) ? `<div class="notice warn"><b>工作结果未证实</b> · ${esc(SESS_UNVERIFIED_NOTE)}</div>`
     : tv.status === 'failed' ? `<div class="notice danger"><b>执行失败</b> · <code>${esc(tv.error || '原因未留痕')}</code>${tv.kernel && typeof tv.raw?.exit_code === 'number' && tv.raw.exit_code >= 0 ? ` · 退出码 ${tv.raw.exit_code}` : ''}</div>` : '';
   if (!tv.kernel) {
-    return `<h3 class="spaced">第 ${tv.seq} 轮 ${sessBadge(tv.status)}${kind === 'unknown' ? ' <span class="badge sst-unverified" title="turn_cancel_outcome_unknown">待核对</span>' : ''}</h3>${banner}
+    return `<h3 class="spaced">第 ${tv.seq} 轮 ${nodeTurnBadge(tv)}</h3>${banner}
     <p class="muted small">平台受理事实：原生轮行待内核落定后可见${tv.error ? ' · 记账码 <code>' + esc(tv.error) + '</code>' : ''}。</p>`;
   }
   const t = tv.raw || {};
   const usage = t.usage && (t.usage.total_tokens || t.usage.input_tokens || t.usage.output_tokens)
     ? `<p class="muted small">用量：输入 ${t.usage.input_tokens || 0} · 输出 ${t.usage.output_tokens || 0} · 共 ${t.usage.total_tokens || 0} tokens</p>` : '';
-  return `<h3 class="spaced">第 ${tv.seq} 轮答复 ${sessBadge(tv.status)}${kind === 'unknown' ? ' <span class="badge sst-unverified" title="turn_cancel_outcome_unknown">待核对</span>' : ''}</h3>${banner}
+  return `<h3 class="spaced">第 ${tv.seq} 轮答复 ${nodeTurnBadge(tv)}</h3>${banner}
   <p class="muted small">开始 ${esc(fmtUTC(t.started_at) || '—')}${realTime(t.finished_at) ? ' · 完成 ' + esc(fmtUTC(t.finished_at)) : ''} · 原生轮次 ${sessShortId(t.native_turn_id)}</p>
   <h3 class="spaced">答复</h3>${mdAnswer(t.response)}${usage}`;
 }
@@ -1165,7 +1231,7 @@ function sessTurnDrawerZones(tv, v) {
   const t = tv.raw || {};
   return {
     head: `<div class="row"><h2 id="drawer-title">第 ${tv.seq} 轮执行明细</h2>${button('×', 'close-sess-drawer', 'close', '', 'aria-label="关闭抽屉"')}</div>
-    <div class="row"><h2>${esc(v?.agent_name || '')} @ ${esc(S.nodeID || '本机')} ${sessBadge(tv.status)}${nodeTurnKind(tv) === 'unknown' ? ' <span class="badge sst-unverified" title="turn_cancel_outcome_unknown">待核对</span>' : ''}</h2></div>`,
+    <div class="row"><h2>${esc(v?.agent_name || '')} @ ${esc(S.nodeID || '本机')} ${nodeTurnBadge(tv)}</h2></div>`,
     facts: `<h3>受理与执行事实</h3>
     <div class="table-wrap"><table><tbody>
     ${tv.kernel ? `<tr><td>原生轮次</td><td>${sessShortId(t.native_turn_id)}</td></tr>
@@ -3512,7 +3578,12 @@ document.addEventListener('click', e => {
       case 'sess-again': S.sess = freshSessForm(); syncSessModal(); syncSessModalHead(); requestAnimationFrame(() => $('#sess-title')?.focus()); return;
       case 'sess-switch-new': S.sess = freshSessForm(); syncSessModal(); syncSessModalHead(); requestAnimationFrame(() => $('#sess-title')?.focus()); return;
       case 'sess-reload': loadSessions().then(paintSessionsView).catch(() => { }); return;
-      case 'sess-chip': S.sessFilter = btn.dataset.chip || ''; paintSessionsView(); return;
+      case 'sess-chip': {
+        const c = btn.dataset.chip || '';
+        S.sessFilter = c !== '' && S.sessFilter === c ? '' : c;   // 终审必修3：选中/再点复位（点同值回全部）
+        paintSessionsView();
+        return;
+      }
       case 'sess-clear-filter': S.sessFilter = ''; S.sessQuery = ''; const q = $('#sess-query'); if (q) q.value = ''; paintSessionsView(); toast('已清除筛选'); return;
       case 'sess-back': location.hash = '#/sessions'; return;
       case 'sess-open': closeSessModal(); goSessionDetail(arg); return;   // 旧入口兼容跳转（受理回执/列表行查看 → 详情页）

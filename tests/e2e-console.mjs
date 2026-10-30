@@ -615,21 +615,30 @@ async function hubSessFlow(browser) {
     cancelToast = await page.textContent('#toast').catch(() => '');
     cancelClicked = true;
   }
-  const cancelHonest = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
-    || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对') || cancelToast.includes('取消未生效');
-  // 轮行最终翻已取消（或已先到自然终态——回执诚实即可，徽标不撒谎）
-  let aBadgeCancelled = false;
-  for (let i = 0; i < 60 && !aBadgeCancelled; i++) {
+  // 终审判据收紧：接受取消（queued/executed/unknown/202 任一）⇒ 轮行必须呈现
+  // cancelled/待核对 形态（详情页时间线行——hub 轮次账本投影的取数口），不得以
+  // 「执行失败」放行；取消被拒（先到保留）⇒ 自然终态如实放行。
+  const cancelAccepted = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
+    || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对');
+  const cancelRejected = cancelToast.includes('取消未生效');
+  let rowForm = '';
+  for (let i = 0; i < 120 && !rowForm; i++) {
     await p_sleep(2000);
-    const cls = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
-    aBadgeCancelled = cls.includes('sst-cancelled');
-    if (cls.includes('sst-unverified') || cls.includes('sst-failed')) break;   // 先到保留：取消未赶上，自然终态如实
+    rowForm = await page.evaluate(() => {
+      const td = document.querySelector('#sess-detail tr[data-turn="1"] td:nth-child(2)');
+      if (!td) return '';
+      const b = td.querySelector('.badge');
+      if (!b) return '';
+      if (td.textContent.includes('待核对')) return 'unknown';
+      if (b.classList.contains('sst-cancelled')) return 'cancelled';
+      if (b.classList.contains('sst-unverified') || b.classList.contains('sst-failed')) return 'natural';
+      return '';
+    });
   }
-  const finalBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
-  walkLog(`S13 取消走查：入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 终态徽标=${finalBadge || '（行未就位）'}`);
-  record('S13b', '取消回执三态诚实呈现（取消入口/回执 toast 为 queued/executed/unknown/202 异步/409 先到保留之一；轮行终态徽标如实——cancelled 或自然终态，绝不虚报已停止）',
-    cancelClicked && cancelHonest && (aBadgeCancelled || finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')),
-    `toast=${cancelToast.slice(0, 40)} badge=${finalBadge}`, false, 'DEEP');
+  walkLog(`S13 取消走查：入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 接受=${cancelAccepted} 轮行形态=${rowForm || '（未落定）'}`);
+  record('S13b', '取消回执三态诚实呈现（取消入口/接受取消 ⇒ 轮行必须呈现 cancelled/待核对 形态，绝不以「执行失败」放行；被拒先到保留 ⇒ 自然终态如实）',
+    cancelClicked && (cancelAccepted ? (rowForm === 'cancelled' || rowForm === 'unknown') : (cancelRejected && (rowForm === 'natural' || rowForm === 'cancelled'))),
+    `toast=${cancelToast.slice(0, 40)} 接受=${cancelAccepted} 轮行形态=${rowForm || '（未落定）'}`, false, 'DEEP');
 
   // S06 关闭确认（slim modal 整层语义；在途已清 → 本次关闭成立。深层验收：层可见/
   // 背景 inert/焦点入层/覆盖关系；「再想想」=整层关会话保活；确认后详情页头部徽标
@@ -782,6 +791,32 @@ async function nodeSessFlow(browser) {
   record('SN08', '独立入口迁移（任务页迁移卡留链接/七列同构列序/agent 面 201 登记/pending 会话列表「登记中（首轮未发布）」徽标/详情页登记态+创建请求 ID 行）',
     migTxt.includes('「会话」页') && headsOk && pend.code === 201 && pendPending && pendBadge && pendDetailOk,
     `列序=${heads.join('|')} code=${pend.code} pending=${pendPending} 徽标=${pendBadge} 详情=${pendDetailOk}`);
+
+  // SN08b 状态筛选 chips（终审必修3）：「全部」chip 恒在（与 hub 同构）+ 登记 chip
+  // 选中过滤/再点复位（点同值回全部）。
+  const allChip = await page.locator('#sess-chips-zone [data-act="sess-chip"][data-chip=""]').count();
+  let chipToggleOk = false, chipNote = `全部chip=${allChip}`;
+  if (allChip) {
+    const pendChip = page.locator('#sess-chips-zone [data-act="sess-chip"][data-chip="pending"]');
+    if (await pendChip.count()) {
+      await pendChip.click();
+      await p_sleep(300);
+      const on1 = await page.evaluate(id => {
+        const p = document.querySelector('#sess-chips-zone [data-chip="pending"]');
+        const a = document.querySelector('#sess-chips-zone [data-chip=""]');
+        return p?.classList.contains('on') && !a?.classList.contains('on') && !!document.querySelector(`tr[data-sess="${id}"]`);
+      }, pendId);
+      await pendChip.click();   // 再点复位（回全部）
+      await p_sleep(300);
+      const on2 = await page.evaluate(() => !document.querySelector('#sess-chips-zone [data-chip="pending"]')?.classList.contains('on') && document.querySelector('#sess-chips-zone [data-chip=""]')?.classList.contains('on'));
+      chipToggleOk = !!on1 && !!on2;
+      chipNote += ` 选中过滤=${on1} 再点复位=${on2}`;
+    } else {
+      chipToggleOk = true;
+      chipNote += '（环境无 pending chip 渲染前提，仅验「全部」恒在）';
+    }
+  }
+  record('SN08b', '状态筛选 chips（「全部」chip 恒在与 hub 同构/登记 chip 选中过滤/再点复位回全部）', chipToggleOk, chipNote, allChip === 0);
 
   // SN01 会话独立页新建全链（UI 居中 modal）：真实建会话投首轮 → 创建请求携
   // request_id（网络应答绑定唯一 session ID）→ 受理回执 → 列表行按该 ID 出现
@@ -1108,16 +1143,27 @@ async function nodeSessFlow(browser) {
       cancelToast = await page.textContent('#toast').catch(() => '');
       cancelClicked = true;
     }
-    const cancelHonest = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
-      || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对') || cancelToast.includes('取消未生效');
-    // 轮行终态：已取消或先到自然终态（徽标如实即可，绝不虚报）
-    let aBadgeCancelled = false, finalBadge = '';
-    for (let i = 0; i < 90 && !aBadgeCancelled; i++) {
+    // 终审判据收紧：接受取消（queued/executed/unknown/202 任一）⇒ 轮行必须呈现
+    // cancelled/待核对 形态（详情页时间线行——账本扫描+治理证据分类的取数口），
+    // 不得以「执行失败」放行；取消被拒（先到保留）⇒ 自然终态如实放行。
+    const cancelAccepted = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
+      || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对');
+    const cancelRejected = cancelToast.includes('取消未生效');
+    let rowForm = '';
+    for (let i = 0; i < 120 && !rowForm; i++) {
       await p_sleep(2000);
-      finalBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
-      if (finalBadge.includes('sst-cancelled')) aBadgeCancelled = true;
-      if (finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')) break;   // 先到保留：取消未赶上，自然终态如实
+      rowForm = await page.evaluate(() => {
+        const td = document.querySelector('#sess-detail tr[data-turn="1"] td:nth-child(2)');
+        if (!td) return '';
+        const b = td.querySelector('.badge');
+        if (!b) return '';
+        if (td.textContent.includes('待核对')) return 'unknown';
+        if (b.classList.contains('sst-cancelled')) return 'cancelled';
+        if (b.classList.contains('sst-unverified') || b.classList.contains('sst-failed')) return 'natural';
+        return '';
+      });
     }
+    const finalBadge = rowForm;
     // 等在途清空后关闭成立（409 循环重试，直至 200 已关闭）
     let closedOk = false;
     for (let i = 0; i < 90 && !closedOk; i++) {
@@ -1141,8 +1187,8 @@ async function nodeSessFlow(browser) {
       await p_sleep(1200);
       listClosed = await page.evaluate(id => document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes('已关闭'), s3Id);
     }
-    sn10ok = cifOk && cancelClicked && cancelHonest && (aBadgeCancelled || finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')) && closedOk && headClosed && listClosed;
-    sn10Note = `取消入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 终态=${finalBadge || '（行未就位）'} 关闭=${closedOk}/${headClosed}/${listClosed}`;
+    sn10ok = cifOk && cancelClicked && (cancelAccepted ? (rowForm === 'cancelled' || rowForm === 'unknown') : (cancelRejected && (rowForm === 'natural' || rowForm === 'cancelled'))) && closedOk && headClosed && listClosed;
+    sn10Note = `取消入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 接受=${cancelAccepted} 轮行形态=${rowForm || '（未落定）'} 关闭=${closedOk}/${headClosed}/${listClosed}`;
   }
   walkLog(`SN10 取消三态+关闭走查：${sn10Note}`);
   record('SN10', '在途关闭拒绝+取消三态+关闭收尾（取消入口/回执 toast 为 queued/executed/unknown/202 异步/409 先到保留之一；轮行终态徽标如实；关闭最终成立且头部+列表双刷新）', sn10ok, sn10Note, false, 'DEEP');

@@ -652,9 +652,10 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    ② 新建表单「权限模式断言」下拉为 hub 独有：node 控制台新建经 agent 会话面（无 permission_mode 断言
       字段），绑定区以能力卡声明只读双槽呈现；hub 创建端点支持断言核对（409 binding_mismatch）保留
       下拉；
-   ③ 会话列表筛选 chips：node 全集含「登记中（首轮未发布）」chip（pending 会话级状态，hub 无此态不
-      渲染）；其余七值轮投影 chips（含 cancelled）双端同集零计数退灰；node pending chip 计数=登记中
-      会话，发布后在途排队轮并入「执行中」chip 计数（时间线行仍精确显示「排队中」徽标）；
+   ③ 会话列表筛选 chips：投影值词表双端同源（七值含 cancelled）；「排队中」chip 为 hub 独有
+      （node 排队事实并入「执行中」chip 计数，时间线行仍精确显示「排队中」徽标）；node 以「登记中
+      （首轮未发布）」chip 替位（pending 会话级状态，hub 无此态）；chips 双端零计数退灰；node
+      pending chip 计数=登记中会话，发布后在途排队轮并入「执行中」chip 计数；
    ④ 列表「标题」列：hub 注册表无标题字段，恒显示「（无标题）」+ 平台 ID 短形式；node 显示登记期
       title（无标题同口径缺省）；
    ⑤ 机器列取值：hub 显示目标 node_id；node 显示本机 nodeID（缺省「本机」）——单机形态如实，非跨机
