@@ -618,6 +618,10 @@ async function hubSessFlow(browser) {
   // 终审判据收紧：接受取消（queued/executed/unknown/202 任一）⇒ 轮行必须呈现
   // cancelled/待核对 形态（详情页时间线行——hub 轮次账本投影的取数口），不得以
   // 「执行失败」放行；取消被拒（先到保留）⇒ 自然终态如实放行。
+  // 【登记不复测】cancel_unconfirmed（500，取消已触发但终态未落盘——需落盘失败注入，
+  // E2E 环境不可构造）：回执后轮行保持非终态，最终经账本收敛/状态对账落 executed/
+  // unknown 形态（RFC §6 竞态仲裁口径）；本用例对该回执不设通过路径，toast 落
+  // 「取消失败」分支即判 FAIL（显式不覆盖，返工轮 b62c2e3 建议3 登记）。
   const cancelAccepted = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
     || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对');
   const cancelRejected = cancelToast.includes('取消未生效');
@@ -1146,6 +1150,10 @@ async function nodeSessFlow(browser) {
     // 终审判据收紧：接受取消（queued/executed/unknown/202 任一）⇒ 轮行必须呈现
     // cancelled/待核对 形态（详情页时间线行——账本扫描+治理证据分类的取数口），
     // 不得以「执行失败」放行；取消被拒（先到保留）⇒ 自然终态如实放行。
+    // 【登记不复测】cancel_unconfirmed（500，取消已触发但终态未落盘——需落盘失败注入，
+    // E2E 环境不可构造）：回执后轮行保持非终态，最终经账本收敛/状态对账落 executed/
+    // unknown 形态（RFC §6 竞态仲裁口径）；本用例对该回执不设通过路径，toast 落
+    // 「取消失败」分支即判 FAIL（显式不覆盖，返工轮 b62c2e3 建议3 登记）。
     const cancelAccepted = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
       || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对');
     const cancelRejected = cancelToast.includes('取消未生效');

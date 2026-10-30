@@ -917,12 +917,14 @@ function nodeSessionTurns(v) {
     if (bySeq.has(seq)) {
       const tv = bySeq.get(seq);
       if (st === 'cancelled' && tv.status === 'failed') {
-        tv.cancelBooked = true;   // 本机账本取消记账（终审必修1：内核行取消分类判据；三态由 nodeTurnKind 依治理证据细分）
+        tv.cancelBooked = true;   // 本机账本取消记账（终审必修1：内核行取消分类判据；三态由 nodeTurnKind 依治理证据细分——账本 cancelled 蕴含 ClassifyCancelTurn 已证停止，timeout:+exit-1 恒 Executed，此为快路径免探针）
       } else if (st === 'failed' && tv.status === 'failed' && !tv.cancelBooked) {
-        const ec = tv.raw?.exit_code;
-        if (String(tv.error || '').startsWith('timeout:') && !(typeof ec === 'number' && ec >= 0)) {
-          tv.probeTask = e.task_id || '';   // 治理形态失败轮：自然超时/unknown 取消在内核留痕上不可区分——探针依任务详情记账码判定（probeSessCancelUnknowns）
-        }
+        // 终审必修A：探针总体=全部无 cancelBooked 的 failed 内核行（unknown 真实总体是
+        // 非治理形态：ClassifyCancelTurn 的 unknown=exit-1 且错误非 timeout 前缀——
+        // process_governance_failed:/exit_code=N: 等落账 failed+turn_cancel_outcome_unknown，
+        // sessionturn.go 落账口径）。内核留痕不可区分自然失败/unknown 取消——探针本身即
+        // 区分器（任务详情记账码 turn_cancel_outcome_unknown → unknown，否则 natural）。
+        tv.probeTask = e.task_id || '';
       }
       continue;
     }
@@ -942,9 +944,10 @@ function nodeSessionTurns(v) {
  *    同源（证据口径同式：error 前缀 timeout: 且无真实退出码=runner 治理已整组终止
  *    并回收 → executed；其余错误形态=停止事实未证实 → unknown 待核对——徽标+答复区
  *    警示条，绝不渲染「执行失败」冒认进程错误语义）。
- * 3) 内核行无 cancelBooked 但治理形态（timeout:+退出码 -1）且探针判为 unknown
- *    （任务详情账本记账码 turn_cancel_outcome_unknown，sessCancelProbe 缓存）→
- *    unknown。其余沿 shared 判定（failed + turn_cancel_outcome_unknown → unknown）。 */
+ * 3) 内核行无 cancelBooked 且探针判为 unknown（任务详情账本记账码
+ *    turn_cancel_outcome_unknown，sessCancelProbe 缓存）→ unknown；探针 natural →
+ *    维持「执行失败」如实。其余沿 shared 判定（failed + turn_cancel_outcome_unknown
+ *    → unknown）。 */
 function nodeTurnKind(tv) {
   const err = String(tv.error || '');
   if (tv.status === 'cancelled') {
@@ -955,7 +958,7 @@ function nodeTurnKind(tv) {
     const ec = tv.raw?.exit_code;
     const governed = err.startsWith('timeout:') && !(typeof ec === 'number' && ec >= 0);
     if (tv.cancelBooked) return governed ? 'executed' : 'unknown';
-    if (governed && tv.probeTask && sessCancelProbe.get(tv.probeTask) === 'unknown') return 'unknown';
+    if (tv.probeTask && sessCancelProbe.get(tv.probeTask) === 'unknown') return 'unknown';   // 终审必修A：探针本身即 unknown/natural 区分器——无 governed 门（治理形态走 cancelBooked 快路径，见 nodeSessionTurns 附加条件）
   }
   return sessCancelKind(tv);
 }
@@ -968,9 +971,11 @@ function nodeTurnBadge(tv) {
   if (kind === 'executed' || kind === 'queued') return sessBadge('cancelled');
   return sessBadge(tv.status);
 }
-/* sessCancelProbe 治理形态失败轮的取消探针缓存（task_id → 'unknown'|'natural'）：
- * 内核轮行 timeout:+退出码-1 与自然超时在内核留痕上不可区分，取消是否在案以任务
- * 详情账本记账码（turn_cancel_outcome_unknown）为唯一判据——每 task 至多探一次。 */
+/* sessCancelProbe 无 cancelBooked 失败内核行的取消探针缓存（task_id →
+ * 'unknown'|'natural'）：自然失败与 unknown 取消在内核留痕上不可区分，取消是否在案
+ * 以任务详情账本记账码（turn_cancel_outcome_unknown）为唯一判据——每 task 至多探
+ * 一次成功；网络失败不落缓存（下轮轮询重探，避免瞬时失败把任务永久锁出待核对通
+ * 道）；404=任务已过保留期记账码不可达，按自然失败保守呈现并落缓存（终态判定）。 */
 const sessCancelProbe = new Map();
 let sessCancelProbeBusy = false;
 async function probeSessCancelUnknowns() {
@@ -984,7 +989,10 @@ async function probeSessCancelUnknowns() {
   try {
     for (const tid of targets) {
       const r = await api('GET', '/api/v1/tasks/' + encodeURIComponent(tid)).catch(() => null);
-      const err = String(r?.data?.result?.error || '');
+      if (!r) continue;   // 建议2：网络失败不落缓存——下轮轮询重探
+      if (r.code === 404) { sessCancelProbe.set(tid, 'natural'); continue; }   // 任务已过保留期：记账码不可达，保守终态
+      if (r.code !== 200 || !r.data) continue;
+      const err = String(r.data.result?.error || '');
       sessCancelProbe.set(tid, err.startsWith('turn_cancel_outcome_unknown') ? 'unknown' : 'natural');
       if (err.startsWith('turn_cancel_outcome_unknown')) changed = true;
     }
@@ -1049,6 +1057,11 @@ function sessChipsNode() {
     return `<button data-act="sess-chip" data-chip="${s}" class="${S.sessFilter === s ? 'on' : ''}${n ? '' : ' zero'}" title="${esc(s)}">${bd} ${n}</button>`;
   }));
 }
+/* sessListZone 列表行状态列（终审必修B）：关闭态优先「已关闭」徽标（与 hub sessTable
+ * 同构——7bd09a3 起 hub 即 closed 优先，node 旧渲染按最近轮次出徽标属双端漂移，
+ * 一处两修：消 SN10「已关闭」断言永 FAIL 矛盾）；登记中其次；其余按取消三态感知
+ * 轮徽标（nodeTurnBadge）；无轮次「待首轮」。chips 计数（sessRowState）不受本渲染
+ * 改动影响——closed 会话按最近轮次投影计数，与 hub sessStateCounts 同口径。 */
 function sessListZone() {
   if (S.sessUnsupported) return `<div class="empty"><h2>本机未装配会话内核</h2><p class="muted">没有能力声明 session_adapter（node.yaml 能力级配置，变更须「应用并重启」）。本机原生线程管理不可用；跨机会话请经 hub 控制台。</p></div>`;
   if (!S.sessLoaded) return listLoadingBox('会话列表');   // 首载未落定：不冒充「还没有会话」（R1 建议3）
@@ -1063,7 +1076,7 @@ function sessListZone() {
     <td><strong>${esc(v.agent_name)}</strong></td>
     <td><small>${esc(S.nodeID || '本机')}</small></td>
     <td><small title="${esc(v.cwd || '')}">${esc(sessWsSummary(v.cwd))}</small></td>
-    <td>${v.pending ? sessStateBadge(v) : lastT ? nodeTurnBadge(lastT) : '<span class="muted small">待首轮</span>'}</td>
+    <td>${v.pending ? sessStateBadge(v) : closed ? sessBadge('closed') : lastT ? nodeTurnBadge(lastT) : '<span class="muted small">待首轮</span>'}</td>
     <td><small>${esc(fmtUTC(v.updated_at) || '—')}</small></td>
     <td class="table-action">${!closed ? button('继续', 'sess-continue:' + esc(v.id), 'link') : ''}${button('查看 →', 'sess-open:' + esc(v.id), 'link')}</td>
   </tr>`; }).join('')}</tbody></table></div>`;
@@ -1160,7 +1173,7 @@ function sessTurnAnswerHtml(tv, v) {
   const banner = kind === 'unknown'
     ? `<div class="notice warn"><b>取消结果待核对</b> · ${esc(SESS_CANCEL_WORDS.turn_cancel_outcome_unknown)}；本记录绝不记为成功或已停止，请核对本机实际状态。</div>`
     : kind === 'queued' ? `<div class="notice"><b>已取消（进入执行前撤销）</b> · 本轮未运行，确定性终止；平台序号已受理消耗。</div>`
-    : kind === 'executed' ? `<div class="notice"><b>已取消（执行取消）</b>：进程组已整组终止并回收。</div>`
+    : kind === 'executed' ? `<div class="notice"><b>已取消（执行已终止）</b> · 进程组已整组回收。</div>`
     : tv.status === 'unverified' && (tv.kernel || tv.raw) ? `<div class="notice warn"><b>工作结果未证实</b> · ${esc(SESS_UNVERIFIED_NOTE)}</div>`
     : tv.status === 'failed' ? `<div class="notice danger"><b>执行失败</b> · <code>${esc(tv.error || '原因未留痕')}</code>${tv.kernel && typeof tv.raw?.exit_code === 'number' && tv.raw.exit_code >= 0 ? ` · 退出码 ${tv.raw.exit_code}` : ''}</div>` : '';
   if (!tv.kernel) {
