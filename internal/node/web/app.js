@@ -1564,6 +1564,7 @@ async function tryToken(token) {
       S.snap = '';
       render();
       loadAll().then(c => { if (c) render(); }).catch(() => {});
+      loadMcpAccess().then(() => { if (S.page === 'overview') render(); applyPendingAnchor(); }).catch(() => {}); // 终审建议①：令牌门首登落在总览页时授权卡自举（否则滞留 loading 且 loading 态无重试入口，须手动切页才自愈）
       return;
     }
     /* A3 错误就地留痕：令牌验证失败留在令牌门页（人话原因+核对指引），toast 只短报。 */
@@ -1773,12 +1774,19 @@ function gotoAnchor(id) {
   if (S.page !== P08_ANCHOR_PAGE[id]) { pendingAnchor = id; location.hash = '#/' + P08_ANCHOR_PAGE[id]; return; }
   const el = document.getElementById(id);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  else toast('目标区域当前不可见（如尚未登记能力或未完成接入）——完成对应设置后此链接即可跳转'); // 终审建议③：同页死按钮给指引不静默
 }
+let pendingAnchorTries = 0;
 function applyPendingAnchor() {
   if (!pendingAnchor || S.page !== P08_ANCHOR_PAGE[pendingAnchor]) return;
   const el = document.getElementById(pendingAnchor);
-  if (!el) return;
+  if (!el) {
+    pendingAnchorTries++;
+    if (pendingAnchorTries >= 3) { toast('跳转目标「' + (P08_LINKS.find(l => l[0] === pendingAnchor) || ['', pendingAnchor])[1] + '」尚未出现——完成对应设置后可再次点击链接'); pendingAnchor = ''; pendingAnchorTries = 0; }
+    return; // 未达上限：待目标区渲染后的下一轮消费（终审建议③：跨页缺失不再无限挂起）
+  }
   pendingAnchor = '';
+  pendingAnchorTries = 0;
   el.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 /* deepLinksRow/linkTo 决策设置互链（文案层单一起源：三区词典同一数组，互链行与
@@ -1993,7 +2001,9 @@ function mcpAccessToggle(btn) {
       }
     } catch (e) {
       if (e.unauthorized) return;
-      toast(e.network ? '本机 API 不可达' : word + '失败（旧状态保持，可重试）');
+      // api() 仅抛 {network:true}/{unauthorized:true} 两类（终审建议②：原「旧状态保持，
+      // 可重试」分支不可达死码删除；500 服务端文案已含「授权状态保留为 X」语义）
+      toast(e.network ? '本机 API 不可达' : word + '失败 · ' + (e.message || '请重试'));
     }
     render();
     applyPendingAnchor();
