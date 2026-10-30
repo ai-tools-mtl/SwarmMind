@@ -215,6 +215,10 @@ func (s *Scanner) detectInstalled(ctx context.Context, req Request, now time.Tim
 		lc.appendReason("版本探测失败: " + pr.WaitErr.Error())
 	default:
 		lc.Status = StatusPass // 退出码 0 = 安装证据；版本信息见 VersionRaw 原样留痕
+		// V0 不解析版本（doc.go 口径）：未知/不支持版本形态只留痕不判定，安装
+		// 判定不受版本值影响；结果如实注记未做版本兼容性判断（支持版本表归
+		// W06-02 交付）。
+		lc.appendReason("版本输出仅原样留痕：未解析版本、未做版本兼容性判断（版本值不影响安装判定）")
 	}
 	return lc
 }

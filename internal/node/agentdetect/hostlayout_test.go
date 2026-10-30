@@ -287,3 +287,240 @@ func TestUnknownHostGenericManual(t *testing.T) {
 		t.Fatalf("未知宿主不得核标记，实得 %+v", marker)
 	}
 }
+
+// ===== 以下为 W06-01 codex 联审修复新增用例（必修项 1/2 + 建议修 3）=====
+
+// runWithTimeoutGuard 限时执行辅助：f 超过 limit 未返回即 Fatal（防打开原语
+// 挂起拖死整测；联审必修项 1 要求 FIFO 用例限时）。
+func runWithTimeoutGuard(t *testing.T, limit time.Duration, name string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+		t.Fatalf("%s 超过 %v 未返回（打开原语疑似挂起）", name, limit)
+	}
+}
+
+// makeFifoZcodeHome 造 setting.json 位置为 FIFO 的 zcode home（末段被换为
+// FIFO 的现实形态）。
+func makeFifoZcodeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	mkdirAllWithFix(t, filepath.Join(home, ".zcode", "cli"))
+	makeFifoForTest(t, filepath.Join(home, ".zcode", "cli", "setting.json"))
+	return home
+}
+
+// TestConfigIntermediateDirSymlinkRejected 中间目录符号链接穿透（联审必修项 1）：
+// <home>/.zcode（或 .codex）→ 外部真实目录时整链 fail、注记链接段位，绝不
+// 读取外部配置（金丝内容不得进 reason），路径引用如实注记 symlink=true。
+func TestConfigIntermediateDirSymlinkRejected(t *testing.T) {
+	t.Run("zcode", func(t *testing.T) {
+		outside := t.TempDir()
+		mkdirAllWithFix(t, filepath.Join(outside, "cli"))
+		// 外部真实合法配置（含身份键金丝）：若中间链接被穿透即误判 pass 并读外部内容。
+		writeFileWithFix(t, filepath.Join(outside, "cli", "setting.json"),
+			`{"authToken":"INTERMEDIATE-LINK-CANARY"}`)
+		home := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(home, ".zcode")); err != nil {
+			t.Fatalf("造符号链接失败: %v", err)
+		}
+		lc, marker := recognizeConfig(HostZcode, home, testNow())
+		if lc.Status != StatusFail {
+			t.Fatalf("中间目录链接应整链 fail，实得 %+v", lc)
+		}
+		if !strings.Contains(lc.Reason, "符号链接") || !strings.Contains(lc.Reason, "中间目录") {
+			t.Fatalf("原因应注记中间目录符号链接，实得 %q", lc.Reason)
+		}
+		if !strings.Contains(lc.Reason, filepath.Join(home, ".zcode")) {
+			t.Fatalf("原因应注记是哪一段链接（段路径），实得 %q", lc.Reason)
+		}
+		if strings.Contains(lc.Reason, "INTERMEDIATE-LINK-CANARY") {
+			t.Fatalf("外部配置内容不得进 reason：%q", lc.Reason)
+		}
+		if len(lc.Paths) != 1 || !lc.Paths[0].Symlink {
+			t.Fatalf("Paths 应注记 symlink=true，实得 %+v", lc.Paths)
+		}
+		if marker.Checked {
+			t.Fatalf("结构未识别不得核标记（不给穿透布局背书），实得 %+v", marker)
+		}
+	})
+	t.Run("codex", func(t *testing.T) {
+		outside := t.TempDir()
+		writeFileWithFix(t, filepath.Join(outside, "config.toml"), "model = \"gpt\"\n")
+		writeFileWithFix(t, filepath.Join(outside, "auth.json"), `{"k":"x"}`)
+		home := t.TempDir()
+		if err := os.Symlink(outside, filepath.Join(home, ".codex")); err != nil {
+			t.Fatalf("造符号链接失败: %v", err)
+		}
+		lc, marker := recognizeConfig(HostCodex, home, testNow())
+		if lc.Status != StatusFail {
+			t.Fatalf("中间目录链接应整链 fail，实得 %+v", lc)
+		}
+		if !strings.Contains(lc.Reason, "符号链接") || !strings.Contains(lc.Reason, "中间目录") {
+			t.Fatalf("原因应注记中间目录符号链接，实得 %q", lc.Reason)
+		}
+		if !lc.Paths[0].Symlink {
+			t.Fatalf("Paths 应注记 symlink=true，实得 %+v", lc.Paths)
+		}
+		// 标记层独立核查：链上有链接不得跟随计数外部 auth.json。
+		if marker.Found {
+			t.Fatalf("标记路径链上有链接不得计外部 auth.json，实得 %+v", marker)
+		}
+		if !marker.Symlink || !strings.Contains(marker.Note, "符号链接") {
+			t.Fatalf("标记应注记链接且不跟随，实得 %+v", marker)
+		}
+	})
+}
+
+// TestConfigIntermediateDirNotDirectory 中间目录段非目录/缺失：整链 fail 带段位
+// （链接/不存在/非目录三类整链拒绝口径的另外两支）。
+func TestConfigIntermediateDirNotDirectory(t *testing.T) {
+	t.Run("中间段是文件", func(t *testing.T) {
+		home := t.TempDir()
+		writeFileWithFix(t, filepath.Join(home, ".codex"), "plain file冒名目录")
+		lc, _ := recognizeConfig(HostCodex, home, testNow())
+		if lc.Status != StatusFail || !strings.Contains(lc.Reason, "中间目录非目录") {
+			t.Fatalf(".codex 为文件应整链 fail 并注记非目录，实得 %+v", lc)
+		}
+		if !strings.Contains(lc.Reason, filepath.Join(home, ".codex")) {
+			t.Fatalf("原因应注记段位路径，实得 %q", lc.Reason)
+		}
+	})
+	t.Run("中间段缺失", func(t *testing.T) {
+		home := t.TempDir()
+		mkdirAllWithFix(t, filepath.Join(home, ".zcode")) // cli 段缺失
+		lc, _ := recognizeConfig(HostZcode, home, testNow())
+		if lc.Status != StatusFail || !strings.Contains(lc.Reason, "不存在") {
+			t.Fatalf("cli 段缺失应整链 fail 注记不存在，实得 %+v", lc)
+		}
+		if !strings.Contains(lc.Reason, filepath.Join(home, ".zcode", "cli")) {
+			t.Fatalf("原因应注记缺失段位路径，实得 %q", lc.Reason)
+		}
+	})
+}
+
+// TestConfigFinalFifoNoHang 末段被换为 FIFO：识别限时返回且 fail（Lstat 判非
+// 普通文件即不打开，绝不挂起；联审必修项 1「FIFO 替换不挂起且 fail」端到端面）。
+func TestConfigFinalFifoNoHang(t *testing.T) {
+	home := makeFifoZcodeHome(t)
+	var lc LayerCheck
+	runWithTimeoutGuard(t, 5*time.Second, "FIFO 配置识别", func() {
+		lc, _ = recognizeConfig(HostZcode, home, testNow())
+	})
+	if lc.Status != StatusFail {
+		t.Fatalf("FIFO 应 fail，实得 %+v", lc)
+	}
+	if !strings.Contains(lc.Reason, "非普通文件") {
+		t.Fatalf("原因应注记非普通文件，实得 %q", lc.Reason)
+	}
+	if len(lc.Paths) != 1 || lc.Paths[0].Regular {
+		t.Fatalf("Paths 不得记 regular=true，实得 %+v", lc.Paths)
+	}
+}
+
+// TestOpenVerifyReadFifoSwapWindow Lstat→Open 窗口内末段被换为 FIFO 的等价状态
+// （直接以 FIFO 调打开-复核原语，确定性覆盖换窗代码路径）：O_NONBLOCK 打开不
+// 挂起，fd fstat 复核非普通文件即关即拒——校验对象=读取对象。
+func TestOpenVerifyReadFifoSwapWindow(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "setting.json")
+	makeFifoForTest(t, fifo)
+	var err error
+	runWithTimeoutGuard(t, 5*time.Second, "打开复核原语", func() {
+		_, err = openVerifyReadCapped(fifo, configReadLimit)
+	})
+	if err == nil {
+		t.Fatalf("FIFO 必须被打开后复核拒绝，实得 nil")
+	}
+	if !strings.Contains(err.Error(), "非普通文件") || !strings.Contains(err.Error(), "打开后复核") {
+		t.Fatalf("应为打开后复核拒绝文案，实得 %q", err.Error())
+	}
+}
+
+// TestZcodeJSONErrorNoContentEcho JSON 解析失败只回固定分类+偏移量，绝不回显
+// 内容（联审建议修 3：err.Error() 上下文会把配置内容字符带进 reason，实证
+// authToken 首字符泄漏）。金丝全用大写字母（reason 为小写 ASCII+中文+数字
+// 偏移量，无碰撞面），逐字符断言零泄漏。
+func TestZcodeJSONErrorNoContentEcho(t *testing.T) {
+	canary := "QZWKFLEAK"
+	home := makeZcodeHome(t, `{"authToken": `+canary+`}`) // 裸 token 触发 invalid character 类错误
+	lc, _ := recognizeConfig(HostZcode, home, testNow())
+	if lc.Status != StatusFail {
+		t.Fatalf("损坏 JSON 应 fail，实得 %+v", lc)
+	}
+	if !strings.Contains(lc.Reason, "invalid_json at offset") {
+		t.Fatalf("原因应为固定分类+偏移量，实得 %q", lc.Reason)
+	}
+	for _, r := range canary {
+		if strings.ContainsRune(lc.Reason, r) {
+			t.Fatalf("原因泄漏金丝字符 %q（err.Error() 回显未封住）：%q", r, lc.Reason)
+		}
+	}
+}
+
+// TestCodexConfigCorruptFormsRejected 明显损坏配置保守拒绝（联审必修项 2）：
+// 旧启发式「命中任一结构特征行即过」会让以下形态误判 pass——收紧后任何损坏/
+// 无法确认形态整文件 fail，原因带「结构无法确认（保守拒绝）」。
+func TestCodexConfigCorruptFormsRejected(t *testing.T) {
+	cases := []struct {
+		name       string
+		content    string
+		wantReason string
+	}{
+		{"孤立key无值", "model =\n", "孤立 key"},
+		{"孤立key带注释行", "model =\n# trailing comment\n", "孤立 key"},
+		{"未闭合字符串", "model = \"gpt\n", "未闭合引号"},
+		{"未闭合单引号字符串", `name = 'abc` + "\n", "未闭合引号"},
+		{"表头后乱码", "[profiles.default] garbage\n", "尾随垃圾"},
+		{"表头未闭合", "[profiles.default\n", "表头未闭合"},
+		{"值后尾随垃圾", "model = gpt extra\n", "尾随垃圾"},
+		{"行内数组", "tags = [\"a\", \"b\"]\n", "结构无法确认"},
+		{"多行字符串", "desc = \"\"\"abc\n", "结构无法确认"},
+		{"无法确认行形态", "just some words\n", "结构无法确认"},
+		{"合法特征行混损坏行", "model = \"gpt\"\nbroken line here\n", "结构无法确认"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := makeCodexHome(t, tc.content, false)
+			lc, _ := recognizeConfig(HostCodex, home, testNow())
+			if lc.Status != StatusFail {
+				t.Fatalf("损坏形态应保守拒绝，实得 %+v", lc)
+			}
+			if !strings.Contains(lc.Reason, tc.wantReason) {
+				t.Fatalf("原因应含 %q，实得 %q", tc.wantReason, lc.Reason)
+			}
+			if !strings.Contains(lc.Reason, "结构无法确认（保守拒绝）") {
+				t.Fatalf("原因必须带「结构无法确认（保守拒绝）」，实得 %q", lc.Reason)
+			}
+		})
+	}
+}
+
+// TestCodexConfigMinimalLegalFormsPass 合法最小形态不回归（联审必修项 2 的
+// pass 面）：裸键+引号值、[表头]、[[数组表]]、裸值、注释与空行、行尾注释 →
+// 识别过。
+func TestCodexConfigMinimalLegalFormsPass(t *testing.T) {
+	cases := []string{
+		"model = \"gpt-5\"\n",
+		"[profiles.default]\n",
+		"[[mcp_servers]]\n",
+		"auto = true\n",
+		"retries = 3\n",
+		"# 只有注释头\nmodel = \"gpt\" # 行尾注释\n\n[profiles.default]\n",
+		"timeout_ms = 1500\nwait = false\n",
+		"[projects.\"quoted-name\"]\n",
+	}
+	for i, content := range cases {
+		home := makeCodexHome(t, content, false)
+		lc, _ := recognizeConfig(HostCodex, home, testNow())
+		if lc.Status != StatusPass {
+			t.Fatalf("case %d (%q) 应识别通过，实得 %+v", i, content, lc)
+		}
+	}
+}

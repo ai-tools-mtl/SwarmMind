@@ -241,3 +241,42 @@ func TestOptionsDefaults(t *testing.T) {
 		t.Fatalf("显式选项应生效，实得 timeout=%v limit=%d", s2.versionTimeout, s2.outputLimit)
 	}
 }
+
+// TestInstalledUnknownVersionFormVerbatim 未知/不支持版本形态（W06 任务书
+// fixture 口径「不支持版本」，联审建议修 4 封堵缺口）：--version 输出何种版本
+// 串不影响安装判定（退出码 0 即安装证据），version_raw 原样留痕可审计，结果
+// 如实注记「未解析版本、未做版本兼容性判断」（支持版本表归 W06-02）。
+func TestInstalledUnknownVersionFormVerbatim(t *testing.T) {
+	s := New(Options{})
+	weird := writeScript(t, t.TempDir(), "weird-cli", `echo "codex-future 999.0.0-unknown-BUILD-GARBAGE ???"`)
+	rep := s.Detect(context.Background(), Request{Host: HostCodex, Command: weird})
+	if rep.Installed.Status != StatusPass {
+		t.Fatalf("未知版本形态不得影响安装判定（退出码 0 即安装证据），实得 %+v", rep.Installed)
+	}
+	if !strings.Contains(rep.Installed.VersionRaw, "999.0.0-unknown-BUILD-GARBAGE ???") {
+		t.Fatalf("未知版本输出应原样留痕，实得 %q", rep.Installed.VersionRaw)
+	}
+	if rep.Installed.VersionTruncated {
+		t.Fatalf("正常长度输出不得记截断，实得 %+v", rep.Installed)
+	}
+	if !strings.Contains(rep.Installed.Reason, "未解析版本") || !strings.Contains(rep.Installed.Reason, "未做版本兼容性判断") {
+		t.Fatalf("结果应如实注记未解析/未做版本兼容性判断，实得 %q", rep.Installed.Reason)
+	}
+	// 对照面：正常版本串同样只留痕、同样注记——判定与版本值无关。
+	normal := writeScript(t, t.TempDir(), "normal-cli", `echo "cli 1.2.3"`)
+	rep2 := s.Detect(context.Background(), Request{Host: HostCodex, Command: normal})
+	if rep2.Installed.Status != StatusPass || !strings.Contains(rep2.Installed.VersionRaw, "cli 1.2.3") {
+		t.Fatalf("正常版本对照应通过且原样留痕，实得 %+v", rep2.Installed)
+	}
+	if !strings.Contains(rep2.Installed.Reason, "未做版本兼容性判断") {
+		t.Fatalf("正常版本同样注记未做兼容性判断，实得 %q", rep2.Installed.Reason)
+	}
+	// 留痕可审计：序列化 JSON 中 version_raw 原样可核。
+	b, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "999.0.0-unknown-BUILD-GARBAGE ???") {
+		t.Fatalf("version_raw 序列化后应原样可核，实得 %s", b)
+	}
+}

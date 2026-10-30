@@ -7,6 +7,12 @@
 //     localapi/primewire.go 合并写布局同源（SPEC 506）；
 //   - codex：<config_home>/.codex/config.toml（TOML，W06-03 fixture 口径
 //     「非法 JSON/TOML」即此），登录标记 auth.json 为公开安装布局。
+//
+// 路径闸门（W06-01 联审必修项收紧）：布局链逐段 Lstat——config_home 本体与
+// 其下每个中间目录组件都必须是真实目录（链接/缺失/非目录=整链 fail 并注记
+// 哪一段），防 `.zcode → 外部目录` 式中间链接穿透误判 pass；末段保持 Lstat
+// 语义（链接=如实注记不读取），打开用 O_NONBLOCK 再以 fd fstat 复核普通文件
+// （末段被换为 FIFO/设备时 open 不挂起，非普通即关即拒）。TOCTOU 残窗见 doc.go。
 package agentdetect
 
 import (
@@ -28,10 +34,11 @@ import (
 var zcodeMarkerKeys = []string{"auth", "authToken", "credentials"}
 
 // codex TOML 保守启发式（V0 不引入 TOML 解析依赖——SPEC 三依赖白名单不加项）：
-// 只认两种结构特征行——[表头] 与 key = value；识别不了就 fail，不冒认已适配。
+// 逐行保守确认（合法形态行定义见 validateCodexConfigToml 注释），损坏/无法确认
+// 形态一律整文件 fail——宁可漏判不冒判。
 var (
-	tomlTableLineRe = regexp.MustCompile(`^\s*\[[^\]]+\]`)
-	tomlKeyLineRe   = regexp.MustCompile(`^\s*[A-Za-z0-9_"'.\-]+\s*=`)
+	tomlBareKeyRe   = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
+	tomlBareValueRe = regexp.MustCompile(`^[A-Za-z0-9_+\-.:]+$`)
 )
 
 // 配置读取闸门的统一文案（测试断言锚点）。
@@ -58,14 +65,16 @@ func knownLayoutSource(h Host) string {
 // Checked=false）。
 func recognizeConfig(host Host, home string, now time.Time) (LayerCheck, LoginMarkerCheck) {
 	lc := LayerCheck{Source: knownLayoutSource(host), CheckedAt: now}
-	var cfgPath, markerPath string
+	// 布局以「config_home + 相对段」表达：段校验/打开全部按段逐段 Lstat，
+	// 不允许中间目录符号链接穿透（联审必修项 1）。
+	var cfgSegs, markerSegs []string
 	switch host {
 	case HostCodex:
-		cfgPath = filepath.Join(home, ".codex", "config.toml")
-		markerPath = filepath.Join(home, ".codex", "auth.json")
+		cfgSegs = []string{".codex", "config.toml"}
+		markerSegs = []string{".codex", "auth.json"}
 	case HostZcode:
-		cfgPath = filepath.Join(home, ".zcode", "cli", "setting.json")
-		markerPath = cfgPath // zcode 标记在该文件顶层身份键内，引用同一路径
+		cfgSegs = []string{".zcode", "cli", "setting.json"}
+		markerSegs = cfgSegs // zcode 标记在该文件顶层身份键内，引用同一路径
 	default:
 		// 未知宿主：明确「通用手动」，绝不猜布局（宁可让人手动确认，不可冒认）。
 		lc.Status = StatusFail
@@ -73,12 +82,12 @@ func recognizeConfig(host Host, home string, now time.Time) (LayerCheck, LoginMa
 		return lc, LoginMarkerCheck{CheckedAt: now, Note: "未知宿主无登录标记规则"}
 	}
 
-	raw, ref, cfgErr := readRegularFileCapped(cfgPath, "config", configReadLimit)
+	raw, ref, cfgErr := readRegularFileCapped(home, cfgSegs, "config", configReadLimit)
 	lc.Paths = []PathRef{ref} // 路径注记来自真实 Lstat 事实（exists/regular/symlink）
 	if cfgErr != nil {
 		lc.Status = StatusFail
-		lc.Reason = cfgErr.Error() // 文案已含「未找到/符号链接/非普通文件」等事实与引用路径
-		return lc, checkLoginMarker(host, markerPath, nil, now)
+		lc.Reason = cfgErr.Error() // 文案已含「不存在/符号链接（含段位）/非普通文件」等事实与引用路径
+		return lc, checkLoginMarker(host, home, markerSegs, nil, now)
 	}
 	var parseErr error
 	var doc map[string]any // 仅 zcode 使用（JSON 顶层对象）；codex 恒 nil
@@ -91,24 +100,31 @@ func recognizeConfig(host Host, home string, now time.Time) (LayerCheck, LoginMa
 	if parseErr != nil {
 		lc.Status = StatusFail
 		lc.Reason = parseErr.Error()
-		return lc, checkLoginMarker(host, markerPath, nil, now)
+		return lc, checkLoginMarker(host, home, markerSegs, nil, now)
 	}
 	lc.Status = StatusPass
 	if host == HostCodex {
 		lc.Reason = "结构启发式识别通过（V0 无 TOML 解析依赖，未解析语义）"
 	}
-	return lc, checkLoginMarker(host, markerPath, doc, now)
+	return lc, checkLoginMarker(host, home, markerSegs, doc, now)
 }
 
 // checkLoginMarker 登录态标记核查（只回元数据，标记内容与有效性永不读取/返回）：
-//   - codex：auth.json 存在性（Lstat，永不读内容）；
+//   - codex：auth.json 存在性（Lstat，永不读内容）；布局链校验未过时不跟随
+//     判定存在性（防中间目录链接把外部对象计成本宿主标记）；
 //   - zcode：setting.json 顶层身份键（doc=nil 即结构未识别 → 不核）。
-func checkLoginMarker(host Host, markerPath string, doc map[string]any, now time.Time) LoginMarkerCheck {
+func checkLoginMarker(host Host, home string, markerSegs []string, doc map[string]any, now time.Time) LoginMarkerCheck {
 	m := LoginMarkerCheck{CheckedAt: now}
 	switch host {
 	case HostCodex:
+		markerPath := joinLayout(home, markerSegs)
 		m.Path = markerPath
 		m.Checked = true
+		if issue, viaLink := layoutChainIssue(home, markerSegs); issue != "" {
+			m.Symlink = viaLink // 链上有符号链接：如实注记，不跟随
+			m.Note = "标记路径布局链校验未过，不跟随判定存在性：" + issue
+			return m
+		}
 		facts := lstatPath(markerPath)
 		m.Symlink = facts.Symlink
 		if facts.Exists {
@@ -119,7 +135,7 @@ func checkLoginMarker(host Host, markerPath string, doc map[string]any, now time
 		m.Note = "auth.json 不存在（未发现 codex 登录态标记）"
 		return m
 	case HostZcode:
-		m.Path = markerPath
+		m.Path = joinLayout(home, markerSegs)
 		if doc == nil {
 			m.Note = "配置结构未识别，不核顶层身份键（不给损坏配置背书）"
 			return m
@@ -159,49 +175,116 @@ func markerValueNonEmpty(v any) bool {
 	}
 }
 
-// readRegularFileCapped 带闸门的只读：Lstat 先判符号链接与非普通文件（拒绝即
-// 不打开）；打开后 fd fstat 复核「校验对象=读取对象」（消 Lstat→Open 窗口换型）；
-// 读取设字节上限并核对实得字节数（防声明大小与实际不符/检查后增长）。无论成败
-// 都返回路径引用（来自真实 Lstat 事实，供调用方如实注记）；错误文案即配置层
-// 失败原因（不回文件内容）。
-func readRegularFileCapped(path, kind string, limit int64) ([]byte, PathRef, error) {
+// joinLayout config_home + 布局相对段拼出绝对路径（与识别目标路径一一对应）。
+func joinLayout(home string, segments []string) string {
+	return filepath.Join(append([]string{home}, segments...)...)
+}
+
+// layoutChainIssue 布局目录链逐段校验（联审必修项 1：防中间目录符号链接穿透
+// ——只对末段 Lstat 时，os.Open 会跟随中间目录链接，`.zcode → 外部目录` 会
+// 误判 pass 且 symlink=false）。config_home 本体与其下 segments 的前 len-1 个
+// 中间目录组件逐一 Lstat，必须都是真实目录；链接/不存在/非目录即整链 fail，
+// 返回含具体段位的失败原因（viaSymlink 标注是否因符号链接）。末段文件不在此
+// 校验（保持既有 Lstat 语义）。范围口径：config_home 为调用方显式给出的受控
+// 根，按一个整体校验（其上/其内的 OS 层组件不逐段展开——调用方输入与命令
+// 路径同责，残窗登记 doc.go）。
+func layoutChainIssue(home string, segments []string) (issue string, viaSymlink bool) {
+	fi, err := os.Lstat(home)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "配置根目录（config_home）不存在：" + home, false
+		}
+		return fmt.Sprintf("配置根目录状态检查失败：%s（%v）", home, err), false
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errSymlinkMsg + "（config_home 本身为符号链接：" + home + "）", true
+	}
+	if !fi.IsDir() {
+		return "配置根目录非目录：" + home, false
+	}
+	for i := 0; i < len(segments)-1; i++ {
+		cur := joinLayout(home, segments[:i+1])
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Sprintf("配置路径中间目录不存在（段 %d/%d）：%s（整链不跟随解析）", i+1, len(segments)-1, cur), false
+			}
+			return fmt.Sprintf("配置路径中间目录状态检查失败（段 %d/%d）：%s（%v）", i+1, len(segments)-1, cur, err), false
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Sprintf("%s（中间目录段 %d 为符号链接：%s，整链 fail）", errSymlinkMsg, i+1, cur), true
+		}
+		if !fi.IsDir() {
+			return fmt.Sprintf("配置路径中间目录非目录（段 %d/%d）：%s", i+1, len(segments)-1, cur), false
+		}
+	}
+	return "", false
+}
+
+// readRegularFileCapped 带闸门的只读（config_home + 布局相对段）：先逐段校验
+// 布局目录链（中间目录符号链接=整链 fail 并注记段位）；末段 Lstat 判符号链接
+// 与非普通文件（拒绝即不打开）；打开用 O_NONBLOCK（末段被换为 FIFO/设备时
+// open 不挂起）后立即 fd fstat 复核「校验对象=读取对象」（非普通即关即拒）；
+// 读取设字节上限并核对实得字节数。无论成败都返回路径引用（来自真实 Lstat
+// 事实，供调用方如实注记）；错误文案即配置层失败原因（不回文件内容）。
+func readRegularFileCapped(home string, segments []string, kind string, limit int64) ([]byte, PathRef, error) {
+	path := joinLayout(home, segments)
+	if issue, viaLink := layoutChainIssue(home, segments); issue != "" {
+		ref := lstatPath(path).ref(path, kind)
+		ref.Symlink = ref.Symlink || viaLink // 链上有符号链接：如实注记
+		return nil, ref, errors.New(issue)
+	}
 	facts := lstatPath(path)
 	ref := facts.ref(path, kind)
-	if facts.Err != nil {
-		if os.IsNotExist(facts.Err) {
-			return nil, ref, fmt.Errorf("宿主配置不存在：%s", path)
-		}
-		return nil, ref, fmt.Errorf("宿主配置状态检查失败：%s（%v）", path, facts.Err)
-	}
 	if facts.Symlink {
 		return nil, ref, errors.New(errSymlinkMsg + "：" + path)
 	}
 	if !facts.Regular {
 		return nil, ref, errors.New(errNotRegularMsg + "：" + path)
 	}
-	f, err := os.Open(path) // 仅在 Lstat 判非链接/非异常型后打开
+	raw, err := openVerifyReadCapped(path, limit)
 	if err != nil {
-		return nil, ref, fmt.Errorf("宿主配置打开失败：%s（%v）", path, err)
+		return nil, ref, err
+	}
+	return raw, ref, nil
+}
+
+// openVerifyReadCapped 末段打开-复核-读取三件套（联审必修项 1：打开原语防
+// 阻塞）：O_NONBLOCK 打开（末段被换为 FIFO/设备时 open 立即返回不挂起）→
+// fd fstat 复核必须是普通文件（非普通即关即拒——校验对象=读取对象，消
+// Lstat→Open 窗口内换型为 FIFO 的挂起面与误读面）→ 上限内读取并核对实得
+// 字节数。错误文案不回文件内容。
+func openVerifyReadCapped(path string, limit int64) ([]byte, error) {
+	f, err := openNoBlock(path) // O_NONBLOCK：末段换型为 FIFO 时 open 立即返回
+	if err != nil {
+		return nil, fmt.Errorf("宿主配置打开失败：%s（%v）", path, err)
 	}
 	defer f.Close()
 	st, err := f.Stat() // fd fstat：校验对象=读取对象
 	if err != nil {
-		return nil, ref, fmt.Errorf("宿主配置句柄状态复核失败：%s（%v）", path, err)
+		return nil, fmt.Errorf("宿主配置句柄状态复核失败：%s（%v）", path, err)
 	}
 	if !st.Mode().IsRegular() {
-		return nil, ref, errors.New(errNotRegularMsg + "（打开后复核）：" + path)
+		return nil, errors.New(errNotRegularMsg + "（打开后复核，即关即拒）：" + path)
 	}
 	if st.Size() > limit {
-		return nil, ref, fmt.Errorf("宿主配置超过读取上限 %d 字节：不做结构识别（异常文件，如实上报）", limit)
+		return nil, fmt.Errorf("宿主配置超过读取上限 %d 字节：不做结构识别（异常文件，如实上报）", limit)
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
-		return nil, ref, fmt.Errorf("宿主配置读取失败：%s（%v）", path, err)
+		return nil, fmt.Errorf("宿主配置读取失败：%s（%v）", path, err)
 	}
 	if int64(len(raw)) > limit { // 声明大小可造假，实得字节数兜底核对
-		return nil, ref, fmt.Errorf("宿主配置超过读取上限 %d 字节：不做结构识别（异常文件，如实上报）", limit)
+		return nil, fmt.Errorf("宿主配置超过读取上限 %d 字节：不做结构识别（异常文件，如实上报）", limit)
 	}
-	return raw, ref, nil
+	return raw, nil
+}
+
+// openNoBlock 以非阻塞语义打开末段文件（openNoBlockFlag 平台分文件定义）：
+// Unix 加 O_NONBLOCK 防 FIFO/设备 open 挂起；打开后必须 fd fstat 复核普通
+// 文件才算通过（见 openVerifyReadCapped）。
+func openNoBlock(path string) (*os.File, error) {
+	return os.OpenFile(path, openNoBlockFlag, 0)
 }
 
 // validateZcodeSetting zcode setting.json 结构识别：与 primewire 合法性口径同源
@@ -215,7 +298,9 @@ func validateZcodeSetting(raw []byte) (map[string]any, error) {
 	dec.UseNumber()
 	var doc map[string]any
 	if err := dec.Decode(&doc); err != nil {
-		return nil, fmt.Errorf("setting.json 非合法 JSON（顶层须为对象）：%v", err)
+		// 只回固定错误分类+偏移量，绝不拼接 err.Error()——解码错误上下文会回显
+		// 配置内容字符（实证：authToken 首字符进 reason，联审建议修项 3）。
+		return nil, fmt.Errorf("setting.json 非合法 JSON（顶层须为对象）：invalid_json at offset %d", jsonErrOffset(dec, err))
 	}
 	if doc == nil {
 		// `null` 解码成功但 doc 为 nil：无安全识别点，判结构不可识别（同 primewire R1）。
@@ -227,9 +312,35 @@ func validateZcodeSetting(raw []byte) (map[string]any, error) {
 	return doc, nil
 }
 
-// validateCodexConfigToml codex config.toml 保守启发式识别：非空、非二进制
-// （无 NUL 字节）、至少一行 [表头] 或 key = 形态。不是 TOML 语义解析（V0 不引
-// 解析依赖），识别不了就 fail 不冒认——语义级适配待宿主布局确证后再进。
+// jsonErrOffset JSON 解析失败的定位偏移：优先取 SyntaxError/UnmarshalTypeError
+// 的 Offset，兜底用解码器当前输入偏移；只回数字，绝不回错误上下文文本（错误
+// 文本含配置内容字符，防泄漏红线见 validateZcodeSetting）。
+func jsonErrOffset(dec *json.Decoder, err error) int64 {
+	var syn *json.SyntaxError
+	var typ *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &syn):
+		return syn.Offset
+	case errors.As(err, &typ):
+		return typ.Offset
+	default:
+		return dec.InputOffset()
+	}
+}
+
+// validateCodexConfigToml codex config.toml 保守启发式识别（W06-01 联审必修项 2
+// 收紧：旧「命中任一结构特征行即过」会让孤立 `model =`、未闭合字符串、表头后
+// 乱码等明显损坏配置误判 pass）。逐行分类口径：
+//
+//	合法形态行 = [表头]/[[数组表]]（整行闭合、闭合后至多行尾注释）或
+//	            key = 非空值（键为裸键/点键/闭合引号键；值为引号同行平衡闭合
+//	            字符串或单 token 裸值，行尾至多注释）。
+//	其余一律损坏信号 → 整文件 fail。
+//
+// pass 需「≥1 个合法形态行 且 无任何损坏/无法确认行」，原因带「结构无法确认
+// （保守拒绝）」——宁可漏判不冒判。行内数组、多行字符串/数组、含空白引号的
+// 表头名等复杂形态无法行级确认，同样保守拒绝（登记 doc.go）。不是 TOML 语义
+// 解析（V0 不引解析依赖），语义级适配待宿主布局确证后再进。
 func validateCodexConfigToml(raw []byte) error {
 	if len(raw) == 0 {
 		return errors.New("config.toml 为空文件：结构不可识别")
@@ -237,14 +348,131 @@ func validateCodexConfigToml(raw []byte) error {
 	if bytes.IndexByte(raw, 0) >= 0 {
 		return errors.New("config.toml 含 NUL 字节（二进制内容）：结构不可识别")
 	}
-	for _, line := range strings.Split(string(raw), "\n") {
+	validLines := 0
+	for i, line := range strings.Split(string(raw), "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		if tomlTableLineRe.MatchString(t) || tomlKeyLineRe.MatchString(t) {
-			return nil // 命中任一结构特征行即通过
+		if detail, ok := classifyCodexTomlLine(t); !ok {
+			return fmt.Errorf("config.toml 第 %d 行%s：结构无法确认（保守拒绝），不冒判已适配", i+1, detail)
+		}
+		validLines++
+	}
+	if validLines == 0 {
+		return errors.New("config.toml 未发现 TOML 结构特征（无 [表头] 或 key = 非空值行）：结构不可识别")
+	}
+	return nil
+}
+
+// classifyCodexTomlLine 单行形态保守分类：ok=true 为可确认的合法形态行；
+// ok=false 时 detail 为损坏/无法确认信号（供行号定位拼接）。
+func classifyCodexTomlLine(t string) (detail string, ok bool) {
+	if strings.HasPrefix(t, "[") {
+		return classifyCodexTomlHeader(t)
+	}
+	eq := strings.IndexByte(t, '=')
+	if eq < 0 {
+		return "既非 [表头] 也非 key = 行（无结构锚点）", false
+	}
+	if eq == 0 {
+		return "孤立 =（键缺失）", false
+	}
+	key := strings.TrimSpace(t[:eq])
+	val := strings.TrimSpace(t[eq+1:])
+	if !codexTomlKeyOK(key) {
+		return "键形态无法确认（非裸键/点键/闭合引号键）", false
+	}
+	if val == "" {
+		return "key = 后无值（孤立 key）", false
+	}
+	return codexTomlValueOK(val)
+}
+
+// classifyCodexTomlHeader 表头行：[[name]] / [name] 整行闭合，表头名非空且无
+// 括号与空白（引号名内含空白的形态保守拒绝），闭合后至多行尾注释。
+func classifyCodexTomlHeader(t string) (string, bool) {
+	dbl := strings.HasPrefix(t, "[[")
+	open := 1
+	closeTok := "]"
+	if dbl {
+		open = 2
+		closeTok = "]]"
+	}
+	idx := strings.Index(t, closeTok)
+	if idx < 0 {
+		return "表头未闭合（缺 ]）", false
+	}
+	name := t[open:idx]
+	if name == "" || strings.ContainsAny(name, "[] \t") {
+		return "表头名形态无法确认", false
+	}
+	tail := strings.TrimSpace(t[idx+len(closeTok):])
+	if tail != "" && !strings.HasPrefix(tail, "#") {
+		return "表头后尾随垃圾 token", false
+	}
+	return "", true
+}
+
+// codexTomlKeyOK 键形态：裸键/点键（[A-Za-z0-9_-] 段以点相连）或整行闭合的
+// 引号键；点引号混写（"a"."b"）等复杂形态保守拒绝。
+func codexTomlKeyOK(key string) bool {
+	if tomlBareKeyRe.MatchString(key) {
+		return true
+	}
+	if key[0] == '"' || key[0] == '\'' {
+		closed, rest := scanClosedQuoted(key)
+		return closed && strings.TrimSpace(rest) == ""
+	}
+	return false
+}
+
+// codexTomlValueOK 值形态：双/单引号字符串须同行平衡闭合（闭合后至多注释，
+// 未闭合至行尾即损坏）；""" / ''' 多行字符串无法行级确认 → 保守拒绝；裸值须
+// 单 token（布尔/数字/日期类字符集）且行尾至多注释。行内数组等复杂形态落在
+// 裸值字符集外 → 保守拒绝。
+func codexTomlValueOK(val string) (string, bool) {
+	if strings.HasPrefix(val, `"""`) || strings.HasPrefix(val, `'''`) {
+		return "多行字符串形态无法行级确认", false
+	}
+	if val[0] == '"' || val[0] == '\'' {
+		closed, rest := scanClosedQuoted(val)
+		if !closed {
+			return "未闭合引号至行尾", false
+		}
+		tail := strings.TrimSpace(rest)
+		if tail != "" && !strings.HasPrefix(tail, "#") {
+			return "值后尾随垃圾 token", false
+		}
+		return "", true
+	}
+	token, rest := val, ""
+	if idx := strings.IndexAny(val, " \t"); idx >= 0 {
+		token, rest = val[:idx], val[idx:]
+	}
+	if !tomlBareValueRe.MatchString(token) {
+		return "裸值形态无法确认（含行内数组等复杂形态）", false
+	}
+	tail := strings.TrimSpace(rest)
+	if tail != "" && !strings.HasPrefix(tail, "#") {
+		return "值后尾随垃圾 token", false
+	}
+	return "", true
+}
+
+// scanClosedQuoted 扫描以引号开头的字符串字面量（s[0] 为引号）：双引号内反斜杠
+// 转义跳过下一字符（行尾落单反斜杠按未闭合处理），单引号字面量不转义；返回
+// 是否同行闭合与闭合后余文。
+func scanClosedQuoted(s string) (bool, string) {
+	q := s[0]
+	basic := q == '"'
+	for i := 1; i < len(s); i++ {
+		switch {
+		case basic && s[i] == '\\':
+			i++ // 转义：与循环自增合计跳过两字符
+		case s[i] == q:
+			return true, s[i+1:]
 		}
 	}
-	return errors.New("config.toml 未发现 TOML 结构特征（无 [表头] 或 key = 行）：结构不可识别")
+	return false, ""
 }
