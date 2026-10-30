@@ -662,6 +662,7 @@ const S = {
   primeNew: '',            // 统筹凭证轮换后的新凭证（仅此一次展示），
   primeNewWire: null,      // 轮换自动接线结果（t20261023-62a2）：{target} 命中 zcode 布局；null=降级手动配给
   primeDecl: { picking: false, busy: false, done: null },  // 网页钦定流程（方案 3.2.1）：picking=选择视图展开；done={agent,token,mcp,wired,target,orch,orchErr,synced} 钦定完成一次性展示（orch/orchErr/synced=声明联动三态原始值，P1-02；orch/synced 缺省=应答未带该位，完成页不作声明承诺）
+  mcpAccess: { loaded: false, unavailable: false, enabled: null, credential: '', scope: '', primeAgent: '', updatedAt: '' },  // MCP 编排授权（W06-03 P08：GET /api/v1/local/mcp/access 视图；enabled null=未加载；credential 恒为服务端脱敏引用，本端不再脱敏）
   cfg: { loaded: false, unavailable: false, agents: [], pending: false, supervised: true,
          restart_cmd: '', config_path: '', structural: [], msg: '' },  // 能力配置编辑（方案 3.5）；编辑会话在模块级 cfgEdit（t20261023-a4b1 抽屉化）
   sessionEpoch: 0,         // 会话代次（第五轮收敛 3）：login/logout/401/换令牌时 +1（resetPrimeState 统一挂点）；
@@ -715,6 +716,7 @@ function resetPrimeState() {
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
+  S.mcpAccess = { loaded: false, unavailable: false, enabled: null, credential: '', scope: '', primeAgent: '', updatedAt: '' };   // 授权状态同属会话边界（W06-03）：不跨登录残留上个会话的授权视图
   S.tf = { origin: '' };   // 来源筛选随会话边界重置（TASK-nav-filter A1 codex 必须修项）
   S.sess = freshSessForm();   // 会话表单同属会话边界（T3）
   S.sessions = [];
@@ -1611,9 +1613,14 @@ function route() {
     loadNotifyChannels();
     loadNotifySettings();
   }
+  // P08 决策设置（W06-03）：MCP 编排授权卡随总览页拉取（不进轮询——开关变更仅经
+  // 本页 PUT 与盘上显式修改发生，进页即取最新；状态行不参与 loadAll 指纹）。
+  // setup 形态不拉（卡片收缩为指引态，无操作面）。
+  if (S.page === 'overview' && S.authed && S.status?.mode !== 'setup' && !mcpAccessLoading) loadMcpAccess();
   // W01-05 P01/P02：会话独立页（列表主入口/详情页）；进页拉一次（轮询随 pollTick
   // 保持新鲜；503 专态如实降级）。详情页即取（fetchSessionPage 守卫换会话/关页）。
   render();
+  applyPendingAnchor();   // P08 深链（W06-03）：跨页锚点在路由与重绘后落点
   if (S.page === 'sessions' && S.authed) {
     loadSessions().then(paintSessionsView).catch(() => { });
     if (S.sessId) {
@@ -1738,7 +1745,7 @@ function overviewPage() {
       <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
       <div class="step"><span>3</span><div><b>钦定管家并派单</b><div class="muted">在「本机管家」区钦定一个 agent 担任智行管家，随后即可在本机派单；需要开放给其他机器调用时再打开开关。</div></div></div></section>`
-      + (st?.mode === 'setup' ? primeCard() : '');
+      + (st?.mode === 'setup' ? primeCard() : '') + mcpAccessCard();
   }
   return head + `
   <div class="grid cols3 spaced">
@@ -1749,14 +1756,51 @@ function overviewPage() {
     <section class="card"><h3>最近同步</h3><div class="metric">${st?.last_sync_at ? timeShort(st.last_sync_at) : '从未'}</div>
       <small class="muted">${st?.last_sync_at ? '最近一次注册成功 · ' + esc(timeFull(st.last_sync_at)) : '注册成功后这里显示时间'}</small></section>
   </div>
-  ${primeCard()}${recentTasksCard()}`;
+  ${primeCard()}${mcpAccessCard()}${recentTasksCard()}`;
 }
+/* ---------- P08 决策设置深链（W06-03）：三区互相锚点，不建新页 ----------
+ * 「默认管家设置」（总览·管家卡）↔「MCP 授权」（总览·编排授权卡）↔「能力发现」
+ * （服务·能力配置区，发现入口在该区内）。跨页锚点先路由到宿主页再滚动：
+ * pendingAnchor 在 route/render 链与目标区异步加载（loadMcpAccess/loadCfg）完成后
+ * 由 applyPendingAnchor 消费——深链落点不因加载重绘丢失。锚点 <span id> 一律放
+ * 在卡片字节锁前缀之后（TestWebOverviewSpacing 逐字锁定各区 <section> 开头串，
+ * 锚点内嵌不得破坏既有断言）。setup 形态下 services 页不可达，setup 分支不渲染
+ * 互链行（锚点 span 无害保留）。 */
+const P08_ANCHOR_PAGE = { 'prime-setup': 'overview', 'mcp-access': 'overview', 'capability-config': 'services' };
+let pendingAnchor = '';
+function gotoAnchor(id) {
+  if (!P08_ANCHOR_PAGE[id]) return;
+  if (S.page !== P08_ANCHOR_PAGE[id]) { pendingAnchor = id; location.hash = '#/' + P08_ANCHOR_PAGE[id]; return; }
+  const el = document.getElementById(id);
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function applyPendingAnchor() {
+  if (!pendingAnchor || S.page !== P08_ANCHOR_PAGE[pendingAnchor]) return;
+  const el = document.getElementById(pendingAnchor);
+  if (!el) return;
+  pendingAnchor = '';
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+/* deepLinksRow/linkTo 决策设置互链（文案层单一起源：三区词典同一数组，互链行与
+ * 行内指路链接共用；skip=当前区自身不出现在自己的互链行里）。 */
+const P08_LINKS = [['prime-setup', '默认管家设置'], ['mcp-access', 'MCP 编排授权'], ['capability-config', '能力发现 · 能力配置']];
+function deepLinksRow(skip) {
+  return P08_LINKS.filter(([id]) => id !== skip)
+    .map(([id, label]) => button(label, 'goto:' + id, 'link'))
+    .join('<span class="muted"> · </span>');
+}
+function linkTo(id, label) {
+  return button(label, 'goto:' + id, 'link');
+}
+
 /* 本机管家 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换管家走选择视图
  * → declare → 钦定完成视图（凭据事实块 + MCP 配置片段；W02-01 起钦定不换发/不返回凭据）→ 已钦定常态（轮换 +
  * 换管家 + 取消管家入口）。2026-10-29 部署后走查反馈一：能力卡管家按钮全退役
  * （能力卡只留「管家·本机」徽标做身份展示），钦定/换/取消/轮换唯一入口收敛到
  * 本卡；取消管家沿用 2026-10-28 声明制口径（弱化文字链，PATCH orchestrator=false）。
- * setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。 */
+ * setup 模式只提示不开放（矩阵 #9/#18）。全部动态值过 esc()。
+ * W06-03 P08：head 增「决策设置」互链行（→MCP 编排授权/能力发现；setup 分支除外
+ * ——services 页在 setup 不可达）；行内「MCP 授权」区指路文案升格为深链。 */
 function primeCard() {
   const st = S.status;
   const pa = st?.prime_agent || '';
@@ -1768,14 +1812,16 @@ function primeCard() {
   const modeStat = `<span><b${modeTech ? ` title="形态代号：${modeTech}"` : ''}>${esc(modeTxt)}</b><small>当前形态</small></span>`;
   const foot = `<p class="footer-note">断开组网后：还在 hub 离线暂存里、未送达的任务将留到过期；本机历史任务不受影响，本机派单照常可用。</p>`;
   if (st?.mode === 'setup') {
-    return `<section class="card spaced"><h2>本机管家 · 形态</h2>
+    return `<section class="card spaced"><h2>本机管家 · 形态</h2><span id="prime-setup"></span>
     <div class="mini-stat spaced"><span><b>未钦定</b><small>本机管家</small></span>${modeStat}</div>
     <small class="muted">先完成连接并配置能力后再钦定管家。</small></section>`;
   }
   const head = `<section class="card spaced"><div class="row"><h2>本机管家 · 形态</h2>
     <div class="actions">${st?.mode === 'networked' ? button('断开组网', 'net-disconnect') : ''}</div></div>
-  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机管家</small></span>${modeStat}</div>`;
-  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入管家的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个管家」重新走钦定。` : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个管家」重新走钦定。'}</small></div>` : '';
+  <span id="prime-setup"></span>
+  <div class="mini-stat spaced"><span><b>${pa ? esc(pa) : '未钦定'}</b><small>本机管家</small></span>${modeStat}</div>
+  <div class="spaced"><small class="muted">决策设置：</small>${deepLinksRow('prime-setup')}</div>`;
+  const newTok = S.primeNew ? `<div class="notice warn spaced"><b>新管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(S.primeNew)}</code> ${button('复制', 'copy-prime-token', 'link')}<br><small>旧凭证已失效；${S.primeNewWire ? `新凭证已自动写入管家的 MCP 配置（<code>${esc(S.primeNewWire.target)}</code>，重连后生效），或「换一个管家」重新走钦定。` : `请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN），或「换一个管家」重新走钦定；手动配置的宿主条目在线生成随后续版本接入${linkTo('mcp-access', '「MCP 授权」区')}。`}</small></div>` : '';
   /* 声明状态行（P2-01 双源如实，2026-10-29 走查反馈批）：本机凭证持有人=
    * prime_agent（node.yaml），本机声明=能力卡 Orchestrator 位（agents-state
    * 覆盖层）。两源分列实值，不一致时点名「取消管家将撤声明 B」；取消入口按
@@ -1811,7 +1857,7 @@ function primeCard() {
 /* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）——且须主人在「MCP 授权」区显式启用编排授权（新实例默认禁用，禁用期间该派单被 403 mcp_disabled 拒绝）；本机主人网页派单不依赖管家凭证。'}</small>
+  return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : `钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）——且须主人在${linkTo('mcp-access', '「MCP 授权」区')}显式启用编排授权（新实例默认禁用，禁用期间该派单被 403 mcp_disabled 拒绝）；本机主人网页派单不依赖管家凭证。`}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
@@ -1862,7 +1908,97 @@ function primeDoneView() {
   ${credBlock}
   <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制（复制片段的凭据位为脱敏占位，迁移时须替换为有效明文）' : '凭据位为脱敏占位——结构可复用，凭据需轮换获取明文后替换'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
   <div class="row spaced">${retryBtn}${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
-  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权），写入的是当前共享凭据；轮换管家凭证时会自动刷新同一配置，无需重复操作。管家实际派单还须主人在「MCP 授权」区显式启用编排授权（新实例默认禁用，未启用时管家派单被 403 mcp_disabled 拒绝）。' : '把上方 JSON 片段的结构粘进管家 agent 的 MCP 服务器配置；凭据位（SWARM_NODE_PRIME_TOKEN）为脱敏占位，须经「轮换管家凭证」获取一次性明文后替换，且主人在「MCP 授权」区显式启用编排授权（新实例默认禁用）后它才可本机派单。'}</p>`;
+  <p class="footer-note">${d.wired ? `接线发生在钦定事务内（走本机主人授权），写入的是当前共享凭据；轮换管家凭证时会自动刷新同一配置，无需重复操作。管家实际派单还须主人在${linkTo('mcp-access', '「MCP 授权」区')}显式启用编排授权（新实例默认禁用，未启用时管家派单被 403 mcp_disabled 拒绝）。手动配置其他宿主：可复制上方片段结构、凭据经「轮换管家凭证」获取一次性明文后替换；宿主配置的在线生成/预览随后续版本接入「MCP 授权」区。` : `把上方 JSON 片段的结构粘进管家 agent 的 MCP 服务器配置；凭据位（SWARM_NODE_PRIME_TOKEN）为脱敏占位，须经「轮换管家凭证」获取一次性明文后替换，且主人在${linkTo('mcp-access', '「MCP 授权」区')}显式启用编排授权（新实例默认禁用）后它才可本机派单。手动配置宿主的在线生成/预览随后续版本接入「MCP 授权」区。`}</p>`;
+}
+
+/* ---------- MCP 编排授权卡（W06-03 P08 决策设置） ----------
+ * 与「本机管家 · 形态」卡并列但视觉分流——独立卡片、独立开关，授权与角色解耦
+ * 的页面级表达。数据源 GET /api/v1/local/mcp/access（视图凭据位恒为服务端脱敏
+ * 引用，本端只渲染不加工）；启用/禁用调既有 PUT（主人显式启停），操作影响 scope
+ * 人话由服务端返回、原样渲染不二次创作。声明≠调用权：启用无需钦定管家；钦定/
+ * 取消管家不改本开关；禁用=门控拒绝（403 mcp_disabled）不撤销凭据，作废走管家
+ * 卡「轮换管家凭证」。不进轮询（开关变更仅经本页 PUT 与盘上显式修改发生，进页
+ * 即取最新）。setup 形态不渲染操作面（编排门 setup 分支恒 403 prime_required，
+ * 开关无生效对象——如实收缩为指引）。 */
+function mcpAccessCard() {
+  const a = S.mcpAccess;
+  if (S.status?.mode === 'setup') {
+    return `<section class="card spaced" id="mcp-access"><h2>MCP 编排授权</h2>
+    <small class="muted">编排授权开关在接入中心端后开放（当前形态下外部编排调用本就被拒绝）；先完成连接。</small></section>`;
+  }
+  if (!a.loaded) {
+    return `<section class="card spaced" id="mcp-access"><h2>MCP 编排授权</h2>
+    <small class="muted">正在读取授权状态…</small></section>`;
+  }
+  if (a.unavailable) {
+    return `<section class="card spaced" id="mcp-access"><div class="row"><h2>MCP 编排授权</h2></div>
+    <small class="muted">授权状态读取失败（本机 API 不可达或本机版本未装配授权端点）。</small>
+    <div class="row spaced">${button('重试读取', 'mcp-reload', 'link')}</div>
+    <p class="footer-note">决策设置：${deepLinksRow('mcp-access')}</p></section>`;
+  }
+  const stat = `<div class="mini-stat spaced"><span><b>${a.enabled ? '已启用' : '未启用'}</b><small>编排授权</small></span><span><b>${a.primeAgent ? esc(a.primeAgent) : '未钦定'}</b><small>当前管家（仅展示，声明入口在「默认管家设置」卡）</small></span></div>`;
+  const credLine = `<small class="muted">共享编排凭据（prime_token）：${esc(a.credential || '未生成')}${a.updatedAt ? ' · 开关最近变更 ' + esc(timeFull(a.updatedAt)) : ''}</small>`;
+  const scopeLine = a.scope ? `<div class="notice spaced"><small class="muted">${esc(a.scope)}</small></div>` : '';
+  const toggle = a.enabled ? button('禁用编排授权', 'mcp-toggle', 'link') : button('启用编排授权', 'mcp-toggle', 'primary');
+  return `<section class="card spaced" id="mcp-access"><div class="row"><h2>MCP 编排授权</h2></div>
+  ${stat}${credLine}${scopeLine}
+  <div class="row spaced">${toggle}</div>
+  <p class="footer-note">授权与管家角色相互独立：启用编排授权无需钦定管家；钦定/取消管家不改变本开关。禁用只是门控拒绝外部派单（403 mcp_disabled），不撤销凭据——作废旧凭据请用「默认管家设置」卡的「轮换管家凭证」。决策设置：${deepLinksRow('mcp-access')}</p></section>`;
+}
+
+/* ---------- MCP 编排授权数据链（W06-03） ---------- */
+let mcpAccessLoading = false;   // GET 在途防重入（同 notifyLoading 家族；模块级不随 reset 翻转，迟到应答凭会话代次丢弃）
+function applyMcpAccessView(v) {
+  S.mcpAccess = { loaded: true, unavailable: false, enabled: !!v.enabled, credential: v.credential_masked || '', scope: v.scope || '', primeAgent: v.prime_agent || '', updatedAt: v.updated_at || '' };
+}
+async function loadMcpAccess() {
+  if (mcpAccessLoading) return;
+  mcpAccessLoading = true;
+  const epoch = S.sessionEpoch;   // 会话代次：迟到应答不写状态（同 primeNew 一次性凭证纪律）
+  try {
+    const r = await api('GET', '/api/v1/local/mcp/access');
+    if (S.sessionEpoch !== epoch) { mcpAccessLoading = false; return; }
+    if (r.code === 200 && r.data && typeof r.data.enabled === 'boolean') applyMcpAccessView(r.data);
+    else S.mcpAccess = { ...S.mcpAccess, loaded: true, unavailable: true };
+  } catch (e) {
+    if (e?.unauthorized) { mcpAccessLoading = false; return; }   // 401 已回令牌门
+    S.mcpAccess = { ...S.mcpAccess, loaded: true, unavailable: true };
+  }
+  mcpAccessLoading = false;
+  render();
+  applyPendingAnchor();
+}
+/* mcpAccessToggle 主人显式启停（PUT /api/v1/local/mcp/access）：确认弹层预告词用
+ * 服务端 scope 人话原话（mcpaccess.go 返回，如实转述不二次创作）；保存失败如实
+ * 报错（服务端保留旧态，不虚报成功），成功以 PUT 应答视图落状态（同 GET 形态，
+ * 不含任何密钥）。 */
+function mcpAccessToggle(btn) {
+  const cur = S.mcpAccess.enabled;
+  if (typeof cur !== 'boolean') { toast('授权状态未就绪，请先等状态行读取完成'); return; }
+  const target = !cur;
+  const word = target ? '启用' : '禁用';
+  confirmModal(word + ' MCP 编排授权', esc(S.mcpAccess.scope || (target
+    ? '启用后，持共享编排凭据（prime_token）的外部 MCP 调用方可向本机派发任务。'
+    : '禁用后，持共享编排凭据的外部调用被拒绝（403 mcp_disabled）；禁用不撤销凭据——作废旧凭据请用「轮换管家凭证」。')), '确认' + word, async () => {
+    if (btn) btn.disabled = true;
+    const epoch = S.sessionEpoch;   // 会话代次：迟到应答不写状态
+    try {
+      const r = await api('PUT', '/api/v1/local/mcp/access', { enabled: target });
+      if (S.sessionEpoch !== epoch) return;
+      if (r.code === 200 && r.data && typeof r.data.enabled === 'boolean') {
+        applyMcpAccessView(r.data);
+        toast('已' + word + ' MCP 编排授权');
+      } else {
+        toast(word + '失败 · ' + errLine(r.data));
+      }
+    } catch (e) {
+      if (e.unauthorized) return;
+      toast(e.network ? '本机 API 不可达' : word + '失败（旧状态保持，可重试）');
+    }
+    render();
+    applyPendingAnchor();
+    if (btn && document.contains(btn)) btn.disabled = false;
+  });
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -2000,10 +2136,10 @@ function cfgSection() {
   const c = S.cfg;
   if (!c.loaded) {
     return `<section class="card spaced"><div class="row"><div><h2>能力配置</h2></div>
-      ${button('加载配置', 'cfg-load', '')}</div><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。</p></section>`;
+      ${button('加载配置', 'cfg-load', '')}</div><span id="capability-config"></span><p class="muted">读取 node.yaml 的 agents 表进行网页编辑。</p></section>`;
   }
   if (c.unavailable) {
-    return `<section class="card spaced"><h2>能力配置</h2><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
+    return `<section class="card spaced"><h2>能力配置</h2><span id="capability-config"></span><p class="muted">配置编辑不可用（节点版本未装配配置端点，或接口不可达）。</p></section>`;
   }
   // 功能性修复 4：待应用横幅注明「下方表格为最新编辑」——pending 窗口期编辑
   // 副本是用户意图的权威（盘上已是新表，运行时基线待重启收敛）。
@@ -2018,6 +2154,8 @@ function cfgSection() {
     '<p class="muted">（空表：新增至少一个 agent 才能对外提供服务）</p>';
   return `<section class="card spaced"><div class="row"><div><h2>能力配置 <span class="badge">node.yaml</span></h2>
     <small class="muted">配置文件：<code>${esc(c.config_path)}</code> · 保存时服务端强校验；yaml 注释与未知字段保留（round-trip）。普通字段保存即热重载；增删 agent / 改 command 需重启。</small></div></div>
+    <span id="capability-config"></span>
+    <div class="spaced"><small class="muted">决策设置（总览页）：</small>${deepLinksRow('capability-config')}</div>
     ${pending}${msg}
     <div class="table-wrap"><table class="cfg-table"><thead><tr><th>名称</th><th>命令</th><th>超时</th><th>开放</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>
@@ -3451,6 +3589,10 @@ document.addEventListener('click', e => {
       case 'prime-declare': primeDeclare(btn); return;
       case 'prime-retry-orch': retryPrimeDeclare(btn); return;
       case 'net-disconnect': netDisconnect(btn); return;
+      /* P08 决策设置（W06-03）：三区深链 + MCP 编排授权启停/重读 */
+      case 'goto': gotoAnchor(arg); return;
+      case 'mcp-toggle': mcpAccessToggle(btn); return;
+      case 'mcp-reload': loadMcpAccess(); return;
       case 'copy-prime-token': copyPrimeToken(); return;
       case 'copy-prime-declare': copyPrimeDeclare(); return;
       case 'copy-prime-mcp': copyPrimeMcp(); return;
