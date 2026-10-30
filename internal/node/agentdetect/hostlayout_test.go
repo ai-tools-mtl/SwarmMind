@@ -316,6 +316,73 @@ func makeFifoZcodeHome(t *testing.T) string {
 	return home
 }
 
+// TestConfigHomeRootLinkAllFormsRejected 必修①（codex 复审 2d03aba）回归：
+// config_home 指向外部配置目录的同一链接，分别以 `/…/link`、`/…/link/`、
+// `/…/link/.` 三种形态输入——未规范化输入（尾随分隔符/`.` 组件）会让
+// os.Lstat 解析到链接目标而误 pass 并穿透；统一 filepath.Clean 后三种形态
+// 全部 fail（根检查见链接本体）、不认外部 auth.json 标记（codex/zcode 双宿主）。
+func TestConfigHomeRootLinkAllFormsRejected(t *testing.T) {
+	t.Run("codex", func(t *testing.T) {
+		outside := t.TempDir()
+		mkdirAllWithFix(t, filepath.Join(outside))
+		writeFileWithFix(t, filepath.Join(outside, "config.toml"), "model = \"gpt\"\n")
+		writeFileWithFix(t, filepath.Join(outside, "auth.json"), `{"k":"ROOT-LINK-CANARY"}`)
+		home := t.TempDir()
+		link := filepath.Join(home, "link")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatalf("造符号链接失败: %v", err)
+		}
+		for _, form := range []string{link, link + "/", link + "/."} {
+			t.Run(form, func(t *testing.T) {
+				lc, marker := recognizeConfig(HostCodex, form, testNow())
+				if lc.Status != StatusFail {
+					t.Fatalf("链接形态 %q 应 fail，实得 %+v", form, lc)
+				}
+				if !strings.Contains(lc.Reason, "符号链接") || !strings.Contains(lc.Reason, "config_home") {
+					t.Fatalf("原因应注记 config_home 本身为符号链接，实得 %q", lc.Reason)
+				}
+				if strings.Contains(lc.Reason, "ROOT-LINK-CANARY") {
+					t.Fatalf("外部内容不得进 reason：%q", lc.Reason)
+				}
+				if marker.Found {
+					t.Fatalf("不得认外部 auth.json 标记，实得 %+v", marker)
+				}
+				if marker.Checked && !marker.Symlink {
+					t.Fatalf("标记路径应注记链接，实得 %+v", marker)
+				}
+			})
+		}
+	})
+	t.Run("zcode", func(t *testing.T) {
+		outside := t.TempDir()
+		mkdirAllWithFix(t, filepath.Join(outside, "cli"))
+		writeFileWithFix(t, filepath.Join(outside, "cli", "setting.json"),
+			`{"authToken":"ROOT-LINK-CANARY"}`)
+		home := t.TempDir()
+		link := filepath.Join(home, "link")
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatalf("造符号链接失败: %v", err)
+		}
+		for _, form := range []string{link, link + "/", link + "/."} {
+			t.Run(form, func(t *testing.T) {
+				lc, marker := recognizeConfig(HostZcode, form, testNow())
+				if lc.Status != StatusFail {
+					t.Fatalf("链接形态 %q 应 fail，实得 %+v", form, lc)
+				}
+				if !strings.Contains(lc.Reason, "符号链接") {
+					t.Fatalf("原因应注记符号链接，实得 %q", lc.Reason)
+				}
+				if strings.Contains(lc.Reason, "ROOT-LINK-CANARY") {
+					t.Fatalf("外部内容不得进 reason：%q", lc.Reason)
+				}
+				if marker.Checked {
+					t.Fatalf("结构未识别不得核标记，实得 %+v", marker)
+				}
+			})
+		}
+	})
+}
+
 // TestConfigIntermediateDirSymlinkRejected 中间目录符号链接穿透（联审必修项 1）：
 // <home>/.zcode（或 .codex）→ 外部真实目录时整链 fail、注记链接段位，绝不
 // 读取外部配置（金丝内容不得进 reason），路径引用如实注记 symlink=true。
@@ -464,9 +531,9 @@ func TestZcodeJSONErrorNoContentEcho(t *testing.T) {
 	}
 }
 
-// TestCodexConfigCorruptFormsRejected 明显损坏配置保守拒绝（联审必修项 2）：
-// 旧启发式「命中任一结构特征行即过」会让以下形态误判 pass——收紧后任何损坏/
-// 无法确认形态整文件 fail，原因带「结构无法确认（保守拒绝）」。
+// TestCodexConfigCorruptFormsRejected 明显损坏/非法配置保守拒绝（联审必修项 2
+// + codex 复审 2d03aba 必修②三个实测放行反例）：任何非法/损坏形态整文件 fail，
+// 原因带「结构无法确认（保守拒绝）」且不与「合法但不支持」措辞混用。
 func TestCodexConfigCorruptFormsRejected(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -480,10 +547,17 @@ func TestCodexConfigCorruptFormsRejected(t *testing.T) {
 		{"表头后乱码", "[profiles.default] garbage\n", "尾随垃圾"},
 		{"表头未闭合", "[profiles.default\n", "表头未闭合"},
 		{"值后尾随垃圾", "model = gpt extra\n", "尾随垃圾"},
-		{"行内数组", "tags = [\"a\", \"b\"]\n", "结构无法确认"},
-		{"多行字符串", "desc = \"\"\"abc\n", "结构无法确认"},
 		{"无法确认行形态", "just some words\n", "结构无法确认"},
 		{"合法特征行混损坏行", "model = \"gpt\"\nbroken line here\n", "结构无法确认"},
+		// —— 复审必修②三个独立实测放行反例 ——
+		{"裸值裸单词", "model = gpt\n", "裸值形态非法"},
+		{"表头键段引号未闭合", "[profiles.\"broken]\n", "引号键段未在段内闭合"},
+		{"非法转义", "model = \"bad\\q\"\n", "非法转义"},
+		{"非法转义短u", "model = \"x\\u12\"\n", "非法转义"},
+		{"裸值前导零", "count = 007\n", "裸值形态非法"},
+		{"裸值截断浮点", "x = 1.\n", "裸值形态非法"},
+		{"裸值拼错布尔", "x = tru\n", "裸值形态非法"},
+		{"裸值大写布尔", "x = TRUE\n", "裸值形态非法"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -498,7 +572,70 @@ func TestCodexConfigCorruptFormsRejected(t *testing.T) {
 			if !strings.Contains(lc.Reason, "结构无法确认（保守拒绝）") {
 				t.Fatalf("原因必须带「结构无法确认（保守拒绝）」，实得 %q", lc.Reason)
 			}
+			if strings.Contains(lc.Reason, "合法 TOML 但当前不支持") {
+				t.Fatalf("非法/损坏不得借用「合法但不支持」措辞，实得 %q", lc.Reason)
+			}
 		})
+	}
+}
+
+// TestCodexConfigUnsupportedFormsWording 合法但当前不支持的形态（联审建议修 1）：
+// 行内数组/行内表/多行字符串是合法 TOML、无法行级确认——fail 但措辞必须与
+// 「非法/损坏」区分（带「合法 TOML 但当前不支持该结构」）。
+func TestCodexConfigUnsupportedFormsWording(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"行内数组", "tags = [\"a\", \"b\"]\n", "行内数组"},
+		{"行内表", "inline = {a = 1}\n", "行内表"},
+		{"多行字符串", "desc = \"\"\"abc\n", "多行字符串"},
+		{"多行字面串", "desc = '''abc\n", "多行字符串"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := makeCodexHome(t, tc.content, false)
+			lc, _ := recognizeConfig(HostCodex, home, testNow())
+			if lc.Status != StatusFail {
+				t.Fatalf("合法但不支持形态应 fail（保守拒绝），实得 %+v", lc)
+			}
+			if !strings.Contains(lc.Reason, "合法 TOML 但当前不支持该结构") {
+				t.Fatalf("原因必须带「合法 TOML 但当前不支持该结构」，实得 %q", lc.Reason)
+			}
+			if !strings.Contains(lc.Reason, tc.want) {
+				t.Fatalf("原因应含 %q，实得 %q", tc.want, lc.Reason)
+			}
+			if strings.Contains(lc.Reason, "损坏或非法") || strings.Contains(lc.Reason, "结构无法确认") {
+				t.Fatalf("合法但不支持不得借用损坏措辞，实得 %q", lc.Reason)
+			}
+		})
+	}
+}
+
+// TestCodexConfigLegalFormsNewlySupported 联审建议修 1 合法形态补充：值后紧邻
+// 注释（无需空白）、空格分隔日期时间、各类裸值合法字面 → 识别过不回归。
+func TestCodexConfigLegalFormsNewlySupported(t *testing.T) {
+	cases := []string{
+		"auto = true#comment\n",             // 值后紧邻注释，无空白
+		"count = 42# trailing\n",            // 数字后紧邻注释
+		"ts = 1979-05-27T07:32:00Z\n",       // T 分隔日期时间
+		"ts2 = 1979-05-27 07:32:00\n",       // 空格分隔日期时间
+		"local = 07:32:00.999\n",            // 本地时间带小数
+		"big = 1_000_000\n",                 // 整数下划线分隔
+		"hex = 0xDEAD_beef\n",               // 十六进制
+		"neg = -1.5e3\n",                    // 负浮点带指数
+		"day = 1979-05-27\n",                // 纯日期
+		"flags = false\n",                   // 布尔
+		"quoted = \"a\\t\\u00e9b\" # 注释\n", // 转义白名单内（\t、\uXXXX）+ 行尾注释
+		"lit = 'C:\\path\\raw'\n",           // 单引号字面串不转义
+	}
+	for i, content := range cases {
+		home := makeCodexHome(t, content, false)
+		lc, _ := recognizeConfig(HostCodex, home, testNow())
+		if lc.Status != StatusPass {
+			t.Fatalf("case %d (%q) 应识别通过，实得 %+v", i, content, lc)
+		}
 	}
 }
 
@@ -515,6 +652,9 @@ func TestCodexConfigMinimalLegalFormsPass(t *testing.T) {
 		"# 只有注释头\nmodel = \"gpt\" # 行尾注释\n\n[profiles.default]\n",
 		"timeout_ms = 1500\nwait = false\n",
 		"[projects.\"quoted-name\"]\n",
+		"[projects.\"quoted-name\".sub]\n", // 点引号混写表头（合法，逐段确认）
+		"\"quoted key\" = \"v\"\n",         // 引号键
+		"a.b.c = 1\n",                      // 点键
 	}
 	for i, content := range cases {
 		home := makeCodexHome(t, content, false)
