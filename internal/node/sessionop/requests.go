@@ -121,12 +121,15 @@ func (s *Service) saveRequestsLocked() error {
 		return err
 	}
 	// 目录 fsync 尽力而为（RFC §1 声明的崩溃收敛语义）：rename 已完成不可回滚，
-	// fsync 失败只降级为「尽力而为」并如实注记，不虚报持久化失败。
+	// fsync 失败只降级为「尽力而为」并如实注记，不虚报持久化失败；目录打不开
+	// 同样注记（codex 终审顺手项：失败分支不静默）。
 	if d, derr := os.Open(filepath.Dir(s.reqPath)); derr == nil {
 		if serr := d.Sync(); serr != nil {
 			s.reqLog.Printf("sessionop: 请求登记目录 fsync 失败（尽力而为，rename 已完成）: %v", serr)
 		}
 		_ = d.Close()
+	} else {
+		s.reqLog.Printf("sessionop: 请求登记目录打开失败（跳过目录 fsync，rename 已完成）: %v", derr)
 	}
 	return nil
 }

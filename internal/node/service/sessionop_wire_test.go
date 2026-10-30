@@ -555,11 +555,12 @@ func TestW01WorkspaceAuthAndMutex(t *testing.T) {
 	}
 }
 
-// TestW01RestartConvergence N06：中断残留非终态轮 → 重启落待核对、无重跑
-//（fake CLI 零执行；恢复重投不 spawn；普通任务不在收敛范围）。
+// TestW01RestartConvergence N06：中断残留非终态轮 → 重启落待核对、无重跑。
+// 真 sessionx 内核（fake CLI）在场且留痕面接通：恢复重投路径 MarkStarted 必败、
+// fake CLI 零执行（标记文件不存在/留痕无 start/内核零会话）；普通任务不在收敛
+// 范围（codex 终审必修项 4：证据必须来自装配了内核的执行链）。
 func TestW01RestartConvergence(t *testing.T) {
 	ledDir := filepath.Join(t.TempDir(), "ledger")
-	runLog := filepath.Join(t.TempDir(), "run.log")
 	led1, _, err := ledger.Open(ledDir)
 	if err != nil {
 		t.Fatal(err)
@@ -595,7 +596,21 @@ func TestW01RestartConvergence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 「重启」：新账本 + 新 service（sessionop 注入）——恢复在 Open/New 内完成
+	// 「重启」：新账本 + 新 service（sessionop 注入 + 真 sessionx 内核）——恢复在
+	// Open/New 内完成。强化（codex 终审必修项 4）：内核与 fake CLI 真实在场且
+	// FAKE_LOG/FAKE_TOUCH 接到留痕面，「日志无 spawn」升级为「装了内核也不会
+	// spawn」的实证——恢复重投若误入执行链，fake CLI 启动必留 start 行与标记文件。
+	runLog := filepath.Join(t.TempDir(), "run.log")
+	touch := filepath.Join(t.TempDir(), "touched.marker")
+	mgr, err := sessionx.NewManager(t.TempDir(), map[string]sessionx.AgentSpec{"coder": {
+		Adapter: protocol.SessionAdapterCodex, Command: buildSessionFakeCLI(t),
+		PermissionMode: "workspace-write", TimeoutSec: 30,
+		Env: []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex,
+			"FAKE_THREAD_ID=thr-restart-1", "FAKE_LOG=" + runLog, "FAKE_TOUCH=" + touch},
+	}}, sessionx.Options{})
+	if err != nil {
+		t.Fatalf("装配内核: %v", err)
+	}
 	led2, rec, err := ledger.Open(ledDir)
 	if err != nil {
 		t.Fatal(err)
@@ -607,7 +622,7 @@ func TestW01RestartConvergence(t *testing.T) {
 	}
 	bus := transport.NewBus()
 	svc := New(Config{Ledger: led2, Runners: map[string]Runner{},
-		ArtifactRoots: map[string]string{"coder": t.TempDir()}, SessionOps: ops}, bus.Endpoint("n1"))
+		ArtifactRoots: map[string]string{"coder": t.TempDir()}, Sessions: mgr, SessionOps: ops}, bus.Endpoint("n1"))
 	t.Cleanup(svc.Close)
 
 	// started 残留：ledger.recover 既有降级（needs_review/node_restarted_midway）
@@ -626,16 +641,28 @@ func TestW01RestartConvergence(t *testing.T) {
 	if en, _ := led2.Get("t-restart-normal"); en.State != ledger.StateAccepted {
 		t.Fatalf("普通 accepted 任务不得被收敛: %+v", en)
 	}
-	// 绝不重跑：恢复清单中的会话轮重投不 spawn（MarkStarted 必败）
+	// 绝不重跑：恢复清单中的会话轮重投不 spawn（内核在场实证）——先证恢复重投
+	// 路径 MarkStarted 必败（条目已收敛终态，账本拒绝 started 态迁移，执行链在
+	// spawn 前如实终止），再真实重投并断言 fake CLI 零执行（启动标记文件不存在、
+	// 留痕无 start、内核零会话，codex 终审必修项 4）。
 	for _, task := range rec.Reschedule {
 		if task.Session == nil {
 			continue // 普通任务恢复归既有调度语义，本用例不覆盖
 		}
+		if err := led2.MarkStarted(task.ID); !errors.Is(err, ledger.ErrWrongState) {
+			t.Fatalf("已收敛终态条目恢复重投 MarkStarted 必败: task=%s err=%v", task.ID, err)
+		}
 		svc.Execute(task)
 	}
 	time.Sleep(300 * time.Millisecond)
+	if _, serr := os.Stat(touch); serr == nil {
+		t.Fatal("恢复重投不得执行 fake CLI（启动标记文件存在 = 误入执行链）")
+	}
 	if b, rerr := os.ReadFile(runLog); rerr == nil && strings.Contains(string(b), "start") {
 		t.Fatalf("恢复重投不得重跑 CLI: %s", b)
+	}
+	if n := len(mgr.List()); n != 0 {
+		t.Fatalf("重启收敛后内核不得新建任何会话: %d", n)
 	}
 	if e, _ := led2.Get("t-restart-acc"); e.State != ledger.StateFinished {
 		t.Fatalf("收敛终态应保持: %+v", e)

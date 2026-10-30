@@ -187,6 +187,65 @@ func TestAuthorizeWorkspaceRootEdgeAndFallback(t *testing.T) {
 	}
 }
 
+// TestResolveWorkspaceRootAncestorCleanJoin codex 终审必修项 1 回归：最近已存在
+// 祖先为文件系统根 "/" 时，剩余段拼接不得产生 "//xxx" 双斜杠形态——归一结果恒
+// 为 Clean 形态，根 / 下多层缺失链的授权判定随之正确（双斜杠若渗入前缀比对会
+// 误拒全部子目录）。实测旧行为 /__missing/a/b 归一为 //__missing/a/b。
+func TestResolveWorkspaceRootAncestorCleanJoin(t *testing.T) {
+	for _, in := range []string{"/__missing", "/__missing/a/b", "/__missing/a/b/c"} {
+		if got, _ := resolveWorkspace(in); got != in {
+			t.Fatalf("根 / 下缺失链 %s 应归一为 Clean 形态（无双斜杠）: got=%q", in, got)
+		}
+	}
+	// 授权判定联动：根为 "/" 时缺失链全部入根放行（无伪前缀误拒）
+	sRoot, _, _ := newTestService(t, Options{AllowedWorkspaceRoots: []string{"/"}})
+	for _, ok := range []string{"/__missing", "/__missing/a/b", "/tmp/sessions/a"} {
+		if err := sRoot.AuthorizeWorkspace(ok); err != nil {
+			t.Fatalf("根 / 下缺失链 %s 应放行: %v", ok, err)
+		}
+	}
+}
+
+// TestAuthorizeWorkspaceMissingRootWithSymlinkAncestor codex 终审必修项 2 + 顺手
+// 项回归：允许根本身尚不存在且其祖先路径含符号链接时，根归一与 cwd 走同一
+// resolveWorkspace（最近已存在祖先策略消解别名）——旧行为根整体回退 Abs+Clean
+// 保留别名形态、cwd 消解别名，同一路径会自身授权失败；统一后根与 cwd 恒归一为
+// 同一真身，根内新建路径放行、真身越界仍拒绝。
+func TestAuthorizeWorkspaceMissingRootWithSymlinkAncestor(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(filepath.Join(real, "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link") // → real（已存在祖先为符号链接）
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink 不可用: %v", err)
+	}
+	// 允许根：别名之下多层缺失目录（根自身与中间段均不存在）
+	root := filepath.Join(link, "missing-root", "deep")
+	s, _, _ := newTestService(t, Options{AllowedWorkspaceRoots: []string{root}})
+	// 白盒佐证：允许根装配即归一为真身形态（根与 cwd 同一策略的落点）——不得保
+	// 留别名祖先「link」段（旧行为整体回退 Abs+Clean 即保留别名形态）。基准取
+	// real 的归一形态，兼容 TempDir 自身含符号链接前缀（macOS /var→/private/var）。
+	realCanon, _ := resolveWorkspace(real)
+	wantRoot := filepath.Join(realCanon, "missing-root", "deep")
+	if len(s.roots) != 1 || s.roots[0] != wantRoot {
+		t.Fatalf("允许根应归一为真身 %q: %q", wantRoot, s.roots)
+	}
+	// cwd：根内新建多层缺失路径 → 与根同真身，放行
+	if err := s.AuthorizeWorkspace(filepath.Join(root, "new", "cwd")); err != nil {
+		t.Fatalf("缺失根（符号链接祖先）下新建 cwd 应放行: %v", err)
+	}
+	// 根自身（尚不存在）亦放行
+	if err := s.AuthorizeWorkspace(root); err != nil {
+		t.Fatalf("缺失根本身应放行: %v", err)
+	}
+	// 真身越界：别名祖先的真身之下、归一根之外的路径仍拒绝（回退不放松判定）
+	if err := s.AuthorizeWorkspace(filepath.Join(real, "keep")); !errors.Is(err, ErrWorkspaceDenied) {
+		t.Fatalf("真身越界路径应 ErrWorkspaceDenied: %v", err)
+	}
+}
+
 // TestResolveRequestLifecycle N01 同源幂等语义：同键同文返回原受理；同键异文
 // ErrRequestConflict；Lookup 可查回。
 func TestResolveRequestLifecycle(t *testing.T) {

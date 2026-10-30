@@ -22,7 +22,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
@@ -84,7 +83,8 @@ type Options struct {
 	// QueueLimit 逐会话非终态受理轮上限；0 = DefaultQueueLimit；负值装配拒绝。
 	QueueLimit int
 	// AllowedWorkspaceRoots 允许的会话工作区根（绝对路径；空 = 放行保持现状）。
-	// 判定前与 cwd 一并经 agentid.Resolve（Abs+Clean+EvalSymlinks）归一为真实路径。
+	// 判定前与 cwd 一并经 resolveWorkspace 归一为真实路径（根与 cwd 同一函数同一
+	// 策略，codex 终审必修项）。
 	AllowedWorkspaceRoots []string
 	// Now 时钟源（测试注入）；nil = protocol.NowUTC（全工程 UTC 基准）。
 	Now func() time.Time
@@ -101,7 +101,7 @@ type Options struct {
 type Service struct {
 	led        *ledger.Ledger
 	queueLimit int
-	roots      []string // 归一后的允许根（Resolve 产物）
+	roots      []string // 归一后的允许根（resolveWorkspace 产物，与 cwd 同一策略）
 	now        func() time.Time
 	log        Logger
 	confirm    time.Duration
@@ -158,14 +158,18 @@ func New(dataDir string, led *ledger.Ledger, opt Options) (*Service, error) {
 	if confirm <= 0 {
 		confirm = 2 * time.Second
 	}
+	// 允许根与 cwd 走同一归一策略（同一 resolveWorkspace 函数，codex 终审必修
+	// 项）：根尚不存在且祖先含符号链接时，若根整体回退 Abs+Clean 保留别名形态而
+	// cwd 消解了别名，同一路径会出现「根对不上 cwd」的自相矛盾授权失败——统一
+	// 走最近已存在祖先策略后两者恒归一为同一真身。
 	roots := make([]string, 0, len(opt.AllowedWorkspaceRoots))
 	for _, r := range opt.AllowedWorkspaceRoots {
 		if strings.TrimSpace(r) == "" {
 			continue
 		}
-		canonical, fallback := agentid.Resolve(r)
+		canonical, fallback := resolveWorkspace(r)
 		if fallback {
-			log.Printf("sessionop: 允许根 %q 规范化回退（EvalSymlinks 失败，目录可能不存在）: %s", r, canonical)
+			log.Printf("sessionop: 允许根 %q 归一回退（EvalSymlinks 全链不可解析，按 Abs+Clean 保留）: %s", r, canonical)
 		}
 		roots = append(roots, canonical)
 	}
@@ -224,17 +228,21 @@ func (s *Service) CloseGuard(sessionID string) error {
 	return nil
 }
 
-// AuthorizeWorkspace 工作区授权：未配置根 = 放行（保持现状）；cwd 经
-// resolveWorkspace 归一后必须等于某根或位于某根之内（前缀含路径分隔符边界；
-// 根本身为文件系统根 "/" 时不追加分隔符——"//x" 形态的伪前缀会误拒全部子目录，
-// codex 联审必修项）。解析失败策略见 resolveWorkspace：最近已存在祖先解析后拼接
-// 剩余段，全部失败回退 Abs+Clean 并如实注记——目录存在性由执行层如实失败，
-// 授权不因回退放行越界路径。
+// AuthorizeWorkspace 工作区授权：未配置根 = 放行（保持现状）；cwd 与允许根均经
+// resolveWorkspace 归一（根与 cwd 同一策略，根已在装配时归一），归一后 cwd 必须
+// 等于某根或位于某根之内（前缀含路径分隔符边界；根本身为文件系统根 "/" 时不追
+// 加分隔符——"//x" 形态的伪前缀会误拒全部子目录，codex 联审必修项）。解析失败
+// 策略见 resolveWorkspace：最近已存在祖先解析后拼接剩余段，全部失败回退
+// Abs+Clean 并在此注记回退态（s.log，codex 终审必修项：注释与行为一致）——目录
+// 存在性由执行层如实失败，授权不因回退放行越界路径。
 func (s *Service) AuthorizeWorkspace(cwd string) error {
 	if len(s.roots) == 0 {
 		return nil
 	}
-	resolved := resolveWorkspace(cwd)
+	resolved, fallback := resolveWorkspace(cwd)
+	if fallback {
+		s.log.Printf("sessionop: 会话工作目录 %q 归一回退（EvalSymlinks 全链不可解析，按 Abs+Clean 保留）: %s", cwd, resolved)
+	}
 	for _, root := range s.roots {
 		prefix := root
 		if !strings.HasSuffix(root, string(filepath.Separator)) {
@@ -247,19 +255,22 @@ func (s *Service) AuthorizeWorkspace(cwd string) error {
 	return fmt.Errorf("%w: %q（归一 %q 不在任何允许根内）", ErrWorkspaceDenied, cwd, resolved)
 }
 
-// resolveWorkspace 会话工作区路径归一（授权判定专用；codex 联审必修项的解析
-// 失败策略）：优先整体 EvalSymlinks；失败（cwd 尚不存在等）向上找最近的已存在
-// 祖先解析其真实路径后拼接剩余段——防止 /var→/private/var 这类前缀别名让新建
-// 子目录被误判越界；连祖先都解析不了（全链不存在）回退 Abs+Clean（调用方日志
-// 注记回退态）。只读路径运算，无文件系统变更。
-func resolveWorkspace(path string) string {
+// resolveWorkspace 会话工作区路径归一（根与 cwd 同一函数同一策略——允许根装配
+// 与授权判定对同一路径必须得到同一归一结果，否则「根留别名、cwd 消别名」令同
+// 路径自身授权失败，codex 终审必修项）：优先整体 EvalSymlinks；失败（路径尚不
+// 存在等）向上找最近的已存在祖先解析其真实路径后拼接剩余段——防止 /var→
+// /private/var 这类前缀别名让新建子目录被误判越界，且祖先为文件系统根 "/" 时拼
+// 接经 Join（内建 Clean）不产生 "//xxx" 双斜杠形态（codex 终审必修项，实测
+// /__missing/a/b 曾归一为 //__missing/a/b）；连祖先都解析不了（全链不存在）回
+// 退 Abs+Clean，fallback=true 交调用方注记回退态。只读路径运算，无文件系统变更。
+func resolveWorkspace(path string) (canonical string, fallback bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return filepath.Clean(path)
+		return filepath.Clean(path), true
 	}
 	abs = filepath.Clean(abs)
 	if r, err := filepath.EvalSymlinks(abs); err == nil {
-		return r
+		return r, false
 	}
 	rest := ""
 	cur := abs
@@ -271,10 +282,10 @@ func resolveWorkspace(path string) string {
 		rest = string(filepath.Separator) + filepath.Base(cur) + rest
 		cur = parent
 		if r, err := filepath.EvalSymlinks(cur); err == nil {
-			return r + rest
+			return filepath.Join(r, rest), false // Join 清洗 r="/" 时的 "//" 双斜杠
 		}
 	}
-	return abs
+	return abs, true
 }
 
 // ---------- 取消句柄：登记 / 绑定 / 意图 / 收敛 ----------
