@@ -16,6 +16,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -310,6 +312,36 @@ func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (p
 		log.Printf("[node] 会话续轮完成 task=%s session=%s seq=%d（原生线程 %s）",
 			task.ID, sess.ID, turn.Seq, sess.NativeID)
 		return turnCompleted(ref.TurnSeq, turn), sessionTurnEvidence{kernelTurn: turn}
+	case protocol.SessionTurnOpCancel:
+		// 会话轮取消任务（W01-03 RFC §6.2，人工专属管理动作）：直调 CancelTurn
+		// 出回执并映射任务结果——取消任务结果与目标轮任务结果都沿结果链回写 hub
+		// 轮行（记账码一致，先到保留收敛值确定）。调度旁路（execute：不占并发槽
+		// 与 workdir 互斥）使取消不被被取消轮自引用阻塞。
+		if s.sessionOps == nil {
+			return failed(sessionErrUnsupported, "本机未装配会话操作服务，无法执行轮取消")
+		}
+		if ref.CancelTurnSeq <= 0 {
+			return failed(sessionErrInput, "cancel 轮缺 cancel_turn_seq（被取消轮的受理序号必填）")
+		}
+		ctxCancel, cancel := context.WithTimeout(ctx, sessionCancelWaitBudget)
+		defer cancel()
+		rc, err := s.sessionOps.CancelTurn(ctxCancel, ref.SessionID, ref.CancelTurnSeq)
+		if err != nil {
+			return failed(cancelErrCodeOf(err), err.Error())
+		}
+		log.Printf("[node] 会话轮取消任务收口 task=%s session=%s 目标seq=%d outcome=%s 记账=%s",
+			task.ID, ref.SessionID, ref.CancelTurnSeq, rc.Outcome, rc.Error)
+		res := protocol.TaskResult{
+			Status:     protocol.ResultCancelled,
+			ExitCode:   protocol.ExitCodeNotRun,
+			Error:      rc.Error + ": 轮取消回执 outcome=" + rc.Outcome,
+			FinishedAt: protocol.NowUTC(),
+			Turn:       &protocol.TurnOutcome{TurnSeq: 0, NativeIDOk: false, WorkResult: protocol.WorkUnverified},
+		}
+		if rc.Status == protocol.ResultFailed {
+			res.Status = protocol.ResultFailed // unknown 待核对：failed 留痕（绝不记成功）
+		}
+		return res, sessionTurnEvidence{}
 	case protocol.SessionTurnOpClose:
 		// 关闭是管理动作收尾：目标态已达成的三类（已关闭/无映射/agent 配置漂移后
 		// 的残账）一律幂等 completed——注册表是关闭决定的权威，node 清理为收尾
@@ -495,6 +527,326 @@ type LocalTurnAck struct {
 
 // SessionsEnabled 会话内核是否装配（localapi 端点 503 降级判定）。
 func (s *Service) SessionsEnabled() bool { return s.sessions != nil }
+
+// SessionAgentConfigured 报告 agent 是否声明会话能力（在会话装配表；agent 面创建
+// 前置校验，W01-03。与 localSessionOp 创建路径同一判定源 sessions.HasAgent）。
+func (s *Service) SessionAgentConfigured(name string) bool {
+	return s.sessions != nil && s.sessions.HasAgent(name)
+}
+
+// AuthorizeSessionWorkspace 工作区授权（agent 面创建/受理前置校验，W01-03）：
+// 未装配 sessionop 或未配置根 = 放行（保持现状）；越界返回 RemoteError
+//（workspace_denied，403 语义）。判定经 sessionop.AuthorizeWorkspace（与执行口
+// 防御位同一实现，RFC §0/§5）。
+func (s *Service) AuthorizeSessionWorkspace(cwd string) error {
+	if s.sessionOps == nil {
+		return nil
+	}
+	if err := s.sessionOps.AuthorizeWorkspace(cwd); err != nil {
+		return &RemoteError{Code: sessionErrWorkspace, Msg: err.Error()}
+	}
+	return nil
+}
+
+// FingerprintSessionPayload 受理内容指纹（W01-03 RFC §1/§3；与 hub 轮行
+// PromptHash 同一规范化：逐部件 trim + UTF-8 清洗，U+0000 连接后 SHA-256 hex）。
+// 创建登记指纹 = f(agent, cwd, title)；轮受理指纹 = f(prompt)。
+func FingerprintSessionPayload(parts ...string) string {
+	h := sha256.New()
+	for i, p := range parts {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(strings.ToValidUTF8(strings.TrimSpace(p), "\uFFFD")))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// AgentSessionTurnRequest agent 会话面轮提交请求（W01-03；POST /api/v1/sessions/
+// {id}/turns 数据面）。与 LocalSessionTurnRequest 分型：主人旧面零变义；本请求
+// 面向 pending 会话（创建登记预分配平台 ID，首轮经此受理）与内核已发布会话。
+type AgentSessionTurnRequest struct {
+	// NodeID 本机节点 ID（localapi 边界锁已校验）。
+	NodeID string
+	// SessionID 平台会话 ID（pending 登记预分配或内核已发布；必填）。
+	SessionID string
+	// Prompt 本轮输入（必填）。
+	Prompt string
+	// TurnSeq 显式轮序号（可选）：仅支持重放——已知受理序号同文回原回执、异文
+	// 409 turn_seq_conflict、跳号 409（node 面序号由受理推导，不收跳号）；缺省
+	// 由入口分配（推导=内核 TurnCount 与账本高水位取大者 +1）。
+	TurnSeq int64
+	// RequestID 稳定受理请求 ID（可选）：同键同文回原受理（dup）、异文 409
+	// request_conflict；登记持久化于 sessionop 请求登记（响应丢失重试安全）。
+	RequestID string
+}
+
+// SubmitAgentSessionTurn agent 会话面轮受理（W01-03 RFC §2/§3）：受理互斥段内
+// 「request_id 预检 → 显式序号重放 → 推导（内核/pending 双源）→ 队列守卫 →
+// 工作区授权 → 入账 → 句柄登记 → request_id 登记」，与 SubmitSessionTurnLocal
+// 同一执行链（runSessionTurn）与账本（幂等键 lsturn:<sid>:<seq>）。返回
+// dup=true 表示同键同文重放（回执为原受理，零新副作用、不执行）。
+func (s *Service) SubmitAgentSessionTurn(req AgentSessionTurnRequest) (*LocalTurnAck, bool, error) {
+	if s.sessions == nil {
+		return nil, false, &RemoteError{Code: sessionErrUnsupported, Msg: "本机未装配会话内核（agent 未声明 session_adapter）"}
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nil, false, &RemoteError{Code: sessionErrInput, Msg: "session_id 必填"}
+	}
+	promptHash := FingerprintSessionPayload(req.Prompt)
+	s.localMu.Lock()
+	ack, task, dup, err := s.submitAgentSessionTurnLocked(req, promptHash)
+	s.localMu.Unlock()
+	if err != nil || dup {
+		return ack, dup, err
+	}
+	s.execute(task)
+	return ack, false, nil
+}
+
+// submitAgentSessionTurnLocked 受理互斥段内全链（调用方持 s.localMu）；返回受理
+// 任务供互斥段外 execute（与 SubmitSessionTurnLocal 同一解锁后执行纪律）。
+func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, promptHash string) (*LocalTurnAck, protocol.Task, bool, error) {
+	if strings.TrimSpace(req.Prompt) == "" {
+		return nil, protocol.Task{}, false, &RemoteError{Code: sessionErrInput, Msg: "prompt 必填"}
+	}
+	sid := req.SessionID
+	// request_id 预检（RFC §3：回放/冲突先于推导——并发同键同文收敛为回放而非
+	// 撞号冲突；互斥段内查登记即原子，无检查后登记竞态）。
+	if req.RequestID != "" && s.sessionOps != nil {
+		if rec, ok := s.sessionOps.LookupRequest(req.RequestID); ok {
+			if rec.SessionID == sid && rec.TurnSeq > 0 && rec.PayloadHash == promptHash &&
+				(req.TurnSeq == 0 || rec.TurnSeq == req.TurnSeq) {
+				return &LocalTurnAck{SessionID: rec.SessionID, TurnSeq: rec.TurnSeq,
+					Op: replayTurnOp(s, rec), TaskID: rec.TaskID, TraceID: rec.TraceID}, protocol.Task{}, true, nil
+			}
+			return nil, protocol.Task{}, false, &RemoteError{Code: sessionErrRequestConflict,
+				Msg: fmt.Sprintf("request_id %s 已被不同内容占用（已登记 session=%s seq=%d）", req.RequestID, rec.SessionID, rec.TurnSeq)}
+		}
+	}
+	sess, inKernel := s.sessions.Status(sid)
+	// 显式序号重放（RFC §3：仅重放语义——同文回原回执、异文 409；未知序号交由
+	// 推导后的跳号判定）。
+	if req.TurnSeq > 0 {
+		if e, ok := findLedgerTurn(s.cfg.Ledger, sid, req.TurnSeq); ok {
+			if FingerprintSessionPayload(e.Task.Input.Stdin) != promptHash {
+				return nil, protocol.Task{}, false, &RemoteError{Code: "turn_seq_conflict",
+					Msg: fmt.Sprintf("turn_seq=%d 已被不同内容占用（响应丢失重试须原样重发同文）", req.TurnSeq)}
+			}
+			return &LocalTurnAck{SessionID: sid, TurnSeq: req.TurnSeq,
+				Op: replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
+				TaskID: e.Task.ID, TraceID: e.Task.TraceID}, protocol.Task{}, true, nil
+		}
+		if inKernel && req.TurnSeq <= int64(sess.TurnCount) {
+			// 内核已执行过但账本条目已过保留期清理：原文指纹不可考，如实拒绝
+			//（绝不拿不可核对的序号冒充重放回执）。
+			return nil, protocol.Task{}, false, &RemoteError{Code: "turn_seq_conflict",
+				Msg: fmt.Sprintf("turn_seq=%d 已执行且受理留痕已过保留期，无法核对原文重放", req.TurnSeq)}
+		}
+	}
+	// 推导（内核已发布 / pending 登记双源）。
+	op, seq, cwd, agentName, rerr := s.agentSessionOp(sess, inKernel, sid)
+	if rerr != nil {
+		return nil, protocol.Task{}, false, rerr
+	}
+	if req.TurnSeq > 0 && req.TurnSeq != seq {
+		return nil, protocol.Task{}, false, &RemoteError{Code: "turn_seq_conflict",
+			Msg: fmt.Sprintf("turn_seq=%d 为跳号（下一序号为 %d，轮次必须连续）", req.TurnSeq, seq)}
+	}
+	// 受理守卫（W01-02 RFC §2/§5 同锁域）：队列上限 + create 工作区授权；拒绝即
+	// 零副作用。未装配 sessionop 时短路（与主人旧面同一降级形态）。
+	if s.sessionOps != nil {
+		if err := s.sessionOps.AdmissionGuard(sid); err != nil {
+			return nil, protocol.Task{}, false, &RemoteError{Code: sessionErrQueueFull, Msg: err.Error()}
+		}
+		if op == protocol.SessionTurnOpCreate {
+			if err := s.sessionOps.AuthorizeWorkspace(cwd); err != nil {
+				return nil, protocol.Task{}, false, &RemoteError{Code: sessionErrWorkspace, Msg: err.Error()}
+			}
+		}
+	}
+	now := protocol.NowUTC()
+	task := protocol.Task{
+		ID:          protocol.NewTaskID(),
+		TraceID:     protocol.NewTraceID(),
+		TargetNode:  req.NodeID,
+		TargetAgent: agentName,
+		Input:       protocol.TaskInput{Stdin: req.Prompt},
+		SubmittedBy: "local",
+		IdemKey:     fmt.Sprintf("lsturn:%s:%d", sid, seq),
+		Status:      protocol.StatusSubmitted,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		ExpireAt:    now.Add(protocol.TaskRetention),
+		Session: &protocol.SessionTurnRef{
+			SessionID: sid,
+			TurnSeq:   seq,
+			Op:        op,
+			Cwd:       cwd,
+		},
+	}
+	if err := s.cfg.Ledger.AcceptOrigin(task, ledger.OriginLocal); err != nil {
+		return nil, protocol.Task{}, false, fmt.Errorf("本地入账失败: %w", err)
+	}
+	if s.sessionOps != nil {
+		s.sessionOps.BeginTurn(sid, seq, task.ID)
+	}
+	s.regCancel(task.ID)
+	ack := &LocalTurnAck{SessionID: sid, TurnSeq: seq, Op: op, TaskID: task.ID, TraceID: task.TraceID}
+	// request_id 登记（新受理；RFC §3 已知限制：登记在入账之后——落盘失败如实
+	// 报错，轮已受理、登记未生效，重试将分配新序号，绝不虚报登记成功）。
+	if req.RequestID != "" && s.sessionOps != nil {
+		if _, _, err := s.sessionOps.ResolveRequestWith(req.RequestID, sid, seq, promptHash,
+			sessionop.RequestMeta{Kind: sessionop.RequestKindTurn, Op: op, TaskID: task.ID, TraceID: task.TraceID}); err != nil {
+			return nil, protocol.Task{}, false, &RemoteError{Code: "internal",
+				Msg: fmt.Sprintf("轮已受理（session=%s seq=%d task=%s）但 request_id 登记落盘失败，重试将分配新序号: %v", sid, seq, task.ID, err)}
+		}
+	}
+	return ack, task, false, nil
+}
+
+// replayTurnOp 重放回执的操作类型：登记元数据权威（受理时定案，不随会话后续
+// 状态改写，同 hub rowTurnOp 口径）；登记缺失/旧格式空值时回退账本条目，再退
+// 按序号防御推导（seq=1 恒 create——新会话首轮）。
+func replayTurnOp(s *Service, rec sessionop.RequestRecord) string {
+	if rec.Op != "" {
+		return rec.Op
+	}
+	if e, ok := findLedgerTurn(s.cfg.Ledger, rec.SessionID, rec.TurnSeq); ok && e.Task.Session != nil && e.Task.Session.Op != "" {
+		return e.Task.Session.Op
+	}
+	if rec.TurnSeq <= 1 {
+		return protocol.SessionTurnOpCreate
+	}
+	return protocol.SessionTurnOpSend
+}
+
+// agentSessionOp agent 面轮的操作类型与序号推导（调用方持 localMu）：内核已发
+// 布会话沿主人面同一账本推导语义（localSessionOp，零行为差）；内核无映射时查
+// sessionop 创建登记——pending 会话以预分配平台 ID 受理 create 轮（首轮经
+// CreateWithID 落内核，平台 ID 从创建起稳定）；无登记 404。
+func (s *Service) agentSessionOp(sess protocol.Session, inKernel bool, sid string) (op string, seq int64, cwd, agentName string, rerr error) {
+	if inKernel {
+		if sess.Status != protocol.SessionOpen {
+			return "", 0, "", "", &RemoteError{Code: sessionErrClosed, Msg: "会话已关闭（拒绝续轮）"}
+		}
+		for _, t := range sess.Turns {
+			if t.Status == protocol.TurnOK {
+				return protocol.SessionTurnOpSend, localNextTurnSeq(sess, s.cfg.Ledger, sid), sess.Cwd, sess.AgentName, nil
+			}
+		}
+		// 尚无成功首轮：create 重试（首轮独占，与 localSessionOp 同语义）。
+		for _, e := range s.cfg.Ledger.View() {
+			if e.Task.Session != nil && e.Task.Session.SessionID == sid && e.State != ledger.StateFinished {
+				return "", 0, "", "", &RemoteError{Code: "turn_in_flight",
+					Msg: fmt.Sprintf("首轮（seq=%d）尚在执行，成功建立原生映射前不接受新轮", e.Task.Session.TurnSeq)}
+			}
+		}
+		return protocol.SessionTurnOpCreate, localNextTurnSeq(sess, s.cfg.Ledger, sid), sess.Cwd, sess.AgentName, nil
+	}
+	// pending 会话（agent 面创建登记，内核无映射）。
+	if s.sessionOps == nil {
+		return "", 0, "", "", &RemoteError{Code: sessionErrNotFound, Msg: "会话不存在（内核无映射）"}
+	}
+	rec, ok := s.sessionOps.SessionCreation(sid)
+	if !ok {
+		return "", 0, "", "", &RemoteError{Code: sessionErrNotFound, Msg: "会话不存在（内核无映射且无受理登记）"}
+	}
+	// 首轮独占：任何非终态受理轮在途即拒（与 hub 预检同语义）。
+	for _, e := range s.cfg.Ledger.View() {
+		if e.Task.Session != nil && e.Task.Session.SessionID == sid && e.State != ledger.StateFinished {
+			return "", 0, "", "", &RemoteError{Code: "turn_in_flight",
+				Msg: fmt.Sprintf("首轮（seq=%d）尚在执行，成功建立原生映射前不接受新轮", e.Task.Session.TurnSeq)}
+		}
+	}
+	return protocol.SessionTurnOpCreate, localNextTurnSeq(protocol.Session{}, s.cfg.Ledger, sid), rec.Cwd, rec.Agent, nil
+}
+
+// findLedgerTurn 按会话与轮序号定位账本条目（快照扫描；受理轮唯一）。
+func findLedgerTurn(l *ledger.Ledger, sessionID string, seq int64) (ledger.Entry, bool) {
+	for _, e := range l.View() {
+		sr := e.Task.Session
+		if sr == nil || sr.TurnSeq != seq || sr.SessionID != sessionID {
+			continue
+		}
+		return e.Clone(), true
+	}
+	return ledger.Entry{}, false
+}
+
+// CancelSessionTurnLocal 取消会话受理轮（W01-03 人工专属端点数据面，SPEC 六.六
+// 豁免⑬；agent 面不暴露——取消是终局干预，开放即互删通道）。直调 sessionop.
+// CancelTurn（排队取消确定性不 spawn / 执行取消证据分类 / 未知待核对，RFC §6.1），
+// 回执如实；错误哨兵映射 RemoteError 供 HTTP 投影。
+func (s *Service) CancelSessionTurnLocal(ctx context.Context, sessionID string, seq int64) (*sessionop.CancelReceipt, error) {
+	if s.sessionOps == nil {
+		return nil, &RemoteError{Code: sessionErrUnsupported, Msg: "本机未装配会话操作服务（无法执行轮取消）"}
+	}
+	if seq <= 0 {
+		return nil, &RemoteError{Code: sessionErrInput, Msg: "turn_seq 必须为正（close 任务不占号不可取消）"}
+	}
+	rc, err := s.sessionOps.CancelTurn(ctx, sessionID, seq)
+	if err != nil {
+		return nil, &RemoteError{Code: cancelErrCodeOf(err), Msg: err.Error()}
+	}
+	return rc, nil
+}
+
+// cancelErrCodeOf 取消错误 → 错误码（RFC §7 映射表的码侧）。
+func cancelErrCodeOf(err error) string {
+	switch {
+	case errors.Is(err, sessionop.ErrTurnFinished):
+		return sessionop.CodeTurnAlreadyFinished
+	case errors.Is(err, sessionop.ErrTurnUnknown):
+		return sessionop.CodeTurnNotFound
+	case errors.Is(err, sessionop.ErrCancelUnconfirmed):
+		return sessionop.CodeCancelUnconfirmed
+	}
+	return sessionop.CodeCancelUnconfirmed
+}
+
+// ---- agent 面 sessionop 请求登记透传（localapi sessions_api.go 数据面；W01-03
+// RFC §1/§2。薄透传不加语义——登记判定权威在 sessionop）----
+
+// LookupAgentSessionRequest 查受理登记（agent 面重放/冲突预检与冲突复查源）。
+func (s *Service) LookupAgentSessionRequest(requestID string) (sessionop.RequestRecord, bool) {
+	if s.sessionOps == nil {
+		return sessionop.RequestRecord{}, false
+	}
+	return s.sessionOps.LookupRequest(requestID)
+}
+
+// RegisterAgentSessionCreation 会话创建登记（agent 面创建数据面）：分配平台 ID
+// 由调用方完成后携入；判定语义同 ResolveRequest（同键同文 dup/异文冲突/落盘失败
+// 如实上抛，盘为真相）。
+func (s *Service) RegisterAgentSessionCreation(requestID, sessionID, agent, cwd, title, payloadHash string) (sessionop.RequestRecord, bool, error) {
+	if s.sessionOps == nil {
+		return sessionop.RequestRecord{}, false, &RemoteError{Code: sessionErrUnsupported, Msg: "本机未装配会话操作服务"}
+	}
+	return s.sessionOps.ResolveRequestWith(requestID, sessionID, 0, payloadHash, sessionop.RequestMeta{
+		Kind: sessionop.RequestKindSession, Agent: agent, Cwd: cwd, Title: title,
+	})
+}
+
+// AgentSessionCreations 全量创建登记（agent 面列表 pending 合成源，受理时刻升序）。
+func (s *Service) AgentSessionCreations() []sessionop.RequestRecord {
+	if s.sessionOps == nil {
+		return nil
+	}
+	return s.sessionOps.SessionCreations()
+}
+
+// AgentSessionCreation 按会话 ID 查创建登记（agent 面详情 pending 合成源）。
+func (s *Service) AgentSessionCreation(sessionID string) (sessionop.RequestRecord, bool) {
+	if s.sessionOps == nil {
+		return sessionop.RequestRecord{}, false
+	}
+	return s.sessionOps.SessionCreation(sessionID)
+}
+
+// sessionCancelWaitBudget 取消等待上限（RFC §8：ConfirmBudget 之上的人机可感
+// 上限；CLI 自身超时最终兜底进程回收）。
+const sessionCancelWaitBudget = 30 * time.Second
 
 // localSessionOp 本地轮的操作类型与序号推导（与 hub SubmitTurn 同一账本推导
 // 语义：无成功 create 轮即 create；seq = 平台账本 max+1（含在途轮，localMu 互斥

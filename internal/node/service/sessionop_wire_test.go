@@ -36,6 +36,7 @@ type sessOpOpt struct {
 	envkv      map[string]string            // 额外 FAKE_* 注入（ON_RESUME/SPAWN_DELAY_WRITER 等）
 	confirm    time.Duration                // sessionop ConfirmBudget（回执确认预算）
 	ledInject  func(op, stage string) error // 账本事务故障注入（N07）
+	concurrency int                         // 执行并发上限（W01-03 取消任务旁路验证；0 = 默认）
 }
 
 // sessOpFixture sessionop 集成夹具：真 sessionx（fake CLI）+ 真账本 + sessionop
@@ -123,6 +124,7 @@ func newSessOpFixture(t *testing.T, opt sessOpOpt) *sessOpFixture {
 		ArtifactRoots: map[string]string{"coder": artifactRoot},
 		Sessions:      mgr,
 		SessionOps:    ops,
+		Concurrency:   opt.concurrency,
 	}, nodeEP)
 	nodeEP.Subscribe(f.svc.HandleFrame)
 	f.ep.Subscribe(func(env *protocol.Envelope) {

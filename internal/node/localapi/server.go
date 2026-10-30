@@ -255,6 +255,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/orchestrator", s.authRead(s.handleSetAgentOrchestrator))
 	mux.HandleFunc("POST /api/v1/local/agents/discover", s.authLocal(s.handleAgentsDiscover))                  // 本机发现（W06-02，主人专属·六.六豁免⑫）
 	mux.HandleFunc("POST /api/v1/local/agents/registration-preview", s.authLocal(s.handleRegistrationPreview)) // 登记预览（W06-02，主人专属·六.六豁免⑫）
+	mux.HandleFunc("POST /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionCreate))                     // agent 会话面：创建登记 201（W01-03，不执行模型不投轮）
+	mux.HandleFunc("GET /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionList))                        // 列表（内核快照 ∪ pending）
+	mux.HandleFunc("GET /api/v1/sessions/{id}", s.authOrchestrate(s.handleAgentSessionGet))                    // 详情
+	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.authOrchestrate(s.handleAgentSessionTurns))           // 投轮 202（与 hub 同语义）
+	mux.HandleFunc("POST /api/v1/sessions/{id}/turns/{seq}/cancel", s.authLocal(s.handleAgentSessionTurnCancel)) // 轮取消（W01-03，人工专属·六.六豁免⑬）
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
 	mux.HandleFunc("GET /api/v1/local/config", s.authRead(s.handleGetConfig))

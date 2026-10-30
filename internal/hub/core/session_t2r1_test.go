@@ -52,7 +52,7 @@ func blockNowTwice(c *Core) (release func(), waitReady func(t *testing.T)) {
 func newOfflineSession(t *testing.T) (*sessionFixture, string) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", false)
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestT2R1CreateAssertionRecheckedInTransaction(t *testing.T) {
 		}
 		return protocol.NowUTC()
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "workspace-write"}, "admin"); !errors.Is(err, ErrSessionBindingChanged) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "workspace-write"}, "admin"); !errors.Is(err, ErrSessionBindingChanged) {
 		t.Fatalf("事务内断言重检应拒绝, got %v", err)
 	}
 	if n := len(f.store.View().Sessions); n != 0 {

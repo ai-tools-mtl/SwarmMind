@@ -427,8 +427,15 @@ func (s *Service) execute(task protocol.Task) {
 	// workdir 互斥键（W01-02 codex 终审必修②）：与启动重建占锁同一 taskWsKey 口
 	// 径——会话受理轮按会话 cwd 真实路径派生（符号链接别名同键），同工作区的会
 	// 话与会话、会话与普通任务同键串行；close 任务与普通任务沿 agent 产物根键
-	//（既有行为零变化）。
+	//（既有行为零变化）。会话轮取消任务（W01-03，Op=cancel）旁路 workdir 互斥与
+	// 并发信号量：被取消轮正持 cwd 锁与并发槽，取消任务是管理动作（触发信号 +
+	// 等待收敛，不 spawn 不产执行负载），排队等锁/槽会自引用死锁到被取消轮自然
+	// 超时——旁路使取消立即生效（W01-03 RFC §6.2）。
+	cancelOpTask := task.Session != nil && task.Session.Op == protocol.SessionTurnOpCancel
 	ws := s.taskWsKey(task)
+	if cancelOpTask {
+		ws = ""
+	}
 	var wake <-chan struct{} // 非 nil：已登记排队，release 授予时关闭
 	if ws != "" {
 		wake = s.wsLocks.reserve(ws, task.ID) // nil=已持有（含自持重投）
@@ -462,27 +469,29 @@ func (s *Service) execute(task protocol.Task) {
 				// 授予与取消竞态：持有已生效，按持有走下方取消检查退出
 			}
 		}
-		select {
-		case s.sem <- struct{}{}:
-		case <-s.ctx.Done():
-			if ws != "" {
-				s.wsLocks.release(ws, task.ID)
-			}
-			s.abortSessionTurn(task) // 会话轮句柄收敛（条目保持 accepted，重启恢复再调度）
-			return
-		case <-ce.doneCh():
-			if ws != "" {
-				s.wsLocks.release(ws, task.ID)
-			}
-			if s.sessionCancelIntent(task) {
-				s.finishCancelledSessionTurnBeforeRun(task) // sessionop 排队取消：不执行
+		if !cancelOpTask { // 取消任务旁路并发槽（见上方 cancelOpTask 注记）
+			select {
+			case s.sem <- struct{}{}:
+			case <-s.ctx.Done():
+				if ws != "" {
+					s.wsLocks.release(ws, task.ID)
+				}
+				s.abortSessionTurn(task) // 会话轮句柄收敛（条目保持 accepted，重启恢复再调度）
+				return
+			case <-ce.doneCh():
+				if ws != "" {
+					s.wsLocks.release(ws, task.ID)
+				}
+				if s.sessionCancelIntent(task) {
+					s.finishCancelledSessionTurnBeforeRun(task) // sessionop 排队取消：不执行
+					return
+				}
+				s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
+				s.abortSessionTurn(task) // 会话轮句柄收敛（无 sessionop 记账路径）
 				return
 			}
-			s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
-			s.abortSessionTurn(task) // 会话轮句柄收敛（无 sessionop 记账路径）
-			return
+			defer func() { <-s.sem }()
 		}
-		defer func() { <-s.sem }()
 		if ws != "" {
 			defer s.wsLocks.release(ws, task.ID)
 		}

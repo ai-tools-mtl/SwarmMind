@@ -27,7 +27,8 @@ import (
 )
 
 // DefaultQueueLimit 逐会话非终态受理轮默认上限（W01-01 基准 §4：第 17 条拒绝）。
-const DefaultQueueLimit = 16
+// 单一真相在 protocol.SessionQueueLimit（hub 提交口同值，W01-03 RFC §4）。
+const DefaultQueueLimit = protocol.SessionQueueLimit
 
 // 错误码（W01-01 基准 §4 命名；HTTP 状态码投影归 W01-03 接线）。
 const (

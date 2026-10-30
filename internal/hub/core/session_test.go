@@ -106,29 +106,29 @@ func TestSessionCreateValidation(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", true)
 
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp/x"}, "admin"); err != nil {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp/x"}, "admin"); err != nil {
 		t.Fatalf("合法创建应成功: %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder"}, "admin"); !errors.Is(err, ErrInvalid) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder"}, "admin"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("缺 cwd 应 ErrInvalid, got %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "ghost", AgentName: "coder", Cwd: "/tmp"}, "admin"); !errors.Is(err, ErrAgentNotExposed) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "ghost", AgentName: "coder", Cwd: "/tmp"}, "admin"); !errors.Is(err, ErrAgentNotExposed) {
 		t.Fatalf("未知节点应 ErrAgentNotExposed, got %v", err)
 	}
 	// 无会话能力：注册普通卡
 	if err := f.core.RegisterNode("plain", []protocol.AgentCard{{Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text", OutputMode: "answer+artifacts", ProtocolVer: 1, Exposed: true}}); err != nil {
 		t.Fatalf("注册 plain: %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "plain", AgentName: "coder", Cwd: "/tmp"}, "admin"); !errors.Is(err, ErrSessionAgentUnsupported) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "plain", AgentName: "coder", Cwd: "/tmp"}, "admin"); !errors.Is(err, ErrSessionAgentUnsupported) {
 		t.Fatalf("无声明应 ErrSessionAgentUnsupported, got %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "yolo"}, "admin"); !errors.Is(err, ErrInvalid) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "yolo"}, "admin"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("yolo 断言应 ErrInvalid, got %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "danger-full-access"}, "admin"); !errors.Is(err, ErrInvalid) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "danger-full-access"}, "admin"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("danger-full-access 断言应 ErrInvalid, got %v", err)
 	}
-	if _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "read-only"}, "admin"); !errors.Is(err, ErrSessionBindingChanged) {
+	if _, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp", PermissionMode: "read-only"}, "admin"); !errors.Is(err, ErrSessionBindingChanged) {
 		t.Fatalf("断言不符应 ErrSessionBindingChanged, got %v", err)
 	}
 }
@@ -138,7 +138,7 @@ func TestSessionCreateValidation(t *testing.T) {
 func TestSessionTurnOpDerivation(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", true)
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp/proj"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp/proj"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestSessionTurnOpDerivation(t *testing.T) {
 func TestSessionTurnOfflineStaging(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", false) // 离线
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建（离线亦可登记）: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestSessionTurnOfflineStaging(t *testing.T) {
 func TestSessionBindingGuardDrift(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", true)
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestSessionBindingGuardDrift(t *testing.T) {
 func TestSessionCloseFlow(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", true)
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestSessionCloseFlow(t *testing.T) {
 func TestSessionCancelWriteback(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", true)
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestSessionCancelWriteback(t *testing.T) {
 func TestSessionSweepExpiryWriteback(t *testing.T) {
 	f := newSessionFixture(t)
 	f.registerSessionNode("codex", "workspace-write", false) // 离线滞留至过期
-	sv, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
+	sv, _, err := f.core.CreateSession(SessionCreateRequest{NodeID: "mac-mini", AgentName: "coder", Cwd: "/tmp"}, "admin")
 	if err != nil {
 		t.Fatalf("创建: %v", err)
 	}

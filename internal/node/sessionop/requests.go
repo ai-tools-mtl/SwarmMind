@@ -19,18 +19,43 @@ const requestsFileName = "session_requests.json"
 // requestsVersion 文件结构版本（未来迁移依据）。
 const requestsVersion = 1
 
+// 受理登记种类（RequestRecord.Kind；W01-03 加法）。空值按 turn 语义（W01-02
+// 时代的既有登记全部为轮受理）。
+const (
+	RequestKindSession = "session" // 会话创建登记（TurnSeq 恒 0；pending 投影源）
+	RequestKindTurn    = "turn"    // 轮受理登记（重放回执源）
+)
+
 // RequestRecord 单条受理登记。
 type RequestRecord struct {
 	// RequestID 调用方提供的稳定创建请求 ID。
 	RequestID string `json:"request_id"`
 	// SessionID 原受理分配的平台会话 ID。
 	SessionID string `json:"session_id"`
-	// TurnSeq 原受理的平台轮序号。
+	// TurnSeq 原受理的平台轮序号（创建登记恒 0——管理登记非对话轮）。
 	TurnSeq int64 `json:"turn_seq"`
 	// PayloadHash 受理内容指纹（调用方定义的完整内容摘要；同键同文判定的第三元）。
 	PayloadHash string `json:"payload_hash"`
 	// AcceptedAt 首次受理时刻（UTC）。
 	AcceptedAt time.Time `json:"accepted_at"`
+
+	// ---- W01-03 加法元数据（旧文件缺省零值，加载零迁移；W01-03 RFC §2）----
+
+	// Kind 登记种类：RequestKindSession | RequestKindTurn（空按 turn 语义）。
+	Kind string `json:"kind,omitempty"`
+	// Op 轮受理的操作类型（kind=turn；重放回执权威，受理时定案不随后续改写，
+	// 同 hub rowTurnOp 口径）。
+	Op string `json:"op,omitempty"`
+	// Agent 会话创建元数据（kind=session；pending 投影源；轮登记为空）。
+	Agent string `json:"agent,omitempty"`
+	// Cwd 会话创建元数据（kind=session）。
+	Cwd string `json:"cwd,omitempty"`
+	// Title 会话标题（kind=session，可选；内核无 title 字段，仅受理登记期可见）。
+	Title string `json:"title,omitempty"`
+	// TaskID 轮受理回执重放源（kind=turn；受理任务 ID，不依赖账本保留窗口）。
+	TaskID string `json:"task_id,omitempty"`
+	// TraceID 轮受理回执重放源（kind=turn）。
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 // requestsFile 磁盘形态。
@@ -159,6 +184,30 @@ func (s *Service) LookupRequest(requestID string) (RequestRecord, bool) {
 // 落盘失败：内存登记不保留（盘为真相，重试重新登记），错误如实上抛——绝不虚报
 // 登记成功。request_id 为空拒绝（可选语义由 W01-03 接线层裁量）。
 func (s *Service) ResolveRequest(requestID, sessionID string, turnSeq int64, payloadHash string) (RequestRecord, bool, error) {
+	return s.ResolveRequestWith(requestID, sessionID, turnSeq, payloadHash, RequestMeta{})
+}
+
+// RequestMeta 受理登记附加元数据（W01-03 加法，RFC §2）：不参与同键同文判定
+//（三元组判定不变），仅随登记持久化供投影与回执重放（pending 会话元数据、轮
+// 受理回执重放源）。
+type RequestMeta struct {
+	// Kind 登记种类：RequestKindSession | RequestKindTurn；空按 turn 语义。
+	Kind string
+	// Op 轮受理的操作类型（kind=turn）。
+	Op string
+	// Agent/Cwd/Title 会话创建元数据（kind=session）。
+	Agent string
+	Cwd   string
+	Title string
+	// TaskID/TraceID 轮受理回执重放源（kind=turn）。
+	TaskID  string
+	TraceID string
+}
+
+// ResolveRequestWith 带元数据的 ResolveRequest 变体（W01-03）：判定语义与
+// ResolveRequest 逐字节一致（三元组全等回放、异文冲突、落盘失败不保留），
+// 元数据随登记持久化。既有 ResolveRequest 即本函数空元数据形态（签名零变化）。
+func (s *Service) ResolveRequestWith(requestID, sessionID string, turnSeq int64, payloadHash string, meta RequestMeta) (RequestRecord, bool, error) {
 	if requestID == "" {
 		return RequestRecord{}, false, errors.New("sessionop: request_id 为空")
 	}
@@ -177,6 +226,13 @@ func (s *Service) ResolveRequest(requestID, sessionID string, turnSeq int64, pay
 		TurnSeq:     turnSeq,
 		PayloadHash: payloadHash,
 		AcceptedAt:  s.now(),
+		Kind:        meta.Kind,
+		Op:          meta.Op,
+		Agent:       meta.Agent,
+		Cwd:         meta.Cwd,
+		Title:       meta.Title,
+		TaskID:      meta.TaskID,
+		TraceID:     meta.TraceID,
 	}
 	s.reqs[requestID] = rec
 	if err := s.saveRequestsLocked(); err != nil {
@@ -184,4 +240,36 @@ func (s *Service) ResolveRequest(requestID, sessionID string, turnSeq int64, pay
 		return RequestRecord{}, false, fmt.Errorf("sessionop: 请求登记落盘失败（未受理）: %w", err)
 	}
 	return rec, false, nil
+}
+
+// SessionCreation 按平台会话 ID 查创建登记（kind=session 且 SessionID 命中；
+// pending 会话续轮推导与详情合成的查询原语，W01-03）。不存在 ok=false。
+func (s *Service) SessionCreation(sessionID string) (RequestRecord, bool) {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	for _, r := range s.reqs {
+		if r.Kind == RequestKindSession && r.SessionID == sessionID {
+			return r, true
+		}
+	}
+	return RequestRecord{}, false
+}
+
+// SessionCreations 全量创建登记快照（kind=session；agent 面会话列表 pending
+// 合成源，W01-03）。按受理时刻升序（与落盘排序同键，读序确定）。
+func (s *Service) SessionCreations() []RequestRecord {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+	out := make([]RequestRecord, 0, len(s.reqs))
+	for _, r := range s.reqs {
+		if r.Kind == RequestKindSession {
+			out = append(out, r)
+		}
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && recordLess(out[j], out[j-1]); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
 }

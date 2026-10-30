@@ -33,6 +33,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/localapi"
 	"github.com/mtl802/swarmmind/internal/node/runner"
 	"github.com/mtl802/swarmmind/internal/node/service"
+	"github.com/mtl802/swarmmind/internal/node/sessionop"
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -59,6 +60,10 @@ type nodeConfig struct {
 	// 空 = 默认 24h；0s（含 yaml 裸写数字 0，标量转换）= 永不自动清理；正值最小
 	// 粒度 1 秒（亚秒拒绝启动）；保留期即幂等去重窗口（SPEC 4.5/4.6）。
 	TerminalRetention string `yaml:"terminal_retention"`
+	// SessionWorkspaceRoots 允许的会话工作区根（W01-03，RFC §8；绝对路径列表）。
+	// 空缺省 = 放行保持现状（既有行为零变化）；配置后 agent 面/hub 下发 create 轮
+	// 的 cwd 越界一律拒绝（workspace_denied 403）。归一判定见 sessionop。
+	SessionWorkspaceRoots []string `yaml:"session_workspace_roots"`
 }
 
 // version 二进制版本（Makefile LDFLAGS -X main.version 注入 git describe；
@@ -285,6 +290,17 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("装配会话内核失败: %w", err)
 	}
 
+	// 会话操作服务装配（W01-03 RFC §8，闭环 W01-02 遗留项）：队列上限/取消记账/
+	// CloseGuard/重启不确定收敛/工作区授权全链生效；service.New 内先于重建占锁
+	// 调 RecoverUncertainTurns（W01-2 定案序）。未配置根 = 工作区授权放行保持现状。
+	sessionOps, err := sessionop.New(cfg.DataDir, led, sessionop.Options{
+		AllowedWorkspaceRoots: cfg.SessionWorkspaceRoots,
+		Log:                   log.Default(),
+	})
+	if err != nil {
+		return fmt.Errorf("装配会话操作服务失败: %w", err)
+	}
+
 	// 外连客户端仅组网态装配（方案 3.1：setup/standalone 不连 hub）。service
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧
 	// 一律 transport.ErrNoEndpoint（service 按良性静默），历史 hub 条目的迟到重发
@@ -353,6 +369,9 @@ func run(cfgPath, dataDirOverride string) error {
 		// 会话内核（T2）：hub 下发会话轮任务（Task.Session 段）与本机控制台
 		// 会话端点共用的执行内核；nil 时会话轮任务诚实失败。
 		Sessions: sessions,
+		// 会话操作服务（W01-03）：受理守卫/取消记账/关闭防护/重启收敛/工作区授权
+		//（见上方装配注记）。
+		SessionOps: sessionOps,
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；

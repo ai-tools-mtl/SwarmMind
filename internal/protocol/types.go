@@ -294,7 +294,18 @@ const (
 	// SessionTurnOpClose 关闭：node 侧关闭会话（Close），随任务链投递保证离线
 	// node 重连后补执行；不占轮次序号（管理动作非对话轮）。
 	SessionTurnOpClose = "close"
+	// SessionTurnOpCancel 会话轮取消（W01-03 人工专属管理动作，SPEC 六.六豁免
+	// ⑬；docs/tasks/v3/W01-03-rfc.md §6）：hub 管理面取消某受理轮 → 投递取消
+	// 任务，node 侧接 sessionop.CancelTurn 执行（排队取消确定性/执行取消证据
+	// 分类/未知待核对），结果沿任务结果链回写目标轮行。不占轮次序号（TurnSeq
+	// 恒 0，管理动作非对话轮，同 close 口径）；目标轮序号携于 CancelTurnSeq。
+	SessionTurnOpCancel = "cancel"
 )
+
+// SessionQueueLimit 逐会话非终态受理轮上限（W01-01 基准 §4：第 17 条拒绝）。
+// hub 提交口预检+事务内双检与 node sessionop 队列守卫同一口径；单一真相常量，
+// node sessionop.DefaultQueueLimit 引用本值（W01-03 RFC §4）。
+const SessionQueueLimit = 16
 
 // SessionTurnRef 会话轮身份段（协议层纯数据；投递/注册表/状态机见 hub core 与
 // node service）。create 携 cwd 与绑定断言值（适配器+权限）；send/close 以
@@ -319,6 +330,10 @@ type SessionTurnRef struct {
 	// 交给另一 CLI，同属换绑，须在 spawn 前拒绝）。缺省（旧版 hub 帧无此字段）
 	// = 信任本机配置；续轮不依赖本字段（node 侧存储绑定守卫已覆盖）。
 	Adapter string `json:"adapter,omitempty"`
+	// CancelTurnSeq 取消目标轮序号（仅 Op=SessionTurnOpCancel 携带，W01-03；被
+	// 取消轮的受理序号，node 侧 sessionop.CancelTurn 的目标；cancel 任务自身
+	// 不占轮次号——TurnSeq 恒 0）。加法字段：旧帧缺省 0，解析零迁移。
+	CancelTurnSeq int64 `json:"cancel_turn_seq,omitempty"`
 }
 
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。

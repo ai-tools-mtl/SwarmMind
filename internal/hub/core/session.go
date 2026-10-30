@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -64,7 +65,51 @@ var (
 	// 预检即拒给人话；HTTP 409 turn_in_flight）。create 成立后的续轮允许排队
 	//（sessionx 单写者同会话串行，VISION「同一线程的输入排序执行」）。
 	ErrSessionTurnInFlight = errors.New("core: 会话首轮尚未成立，暂不接受新轮")
+	// ErrSessionQueueFull 会话非终态受理轮已达队列上限（W01-03 RFC §4：第 17 条
+	// 拒绝；HTTP 409 turn_queue_full。与 node sessionop 同一口径
+	// protocol.SessionQueueLimit；预检 + 事务内双检）。
+	ErrSessionQueueFull = errors.New("core: 会话非终态受理轮已达队列上限")
+	// ErrSessionCloseInFlight 存在非终态受理轮，拒绝关闭（W01-03 RFC §5；HTTP 409
+	// close_in_flight，指向取消/等待；已 closed 幂等 dup 保留）。
+	ErrSessionCloseInFlight = errors.New("core: 会话尚有非终态受理轮，拒绝关闭")
+	// ErrSessionRequestConflict 同 request_id 已被不同内容占用（W01-03 RFC §1/§3；
+	// HTTP 409 request_conflict。创建与投轮共用哨兵，消息区分场景）。
+	ErrSessionRequestConflict = errors.New("core: request_id 已被不同内容占用")
+	// ErrSessionTurnNotFound 无该轮受理记录（W01-03 取消专用；HTTP 404
+	// turn_not_found）。
+	ErrSessionTurnNotFound = errors.New("core: 无该轮受理记录")
+	// ErrSessionTurnNotCancellable 轮已终态且非取消类：先到保留，已完成不可取消
+	//（W01-03 RFC §6.2；HTTP 409 turn_already_finished。取消类终态走幂等回执）。
+	ErrSessionTurnNotCancellable = errors.New("core: 轮已终态，不可取消")
 )
+
+// 会话取消记账码（W01-03 RFC §6.3；与 node sessionop CodeCancelXxx 同值的跨端
+// 契约——hub 不 import node 包，以字面常量对齐，双端同值由测试锁定）。
+const (
+	turnCancelQueuedCode   = "turn_cancelled_queued"   // 排队取消成立（未 spawn）
+	turnCancelExecutedCode = "turn_cancelled_executed" // 执行取消成立（有停止证据）
+	turnCancelUnknownCode  = "turn_cancel_outcome_unknown"
+)
+
+// isCancelBookingCode 报告错误串是否以取消类记账码打头（轮行投影 cancelled 的
+// 判定依据；证据缺失的 unknown 归 failed/待核对，不在此列）。
+func isCancelBookingCode(errCode string) bool {
+	return strings.HasPrefix(errCode, turnCancelQueuedCode+":") ||
+		strings.HasPrefix(errCode, turnCancelExecutedCode+":")
+}
+
+// sessionCreateFingerprint 创建内容稳定指纹（W01-03 RFC §1：request_id 同键同文
+// 判定依据；与轮次指纹同一规范化——trim + UTF-8 清洗，U+0000 连接，SHA-256 hex）。
+func sessionCreateFingerprint(nodeID, agent, cwd, permissionMode string) string {
+	h := sha256.New()
+	for i, p := range []string{nodeID, agent, cwd, permissionMode} {
+		if i > 0 {
+			h.Write([]byte{0})
+		}
+		h.Write([]byte(strings.ToValidUTF8(strings.TrimSpace(p), "\uFFFD")))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // 会话轮任务幂等键（任务书：session id + turn 序号；close 动作不占号）。
 func turnIdemKey(sessionID string, seq int64) string {
@@ -97,6 +142,9 @@ type SessionCreateRequest struct {
 	//（核对后写入绑定快照），不符 409；缺省用 node 侧配置（能力卡值即真相）。
 	// 传 yolo/全权档位一律 400——平台绝不注入提权模式，换绑走显式迁移通道。
 	PermissionMode string `json:"permission_mode,omitempty"`
+	// RequestID 稳定创建请求 ID（可选，W01-03 RFC §1）：同键同文返回原会话
+	//（dup）、异文 409 request_conflict；缺省行为零变化（每次新会话）。
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // SessionView 会话详情视图：注册表条目 + 轮次投影（每轮带实时状态；未终态轮由
@@ -131,6 +179,7 @@ type SessionSummary struct {
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
 	ClosedAt       *time.Time       `json:"closed_at,omitempty"`
+	RequestID      string           `json:"request_id,omitempty"`
 }
 
 // TurnRef 轮次受理回执（POST turns 响应；轮终状态经详情端点查询——异步，
@@ -156,6 +205,9 @@ type SessionTurnRequest struct {
 	// TurnSeq 显式轮序号（可选）：响应丢失重试安全——与既有轮同号同文回执
 	// dup，同号异文 409；跳号 409。缺省由 hub 分配下一序号（无重放保护）。
 	TurnSeq int64 `json:"turn_seq,omitempty"`
+	// RequestID 稳定轮受理请求 ID（可选，W01-03 RFC §3）：同键同文查回原回执
+	//（dup）、异文 409 request_conflict；缺省行为零变化。
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // CreateSession 建会话（注册表登记，不派发任何任务——首轮经 SubmitTurn 显式
@@ -163,31 +215,45 @@ type SessionTurnRequest struct {
 //（能力卡 adapter/权限投影 + 请求 cwd）→ 分配平台 ID 落库 active。
 //
 // actor 为服务端验证的鉴权主体（注册表无事件账本，本参数保留签名一致性；
-// 审计经首轮任务的既有提交链）。创建动作幂等语义：无幂等键，重复调用即新会话
-//（会话是长命协作线程，重复创建为合法意图；去重责任在调用方）。
-func (c *Core) CreateSession(req SessionCreateRequest, actor string) (*SessionView, error) {
+// 审计经首轮任务的既有提交链）。创建幂等语义（W01-03 RFC §1）：不带 request_id
+// 行为零变化（无幂等键，重复调用即新会话——会话是长命协作线程，重复创建为合法
+// 意图）；带 request_id：同键同文（创建内容指纹全等）返回原会话 dup=true，同键
+// 异文 ErrSessionRequestConflict。返回 dup=true 表示本调用零写入（重放/并发收敛）。
+func (c *Core) CreateSession(req SessionCreateRequest, actor string) (*SessionView, bool, error) {
 	_ = actor
 	nodeID := strings.TrimSpace(req.NodeID)
 	agent := strings.TrimSpace(req.AgentName)
 	cwd := strings.TrimSpace(req.Cwd)
+	requestID := strings.TrimSpace(req.RequestID)
 	if nodeID == "" || agent == "" || cwd == "" {
-		return nil, fmt.Errorf("%w: node_id/agent/cwd 均必填", ErrInvalid)
+		return nil, false, fmt.Errorf("%w: node_id/agent/cwd 均必填", ErrInvalid)
 	}
 	if m := strings.TrimSpace(req.PermissionMode); m != "" {
 		if forbiddenPermissionModes[m] {
-			return nil, fmt.Errorf("%w: permission_mode %q 为全权档位，平台拒绝注入（提权须 node 主人显式改配）", ErrInvalid, m)
+			return nil, false, fmt.Errorf("%w: permission_mode %q 为全权档位，平台拒绝注入（提权须 node 主人显式改配）", ErrInvalid, m)
 		}
 	}
+	payloadHash := sessionCreateFingerprint(nodeID, agent, cwd, strings.TrimSpace(req.PermissionMode))
 	view := c.st.View()
+	if requestID != "" {
+		if rec, dup := findSessionByRequest(view, requestID); dup {
+			// 同键命中：同文返原会话（重放不受当前能力状态阻断——回执查询）；
+			// 异文显式冲突。
+			if rec.PayloadHash == payloadHash {
+				return sessionViewOf(rec, view), true, nil
+			}
+			return nil, false, fmt.Errorf("%w: %s（已登记会话 %s 的创建内容与本次不符）", ErrSessionRequestConflict, requestID, rec.ID)
+		}
+	}
 	card, ok := lookupAgent(view, nodeID, agent)
 	if !ok {
-		return nil, ErrAgentNotExposed
+		return nil, false, ErrAgentNotExposed
 	}
 	if card.SessionAdapter == "" {
-		return nil, fmt.Errorf("%w: %s/%s（node 未声明 session_adapter，会话接入须在 node.yaml 该能力下配置，旧版节点须升级）", ErrSessionAgentUnsupported, nodeID, agent)
+		return nil, false, fmt.Errorf("%w: %s/%s（node 未声明 session_adapter，会话接入须在 node.yaml 该能力下配置，旧版节点须升级）", ErrSessionAgentUnsupported, nodeID, agent)
 	}
 	if m := strings.TrimSpace(req.PermissionMode); m != "" && m != card.PermissionMode {
-		return nil, fmt.Errorf("%w: 权限断言 %q ≠ 能力卡声明 %q（断言仅供核对，非换绑通道）", ErrSessionBindingChanged, m, card.PermissionMode)
+		return nil, false, fmt.Errorf("%w: 权限断言 %q ≠ 能力卡声明 %q（断言仅供核对，非换绑通道）", ErrSessionBindingChanged, m, card.PermissionMode)
 	}
 	now := c.now()
 	sess := store.Session{
@@ -201,32 +267,70 @@ func (c *Core) CreateSession(req SessionCreateRequest, actor string) (*SessionVi
 		Turns:          []store.SessionTurn{},
 		CreatedAt:      now,
 		UpdatedAt:      now,
+		RequestID:      requestID,
+		PayloadHash:    payloadHash,
 	}
+	var (
+		txnView *SessionView
+		txnDup  bool
+		txnErr  error
+	)
 	err := c.st.Update(func(st *store.State) error {
 		// 事务内重检目标（注册/下线与预检竞态以快照为准）；绑定快照取事务内
 		// 卡片（与预检漂移时以事务内为准，拒绝即副本整体丢弃零发布）。
+		// request_id 事务内重检（W01-03）：并发同键创建以先落库者为准——同文
+		// 收敛为重放（txnDup），异文显式冲突，零双会话同键。
+		if requestID != "" {
+			if rec, dup := findSessionByRequest(st, requestID); dup {
+				if rec.PayloadHash == payloadHash {
+					txnView = sessionViewOf(rec, st)
+					txnDup = true
+					return nil
+				}
+				txnErr = fmt.Errorf("%w: %s（已登记会话 %s 的创建内容与本次不符）", ErrSessionRequestConflict, requestID, rec.ID)
+				return nil
+			}
+		}
 		card, ok := lookupAgent(st, nodeID, agent)
 		if !ok {
-			return ErrAgentNotExposed
+			txnErr = ErrAgentNotExposed
+			return nil
 		}
 		if card.SessionAdapter == "" {
-			return ErrSessionAgentUnsupported
+			txnErr = ErrSessionAgentUnsupported
+			return nil
 		}
 		// 权限断言事务内重检（T2-R1 必修3）：预检后能力卡更新的竞态窗口内，显式
 		// 断言必须与事务内同一张当前卡重新核对——不符整体拒绝（mutate 错误回滚
 		// 零发布），禁止静默按提权后的新卡落绑定。
 		if m := strings.TrimSpace(req.PermissionMode); m != "" && m != card.PermissionMode {
-			return fmt.Errorf("%w: 权限断言 %q ≠ 能力卡声明 %q（事务内重检，卡片在创建竞态中已变更）", ErrSessionBindingChanged, m, card.PermissionMode)
+			txnErr = fmt.Errorf("%w: 权限断言 %q ≠ 能力卡声明 %q（事务内重检，卡片在创建竞态中已变更）", ErrSessionBindingChanged, m, card.PermissionMode)
+			return nil
 		}
 		sess.Adapter = card.SessionAdapter
 		sess.PermissionMode = card.PermissionMode
 		st.Sessions[sess.ID] = sess
+		txnView = &SessionView{Session: sess.Clone(), Turns: []SessionTurnView{}}
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	if err != nil && txnErr == nil {
+		txnErr = err
 	}
-	return &SessionView{Session: sess, Turns: []SessionTurnView{}}, nil
+	if txnErr != nil {
+		return nil, false, txnErr
+	}
+	return txnView, txnDup, nil
+}
+
+// findSessionByRequest 按 request_id 定位创建登记（W01-03；注册表线性扫描——
+// V0 低量与 ListSessions 同口径）。命中返回会话快照。
+func findSessionByRequest(view *store.State, requestID string) (store.Session, bool) {
+	for _, s := range view.Sessions {
+		if s.RequestID != "" && s.RequestID == requestID {
+			return s.Clone(), true
+		}
+	}
+	return store.Session{}, false
 }
 
 // SubmitTurn 提交轮次（会话轮任务落库 + 轮次账本登记同事务原子；返回受理回执，
@@ -237,17 +341,18 @@ func (c *Core) CreateSession(req SessionCreateRequest, actor string) (*SessionVi
 //  2. prompt 非空；
 //  3. 操作类型由账本推导：无成功 create 轮（无 NativeIDOk 行）即 create——
 //     首轮失败后的重试按 create 重来（node 侧无映射残留），对调用方透明；
-//  4. 显式 turn_seq：跳号 409；与既有轮同号同文 = 响应丢失重放，返回原轮回执
-//     （dup，零写入；任务已清理仍可回执——轮行是重放判定的权威，同源判定用
-//     行内完整输入指纹 PromptHash 而非展示截断文本）；同号异文 409；缺省序号
-//     在写事务内分配（next=max+1，事务串行保证 (session_id,seq) 唯一——T2-R1
-//     必修1：并发提交不得产生同会话同序号）；
+//  4. 幂等重放（先于队列判定——幂等回执补拉不重校验，同 submit 链口径）：
+//     显式 turn_seq 跳号 409 / 同号同文回原回执 dup / 同号异文 409；request_id
+//     同键同文回原回执 dup / 异文 409 request_conflict（W01-03 RFC §3）；
 //  5. 绑定守卫：当前能力卡（adapter/权限模式）与创建时绑定快照严格相等，漂移
 //     409（node 侧内核守卫为第二道防线）；
 //  6. 首轮独占：create 轮在途（未终态）时拒绝新轮 409（两个 create 并发必撞
-//     node 侧显式重复 ID 拒绝，预检即拒）；续轮不设限（sessionx 单写者排队）；
-//  7. 体积实测 + 容量预检（与任务提交同口径，会话轮任务体含 Session 段）；
-//  8. 单写事务：全重检 → 任务落库（IdemKey=会话轮键）+ 信箱入队 + 轮行登记。
+//     node 侧显式重复 ID 拒绝，预检即拒）；
+//  7. 队列上限（W01-03 RFC §4）：新受理 send 轮的非终态轮计数 ≥16 → 409
+//     turn_queue_full（预检 + 事务内双检；重放不受限）；
+//  8. 体积实测 + 容量预检（与任务提交同口径，会话轮任务体含 Session 段）；
+//  9. 单写事务：全重检 → 任务落库（IdemKey=会话轮键）+ 信箱入队 + 轮行登记
+//    （含 request_id 留痕）。
 func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string) (*TurnRef, bool, error) {
 	view := c.st.View()
 	sess, ok := view.Sessions[sessionID]
@@ -261,8 +366,21 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 	if prompt == "" {
 		return nil, false, fmt.Errorf("%w: prompt 必填", ErrInvalid)
 	}
+	requestID := strings.TrimSpace(req.RequestID)
 	nextSeq := nextTurnSeq(sess)
 	op, hasCreate := sessionOp(sess)
+	// request_id 幂等重放（预检；事务内重检为准，W01-03 RFC §3）。先于显式序号
+	// 与队列判定——幂等回执补拉不重校验。
+	if requestID != "" {
+		tr, existed := findTurnByRequest(sess, requestID)
+		if existed {
+			if tr.PromptHash != "" && tr.PromptHash == promptFingerprint(prompt) &&
+				(req.TurnSeq == 0 || tr.Seq == req.TurnSeq) {
+				return &TurnRef{SessionID: sessionID, TurnSeq: tr.Seq, Op: rowTurnOp(tr, op), TaskID: tr.TaskID, TraceID: tr.TraceID}, true, nil
+			}
+			return nil, false, fmt.Errorf("%w: %s（已登记 turn_seq=%d 的内容与本次不符）", ErrSessionRequestConflict, requestID, tr.Seq)
+		}
+	}
 	// 显式序号：重放回执 / 冲突 / 跳号（预检；事务内重检为准）。先于首轮独占——
 	// 幂等回执补拉不重校验（同 submit 链 idem 查重先于容量/依赖准入的口径），
 	// 在途轮的重放仍须拿到回执而非被守卫挡住。
@@ -285,6 +403,9 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 				return nil, false, fmt.Errorf("%w: 首轮（seq=%d）尚在执行，成功建立原生映射前不接受新轮", ErrSessionTurnInFlight, t.Seq)
 			}
 		}
+	} else if nonTerminalTurnCount(sess) >= protocol.SessionQueueLimit {
+		// 队列上限（预检；事务内双检为准，W01-03 RFC §4）
+		return nil, false, fmt.Errorf("%w: 会话非终态受理轮已达 %d 条，拒绝受理（先取消或等待收束）", ErrSessionQueueFull, protocol.SessionQueueLimit)
 	}
 	// 绑定守卫（预检）
 	card, ok := lookupAgent(view, sess.NodeID, sess.AgentName)
@@ -340,6 +461,19 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 		}
 		next := nextTurnSeq(s)
 		opNow, hasCreateNow := sessionOp(s)
+		if requestID != "" { // request_id 事务内重检（W01-03；同预检口径）
+			tr, existed := findTurnByRequest(s, requestID)
+			if existed {
+				if tr.PromptHash != "" && tr.PromptHash == promptFingerprint(prompt) &&
+					(req.TurnSeq == 0 || tr.Seq == req.TurnSeq) {
+					txnRef = &TurnRef{SessionID: sessionID, TurnSeq: tr.Seq, Op: rowTurnOp(tr, opNow), TaskID: tr.TaskID, TraceID: tr.TraceID}
+					txnDup = true
+					return nil
+				}
+				txnErr = fmt.Errorf("%w: %s（已登记 turn_seq=%d 的内容与本次不符）", ErrSessionRequestConflict, requestID, tr.Seq)
+				return nil
+			}
+		}
 		if req.TurnSeq > 0 && req.TurnSeq != next { // 重放/冲突先于首轮独占（同预检序）
 			tr, existed := findTurn(s, req.TurnSeq)
 			if !existed {
@@ -362,6 +496,9 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 					return nil
 				}
 			}
+		} else if nonTerminalTurnCount(s) >= protocol.SessionQueueLimit { // 队列上限事务内双检（W01-03 RFC §4）
+			txnErr = fmt.Errorf("%w: 会话非终态受理轮已达 %d 条，拒绝受理（先取消或等待收束）", ErrSessionQueueFull, protocol.SessionQueueLimit)
+			return nil
 		}
 		cardNow, ok := lookupAgent(st, s.NodeID, s.AgentName)
 		if !ok {
@@ -407,6 +544,7 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 			TraceID:    taskNow.TraceID,
 			Prompt:     truncateRunes(prompt, store.MaxSessionTurnPrompt),
 			PromptHash: promptFingerprint(prompt),
+			RequestID:  requestID,
 			CreatedAt:  c.now(),
 		})
 		s.UpdatedAt = c.now()
@@ -437,6 +575,10 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 // 注册表关闭即成立（重复 close 幂等回执 dup，响应丢失重试安全）；close 任务照走
 // 投递链（离线 node 重连补执行）收尾 node 侧原生映射——注册表状态与投递状态
 // 分离，node 清理为收尾动作非关闭前提。close 不占轮次序号。
+//
+// 关闭在途防护（W01-03 RFC §5，任务书点名的 v3 行为变更）：存在非终态轮行 →
+// ErrSessionCloseInFlight（409 close_in_flight，指向取消/等待）；预检 + 事务内
+// 重检；已 closed 幂等 dup 保留（先于在途判定）。
 func (c *Core) CloseSession(sessionID string, actor string) (*SessionView, bool, error) {
 	_ = actor
 	view := c.st.View()
@@ -446,6 +588,9 @@ func (c *Core) CloseSession(sessionID string, actor string) (*SessionView, bool,
 	}
 	if sess.Status == store.SessionStatusClosed {
 		return sessionViewOf(sess, view), true, nil // 幂等回执：零写入零任务
+	}
+	if nonTerminalTurnCount(sess) > 0 {
+		return nil, false, fmt.Errorf("%w: %s 尚有 %d 条非终态受理轮（先取消或等待收束；关闭不删历史）", ErrSessionCloseInFlight, sessionID, nonTerminalTurnCount(sess))
 	}
 	reqView := protocol.TaskSubmitRequest{
 		TargetNode:  sess.NodeID,
@@ -473,6 +618,11 @@ func (c *Core) CloseSession(sessionID string, actor string) (*SessionView, bool,
 		if s.Status == store.SessionStatusClosed {
 			closed = s
 			return nil // 并发 close 收敛：零写入
+		}
+		// 在途事务内重检（W01-03 RFC §5）：此处尚无任何变更，mutate 错误返回
+		// 整体拒绝（副本丢弃零发布），与上方 not-found 同形。
+		if n := nonTerminalTurnCount(s); n > 0 {
+			return fmt.Errorf("%w: %s 尚有 %d 条非终态受理轮（先取消或等待收束；关闭不删历史）", ErrSessionCloseInFlight, sessionID, n)
 		}
 		if _, exists := st.Tasks[task.ID]; exists {
 			return ErrInvalid
@@ -507,8 +657,353 @@ func (c *Core) CloseSession(sessionID string, actor string) (*SessionView, bool,
 	return sessionViewOf(closed, c.st.View()), !placed, nil
 }
 
+// CancelTurnReceipt 会话轮取消回执（W01-03 RFC §6.2；hub 面 REST 响应体）。
+type CancelTurnReceipt struct {
+	SessionID string `json:"session_id"`
+	TurnSeq   int64  `json:"turn_seq"`
+	// Outcome queued | executed | unknown（node sessionop 同值契约）；异步受理
+	// 时为空（outcome 待 node 回执，经会话详情轮行查询）。
+	Outcome string `json:"outcome,omitempty"`
+	// Status 账本终态：cancelled（queued/executed）| failed（unknown 待核对）。
+	Status string `json:"status,omitempty"`
+	// Error 记账码：turn_cancelled_queued / turn_cancelled_executed /
+	// turn_cancel_outcome_unknown（终态重放时）。
+	Error string `json:"error,omitempty"`
+	// CancelTaskID 异步受理的取消任务 ID（同步路径为空）。
+	CancelTaskID string `json:"cancel_task_id,omitempty"`
+	// TraceID 取消任务链路追踪（异步路径）。
+	TraceID string `json:"trace_id,omitempty"`
+}
+
+// CancelSessionTurn 取消会话受理轮（W01-03 RFC §6.2；人工专属管理动作，SPEC
+// 六.六豁免⑬——REST POST /api/v1/sessions/{id}/turns/{seq}/cancel）。三路：
+//
+//  1. 终态轮行：取消类记账码 → 幂等回执（重放）；其余 → ErrSessionTurnNotCancellable
+//    （先到保留，已完成不可取消）。
+//  2. 目标任务 submitted（未投递）：本地 CancelTask（信箱撤回，确定性不 spawn）
+//    → 同步回执 queued；轮行由通用回写落 cancelled 后细化为 turn_cancelled_queued
+//    （排队取消在 hub 侧确定性成立；已知竞态见 RFC §9.1）。
+//  3. offered/acknowledged/running：投递取消任务（Op=cancel + CancelTurnSeq，不占
+//    轮次号）→ 异步受理（返回 async=true，outcome 待 node 侧 CancelTurn 证据分类，
+//    结果沿任务结果链回写轮行）。
+//
+// 返回 (receipt, async, error)：async=true 时 outcome 为空、CancelTaskID 在场
+//（HTTP 202）；否则 200/409/404 语义由 error 哨兵承载。
+func (c *Core) CancelSessionTurn(sessionID string, seq int64, reason string, actor string) (*CancelTurnReceipt, bool, error) {
+	_ = actor
+	if seq <= 0 {
+		return nil, false, fmt.Errorf("%w: turn_seq 必须为正（close/cancel 任务不占号）", ErrSessionTurnNotFound)
+	}
+	view := c.st.View()
+	sess, ok := view.Sessions[sessionID]
+	if !ok {
+		return nil, false, ErrSessionNotFound
+	}
+	tr, existed := findTurn(sess, seq)
+	if !existed {
+		return nil, false, fmt.Errorf("%w: %s seq=%d", ErrSessionTurnNotFound, sessionID, seq)
+	}
+	// 路径 1：终态轮行（先到保留）。
+	if tr.Terminal() {
+		code, _, _ := strings.Cut(tr.Error, ":")
+		switch {
+		case strings.HasPrefix(tr.Error, turnCancelQueuedCode+":"):
+			return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: "queued", Status: "cancelled", Error: turnCancelQueuedCode}, false, nil
+		case strings.HasPrefix(tr.Error, turnCancelExecutedCode+":"):
+			return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: "executed", Status: "cancelled", Error: turnCancelExecutedCode}, false, nil
+		case strings.HasPrefix(tr.Error, turnCancelUnknownCode+":"):
+			return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: "unknown", Status: "failed", Error: turnCancelUnknownCode}, false, nil
+		default:
+			return nil, false, fmt.Errorf("%w: %s seq=%d（终态 %s/%s，已完成不可取消）", ErrSessionTurnNotCancellable, sessionID, seq, projectTurn(view, tr).Status, code)
+		}
+	}
+	// 目标任务现态分路（行内 TaskID 是唯一锚点）。
+	target, tok := view.Tasks[tr.TaskID]
+	if !tok {
+		// 防御位（正常不可达：轮终回写与任务终态同事务，清理必以终态为前提）。
+		return nil, false, fmt.Errorf("%w: %s seq=%d（关联任务已不在账本，无法取消）", ErrSessionTurnNotCancellable, sessionID, seq)
+	}
+	if target.Status == protocol.StatusSubmitted {
+		// 路径 2：未投递——本地撤回（确定性不 spawn，排队取消记账）。
+		if _, _, err := c.CancelTask(tr.TaskID, reason); err != nil {
+			if errors.Is(err, ErrNotCancellable) {
+				// 并发收敛：目标已终态，按行现态重放/拒绝。
+				return c.cancelReceiptAfterRace(sessionID, seq)
+			}
+			return nil, false, err
+		}
+		c.refineQueuedCancelRow(sessionID, seq)
+		return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: "queued", Status: "cancelled", Error: turnCancelQueuedCode}, false, nil
+	}
+	// 路径 3：已投递——投递取消任务（node 侧 CancelTurn 执行，证据分类记账）。
+	return c.placeSessionCancelTask(sess, seq, reason)
+}
+
+// cancelReceiptAfterRace 取消竞态后的行现态回执（并发终态收敛路径）。
+func (c *Core) cancelReceiptAfterRace(sessionID string, seq int64) (*CancelTurnReceipt, bool, error) {
+	view := c.st.View()
+	sess, ok := view.Sessions[sessionID]
+	if !ok {
+		return nil, false, ErrSessionNotFound
+	}
+	tr, existed := findTurn(sess, seq)
+	if !existed {
+		return nil, false, fmt.Errorf("%w: %s seq=%d", ErrSessionTurnNotFound, sessionID, seq)
+	}
+	if !tr.Terminal() {
+		// 他路径未落终态（理论窄窗）：如实报未确认，不虚报。
+		return nil, false, fmt.Errorf("%w: %s seq=%d（取消触发但终态未确认，请重试或查询）", ErrCancelUnconfirmed, sessionID, seq)
+	}
+	if isCancelBookingCode(tr.Error) {
+		outcome := "executed"
+		status := "cancelled"
+		code := turnCancelExecutedCode
+		if strings.HasPrefix(tr.Error, turnCancelQueuedCode+":") {
+			outcome, code = "queued", turnCancelQueuedCode
+		}
+		return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: outcome, Status: status, Error: code}, false, nil
+	}
+	return nil, false, fmt.Errorf("%w: %s seq=%d", ErrSessionTurnNotCancellable, sessionID, seq)
+}
+
+// ErrCancelUnconfirmed 取消已触发但终态未确认（hub 侧哨兵；HTTP 500，不虚报）。
+var ErrCancelUnconfirmed = errors.New("core: 取消已触发但终态未确认")
+
+// placeSessionCancelTask 投递取消任务（路径 3；单事务：幂等命中收敛 + 落库入
+// 信箱）。幂等键 scancel:<sid>:<seq>——重复取消收敛为同一取消任务（dup 返原
+// 任务引用，零双投）。
+func (c *Core) placeSessionCancelTask(sess store.Session, seq int64, reason string) (*CancelTurnReceipt, bool, error) {
+	sessionID := sess.ID
+	reqView := protocol.TaskSubmitRequest{
+		TargetNode:  sess.NodeID,
+		TargetAgent: sess.AgentName,
+		SubmittedBy: sessionSubmitter,
+		IdemKey:     fmt.Sprintf("scancel:%s:%d", sessionID, seq),
+	}
+	task := c.newTask(reqView, "")
+	task.Session = &protocol.SessionTurnRef{
+		SessionID:     sessionID,
+		TurnSeq:       0, // 管理动作不占轮次号（同 close 口径）
+		Op:            protocol.SessionTurnOpCancel,
+		CancelTurnSeq: seq,
+	}
+	if err := checkOfferSize(&task); err != nil {
+		return nil, false, err
+	}
+	var (
+		txnTask        *protocol.Task
+		txnDup         bool
+		txnRowTerminal bool
+		txnErr         error
+		preView        = c.st.View()
+		size           = mailbox.TaskBytes(&task)
+		capErr         = c.checkCapacity(preView, sess.NodeID, size)
+	)
+	if capErr != nil {
+		return nil, false, capErr
+	}
+	err := c.st.Update(func(st *store.State) error {
+		s, ok := st.Sessions[sessionID]
+		if !ok {
+			txnErr = ErrSessionNotFound
+			return nil
+		}
+		tr, existed := findTurn(s, seq)
+		if !existed {
+			txnErr = fmt.Errorf("%w: %s seq=%d", ErrSessionTurnNotFound, sessionID, seq)
+			return nil
+		}
+		// 幂等命中：取消任务已在（先到的 cancel 对同轮收敛，IdemCheck 按幂等键+
+		// 内容指纹查重，同 submit 链口径），返原任务引用。
+		if id, dup, derr := mailbox.IdemCheck(st, reqView); derr == nil && dup {
+			prev := st.Tasks[id]
+			if prev.Session != nil && prev.Session.Op == protocol.SessionTurnOpCancel {
+				t := prev.Clone()
+				txnTask = &t
+				txnDup = true
+				return nil
+			}
+		}
+		// 终态重检（取消到达与轮终竞态：终态先行则按行现态出回执/拒绝）。
+		if tr.Terminal() {
+			txnRowTerminal = true
+			return nil
+		}
+		target, tok := st.Tasks[tr.TaskID]
+		if !tok {
+			txnErr = fmt.Errorf("%w: %s seq=%d（关联任务已不在账本）", ErrSessionTurnNotCancellable, sessionID, seq)
+			return nil
+		}
+		if target.Status == protocol.StatusSubmitted {
+			// 受理竞争收敛（预检后任务回退未投递态）：取消任务对 node 无意义，
+			// 交调用方重走路径 2（本地撤回，确定性 queued）。
+			txnErr = errRetryLocalCancel
+			return nil
+		}
+		if _, exists := st.Tasks[task.ID]; exists {
+			txnErr = ErrInvalid
+			return nil
+		}
+		if err := checkOfferSize(&task); err != nil {
+			return err
+		}
+		if err := c.checkCapacity(st, sess.NodeID, mailbox.TaskBytes(&task)); err != nil {
+			return err
+		}
+		st.Tasks[task.ID] = task
+		if err := mailbox.Enqueue(st, task.TargetNode, &task); err != nil {
+			return err
+		}
+		t := task
+		txnTask = &t
+		return nil
+	})
+	if txnRowTerminal {
+		// 事务内零写入，行现态为准（取消类幂等回执 / 已完成不可取消）。
+		return c.cancelReceiptAfterRace(sessionID, seq)
+	}
+	if err != nil && txnErr == nil {
+		txnErr = err
+	}
+	if txnErr == errRetryLocalCancel {
+		// 受理竞争收敛：目标任务回到未投递态，重走路径 2（本地撤回）。
+		if _, _, err := c.CancelTask(findTaskIDOf(c, sessionID, seq), reason); err != nil {
+			return c.cancelReceiptAfterRace(sessionID, seq)
+		}
+		c.refineQueuedCancelRow(sessionID, seq)
+		return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, Outcome: "queued", Status: "cancelled", Error: turnCancelQueuedCode}, false, nil
+	}
+	if txnErr != nil {
+		return nil, false, txnErr
+	}
+	if txnDup {
+		return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, CancelTaskID: txnTask.ID, TraceID: txnTask.TraceID}, true, nil
+	}
+	if txnTask != nil {
+		c.noteTask(txnTask)
+		c.dispatch(txnTask.TargetNode)
+	}
+	return &CancelTurnReceipt{SessionID: sessionID, TurnSeq: seq, CancelTaskID: txnTask.ID, TraceID: txnTask.TraceID}, true, nil
+}
+
+// errRetryLocalCancel 内部信号：事务内发现目标已回退未投递态，调用方改走本地
+// 撤回路径（哨兵不外泄——调用方须在同函数内识别）。
+var errRetryLocalCancel = errors.New("core: retry local cancel")
+
+// findTaskIDOf 定位轮行关联任务 ID（竞态收敛重走路径用；缺失返空串由
+// CancelTask 如实报 not found）。
+func findTaskIDOf(c *Core, sessionID string, seq int64) string {
+	view := c.st.View()
+	sess, ok := view.Sessions[sessionID]
+	if !ok {
+		return ""
+	}
+	if tr, existed := findTurn(sess, seq); existed {
+		return tr.TaskID
+	}
+	return ""
+}
+
+// refineQueuedCancelRow 排队取消的轮行记账细化（W01-03 RFC §6.2 路径 2）：
+// CancelTask 的通用回写对会话轮落 Error=cancelled（既有口径零变化）；本会话取
+// 消通道在取消成立的同一事件内把该行细化为 turn_cancelled_queued——仅当行非
+// 终态误判不会发生（通用回写已落终态）、Error 恰为通用值 cancelled 且任务已
+// cancelled 时改写（同事件记账细化，单调收敛；其他形态一律不动）。
+func (c *Core) refineQueuedCancelRow(sessionID string, seq int64) {
+	_ = c.st.Update(func(st *store.State) error {
+		s, ok := st.Sessions[sessionID]
+		if !ok {
+			return nil
+		}
+		for i := range s.Turns {
+			if s.Turns[i].Seq != seq {
+				continue
+			}
+			tr := &s.Turns[i]
+			if !tr.Terminal() || tr.Error != "cancelled" || tr.NativeIDOk {
+				return nil
+			}
+			if t, ok := st.Tasks[tr.TaskID]; !ok || t.Status != protocol.StatusCancelled {
+				return nil
+			}
+			tr.Error = turnCancelQueuedCode + ": 本轮在投递前被取消（未 spawn，确定性终止；平台序号已受理消耗，不回退）"
+			s.UpdatedAt = c.now()
+			st.Sessions[sessionID] = s
+			return nil
+		}
+		return nil
+	})
+}
+
+// writebackCancelReceipt 取消任务结果的轮行回写（W01-03 RFC §6.2；任务结果链
+// 同事务调用）：取消类记账码（queued/executed/unknown）写目标轮行（先到保留——
+// 目标轮自身结果通常先到并已落终态，本回写为结果丢失时的收敛防线）；
+// turn_already_finished / turn_not_found / cancel_unconfirmed 不写（行由目标轮
+// 自身结果或后续状态收敛，防未确认回执抢先落终态虚报）。
+func writebackCancelReceipt(st *store.State, t *protocol.Task, now time.Time) {
+	if t.Session == nil || t.Session.Op != protocol.SessionTurnOpCancel || t.Session.CancelTurnSeq <= 0 || t.Result == nil {
+		return
+	}
+	code, _, _ := strings.Cut(t.Result.Error, ":")
+	if code != turnCancelQueuedCode && code != turnCancelExecutedCode && code != turnCancelUnknownCode {
+		return
+	}
+	sess, ok := st.Sessions[t.Session.SessionID]
+	if !ok {
+		return
+	}
+	for i := range sess.Turns {
+		if sess.Turns[i].Seq != t.Session.CancelTurnSeq {
+			continue
+		}
+		tr := &sess.Turns[i]
+		if tr.Terminal() {
+			return // 先到保留（防御重复回写）
+		}
+		tr.FinishedAt = now
+		tr.NativeIDOk = false
+		tr.Error = t.Result.Error
+		sess.UpdatedAt = now
+		st.Sessions[sess.ID] = sess
+		return
+	}
+}
+
+// convergeCancelOp 取消任务结果的事务外收敛（handleTaskResult 提交后调用）：
+// turn_not_found 回执 = node 无该轮受理记录（取消任务先于投递到达的窄窗口）→
+// 对目标任务补发 CancelTask（信箱撤回/fence 取消，RFC §6.2 路径 3 兜底）。
+func (c *Core) convergeCancelOp(t *protocol.Task) {
+	if t.Session == nil || t.Session.Op != protocol.SessionTurnOpCancel || t.Result == nil {
+		return
+	}
+	code, _, _ := strings.Cut(t.Result.Error, ":")
+	if code != "turn_not_found" {
+		if code != "" {
+			log.Printf("[hub] 会话轮取消回执 session=%s seq=%d 记账=%s（轮行由结果链回写）", t.Session.SessionID, t.Session.CancelTurnSeq, code)
+		}
+		return
+	}
+	taskID := findTaskIDOf(c, t.Session.SessionID, t.Session.CancelTurnSeq)
+	if taskID == "" {
+		return
+	}
+	view := c.st.View()
+	target, ok := view.Tasks[taskID]
+	if !ok || target.Status.Terminal() {
+		return
+	}
+	log.Printf("[hub] 取消任务回执 turn_not_found（node 无受理记录），兜底本地取消 task=%s session=%s seq=%d",
+		taskID, t.Session.SessionID, t.Session.CancelTurnSeq)
+	if _, _, err := c.CancelTask(taskID, "hub 取消兜底（node 无该轮受理记录）"); err != nil {
+		log.Printf("[hub] 取消兜底未生效（先到终态为准或真实失败）task=%s: %v", taskID, err)
+		return
+	}
+	c.refineQueuedCancelRow(t.Session.SessionID, t.Session.CancelTurnSeq)
+}
+
 // GetSession 会话详情（只读）：轮次投影（未终态轮按关联任务现态投影状态；
-// 终态轮按留痕字段定 done/unverified/failed）+ task_gone 注解。
+// 终态轮按留痕字段定 done/unverified/failed + W01-03 cancelled 投影）+ task_gone
+// 注解。
 func (c *Core) GetSession(sessionID string) (*SessionView, bool) {
 	view := c.st.View()
 	sess, ok := view.Sessions[sessionID]
@@ -529,6 +1024,7 @@ func (c *Core) ListSessions() []SessionSummary {
 			Adapter: s.Adapter, PermissionMode: s.PermissionMode, Cwd: s.Cwd,
 			Status: s.Status, TurnCount: len(s.Turns),
 			CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, ClosedAt: s.ClosedAt,
+			RequestID: s.RequestID,
 		}
 		for i := range s.Turns {
 			if sum.LastTurn == nil || s.Turns[i].Seq > sum.LastTurn.Seq {
@@ -580,6 +1076,12 @@ func projectTurn(view *store.State, t store.SessionTurn) SessionTurnView {
 			} else {
 				tv.Status = store.TurnStatusDone
 			}
+		} else if isCancelBookingCode(t.Error) {
+			// 取消类记账码 → cancelled 投影（W01-01 基准 §3/W01-03 RFC §6.3：
+			// 排队取消 turn_cancelled_queued / 执行取消已证停止
+			// turn_cancelled_executed；证据缺失的 turn_cancel_outcome_unknown 不在
+			// 此列——failed 待核对，绝不记成功）。
+			tv.Status = store.TurnStatusCancelled
 		} else {
 			tv.Status = store.TurnStatusFailed
 		}
@@ -697,6 +1199,29 @@ func findTurn(s store.Session, seq int64) (store.SessionTurn, bool) {
 		}
 	}
 	return store.SessionTurn{}, false
+}
+
+// findTurnByRequest 按 request_id 定位轮行（W01-03 RFC §3；同 ListSessions 的
+// 线性扫描口径——V0 低量）。
+func findTurnByRequest(s store.Session, requestID string) (store.SessionTurn, bool) {
+	for _, t := range s.Turns {
+		if t.RequestID != "" && t.RequestID == requestID {
+			return t, true
+		}
+	}
+	return store.SessionTurn{}, false
+}
+
+// nonTerminalTurnCount 会话非终态受理轮计数（W01-03 RFC §4/§5：队列上限与关闭
+// 在途防护共用口径；轮行只含受理轮，close/cancel 任务不占号不入行）。
+func nonTerminalTurnCount(s store.Session) int {
+	n := 0
+	for _, t := range s.Turns {
+		if !t.Terminal() {
+			n++
+		}
+	}
+	return n
 }
 
 // sameTurnPrompt 重放同源判定（T2-R1 必修5）：以行内完整规范化输入指纹

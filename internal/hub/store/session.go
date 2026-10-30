@@ -25,25 +25,30 @@ const (
 	SessionStatusClosed = "closed"
 )
 
-// 轮次状态取值（SessionTurn.Status；任务书状态机六值）。
-const (
-	// TurnStatusPending 轮已受理、任务未送达 node（submitted，信箱排队/离线暂存）。
-	TurnStatusPending = "pending"
-	// TurnStatusAwaitingNode 任务已投递 node 未确认开始（offered/acknowledged）。
-	TurnStatusAwaitingNode = "awaiting_node"
-	// TurnStatusRunning node 执行中（任务 running）。
-	TurnStatusRunning = "running"
-	// TurnStatusDone 轮终执行成立且工作结果已证实。T2 无改判通道（内核恒
-	// unverified），本值为保留态：验收链路显式改判（T1 protocol 契约预告）落地
-	// 前无到达路径，SPEC 如实声明。
-	TurnStatusDone = "done"
-	// TurnStatusUnverified 轮终执行成立、工作结果未经证实。T2 完成轮恒此态
-	//（内核第四路无判定通道，禁止文本关键词猜测）。
-	TurnStatusUnverified = "unverified"
-	// TurnStatusFailed 轮终执行不成立（退出码/解析/原生 ID/绑定守卫/内核拒绝/
-	// 过期/取消/平台中断——Error 留痕细分原因）。
-	TurnStatusFailed = "failed"
-)
+	// 轮次状态取值（SessionTurn.Status；任务书状态机六值 + W01-03 投影加法值）。
+	const (
+		// TurnStatusPending 轮已受理、任务未送达 node（submitted，信箱排队/离线暂存）。
+		TurnStatusPending = "pending"
+		// TurnStatusAwaitingNode 任务已投递 node 未确认开始（offered/acknowledged）。
+		TurnStatusAwaitingNode = "awaiting_node"
+		// TurnStatusRunning node 执行中（任务 running）。
+		TurnStatusRunning = "running"
+		// TurnStatusDone 轮终执行成立且工作结果已证实。T2 无改判通道（内核恒
+		// unverified），本值为保留态：验收链路显式改判（T1 protocol 契约预告）落地
+		// 前无到达路径，SPEC 如实声明。
+		TurnStatusDone = "done"
+		// TurnStatusUnverified 轮终执行成立、工作结果未经证实。T2 完成轮恒此态
+		//（内核第四路无判定通道，禁止文本关键词猜测）。
+		TurnStatusUnverified = "unverified"
+		// TurnStatusFailed 轮终执行不成立（退出码/解析/原生 ID/绑定守卫/内核拒绝/
+		// 过期/取消/平台中断——Error 留痕细分原因）。
+		TurnStatusFailed = "failed"
+		// TurnStatusCancelled 轮已取消（终态投影加法值，W01-01 基准 §3/W01-03 RFC
+		// §6.3）：排队取消（未 spawn，Error=turn_cancelled_queued）或执行取消已证
+		// 停止（Error=turn_cancelled_executed）。旧六态不改名不删；证据缺失的取消
+		// （turn_cancel_outcome_unknown）投影 failed（待核对，绝不记成功）。
+		TurnStatusCancelled = "cancelled"
+	)
 
 // Session 会话注册表条目（hub 全局；平台会话 ID 即 node 侧 sessionx 内核键）。
 // 绑定快照（Adapter/PermissionMode/Cwd）在创建时从目标能力卡与请求落定：send
@@ -63,6 +68,13 @@ type Session struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 	// Cwd 绑定快照：会话工作目录（node 本机绝对路径；create 轮下发值）。
 	Cwd string `json:"cwd"`
+	// RequestID 稳定创建请求 ID（W01-03 加法，可选；空=调用方未用幂等创建，行为
+	// 与既有逐字节一致）。同键同文返回原会话、异文 409 request_conflict 的判定键；
+	// 命名空间全局（调用方保证唯一）。
+	RequestID string `json:"request_id,omitempty"`
+	// PayloadHash 创建内容指纹（W01-03 加法；f(node_id, agent, cwd,
+	// permission_mode)，与轮次指纹同一规范化）：request_id 同键同文判定的依据。
+	PayloadHash string `json:"payload_hash,omitempty"`
 	// Status SessionStatusActive | SessionStatusClosed。
 	Status string `json:"status"`
 	// Turns 轮次账本（按 Seq 升序；终态行不再变更，未终态行随任务现态投影）。
@@ -112,6 +124,10 @@ type SessionTurn struct {
 	// 重放同源判定的权威——展示截断不参与判定，同号异文必须 409；任务清理后
 	// 指纹仍在本行，T2-R1 必修5）。
 	PromptHash string `json:"prompt_hash,omitempty"`
+	// RequestID 稳定轮受理请求 ID（W01-03 加法，可选；空=调用方未用幂等投轮）。
+	// 同键同文查回原回执、异文 409 request_conflict 的判定键；重放回执以本行为准
+	//（任务清理后仍可回执，与 PromptHash 同源纪律）。
+	RequestID string `json:"request_id,omitempty"`
 	// Response 轮终答复正文（node 回传 FinalAnswer 原样落账；未终态为空）。
 	Response string `json:"response,omitempty"`
 	// NativeIDOk 原生 ID 校验成立（轮终回写；未终态 false）。
