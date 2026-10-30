@@ -531,117 +531,91 @@ func TestZcodeJSONErrorNoContentEcho(t *testing.T) {
 	}
 }
 
-// TestCodexConfigCorruptFormsRejected 明显损坏/非法配置保守拒绝（联审必修项 2
-// + codex 复审 2d03aba 必修②三个实测放行反例）：任何非法/损坏形态整文件 fail，
-// 原因带「结构无法确认（保守拒绝）」且不与「合法但不支持」措辞混用。
-func TestCodexConfigCorruptFormsRejected(t *testing.T) {
+// TestCodexConfigObviousCorruptionRejected 明显损坏判定（2026-10-30 流程裁决
+// 方案 B：config_recognized 降范围为粗检语义——只拦「明显损坏」，不 chase 文法）：
+// 空文件/全空白、NUL 二进制、无任何松散结构形态（无 [表头] 行也无 " = " 键值行）
+// → fail，既有文案锚点词保留。
+func TestCodexConfigObviousCorruptionRejected(t *testing.T) {
 	cases := []struct {
 		name       string
 		content    string
 		wantReason string
 	}{
-		{"孤立key无值", "model =\n", "孤立 key"},
-		{"孤立key带注释行", "model =\n# trailing comment\n", "孤立 key"},
-		{"未闭合字符串", "model = \"gpt\n", "未闭合引号"},
-		{"未闭合单引号字符串", `name = 'abc` + "\n", "未闭合引号"},
-		{"表头后乱码", "[profiles.default] garbage\n", "尾随垃圾"},
-		{"表头未闭合", "[profiles.default\n", "表头未闭合"},
-		{"值后尾随垃圾", "model = gpt extra\n", "尾随垃圾"},
-		{"无法确认行形态", "just some words\n", "结构无法确认"},
-		{"合法特征行混损坏行", "model = \"gpt\"\nbroken line here\n", "结构无法确认"},
-		// —— 复审必修②三个独立实测放行反例 ——
-		{"裸值裸单词", "model = gpt\n", "裸值形态非法"},
-		{"表头键段引号未闭合", "[profiles.\"broken]\n", "引号键段未在段内闭合"},
-		{"非法转义", "model = \"bad\\q\"\n", "非法转义"},
-		{"非法转义短u", "model = \"x\\u12\"\n", "非法转义"},
-		{"裸值前导零", "count = 007\n", "裸值形态非法"},
-		{"裸值截断浮点", "x = 1.\n", "裸值形态非法"},
-		{"裸值拼错布尔", "x = tru\n", "裸值形态非法"},
-		{"裸值大写布尔", "x = TRUE\n", "裸值形态非法"},
+		{"空文件", "", "空文件"},
+		{"全空白行", "  \n\t\n  \n", "空文件"},
+		{"二进制NUL", "\x00\x01garbage", "NUL"},
+		{"纯注释无结构", "# 只有注释\n# 没有结构行\n", "结构特征"},
+		{"纯垃圾无结构", "just some words without any structure\n", "无法识别出任何 TOML 键值/表头结构"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			home := makeCodexHome(t, tc.content, false)
 			lc, _ := recognizeConfig(HostCodex, home, testNow())
 			if lc.Status != StatusFail {
-				t.Fatalf("损坏形态应保守拒绝，实得 %+v", lc)
+				t.Fatalf("明显损坏应 fail，实得 %+v", lc)
 			}
 			if !strings.Contains(lc.Reason, tc.wantReason) {
 				t.Fatalf("原因应含 %q，实得 %q", tc.wantReason, lc.Reason)
 			}
-			if !strings.Contains(lc.Reason, "结构无法确认（保守拒绝）") {
-				t.Fatalf("原因必须带「结构无法确认（保守拒绝）」，实得 %q", lc.Reason)
-			}
-			if strings.Contains(lc.Reason, "合法 TOML 但当前不支持") {
-				t.Fatalf("非法/损坏不得借用「合法但不支持」措辞，实得 %q", lc.Reason)
-			}
 		})
 	}
 }
 
-// TestCodexConfigUnsupportedFormsWording 合法但当前不支持的形态（联审建议修 1）：
-// 行内数组/行内表/多行字符串是合法 TOML、无法行级确认——fail 但措辞必须与
-// 「非法/损坏」区分（带「合法 TOML 但当前不支持该结构」）。
-func TestCodexConfigUnsupportedFormsWording(t *testing.T) {
+// TestCodexConfigSyntaxErrorsPassWithHonestNote 粗检语义的诚实化核心（2026-10-30
+// 流程裁决）：语法非法输入（裸单词值/非法转义/非法日期/键段引号未闭合/前导零）
+// 不再由检测层判定 fail——粗检 pass，但注记必须明示「未做语法校验、不做 TOML
+// 语法校验」，语法错误由执行 CLI 自行解析暴露（绝不声称语法合法）。
+func TestCodexConfigSyntaxErrorsPassWithHonestNote(t *testing.T) {
 	cases := []struct {
 		name    string
 		content string
-		want    string
 	}{
-		{"行内数组", "tags = [\"a\", \"b\"]\n", "行内数组"},
-		{"行内表", "inline = {a = 1}\n", "行内表"},
-		{"多行字符串", "desc = \"\"\"abc\n", "多行字符串"},
-		{"多行字面串", "desc = '''abc\n", "多行字符串"},
+		{"裸单词值", "x = gpt\n"},
+		{"非法转义", "model = \"bad\\q\"\n"},
+		{"非法日期", "x = 2026-99-99\n"},
+		{"键段引号未闭合", "[profiles.\"broken]\n"},
+		{"前导零整数", "count = 007\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			home := makeCodexHome(t, tc.content, false)
 			lc, _ := recognizeConfig(HostCodex, home, testNow())
-			if lc.Status != StatusFail {
-				t.Fatalf("合法但不支持形态应 fail（保守拒绝），实得 %+v", lc)
+			if lc.Status != StatusPass {
+				t.Fatalf("粗检语义下语法非法输入应 pass（语法判定归执行 CLI），实得 %+v", lc)
 			}
-			if !strings.Contains(lc.Reason, "合法 TOML 但当前不支持该结构") {
-				t.Fatalf("原因必须带「合法 TOML 但当前不支持该结构」，实得 %q", lc.Reason)
+			if !strings.Contains(lc.Reason, "未做语法校验") || !strings.Contains(lc.Reason, "不做 TOML 语法校验") {
+				t.Fatalf("pass 注记必须明示未做语法校验，实得 %q", lc.Reason)
 			}
-			if !strings.Contains(lc.Reason, tc.want) {
-				t.Fatalf("原因应含 %q，实得 %q", tc.want, lc.Reason)
-			}
-			if strings.Contains(lc.Reason, "损坏或非法") || strings.Contains(lc.Reason, "结构无法确认") {
-				t.Fatalf("合法但不支持不得借用损坏措辞，实得 %q", lc.Reason)
+			if !strings.Contains(lc.Reason, "粗检") || !strings.Contains(lc.Reason, "执行 CLI 自行解析暴露") {
+				t.Fatalf("pass 注记应声明粗检口径与 CLI 解析暴露，实得 %q", lc.Reason)
 			}
 		})
 	}
 }
 
-// TestCodexConfigLegalFormsNewlySupported 联审建议修 1 合法形态补充：值后紧邻
-// 注释（无需空白）、空格分隔日期时间、各类裸值合法字面 → 识别过不回归。
-func TestCodexConfigLegalFormsNewlySupported(t *testing.T) {
+// TestCodexConfigBareValuesPassNoRegression 裸值合法字面 pass 无回归（裁决指定
+// 抽查：1.5 / -0.5 / 1e01 等在粗检语义下恒 pass，不再有字面文法误拒面）。
+func TestCodexConfigBareValuesPassNoRegression(t *testing.T) {
 	cases := []string{
-		"auto = true#comment\n",             // 值后紧邻注释，无空白
-		"count = 42# trailing\n",            // 数字后紧邻注释
-		"ts = 1979-05-27T07:32:00Z\n",       // T 分隔日期时间
-		"ts2 = 1979-05-27 07:32:00\n",       // 空格分隔日期时间
-		"local = 07:32:00.999\n",            // 本地时间带小数
-		"big = 1_000_000\n",                 // 整数下划线分隔
-		"hex = 0xDEAD_beef\n",               // 十六进制
-		"neg = -1.5e3\n",                    // 负浮点带指数
-		"day = 1979-05-27\n",                // 纯日期
-		"flags = false\n",                   // 布尔
-		"quoted = \"a\\t\\u00e9b\" # 注释\n", // 转义白名单内（\t、\uXXXX）+ 行尾注释
-		"lit = 'C:\\path\\raw'\n",           // 单引号字面串不转义
+		"ratio = 1.5\n",
+		"delta = -0.5\n",
+		"scale = 1e01\n",
+		"auto = true\n",
+		"retries = 3\n",
+		"day = 1979-05-27\n",
+		"auto = true#comment\n", // 值后紧邻注释（合法 TOML，无需空白）
 	}
 	for i, content := range cases {
 		home := makeCodexHome(t, content, false)
 		lc, _ := recognizeConfig(HostCodex, home, testNow())
 		if lc.Status != StatusPass {
-			t.Fatalf("case %d (%q) 应识别通过，实得 %+v", i, content, lc)
+			t.Fatalf("case %d (%q) 应粗检通过，实得 %+v", i, content, lc)
 		}
 	}
 }
 
-// TestCodexConfigMinimalLegalFormsPass 合法最小形态不回归（联审必修项 2 的
-// pass 面）：裸键+引号值、[表头]、[[数组表]]、裸值、注释与空行、行尾注释 →
-// 识别过。
+// TestCodexConfigMinimalLegalFormsPass 既有合法 fixture pass 不回归（粗检语义
+// 下同样识别过）。
 func TestCodexConfigMinimalLegalFormsPass(t *testing.T) {
 	cases := []string{
 		"model = \"gpt-5\"\n",
@@ -652,7 +626,7 @@ func TestCodexConfigMinimalLegalFormsPass(t *testing.T) {
 		"# 只有注释头\nmodel = \"gpt\" # 行尾注释\n\n[profiles.default]\n",
 		"timeout_ms = 1500\nwait = false\n",
 		"[projects.\"quoted-name\"]\n",
-		"[projects.\"quoted-name\".sub]\n", // 点引号混写表头（合法，逐段确认）
+		"[projects.\"quoted-name\".sub]\n", // 点引号混写表头
 		"\"quoted key\" = \"v\"\n",         // 引号键
 		"a.b.c = 1\n",                      // 点键
 	}

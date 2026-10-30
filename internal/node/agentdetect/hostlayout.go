@@ -23,7 +23,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -32,17 +31,6 @@ import (
 // 清单不命中一律按「无登录标记」处理（fail-closed：只影响 ExecutionReady 不亮，
 // 绝不因清单不命中放行，也绝不据此断言「未登录」）。
 var zcodeMarkerKeys = []string{"auth", "authToken", "credentials"}
-
-// codex TOML 裸值合法字面集（必修②：裸值只容 true/false、整数/浮点/日期时间
-// 形态——含其他字母的裸单词如 `gpt` 是非法 TOML，不得放行）。日期正则同时覆盖
-// 空格分隔日期时间（TOML 合法形态）。
-var (
-	tomlBoolRe  = regexp.MustCompile(`^(?:true|false)$`)
-	tomlIntRe   = regexp.MustCompile(`^[+-]?(?:0|[1-9](?:_?[0-9])*|0[xX][0-9A-Fa-f](?:_?[0-9A-Fa-f])*|0[oO][0-7](?:_?[0-7])*|0[bB][01](?:_?[01])*)$`)
-	tomlFloatRe = regexp.MustCompile(`^[+-]?(?:(?:0|[1-9](?:_?[0-9])*)(?:\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?(?:0|[1-9](?:_?[0-9])*))|inf|nan)$`)
-	tomlDateRe  = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?)?$`)
-	tomlTimeRe  = regexp.MustCompile(`^\d{2}:\d{2}:\d{2}(?:\.\d+)?$`)
-)
 
 // 配置读取闸门的统一文案（测试断言锚点）。
 var (
@@ -113,7 +101,10 @@ func recognizeConfig(host Host, home string, now time.Time) (LayerCheck, LoginMa
 	}
 	lc.Status = StatusPass
 	if host == HostCodex {
-		lc.Reason = "结构启发式识别通过（V0 无 TOML 解析依赖，未解析语义）"
+		// 粗检语义（2026-10-30 流程裁决方案 B）：pass ≠ 语法合法——检测层不做
+		// TOML 语法校验，注记必须明示「未做语法校验」，语法错误由执行 CLI 自行
+		// 解析暴露（绝不冒认语法合法）。
+		lc.Reason = "结构粗检通过（启发式，非语法校验）：检测层不做 TOML 语法校验、未做语法校验，语法错误由执行 CLI 自行解析暴露"
 	}
 	return lc, checkLoginMarker(host, home, markerSegs, doc, now)
 }
@@ -298,7 +289,8 @@ func openNoBlock(path string) (*os.File, error) {
 
 // validateZcodeSetting zcode setting.json 结构识别：与 primewire 合法性口径同源
 // ——全文恰一个顶层 JSON 对象；null、数组、尾部多余内容、空文件均不命中。
-// 返回解析出的顶层对象（供标记键核查；内容不外返）。
+// 返回解析出的顶层对象（供标记键核查；内容不外返）。这是 stdlib encoding/json
+// 真解析（非文法模拟），保留不动。
 func validateZcodeSetting(raw []byte) (map[string]any, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, errors.New("setting.json 为空文件：结构不可识别")
@@ -337,269 +329,35 @@ func jsonErrOffset(dec *json.Decoder, err error) int64 {
 	}
 }
 
-// 行分类三值：lineValid（可确认的合法形态行）；lineCorrupt（非法/损坏——
-// 不可能是合法 TOML 的形态）；lineUnsupported（合法 TOML 但当前不支持——
-// 无法行级确认的合法结构）。两者失败措辞区分（联审建议修 1），均整文件 fail。
-type tomlLineClass int
-
-const (
-	tomlLineValid tomlLineClass = iota
-	tomlLineCorrupt
-	tomlLineUnsupported
-)
-
-// validateCodexConfigToml codex config.toml 保守启发式识别（W06-01 联审必修项 2
-// 收紧 + codex 复审 2d03aba 再收紧）。逐行分类口径：
+// validateCodexConfigToml codex config.toml 结构粗检（2026-10-30 流程裁决方案 B
+// 降范围：检测层不承担 TOML 语法校验职责——字面文法层【正则字面集/转义白名单/
+// 键段扫描器/三值分类器】整层删除，从构造上消除「非法字面放行/合法形态误拒/
+// Unicode 转义」三类必修问题，不再 chase 文法）。判定四步：
 //
-//	合法形态行 = [表头]/[[数组表]]（表头名为裸键段/完整闭合引号段以点相连，
-//	            整行闭合、闭合后至多行尾注释）或 key = 非空值（键同表头名语法；
-//	            值为单行基础/字面串——基础串转义白名单为 TOML 合法集、或裸值
-//	            仅容 true/false、整数/浮点/日期时间字面，值后紧邻 # 注释合法）。
-//	非法/损坏行（孤立 key、未闭合引号、非法转义、裸值非法字面如 `model = gpt`、
-//	            尾随垃圾、表头键段引号未闭合等）→ fail，原因带「结构无法确认
-//	            （保守拒绝）」。
-//	合法但当前不支持的行（行内数组、行内表、多行字符串）→ fail，原因带
-//	            「合法 TOML 但当前不支持该结构」——与非法措辞区分（联审建议修 1）。
+//  1. 空文件（0 字节或全空白行）→ fail「为空文件」；
+//  2. 含 NUL 字节 → fail「二进制内容，非文本配置」；
+//  3. 无任何行匹配松散形态（[ 开头表头行 或 含 " = " 的键值行，跳过空行与
+//     注释行）→ fail「无法识别出任何 TOML 键值/表头结构」；
+//  4. 否则 pass（nil）。
 //
-// pass 需「≥1 个合法形态行 且 无任何损坏/不支持行」——宁可漏判不冒判。不是
-// TOML 语义解析（V0 不引解析依赖），语义级适配待宿主布局确证后再进。
+// pass 仅代表「已知布局位置存在配置文件且非明显损坏」，绝不声称语法合法——
+// 语法非法输入（裸单词值、非法转义、非法日期等）同样 pass，由 pass 注记明示
+// 「未做语法校验，语法错误由执行 CLI 自行解析暴露」（见 recognizeConfig）。
 func validateCodexConfigToml(raw []byte) error {
-	if len(raw) == 0 {
-		return errors.New("config.toml 为空文件：结构不可识别")
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return errors.New("config.toml 为空文件（0 字节或全空白行）：结构不可识别")
 	}
 	if bytes.IndexByte(raw, 0) >= 0 {
-		return errors.New("config.toml 含 NUL 字节（二进制内容）：结构不可识别")
+		return errors.New("config.toml 含 NUL 字节（二进制内容，非文本配置）：结构不可识别")
 	}
-	validLines := 0
-	for i, line := range strings.Split(string(raw), "\n") {
+	for _, line := range strings.Split(string(raw), "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		cls, detail := classifyCodexTomlLine(t)
-		switch cls {
-		case tomlLineValid:
-			validLines++
-		case tomlLineCorrupt:
-			return fmt.Errorf("config.toml 第 %d 行损坏或非法（%s）：结构无法确认（保守拒绝），不冒判已适配", i+1, detail)
-		case tomlLineUnsupported:
-			return fmt.Errorf("config.toml 第 %d 行合法 TOML 但当前不支持该结构（%s）：保守拒绝识别，宁可漏判不冒判", i+1, detail)
+		if strings.HasPrefix(t, "[") || strings.Contains(t, " = ") {
+			return nil // 松散结构形态命中：粗检通过（语法校验不归检测层，见函数注释）
 		}
 	}
-	if validLines == 0 {
-		return errors.New("config.toml 未发现 TOML 结构特征（无 [表头] 或 key = 非空值行）：结构不可识别")
-	}
-	return nil
-}
-
-// classifyCodexTomlLine 单行形态保守分类：返回行分类与细节（供行号定位拼接）。
-func classifyCodexTomlLine(t string) (tomlLineClass, string) {
-	if strings.HasPrefix(t, "[") {
-		return classifyCodexTomlHeader(t)
-	}
-	eq := strings.IndexByte(t, '=')
-	if eq < 0 {
-		return tomlLineCorrupt, "既非 [表头] 也非 key = 行（无结构锚点）"
-	}
-	if eq == 0 {
-		return tomlLineCorrupt, "孤立 =（键缺失）"
-	}
-	key := strings.TrimSpace(t[:eq])
-	val := strings.TrimSpace(t[eq+1:])
-	if detail := codexTomlKeyNameIssue(key); detail != "" {
-		return tomlLineCorrupt, "键形态非法（" + detail + "）"
-	}
-	if val == "" {
-		return tomlLineCorrupt, "key = 后无值（孤立 key）"
-	}
-	return classifyCodexTomlValue(val)
-}
-
-// codexTomlKeyNameIssue 键/表头名语法校验（同一文法）：裸键段（[A-Za-z0-9_-]+）
-// 或完整闭合引号段，段间以裸点相连（点引号混写 "a"."b" 为合法 TOML，逐段确认
-// 后放行）。返回空串=合法；否则为损坏原因（必修②：引号必须段内闭合，如
-// `[profiles."broken]` 的键段引号未闭合即损坏）。
-func codexTomlKeyNameIssue(name string) string {
-	i := 0
-	for {
-		if i >= len(name) {
-			return "名为空或以点结尾"
-		}
-		if c := name[i]; c == '"' || c == '\'' {
-			st, rest := scanClosedQuoted(name[i:])
-			switch st {
-			case quotedUnclosed:
-				return "引号键段未在段内闭合"
-			case quotedBadEscape:
-				return "引号键段含非法转义"
-			}
-			i = len(name) - len(rest)
-		} else {
-			j := i
-			for j < len(name) && name[j] != '.' {
-				if !isTomlBareKeyByte(name[j]) {
-					return "裸键段含非法字符"
-				}
-				j++
-			}
-			if j == i {
-				return "名为空段（空段或以点开头）"
-			}
-			i = j
-		}
-		if i == len(name) {
-			return ""
-		}
-		if name[i] != '.' {
-			return "引号段后未以点相连"
-		}
-		i++ // 跳过点，继续下一段
-	}
-}
-
-// isTomlBareKeyByte 裸键段合法字节。
-func isTomlBareKeyByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
-}
-
-// classifyCodexTomlHeader 表头行：[[name]] / [name]，表头名按键文法逐段校验
-// （必修②：`[profiles."broken]` 键段引号未闭合 → 损坏），闭合后至多行尾注释。
-func classifyCodexTomlHeader(t string) (tomlLineClass, string) {
-	dbl := strings.HasPrefix(t, "[[")
-	open := 1
-	closeTok := "]"
-	if dbl {
-		open = 2
-		closeTok = "]]"
-	}
-	idx := strings.Index(t, closeTok)
-	if idx < 0 {
-		return tomlLineCorrupt, "表头未闭合（缺 ]）"
-	}
-	name := t[open:idx]
-	if name == "" {
-		return tomlLineCorrupt, "表头名为空"
-	}
-	if issue := codexTomlKeyNameIssue(name); issue != "" {
-		return tomlLineCorrupt, "表头名"+issue
-	}
-	tail := strings.TrimSpace(t[idx+len(closeTok):])
-	if tail != "" && !strings.HasPrefix(tail, "#") {
-		return tomlLineCorrupt, "表头后尾随垃圾 token"
-	}
-	return tomlLineValid, ""
-}
-
-// classifyCodexTomlValue 值形态分类：
-//   - 多行字符串/行内数组/行内表首行：合法 TOML 但当前不支持 → lineUnsupported；
-//   - 单行基础/字面串：须同行闭合，基础串转义白名单为 TOML 合法集（必修②：
-//     \q 等白名单外转义即损坏），闭合后至多注释；
-//   - 裸值：仅容 true/false、整数/浮点/日期时间字面（必修②：`model = gpt`
-//     类裸单词即非法）；首个 # 即注释起点（TOML 允许值后紧邻注释，无需空白，
-//     联审建议修 1）；空格分隔日期时间按 tomlDateRe 整体确认。
-func classifyCodexTomlValue(val string) (tomlLineClass, string) {
-	switch {
-	case strings.HasPrefix(val, `"""`), strings.HasPrefix(val, `'''`):
-		return tomlLineUnsupported, "多行字符串"
-	case val[0] == '[':
-		return tomlLineUnsupported, "行内数组（含其多行形态）"
-	case val[0] == '{':
-		return tomlLineUnsupported, "行内表"
-	case val[0] == '"', val[0] == '\'':
-		st, rest := scanClosedQuoted(val)
-		switch st {
-		case quotedUnclosed:
-			return tomlLineCorrupt, "未闭合引号至行尾"
-		case quotedBadEscape:
-			return tomlLineCorrupt, "基础字符串含非法转义（合法集：\\b \\t \\n \\f \\r \\\" \\\\ \\uXXXX \\UXXXXXXXX）"
-		}
-		tail := strings.TrimSpace(rest)
-		if tail != "" && !strings.HasPrefix(tail, "#") {
-			return tomlLineCorrupt, "值后尾随垃圾 token"
-		}
-		return tomlLineValid, ""
-	}
-	// 裸值：首个 # 即注释起点（紧邻注释合法）
-	body := val
-	if idx := strings.IndexByte(val, '#'); idx >= 0 {
-		body = strings.TrimSpace(val[:idx])
-	}
-	if body == "" {
-		return tomlLineCorrupt, "key = 后无值（注释不构成值）"
-	}
-	if tomlDateRe.MatchString(body) { // 含空格分隔日期时间整体确认
-		return tomlLineValid, ""
-	}
-	if strings.ContainsAny(body, " \t") {
-		return tomlLineCorrupt, "裸值后尾随垃圾 token"
-	}
-	if tomlBoolRe.MatchString(body) || tomlIntRe.MatchString(body) ||
-		tomlFloatRe.MatchString(body) || tomlTimeRe.MatchString(body) {
-		return tomlLineValid, ""
-	}
-	return tomlLineCorrupt, "裸值形态非法（仅容 true/false、整数/浮点/日期时间字面）"
-}
-
-// 引号字符串扫描状态三值：闭合 / 至行尾未闭合 / 基础串含非法转义。
-type quotedScan int
-
-const (
-	quotedClosed quotedScan = iota
-	quotedUnclosed
-	quotedBadEscape
-)
-
-// scanClosedQuoted 扫描以引号开头的单行字符串字面量（s[0] 为引号）：单引号
-// 字面量不转义；双引号基础串转义白名单为 TOML 合法集（必修②：任意「反斜杠+
-// 任意字符」跳过会让 `"bad\q"` 放行——白名单外记非法转义）。返回状态与闭合
-// 后余文。
-func scanClosedQuoted(s string) (quotedScan, string) {
-	q := s[0]
-	basic := q == '"'
-	for i := 1; i < len(s); i++ {
-		switch c := s[i]; {
-		case basic && c == '\\':
-			if i+1 >= len(s) {
-				return quotedUnclosed, "" // 行尾落单反斜杠：按未闭合处理
-			}
-			adv, ok := tomlEscapeWidth(s[i:])
-			if !ok {
-				return quotedBadEscape, ""
-			}
-			i += adv - 1 // 与循环自增合计前进 adv
-		case c == q:
-			return quotedClosed, s[i+1:]
-		}
-	}
-	return quotedUnclosed, ""
-}
-
-// tomlEscapeWidth 计算基础串转义序列宽度（s[0]=='\\'）：合法返回宽度，白名单
-// 外返回 ok=false。TOML 合法集：\b \t \n \f \r \" \\（2 宽）、\uXXXX（6 宽，
-// 4 位十六进制）、\UXXXXXXXX（10 宽，8 位十六进制）。
-func tomlEscapeWidth(s string) (int, bool) {
-	switch s[1] {
-	case 'b', 't', 'n', 'f', 'r', '"', '\\':
-		return 2, true
-	case 'u':
-		if len(s) >= 6 && isHexBytes(s[2:6]) {
-			return 6, true
-		}
-	case 'U':
-		if len(s) >= 10 && isHexBytes(s[2:10]) {
-			return 10, true
-		}
-	}
-	return 0, false
-}
-
-// isHexBytes 十六进制字节判定。
-func isHexBytes(bs string) bool {
-	for i := 0; i < len(bs); i++ {
-		c := bs[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-			return false
-		}
-	}
-	return true
+	return errors.New("config.toml 未发现 TOML 结构特征（无 [表头] 行或含 \" = \" 的键值行）：无法识别出任何 TOML 键值/表头结构，结构不可识别")
 }
