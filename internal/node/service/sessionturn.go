@@ -21,8 +21,11 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
+	"github.com/mtl802/swarmmind/internal/node/sessionop"
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
@@ -37,7 +40,8 @@ var sessionPermissionDenylist = map[string]bool{
 }
 
 // sessionTurnError 会话轮执行错误码（TaskResult.Error 首位，供 hub 轮行留痕与
-// 调用方判定；语义与 sessionx 显式拒绝面对齐）。
+// 调用方判定；语义与 sessionx 显式拒绝面对齐）。W01-02 增量（全部加法，旧码与
+// 值不变）：取值源自 sessionop 常量（单一真相，RFC §7）。
 const (
 	sessionErrUnsupported = "session_unsupported"      // node 未装配会话内核
 	sessionErrAgent       = protocol.CodeAgentNotFound // agent 不在会话装配表
@@ -48,13 +52,183 @@ const (
 	sessionErrPermission  = "permission_denied"        // 提权档位断言
 	sessionErrInput       = "input_invalid"            // cwd/prompt 非法
 	sessionErrTurnFailed  = "turn_failed"              // 内核轮次失败（退出码/解析/原生 ID）
+
+	sessionErrQueueFull       = sessionop.CodeQueueFull            // 有界队列已满（409）
+	sessionErrCloseInFlight   = sessionop.CodeCloseInFlight        // 存在非终态受理轮，拒绝关闭（409）
+	sessionErrRequestConflict = sessionop.CodeRequestConflict      // 同 request_id 异文（409）
+	sessionErrWorkspace       = sessionop.CodeWorkspaceDenied      // cwd 越出允许工作区根（403）
+	sessionErrCancelQueued    = sessionop.CodeCancelQueued         // 排队取消成立（未 spawn）
+	sessionErrCancelExecuted  = sessionop.CodeCancelExecuted       // 执行取消成立（有停止证据）
+	sessionErrCancelUnknown   = sessionop.CodeCancelOutcomeUnknown // 取消停止事实未证实（待核对）
 )
 
 // runSessionTurn 执行一轮会话（execute 分支入口；task.Session 必非 nil）。
-// 返回值沿任务结果链：completed/failed + TurnOutcome 产物。
+// 包装器：原执行体收敛后，对 sessionop 取消意图轮按证据改写取消类终态并收敛
+// 取消句柄（RFC §3：取消终态一律由执行 goroutine 依自身位置与证据记账）；无
+// sessionop 或非受理轮（close 等）零变化。
 func (s *Service) runSessionTurn(ctx context.Context, task protocol.Task) protocol.TaskResult {
+	res, conv := s.runSessionTurnExec(ctx, task)
+	return s.sessionTurnFinish(task, res, conv)
+}
+
+// sessionTurnEvidence 单轮执行的内核证据（取消分类依据，RFC §3 证据口径）。
+type sessionTurnEvidence struct {
+	// kernelTurn 内核轮行（nil = 未进入内核执行：调度/内核门排队期弃队，未 spawn）。
+	kernelTurn *protocol.Turn
+}
+
+// sessionTurnFinish 会话轮统一收口：sessionop 取消意图的轮依内核证据改写取消类
+// 终态（排队取消/执行取消有证/证据缺失待核对；自然终态先到保留）。句柄收敛不在此
+// 处——移至 execute 终态落盘点之后（若先收敛，execute 收尾分支的意图复查将查空
+// 句柄，已分类的取消终态会被既有 cancelledResult 改写）。
+func (s *Service) sessionTurnFinish(task protocol.Task, res protocol.TaskResult, conv sessionTurnEvidence) protocol.TaskResult {
+	sid, seq, ok := s.sessionTurnIdent(task)
+	if !ok {
+		return res
+	}
+	if s.sessionOps.IsCancelRequested(sid, seq) {
+		return sessionCancelledResult(seq, sessionop.ClassifyCancelTurn(conv.kernelTurn), res, protocol.NowUTC())
+	}
+	return res
+}
+
+// sessionCancelledResult 取消意图轮的终态改写（RFC §3 矩阵）：queued/executed →
+// cancelled 终态；unknown → failed 待核对（绝不虚报已停止、绝不记成功）；natural
+// → 原样保留（先到保留，迟到取消由 CancelTurn 如实报「已完成不可取消」）。
+func sessionCancelledResult(seq int64, cls sessionop.CancelClass, res protocol.TaskResult, now time.Time) protocol.TaskResult {
+	switch cls {
+	case sessionop.CancelClassQueued:
+		return protocol.TaskResult{
+			Status:     protocol.ResultCancelled,
+			ExitCode:   protocol.ExitCodeNotRun,
+			Error:      sessionErrCancelQueued + ": 本轮在进入执行前被取消（未 spawn，确定性终止；平台序号已受理消耗，不回退）",
+			FinishedAt: now,
+			Turn:       &protocol.TurnOutcome{TurnSeq: seq, NativeIDOk: false, WorkResult: protocol.WorkUnverified},
+		}
+	case sessionop.CancelClassExecuted:
+		// runner 治理已整组终止并回收进程组（停止证据：治理标记 + 退出码 -1）；
+		// 已采集的 stdout/stderr tail 保留供核对。
+		res.Status = protocol.ResultCancelled
+		res.Error = sessionErrCancelExecuted + ": 本轮执行已被取消（进程组已整组终止并回收，无孤儿）"
+		res.FinishedAt = now
+		return res
+	case sessionop.CancelClassUnknown:
+		res.Status = protocol.ResultFailed
+		res.Error = sessionErrCancelUnknown + ": 取消已触发但进程停止事实未证实，落待核对（绝不虚报已停止）"
+		res.FinishedAt = now
+		return res
+	default:
+		return res // CancelClassNatural：自然终态先到保留（防御位，正常不可达）
+	}
+}
+
+// sessionTurnIdent 会话受理轮身份（seq>0 的 create/send 轮；close/普通任务/未装
+// 配 sessionop 一律 false）。
+func (s *Service) sessionTurnIdent(task protocol.Task) (sessionID string, seq int64, ok bool) {
+	if task.Session == nil || task.Session.TurnSeq <= 0 || s.sessionOps == nil {
+		return "", 0, false
+	}
+	return task.Session.SessionID, task.Session.TurnSeq, true
+}
+
+// sessionCancelIntent 报告该轮是否已有 sessionop 取消意图（execute 弃队/收尾分支
+// 的路由依据：意图轮走 sessionop 记账，非意图轮沿既有 task_cancel/关闭收尾）。
+func (s *Service) sessionCancelIntent(task protocol.Task) bool {
+	sid, seq, ok := s.sessionTurnIdent(task)
+	if !ok {
+		return false
+	}
+	return s.sessionOps.IsCancelRequested(sid, seq)
+}
+
+// bindSessionTurnHandle 登记并绑定会话受理轮取消句柄（execute 入口；受理互斥段
+// 已登记时幂等绑定，绑定前已登记的意图立即触发——窄窗口闭合）。
+func (s *Service) bindSessionTurnHandle(task protocol.Task, trigger func()) {
+	sid, seq, ok := s.sessionTurnIdent(task)
+	if !ok {
+		return
+	}
+	s.sessionOps.BeginTurn(sid, seq, task.ID)
+	s.sessionOps.BindCancel(sid, seq, task.ID, trigger)
+}
+
+// convergeSessionTurn 收敛取消句柄（有终态记账的收口）。
+func (s *Service) convergeSessionTurn(task protocol.Task) {
+	sid, seq, ok := s.sessionTurnIdent(task)
+	if !ok {
+		return
+	}
+	s.sessionOps.ConvergeTurn(sid, seq, task.ID)
+}
+
+// abortSessionTurn 无终态弃队的句柄收敛（服务关闭弃队/MarkStarted 失败等）：释放
+// CancelTurn 等待者，账本实况如实判定，不虚报。
+func (s *Service) abortSessionTurn(task protocol.Task) {
+	sid, seq, ok := s.sessionTurnIdent(task)
+	if !ok {
+		return
+	}
+	s.sessionOps.AbortTurn(sid, seq, task.ID)
+}
+
+// finishCancelledSessionTurnBeforeRun 未进入执行即取消的排队取消记账（RFC §3 矩
+// 阵行 2：调度/并发槽等待期弃队——确定性终止，本轮绝不 spawn）：账本落
+// finished(cancelled, turn_cancelled_queued)（序号已随受理消耗，高水位不回退），
+// 收敛句柄。落盘失败不虚报（条目保持非终态，CancelTurn 如实报未确认）。
+func (s *Service) finishCancelledSessionTurnBeforeRun(task protocol.Task) {
+	res := sessionCancelledResult(task.Session.TurnSeq, sessionop.CancelClassQueued,
+		protocol.TaskResult{}, protocol.NowUTC())
+	if err := s.cfg.Ledger.MarkFinished(task.ID, res); err != nil {
+		log.Printf("[node] 会话排队取消落盘未生效（先到终态为准或落盘失败）task=%s session=%s seq=%d: %v",
+			task.ID, task.Session.SessionID, task.Session.TurnSeq, err)
+	} else {
+		s.notifyTerminal(task.ID) // 首次落终态即通知（standalone 旁路，与既有取消路径同口径）
+		s.sendResult(task.ID, res)
+		log.Printf("[node] 会话排队取消成立（未 spawn，序号已消耗）task=%s session=%s seq=%d",
+			task.ID, task.Session.SessionID, task.Session.TurnSeq)
+	}
+	s.convergeSessionTurn(task)
+}
+
+// sessionTurnWsKey 会话轮的 workdir 互斥键（RFC §5：扩展既有 wsMutex 键口径，
+// 不建第二套互斥）：create/send 按**会话 cwd** 经 agentid.WorkspaceID（Abs+Clean+
+// EvalSymlinks 归一）派生——同真实工作区的两会话、会话与普通任务同键串行，符号
+// 链接别名与真实路径同键；send 未携 cwd 时查内核存储绑定。close 任务（seq=0）与
+// 普通任务返回 ""（沿 agent 产物根键，既有行为零变化）。
+func (s *Service) sessionTurnWsKey(task protocol.Task) string {
+	if task.Session == nil || task.Session.TurnSeq <= 0 {
+		return ""
+	}
+	cwd := task.Session.Cwd
+	if cwd == "" && task.Session.Op == protocol.SessionTurnOpSend && s.sessions != nil {
+		if sess, ok := s.sessions.Status(task.Session.SessionID); ok {
+			cwd = sess.Cwd
+		}
+	}
+	if cwd == "" {
+		return ""
+	}
+	return agentid.WorkspaceID(cwd)
+}
+
+// regCancelOnce 登记在途取消开关（幂等）：本机提交互斥段内已登记的沿用（受理先
+// 于 execute，取消触发自受理时刻起可达），避免 execute 重复登记覆盖既有开关。
+func (s *Service) regCancelOnce(taskID string) *cancelEntry {
+	s.muCancels.Lock()
+	defer s.muCancels.Unlock()
+	if ce, ok := s.cancels[taskID]; ok {
+		return ce
+	}
+	ce := newCancelEntry()
+	s.cancels[taskID] = ce
+	return ce
+}
+
+// runSessionTurnExec 会话轮执行体（原 runSessionTurn 实现，行为不变；额外返回
+// 内核证据供取消分类）。返回值沿任务结果链：completed/failed + TurnOutcome 产物。
+func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (protocol.TaskResult, sessionTurnEvidence) {
 	ref := task.Session
-	failed := func(code, msg string) protocol.TaskResult {
+	failed := func(code, msg string) (protocol.TaskResult, sessionTurnEvidence) {
 		log.Printf("[node] 会话轮失败 task=%s session=%s seq=%d op=%s: %s", task.ID, ref.SessionID, ref.TurnSeq, ref.Op, msg)
 		return protocol.TaskResult{
 			Status:     protocol.ResultFailed,
@@ -62,7 +236,7 @@ func (s *Service) runSessionTurn(ctx context.Context, task protocol.Task) protoc
 			Error:      code + ": " + msg,
 			FinishedAt: protocol.NowUTC(),
 			Turn:       &protocol.TurnOutcome{TurnSeq: ref.TurnSeq, NativeIDOk: false, WorkResult: protocol.WorkUnverified},
-		}
+		}, sessionTurnEvidence{}
 	}
 	if s.sessions == nil {
 		return failed(sessionErrUnsupported, "本机未装配会话内核（agent 未声明 session_adapter 或 node 版本过旧）")
@@ -74,6 +248,13 @@ func (s *Service) runSessionTurn(ctx context.Context, task protocol.Task) protoc
 	case protocol.SessionTurnOpCreate:
 		if ref.Cwd == "" {
 			return failed(sessionErrInput, "create 轮缺 cwd（会话工作目录必填）")
+		}
+		// 工作区授权防御位（RFC §5）：create 轮 cwd 必须在允许根内（本地受理入口
+		// 已判，此处覆盖 hub 直下发的执行口；send/close 沿存储绑定不重查）。
+		if s.sessionOps != nil {
+			if err := s.sessionOps.AuthorizeWorkspace(ref.Cwd); err != nil {
+				return failed(sessionErrWorkspace, err.Error())
+			}
 		}
 		// 首轮绑定断言核验（T2-R1 必修2 / T2-R2 补完，绝不带漂移绑定 spawn CLI）：
 		// 帧断言值（适配器 + 权限模式）与本机装配表规范化后的实际配置同口核对——
@@ -94,19 +275,27 @@ func (s *Service) runSessionTurn(ctx context.Context, task protocol.Task) protoc
 		}
 		sess, turn, err := s.sessions.CreateWithID(ctx, ref.SessionID, task.TargetAgent, ref.Cwd, promptOf(task))
 		if err != nil {
-			return failed(sessionErrCodeOf(err), err.Error())
+			r, ev := failed(sessionErrCodeOf(err), err.Error())
+			if turn != nil {
+				ev.kernelTurn = turn
+			}
+			return r, ev
 		}
 		log.Printf("[node] 会话首轮建立 task=%s session=%s native=%s adapter=%s perm=%s",
 			task.ID, sess.ID, sess.NativeID, sess.Adapter, sess.PermissionMode)
-		return turnCompleted(ref.TurnSeq, turn)
+		return turnCompleted(ref.TurnSeq, turn), sessionTurnEvidence{kernelTurn: turn}
 	case protocol.SessionTurnOpSend:
 		sess, turn, err := s.sessions.Send(ctx, ref.SessionID, promptOf(task))
 		if err != nil {
-			return failed(sessionErrCodeOf(err), err.Error())
+			r, ev := failed(sessionErrCodeOf(err), err.Error())
+			if turn != nil {
+				ev.kernelTurn = turn
+			}
+			return r, ev
 		}
 		log.Printf("[node] 会话续轮完成 task=%s session=%s seq=%d（原生线程 %s）",
 			task.ID, sess.ID, turn.Seq, sess.NativeID)
-		return turnCompleted(ref.TurnSeq, turn)
+		return turnCompleted(ref.TurnSeq, turn), sessionTurnEvidence{kernelTurn: turn}
 	case protocol.SessionTurnOpClose:
 		// 关闭是管理动作收尾：目标态已达成的三类（已关闭/无映射/agent 配置漂移后
 		// 的残账）一律幂等 completed——注册表是关闭决定的权威，node 清理为收尾
@@ -123,7 +312,7 @@ func (s *Service) runSessionTurn(ctx context.Context, task protocol.Task) protoc
 				ExitCode:   0,
 				FinishedAt: protocol.NowUTC(),
 				Turn:       &protocol.TurnOutcome{TurnSeq: 0, NativeIDOk: true, WorkResult: protocol.WorkUnverified},
-			}
+			}, sessionTurnEvidence{}
 		default:
 			return failed(sessionErrTurnFailed, err.Error())
 		}
@@ -230,6 +419,21 @@ func (s *Service) SubmitSessionTurnLocal(req LocalSessionTurnRequest) (*LocalTur
 		s.localMu.Unlock()
 		return nil, err
 	}
+	// sessionop 受理守卫（W01-02 RFC §2/§5；与入账同锁域，杜绝「检查后入账」竞态；
+	// 拒绝即零副作用——无账本条目、高水位不推进、CLI 不执行）。未装配 sessionop
+	// 时全部短路（行为与既有逐字节一致）。
+	if s.sessionOps != nil {
+		if err := s.sessionOps.AdmissionGuard(sessionID); err != nil {
+			s.localMu.Unlock()
+			return nil, &RemoteError{Code: sessionErrQueueFull, Msg: err.Error()}
+		}
+		if op == protocol.SessionTurnOpCreate {
+			if err := s.sessionOps.AuthorizeWorkspace(cwd); err != nil {
+				s.localMu.Unlock()
+				return nil, &RemoteError{Code: sessionErrWorkspace, Msg: err.Error()}
+			}
+		}
+	}
 	now := protocol.NowUTC()
 	task := protocol.Task{
 		ID:          protocol.NewTaskID(),
@@ -254,7 +458,13 @@ func (s *Service) SubmitSessionTurnLocal(req LocalSessionTurnRequest) (*LocalTur
 		s.localMu.Unlock()
 		return nil, fmt.Errorf("本地入账失败: %w", err)
 	}
-	s.localMu.Unlock() // 入账即序号预留完成，执行异步不持锁
+	// 受理即登记取消句柄与取消开关（登记先于任何取消可达时刻，W01-02 RFC §3）；
+	// execute 沿 regCancelOnce 沿用同一开关。入账即序号预留完成，执行异步不持锁。
+	if s.sessionOps != nil {
+		s.sessionOps.BeginTurn(sessionID, seq, task.ID)
+	}
+	s.regCancel(task.ID)
+	s.localMu.Unlock()
 	s.execute(task)
 	return &LocalTurnAck{SessionID: sessionID, TurnSeq: seq, Op: op, TaskID: task.ID, TraceID: task.TraceID}, nil
 }
@@ -340,12 +550,24 @@ func localNextTurnSeq(sess protocol.Session, l *ledger.Ledger, sessionID string)
 }
 
 // CloseSessionLocal 本地关闭会话（同步直调内核——本机操作无投递链；幂等语义同
-// hub 侧：已关闭/无映射即达成）。返回关闭后的会话快照。创建在途时内核侧共用
-// 写者门串行化：本调用等首轮收束后关闭（会话绝不以 open 复活，T2-R1 必修4）；
-// 映射尚未发布且创建未开始时，内核落持久化关闭墓碑——后续到达的创建不再发布。
+// hub 侧：已关闭/无映射即达成）。返回关闭后的会话快照。
+//
+// 关闭在途防护（W01-02 RFC §4）：装配 sessionop 时，localMu 互斥段内判定存在非
+// 终态受理轮即拒绝（ErrCloseInFlight，指向取消/等待）——防护与受理同锁域，本地
+// 新轮不可能「检查后插入」；放行后内核 Close 语义零变化：创建在途时共用写者门
+// 串行化（本调用等首轮收束后关闭，会话绝不以 open 复活，T2-R1 必修4）；映射尚
+// 未发布且创建未开始时，内核落持久化关闭墓碑——后续到达的创建不再发布。
 func (s *Service) CloseSessionLocal(sessionID string) (protocol.Session, error) {
 	if s.sessions == nil {
 		return protocol.Session{}, &RemoteError{Code: sessionErrUnsupported, Msg: "本机未装配会话内核"}
+	}
+	if s.sessionOps != nil {
+		s.localMu.Lock()
+		err := s.sessionOps.CloseGuard(sessionID)
+		s.localMu.Unlock()
+		if err != nil {
+			return protocol.Session{}, &RemoteError{Code: sessionErrCloseInFlight, Msg: err.Error()}
+		}
 	}
 	sess, err := s.sessions.Close(sessionID)
 	switch {

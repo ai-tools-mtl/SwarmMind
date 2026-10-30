@@ -27,6 +27,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/inputs"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
+	"github.com/mtl802/swarmmind/internal/node/sessionop"
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/transport"
@@ -73,6 +74,12 @@ type Config struct {
 	// ExecProfile.SessionAdapter 声明集装配（cmd/node buildSessionAgents），
 	// 启动期一次性。
 	Sessions *sessionx.Manager
+	// SessionOps 会话操作服务（W01-02，sessionop.Service；nil = 全部新增判定
+	// 短路，行为与既有逐字节一致）。职责：受理守卫（逐会话队列上限/工作区授权/
+	// 关闭在途防护）、取消原语与竞态收敛记账、创建请求 ID 持久登记、重启不确定
+	// 收敛（New 内一次性执行，先于任何恢复重投）。生产装配归 W01-03（cmd/node
+	// 属 W01-02 批次禁区）；docs/tasks/v3/W01-02-rfc.md 为定案依据。
+	SessionOps *sessionop.Service
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -124,6 +131,13 @@ type Service struct {
 	// runSessionTurn，投递/账本/回传全链与普通任务共用（身份分离见 protocol
 	// SessionTurnRef 注）。
 	sessions *sessionx.Manager
+
+	// sessionOps 会话操作服务（W01-02，Config.SessionOps 注入；nil = 全部新增
+	// 判定短路，零行为变化）。受理守卫/取消记账/关闭防护/重启收敛的接线点：
+	// SubmitSessionTurnLocal（受理互斥段守卫+句柄登记）、CloseSessionLocal
+	//（关闭在途防护）、execute（互斥键扩展/句柄绑定/弃队收敛）、runSessionTurn
+	//（取消终态依证据记账）。
+	sessionOps *sessionop.Service
 
 	// localMu 本机会话提交互斥（T2-R1 建议3）：localSessionOp 的操作/序号推导到
 	// 账本入账之间持锁——本机平台轮号（账本 max+1）原子预留，并发提交同一会话
@@ -183,6 +197,7 @@ func New(cfg Config, tr transport.Transport) *Service {
 		runners:           cfg.Runners,
 		roots:             cfg.ArtifactRoots,
 		sessions:          cfg.Sessions,
+		sessionOps:        cfg.SessionOps,
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -231,6 +246,17 @@ func New(cfg Config, tr transport.Transport) *Service {
 	// 诚实声明（R2 建议修）：降级持久化与本次清扫之间若再次崩溃，内存清扫清单
 	// 丢失且下次启动条目已终态不再收集——清扫是一次性尽力动作（安全侧漏清扫），
 	// 非必达保证；任务终态已由 recover 降级收敛，主人可见。
+	// 会话轮重启不确定收敛（W01-02 RFC §6）：装配期一次性把非终态受理轮落待核对
+	// 终态——先于任何恢复重投（Reschedule 清单虽在 ledger.Open 内先期生成，恢复
+	// 执行入口 MarkStarted 对已终态条目必败），绝不自动重跑、绝不重投 CLI。
+	if s.sessionOps != nil {
+		n, err := s.sessionOps.RecoverUncertainTurns(protocol.NowUTC())
+		if err != nil {
+			log.Printf("[node] 会话轮重启收敛未完成（已收敛 %d 条，剩余条目下次启动重试）: %v", n, err)
+		} else if n > 0 {
+			log.Printf("[node] 会话轮重启收敛：非终态受理轮 %d 条已落待核对终态（不重跑）", n)
+		}
+	}
 	tr.Subscribe(s.HandleFrame)
 	s.wg.Add(3)
 	go s.resendWorker()
@@ -333,6 +359,12 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 		log.Printf("[node] 账本入账失败 task=%s: %v", task.ID, err)
 		return
 	}
+	// 会话受理轮取消句柄登记（W01-02 RFC §3：登记先于任何取消可达时刻；与入账
+	// 同一 goroutine 相邻执行，消除受理与 execute 之间的窄窗口。触发开关在
+	// execute 入口 BindCancel 补绑，绑定前已登记的意图届时立即生效）。
+	if task.Session != nil && task.Session.TurnSeq > 0 && s.sessionOps != nil {
+		s.sessionOps.BeginTurn(task.Session.SessionID, task.Session.TurnSeq, task.ID)
+	}
 	s.sendRef(protocol.MsgTaskAck, task.ID) // accepted 落盘成功后才发（SPEC 4.7）
 	s.execute(task)
 }
@@ -355,11 +387,19 @@ func (s *Service) handleOffer(env *protocol.Envelope) {
 // 走下方检查退出（defer 释放，无执行副作用）。
 func (s *Service) execute(task protocol.Task) {
 	ws := s.wsByAgent[task.TargetAgent]
+	// 会话轮互斥键扩展（W01-02 RFC §5，同一 wsMutex 不建第二套互斥）：create/send
+	// 按会话 cwd 真实路径派生（符号链接别名同键），同工作区的会话与会话、会话与
+	// 普通任务同键串行；close 任务与普通任务沿 agent 产物根键（既有行为零变化）。
+	if k := s.sessionTurnWsKey(task); k != "" {
+		ws = k
+	}
 	var wake <-chan struct{} // 非 nil：已登记排队，release 授予时关闭
 	if ws != "" {
 		wake = s.wsLocks.reserve(ws, task.ID) // nil=已持有（含自持重投）
 	}
-	ce := s.regCancel(task.ID) // task_cancel 入口（cancel.go）；goroutine 退出注销
+	ce := s.regCancelOnce(task.ID) // task_cancel 入口（cancel.go）；goroutine 退出注销。
+	// 本机受理互斥段已登记时沿用同一开关（W01-02：取消触发自受理时刻起可达）。
+	s.bindSessionTurnHandle(task, ce.trigger) // 会话受理轮取消句柄（登记+绑定；非会话轮零操作）
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -369,12 +409,18 @@ func (s *Service) execute(task protocol.Task) {
 			case <-wake: // release 先置 held=本任务再 close，唤醒即持有
 			case <-s.ctx.Done():
 				if s.wsLocks.withdraw(ws, task.ID, wake) {
+					s.abortSessionTurn(task) // 会话轮句柄收敛（防 CancelTurn 等待悬挂）
 					return // 未获授予即放弃：条目保持 accepted，重启恢复再调度
 				}
 				// 授予与关闭竞态：持有已生效，按持有走下方关闭检查退出
 			case <-ce.doneCh():
 				if s.wsLocks.withdraw(ws, task.ID, wake) {
+					if s.sessionCancelIntent(task) {
+						s.finishCancelledSessionTurnBeforeRun(task) // sessionop 排队取消：不执行，落 queued 终态收敛句柄
+						return
+					}
 					s.finishCancelledBeforeRun(task.ID, ce.cancelFence()) // 管理面取消：不再执行，落终态回传
+					s.abortSessionTurn(task) // 会话轮句柄收敛（终态由 cancel.go 路径落账，无 sessionop 记账）
 					return
 				}
 				// 授予与取消竞态：持有已生效，按持有走下方取消检查退出
@@ -386,12 +432,18 @@ func (s *Service) execute(task protocol.Task) {
 			if ws != "" {
 				s.wsLocks.release(ws, task.ID)
 			}
+			s.abortSessionTurn(task) // 会话轮句柄收敛（条目保持 accepted，重启恢复再调度）
 			return
 		case <-ce.doneCh():
 			if ws != "" {
 				s.wsLocks.release(ws, task.ID)
 			}
+			if s.sessionCancelIntent(task) {
+				s.finishCancelledSessionTurnBeforeRun(task) // sessionop 排队取消：不执行
+				return
+			}
 			s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
+			s.abortSessionTurn(task) // 会话轮句柄收敛（无 sessionop 记账路径）
 			return
 		}
 		defer func() { <-s.sem }()
@@ -408,7 +460,14 @@ func (s *Service) execute(task protocol.Task) {
 		// 终态（账本先到为准，与取消路径竞争失败则幂等收敛）。
 		if runCtx.Err() != nil {
 			if ce.triggered() {
-				s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
+				if s.sessionCancelIntent(task) {
+					s.finishCancelledSessionTurnBeforeRun(task) // sessionop 排队取消（spawn 前拦截）
+				} else {
+					s.finishCancelledBeforeRun(task.ID, ce.cancelFence())
+					s.abortSessionTurn(task) // 会话轮句柄收敛（无 sessionop 记账路径）
+				}
+			} else {
+				s.abortSessionTurn(task) // 服务关闭弃队：会话轮句柄收敛（条目保持 accepted）
 			}
 			return
 		}
@@ -425,8 +484,10 @@ func (s *Service) execute(task protocol.Task) {
 			}
 			if err := s.cfg.Ledger.MarkFinished(task.ID, res); err != nil {
 				log.Printf("[node] 写入过期终态失败 task=%s: %v", task.ID, err)
+				s.abortSessionTurn(task) // 终态未落上：句柄如实收敛（不虚报）
 				return
 			}
+			s.convergeSessionTurn(task) // 过期=终态：释放 CancelTurn 等待者（回执按账本判定）
 			s.notifyTerminal(task.ID) // 过期=终态，同走终态旁路（standalone 通知）
 			s.sendResult(task.ID, res)
 			return
@@ -438,7 +499,9 @@ func (s *Service) execute(task protocol.Task) {
 		// failed（error=input_prepare_failed+上游/文件定位，不产生执行副作用，
 		// 对齐上方过期的 pre-started 失败先例）；挂载期间管理面取消 → 走取消
 		// 收口，服务关闭打断 → 条目保持 accepted 由重启恢复再调度。无依赖任务
-		// 不进入此路径（红线：无 depends_on 零行为变化）。
+		// 不进入此路径（红线：无 depends_on 零行为变化）。已知边界：会话轮在
+		// 本路径弃队（inputs.go 属批次禁区）不收敛句柄——会话轮无 depends_on
+		// 投递面，实际不可达；如后续放开须同步收敛句柄（W01-03 接线时核对）。
 		if len(task.DependsOn) > 0 && s.prepareInputs(task, runCtx, ce) {
 			return
 		}
@@ -446,12 +509,14 @@ func (s *Service) execute(task protocol.Task) {
 		if err := s.cfg.Ledger.MarkStarted(task.ID); err != nil {
 			// 已 finished（重复执行竞争/取消路径先落）/不存在：账本为准，结果由重发链路闭合
 			log.Printf("[node] 标记 started 失败 task=%s: %v", task.ID, err)
+			s.abortSessionTurn(task) // 会话轮句柄收敛（不 spawn，无终态记账）
 			return
 		}
 		s.sendRef(protocol.MsgTaskStarted, task.ID) // started 落盘成功后、spawn 前发（SPEC 4.7）
 
 		// 会话轮分支（T2，sessionturn.go）：执行器从 runner 换为 sessionx 同步
 		// 内核；投递/账本/互斥/并发/回传纪律与普通任务共用（普通任务路径零变化）。
+		// runSessionTurn 包装器内完成 sessionop 取消意图轮的终态记账与句柄收敛。
 		var res protocol.TaskResult
 		if task.Session != nil {
 			res = s.runSessionTurn(runCtx, task)
@@ -462,11 +527,15 @@ func (s *Service) execute(task protocol.Task) {
 		// 不确定，写 needs_review/node_restarted_midway 收尾并回传；管理面取消同样
 		// 整组终止，写 cancelled/user_cancelled（仅当进程确被终止或未运行——进程已
 		// 自然退出的保留自然终态，由账本先到为准与 hub 收敛表兜底）。禁止把打断后
-		// 的结果当 completed 落盘（P2 实测缺陷根因）。
+		// 的结果当 completed 落盘（P2 实测缺陷根因）。sessionop 取消意图轮的取消类
+		// 终态（queued/executed/待核对/先到保留）已由 runSessionTurn 依内核证据
+		// 记账（W01-02 RFC §3），此处不再叠加改写。
 		if runCtx.Err() != nil {
 			switch {
 			case ce.triggered():
-				if res.ExitCode == protocol.ExitCodeNotRun {
+				if s.sessionCancelIntent(task) {
+					// sessionop 记账已完成（含自然终态先到保留），不覆盖
+				} else if res.ExitCode == protocol.ExitCodeNotRun {
 					res = cancelledResult(res)
 				}
 			default:
@@ -480,13 +549,18 @@ func (s *Service) execute(task protocol.Task) {
 			// 无可截断字段仍超限：不落终态、不发送——账本保持 started，重启恢复
 			// 走 needs_review 链路收敛；绝不把必然被拒收的超限结果写入重传链路
 			log.Printf("[node] %v", err)
+			s.abortSessionTurn(task) // 会话轮句柄收敛（无终态，不虚报）
 			return
 		}
 		// SPEC 4.7 顺序：finished+result 落盘成功后才发 task_result
 		if err := s.cfg.Ledger.MarkFinished(task.ID, final); err != nil {
 			log.Printf("[node] 写入终态失败 task=%s: %v", task.ID, err)
+			s.abortSessionTurn(task) // 会话轮句柄收敛（终态未落上，CancelTurn 如实报未确认）
 			return
 		}
+		// 终态已落盘：收敛会话轮取消句柄（释放 CancelTurn 等待者；回执按账本终态
+		// 直读，落盘先行消除回执轮询窗口）。意图复查不依赖句柄（句柄此刻才移除）。
+		s.convergeSessionTurn(task)
 		s.notifyTerminal(task.ID) // 首次落终态即通知（重臂失败早退也不漏——终态已成立）
 		// P1-2 取消回写对账：确以 cancelled 收尾时，账本租约与本帧 cancel_fence
 		// 取大者重臂后再回带——重派租约已推进而 node 未及重臂（如 ack 丢后重派
