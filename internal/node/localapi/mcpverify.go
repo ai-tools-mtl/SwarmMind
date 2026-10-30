@@ -793,14 +793,19 @@ func (m *McpVerifyModel) RecordV2(check V2Check) {
 	if check.HTTPStatus != 0 {
 		note = fmt.Sprintf("HTTP %d：%s", check.HTTPStatus, check.Detail)
 	}
+	// CheckedBy 恒写 server_side_view（终审建议①，对齐 RecordV0 加固方式）：
+	// RunV2ProbeCheck 是唯一合法生产者且恒填该值，RecordV2 对外部传入 V2Check 的
+	// CheckedBy 全信会破坏「检查视角恒可见、Source 恒定」的模型边界——手造
+	// user_confirmed 视角的 V2Check 原样入账即可绕过视角分流。状态仍取入参
+	// check.Status（探测三态由 RunV2ProbeCheck 契约定义），视角由本层强制。
 	m.mu.Lock()
 	m.layers[LayerV2] = VerifyLayerState{
 		Layer: LayerV2, Status: check.Status,
-		CheckedBy: check.CheckedBy, CheckedAt: at,
+		CheckedBy: VerifySourceServerSideView, CheckedAt: at,
 		ConfigVersion: m.configVersion, Detail: note,
 	}
 	m.history = append(m.history, VerifyHistoryEntry{
-		Layer: LayerV2, Result: check.Status, Source: check.CheckedBy,
+		Layer: LayerV2, Result: check.Status, Source: VerifySourceServerSideView,
 		ConfigVersion: m.configVersion, At: at, Note: note,
 	})
 	m.mu.Unlock()
@@ -811,6 +816,34 @@ func (m *McpVerifyModel) RecordV2(check V2Check) {
 // （首版无自动回执通道，其他来源拒绝——不冒认自动检测成功）；config_version 必填。
 // 登记成功返回该层投影：确认版本与当前锚一致 → user_confirmed 点亮；不一致 →
 // not_checked（旧回执不点亮新配置），历史保留可查。
+// noteSuspectedPlaintext 备注/说明字段的疑似明文凭据筛查（终审建议②：Note 是
+// 直通板面输出与历史的自由文本通道，与文件头「任何输出绝不含明文凭据」硬规则
+// 冲突——模型层做最低成本防线）：≥16 连续 token 字符且同时含字母与数字的连续段
+// 即疑似明文凭据形态（swarmmind 凭据/常规 API token 均命中；普通语句不含
+// 「字母数字混排 16+ 连续段」，误报面可控）。命中即拒绝登记，由调用方脱敏后重试。
+func noteSuspectedPlaintext(note string) bool {
+	run := 0
+	hasLetter, hasDigit := false, false
+	for _, r := range note {
+		isToken := r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if isToken {
+			run++
+			switch {
+			case r >= '0' && r <= '9':
+				hasDigit = true
+			case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+				hasLetter = true
+			}
+			if run >= 16 && hasLetter && hasDigit {
+				return true
+			}
+		} else {
+			run, hasLetter, hasDigit = 0, false, false
+		}
+	}
+	return false
+}
+
 func (m *McpVerifyModel) RegisterExternalConfirmation(c ExternalConfirmation) (VerifyLayerState, error) {
 	if !IsExternalLayer(c.Layer) {
 		return VerifyLayerState{}, fmt.Errorf("层 %q 不接受外部确认登记：外部确认仅用于服务端不可自证层 v1|v3|v4|v5（v0/v2 为服务端可证层，请运行服务端检查）", c.Layer)
@@ -824,6 +857,9 @@ func (m *McpVerifyModel) RegisterExternalConfirmation(c ExternalConfirmation) (V
 	}
 	if strings.TrimSpace(c.ConfigVersion) == "" {
 		return VerifyLayerState{}, errors.New("confirmation.config_version 必填：用户确认绑定配置版本 hash（旧回执不得点亮新配置，AC10）")
+	}
+	if noteSuspectedPlaintext(c.Note) {
+		return VerifyLayerState{}, errors.New("confirmation.note 含疑似明文凭据（字母数字混排 16+ 连续段）：模型任何输出绝不含明文——请脱敏后重试（终审建议②防线）")
 	}
 	at, err := normalizeUTCTime(c.ConfirmedAt)
 	if err != nil {

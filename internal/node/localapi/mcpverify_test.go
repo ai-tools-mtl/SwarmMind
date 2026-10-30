@@ -919,3 +919,35 @@ func TestMcpVerifyModelConcurrent(t *testing.T) {
 		t.Fatalf("版本锚未更新：%q", m.ConfigVersion())
 	}
 }
+
+// TestW0303ReviewSuggestions 终审 S1/S2 闭环回归：①RecordV2 对手造 CheckedBy
+// 的 V2Check 恒写 server_side_view（视角分流不可经入参绕过）；②ExternalConfirmation.Note
+// 疑似明文拒收（字母数字混排 16+ 连续段），普通语句不受影响。
+func TestW0303ReviewSuggestions(t *testing.T) {
+	m := NewMcpVerifyModel("cfg-hash-1", "SWARM_NODE_PRIME_TOKEN")
+	// S1：手造任意视角/任意状态 → 板面与历史 Source 恒 server_side_view
+	check := V2Check{Status: "pass", CheckedBy: "user_confirmed"}
+	m.RecordV2(check)
+	st := m.LayerState(LayerV2)
+	if st.CheckedBy != VerifySourceServerSideView {
+		t.Fatalf("RecordV2 应恒写 server_side_view, got %q", st.CheckedBy)
+	}
+	for _, e := range m.History() {
+		if e.Layer == LayerV2 && e.Source != VerifySourceServerSideView {
+			t.Fatalf("历史 Source 应恒写 server_side_view, got %q", e.Source)
+		}
+	}
+	// S2：Note 含疑似明文 → 拒绝登记
+	_, err := m.RegisterExternalConfirmation(ExternalConfirmation{
+		Layer: LayerV3, ConfigVersion: "cfg-hash-1", Note: "确认时 token 为 sk-abc123def4567890xyz 有效",
+	})
+	if err == nil || !strings.Contains(err.Error(), "疑似明文") {
+		t.Fatalf("疑似明文 Note 应拒绝登记: %v", err)
+	}
+	// S2 正向：普通语句（无字母数字混排 16+ 段）不受影响
+	if _, err := m.RegisterExternalConfirmation(ExternalConfirmation{
+		Layer: LayerV3, ConfigVersion: "cfg-hash-1", Note: "用户在控制台确认宿主工具发现已通过",
+	}); err != nil {
+		t.Fatalf("普通 Note 不应误拒: %v", err)
+	}
+}
