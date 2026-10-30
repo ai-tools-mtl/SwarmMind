@@ -1,7 +1,7 @@
 // session.go 会话注册表与轮次账本（T2 持久会话，SPEC 六.五「会话与轮次」；
 // 上游 docs/VISION-persistent-agent-collaboration.md 三/5.2）。hub 保存可路由的
 // 会话索引与轮次账本；原生会话 ID 映射与轮次留痕的执行真相在 node 侧
-//（internal/node/sessionx，data_dir/sessions.json），hub 注册表承担跨机寻址、
+// （internal/node/sessionx，data_dir/sessions.json），hub 注册表承担跨机寻址、
 // 绑定快照与轮终投影。写纪律与 Work 同款：写时复制（State.Clone 深拷贝后事务内
 // 改副本），任务落库 + 轮次登记同事务（会话轮任务与轮次账本行原子一致）。
 //
@@ -25,30 +25,30 @@ const (
 	SessionStatusClosed = "closed"
 )
 
-	// 轮次状态取值（SessionTurn.Status；任务书状态机六值 + W01-03 投影加法值）。
-	const (
-		// TurnStatusPending 轮已受理、任务未送达 node（submitted，信箱排队/离线暂存）。
-		TurnStatusPending = "pending"
-		// TurnStatusAwaitingNode 任务已投递 node 未确认开始（offered/acknowledged）。
-		TurnStatusAwaitingNode = "awaiting_node"
-		// TurnStatusRunning node 执行中（任务 running）。
-		TurnStatusRunning = "running"
-		// TurnStatusDone 轮终执行成立且工作结果已证实。T2 无改判通道（内核恒
-		// unverified），本值为保留态：验收链路显式改判（T1 protocol 契约预告）落地
-		// 前无到达路径，SPEC 如实声明。
-		TurnStatusDone = "done"
-		// TurnStatusUnverified 轮终执行成立、工作结果未经证实。T2 完成轮恒此态
-		//（内核第四路无判定通道，禁止文本关键词猜测）。
-		TurnStatusUnverified = "unverified"
-		// TurnStatusFailed 轮终执行不成立（退出码/解析/原生 ID/绑定守卫/内核拒绝/
-		// 过期/取消/平台中断——Error 留痕细分原因）。
-		TurnStatusFailed = "failed"
-		// TurnStatusCancelled 轮已取消（终态投影加法值，W01-01 基准 §3/W01-03 RFC
-		// §6.3）：排队取消（未 spawn，Error=turn_cancelled_queued）或执行取消已证
-		// 停止（Error=turn_cancelled_executed）。旧六态不改名不删；证据缺失的取消
-		// （turn_cancel_outcome_unknown）投影 failed（待核对，绝不记成功）。
-		TurnStatusCancelled = "cancelled"
-	)
+// 轮次状态取值（SessionTurn.Status；任务书状态机六值 + W01-03 投影加法值）。
+const (
+	// TurnStatusPending 轮已受理、任务未送达 node（submitted，信箱排队/离线暂存）。
+	TurnStatusPending = "pending"
+	// TurnStatusAwaitingNode 任务已投递 node 未确认开始（offered/acknowledged）。
+	TurnStatusAwaitingNode = "awaiting_node"
+	// TurnStatusRunning node 执行中（任务 running）。
+	TurnStatusRunning = "running"
+	// TurnStatusDone 轮终执行成立且工作结果已证实。T2 无改判通道（内核恒
+	// unverified），本值为保留态：验收链路显式改判（T1 protocol 契约预告）落地
+	// 前无到达路径，SPEC 如实声明。
+	TurnStatusDone = "done"
+	// TurnStatusUnverified 轮终执行成立、工作结果未经证实。T2 完成轮恒此态
+	//（内核第四路无判定通道，禁止文本关键词猜测）。
+	TurnStatusUnverified = "unverified"
+	// TurnStatusFailed 轮终执行不成立（退出码/解析/原生 ID/绑定守卫/内核拒绝/
+	// 过期/取消/平台中断——Error 留痕细分原因）。
+	TurnStatusFailed = "failed"
+	// TurnStatusCancelled 轮已取消（终态投影加法值，W01-01 基准 §3/W01-03 RFC
+	// §6.3）：排队取消（未 spawn，Error=turn_cancelled_queued）或执行取消已证
+	// 停止（Error=turn_cancelled_executed）。旧六态不改名不删；证据缺失的取消
+	// （turn_cancel_outcome_unknown）投影 failed（待核对，绝不记成功）。
+	TurnStatusCancelled = "cancelled"
+)
 
 // Session 会话注册表条目（hub 全局；平台会话 ID 即 node 侧 sessionx 内核键）。
 // 绑定快照（Adapter/PermissionMode/Cwd）在创建时从目标能力卡与请求落定：send

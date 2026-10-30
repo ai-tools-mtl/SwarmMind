@@ -188,7 +188,7 @@ func (s *Service) ResolveRequest(requestID, sessionID string, turnSeq int64, pay
 }
 
 // RequestMeta 受理登记附加元数据（W01-03 加法，RFC §2）：不参与同键同文判定
-//（三元组判定不变），仅随登记持久化供投影与回执重放（pending 会话元数据、轮
+// （三元组判定不变），仅随登记持久化供投影与回执重放（pending 会话元数据、轮
 // 受理回执重放源）。
 type RequestMeta struct {
 	// Kind 登记种类：RequestKindSession | RequestKindTurn；空按 turn 语义。

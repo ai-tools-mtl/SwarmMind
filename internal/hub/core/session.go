@@ -212,7 +212,7 @@ type SessionTurnRequest struct {
 
 // CreateSession 建会话（注册表登记，不派发任何任务——首轮经 SubmitTurn 显式
 // 提交）：目标校验（node 注册 + agent exposed + 会话能力声明）→ 绑定快照落定
-//（能力卡 adapter/权限投影 + 请求 cwd）→ 分配平台 ID 落库 active。
+// （能力卡 adapter/权限投影 + 请求 cwd）→ 分配平台 ID 落库 active。
 //
 // actor 为服务端验证的鉴权主体（注册表无事件账本，本参数保留签名一致性；
 // 审计经首轮任务的既有提交链）。创建幂等语义（W01-03 RFC §1）：不带 request_id
@@ -352,7 +352,7 @@ func findSessionByRequest(view *store.State, requestID string) (store.Session, b
 //     turn_queue_full（预检 + 事务内双检；重放不受限）；
 //  8. 体积实测 + 容量预检（与任务提交同口径，会话轮任务体含 Session 段）；
 //  9. 单写事务：全重检 → 任务落库（IdemKey=会话轮键）+ 信箱入队 + 轮行登记
-//    （含 request_id 留痕）。
+//     （含 request_id 留痕）。
 func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string) (*TurnRef, bool, error) {
 	view := c.st.View()
 	sess, ok := view.Sessions[sessionID]
@@ -679,16 +679,16 @@ type CancelTurnReceipt struct {
 // 六.六豁免⑬——REST POST /api/v1/sessions/{id}/turns/{seq}/cancel）。三路：
 //
 //  1. 终态轮行：取消类记账码 → 幂等回执（重放）；其余 → ErrSessionTurnNotCancellable
-//    （先到保留，已完成不可取消）。
+//     （先到保留，已完成不可取消）。
 //  2. 目标任务 submitted（未投递）：本地 CancelTask（信箱撤回，确定性不 spawn）
-//    → 同步回执 queued；轮行由通用回写落 cancelled 后细化为 turn_cancelled_queued
-//    （排队取消在 hub 侧确定性成立；已知竞态见 RFC §9.1）。
+//     → 同步回执 queued；轮行由通用回写落 cancelled 后细化为 turn_cancelled_queued
+//     （排队取消在 hub 侧确定性成立；已知竞态见 RFC §9.1）。
 //  3. offered/acknowledged/running：投递取消任务（Op=cancel + CancelTurnSeq，不占
-//    轮次号）→ 异步受理（返回 async=true，outcome 待 node 侧 CancelTurn 证据分类，
-//    结果沿任务结果链回写轮行）。
+//     轮次号）→ 异步受理（返回 async=true，outcome 待 node 侧 CancelTurn 证据分类，
+//     结果沿任务结果链回写轮行）。
 //
 // 返回 (receipt, async, error)：async=true 时 outcome 为空、CancelTaskID 在场
-//（HTTP 202）；否则 200/409/404 语义由 error 哨兵承载。
+// （HTTP 202）；否则 200/409/404 语义由 error 哨兵承载。
 func (c *Core) CancelSessionTurn(sessionID string, seq int64, reason string, actor string) (*CancelTurnReceipt, bool, error) {
 	_ = actor
 	if seq <= 0 {
@@ -1115,7 +1115,7 @@ func projectTurn(view *store.State, t store.SessionTurn) SessionTurnView {
 
 // writebackSessionTurn 会话轮终回写（任务首落终态的同一事务内调用；result/
 // cancel/sweep 三终态路径共用，语义同 writebackWorkTerminal）：轮行落终态留痕
-//（答复正文/原生 ID 校验/工作结果/用量/错误），先到保留（重复回写与迟到数据
+// （答复正文/原生 ID 校验/工作结果/用量/错误），先到保留（重复回写与迟到数据
 // 零变更）。close 任务不占轮次号、无轮行可写，天然 no-op；会话行不存在为防御
 // no-op（注册表是会话身份权威，任务迟到不复活已删条目——T2 无删除路径，防御
 // 纵深）。非 completed 终态一律 NativeIDOk=false：failed/cancelled 自不待言，
@@ -1181,7 +1181,7 @@ func nextTurnSeq(s store.Session) int64 {
 }
 
 // sessionOp 会话当前操作类型：无成功 create 轮（无 NativeIDOk 行）即 create
-//（首轮失败后重试按 create 重来）；否则 send。
+// （首轮失败后重试按 create 重来）；否则 send。
 func sessionOp(s store.Session) (op string, hasCreate bool) {
 	for _, t := range s.Turns {
 		if t.NativeIDOk {

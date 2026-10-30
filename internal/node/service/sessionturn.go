@@ -536,7 +536,7 @@ func (s *Service) SessionAgentConfigured(name string) bool {
 
 // AuthorizeSessionWorkspace 工作区授权（agent 面创建/受理前置校验，W01-03）：
 // 未装配 sessionop 或未配置根 = 放行（保持现状）；越界返回 RemoteError
-//（workspace_denied，403 语义）。判定经 sessionop.AuthorizeWorkspace（与执行口
+// （workspace_denied，403 语义）。判定经 sessionop.AuthorizeWorkspace（与执行口
 // 防御位同一实现，RFC §0/§5）。
 func (s *Service) AuthorizeSessionWorkspace(cwd string) error {
 	if s.sessionOps == nil {
@@ -634,7 +634,7 @@ func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, prom
 					Msg: fmt.Sprintf("turn_seq=%d 已被不同内容占用（响应丢失重试须原样重发同文）", req.TurnSeq)}
 			}
 			return &LocalTurnAck{SessionID: sid, TurnSeq: req.TurnSeq,
-				Op: replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
+				Op:     replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
 				TaskID: e.Task.ID, TraceID: e.Task.TraceID}, protocol.Task{}, true, nil
 		}
 		if inKernel && req.TurnSeq <= int64(sess.TurnCount) {

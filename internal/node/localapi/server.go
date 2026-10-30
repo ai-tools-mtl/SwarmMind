@@ -13,7 +13,7 @@
 //
 // 鉴权分级（方案 3.2.1 v2 修订，2026-10-22 鉴权模型裁决）：local_token 只读 +
 // 本机主人管理面；编排端点（POST /api/v1/tasks，后续 review/cancel）双凭证皆可
-//（authOrchestrate：认证后 level ∈ {local, prime} 即放行）——网页是主人的操作
+// （authOrchestrate：认证后 level ∈ {local, prime} 即放行）——网页是主人的操作
 // 界面，主人派单天然合法。环防护不受影响：declare/rotate/restart/PUT config/
 // reload/disconnect 仍仅 local_token（总理无主人的钥匙，不能自钦定/换人）；
 // 未持任何本机凭证的工人不能派单（401）。监听地址强制回环（代码校验，非文档约束）。
@@ -253,12 +253,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local/agents", s.authRead(s.handleLocalAgents))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/exposed", s.authRead(s.handleSetExposed))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/orchestrator", s.authRead(s.handleSetAgentOrchestrator))
-	mux.HandleFunc("POST /api/v1/local/agents/discover", s.authLocal(s.handleAgentsDiscover))                  // 本机发现（W06-02，主人专属·六.六豁免⑫）
-	mux.HandleFunc("POST /api/v1/local/agents/registration-preview", s.authLocal(s.handleRegistrationPreview)) // 登记预览（W06-02，主人专属·六.六豁免⑫）
-	mux.HandleFunc("POST /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionCreate))                     // agent 会话面：创建登记 201（W01-03，不执行模型不投轮）
-	mux.HandleFunc("GET /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionList))                        // 列表（内核快照 ∪ pending）
-	mux.HandleFunc("GET /api/v1/sessions/{id}", s.authOrchestrate(s.handleAgentSessionGet))                    // 详情
-	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.authOrchestrate(s.handleAgentSessionTurns))           // 投轮 202（与 hub 同语义）
+	mux.HandleFunc("POST /api/v1/local/agents/discover", s.authLocal(s.handleAgentsDiscover))                    // 本机发现（W06-02，主人专属·六.六豁免⑫）
+	mux.HandleFunc("POST /api/v1/local/agents/registration-preview", s.authLocal(s.handleRegistrationPreview))   // 登记预览（W06-02，主人专属·六.六豁免⑫）
+	mux.HandleFunc("POST /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionCreate))                       // agent 会话面：创建登记 201（W01-03，不执行模型不投轮）
+	mux.HandleFunc("GET /api/v1/sessions", s.authOrchestrate(s.handleAgentSessionList))                          // 列表（内核快照 ∪ pending）
+	mux.HandleFunc("GET /api/v1/sessions/{id}", s.authOrchestrate(s.handleAgentSessionGet))                      // 详情
+	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.authOrchestrate(s.handleAgentSessionTurns))             // 投轮 202（与 hub 同语义）
 	mux.HandleFunc("POST /api/v1/sessions/{id}/turns/{seq}/cancel", s.authLocal(s.handleAgentSessionTurnCancel)) // 轮取消（W01-03，人工专属·六.六豁免⑬）
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
@@ -267,9 +267,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/agents/reload", s.authLocal(s.handleAgentsReload))
 	mux.HandleFunc("POST /api/v1/local/restart", s.authLocal(s.handleRestart))
 	mux.HandleFunc("POST /api/v1/local/mcp/access/rotate", s.authLocal(s.handleMcpAccessRotate)) // 换发共享编排凭据（W02-01，一次明文/No-store）
-	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))     // 旧别名 → 同一实现（兼容不删，RFC §3.3）
-	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))           // 授权状态（凭据仅脱敏）
-	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))           // 主人显式启停
+	mux.HandleFunc("POST /api/v1/local/prime/rotate", s.authLocal(s.handleMcpAccessRotate))      // 旧别名 → 同一实现（兼容不删，RFC §3.3）
+	mux.HandleFunc("GET /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessGet))            // 授权状态（凭据仅脱敏）
+	mux.HandleFunc("PUT /api/v1/local/mcp/access", s.authLocal(s.handleMcpAccessPut))            // 主人显式启停
 	mux.HandleFunc("POST /api/v1/local/prime/declare", s.authLocal(s.handlePrimeDeclare))
 	mux.HandleFunc("GET /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelList))
 	mux.HandleFunc("POST /api/v1/local/notify/channels", s.authLocal(s.handleNotifyChannelCreate))
@@ -281,7 +281,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local/setup/parse", s.authLocal(s.handleSetupParse))
 	mux.HandleFunc("POST /api/v1/local/setup/apply", s.authLocal(s.handleSetupApply))
 	mux.HandleFunc("POST /api/v1/local/setup/disconnect", s.authLocal(s.handleSetupDisconnect))
-	mux.HandleFunc("POST /api/v1/local/sessions", s.authLocal(s.handleLocalSessionCreate))          // 会话新建+首轮（T2，主人管理面）
+	mux.HandleFunc("POST /api/v1/local/sessions", s.authLocal(s.handleLocalSessionCreate))           // 会话新建+首轮（T2，主人管理面）
 	mux.HandleFunc("POST /api/v1/local/sessions/{id}/turns", s.authLocal(s.handleLocalSessionTurns)) // 续轮（异步受理）
 	mux.HandleFunc("GET /api/v1/local/sessions", s.authLocal(s.handleLocalSessionList))              // 列表（内核快照）
 	mux.HandleFunc("GET /api/v1/local/sessions/{id}", s.authLocal(s.handleLocalSessionGet))          // 详情（含轮次留痕）

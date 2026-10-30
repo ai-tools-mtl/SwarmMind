@@ -141,17 +141,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.auth(s.handleTaskCancel))
 	mux.HandleFunc("POST /api/v1/control-operations", s.auth(s.handleControlCreate))
 	mux.HandleFunc("GET /api/v1/control-operations/{batch_id}", s.auth(s.handleControlGet))
-	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))                 // 工作单创建（P5 W1，幂等）
-	mux.HandleFunc("POST /api/v1/works/{id}/takeover", s.auth(s.handleWorkTakeover)) // 原子接管（P5 W2，CAS）
-	mux.HandleFunc("POST /api/v1/works/{id}/collect", s.auth(s.handleWorkCollect))   // 收集/关闭（P5 W3，终态闭合）
-	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                    // 工作单列表
-	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                // 详情（事件游标 since_events）
-	mux.HandleFunc("POST /api/v1/sessions", s.auth(s.handleSessionCreate))           // 会话创建（T2 持久会话，绑定快照）
-	mux.HandleFunc("GET /api/v1/sessions", s.auth(s.handleSessionList))              // 会话列表
-	mux.HandleFunc("GET /api/v1/sessions/{id}", s.auth(s.handleSessionGet))          // 详情（轮次账本 + 投影状态）
-	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.auth(s.handleSessionTurn))  // 提交轮次（异步受理）
+	mux.HandleFunc("POST /api/v1/works", s.auth(s.handleWorkCreate))                                   // 工作单创建（P5 W1，幂等）
+	mux.HandleFunc("POST /api/v1/works/{id}/takeover", s.auth(s.handleWorkTakeover))                   // 原子接管（P5 W2，CAS）
+	mux.HandleFunc("POST /api/v1/works/{id}/collect", s.auth(s.handleWorkCollect))                     // 收集/关闭（P5 W3，终态闭合）
+	mux.HandleFunc("GET /api/v1/works", s.auth(s.handleWorkList))                                      // 工作单列表
+	mux.HandleFunc("GET /api/v1/works/{id}", s.auth(s.handleWorkGet))                                  // 详情（事件游标 since_events）
+	mux.HandleFunc("POST /api/v1/sessions", s.auth(s.handleSessionCreate))                             // 会话创建（T2 持久会话，绑定快照）
+	mux.HandleFunc("GET /api/v1/sessions", s.auth(s.handleSessionList))                                // 会话列表
+	mux.HandleFunc("GET /api/v1/sessions/{id}", s.auth(s.handleSessionGet))                            // 详情（轮次账本 + 投影状态）
+	mux.HandleFunc("POST /api/v1/sessions/{id}/turns", s.auth(s.handleSessionTurn))                    // 提交轮次（异步受理）
 	mux.HandleFunc("POST /api/v1/sessions/{id}/turns/{seq}/cancel", s.auth(s.handleSessionTurnCancel)) // 轮取消（W01-03，人工专属·六.六豁免⑬）
-	mux.HandleFunc("POST /api/v1/sessions/{id}/close", s.auth(s.handleSessionClose)) // 关闭（幂等回执；在途轮 409 close_in_flight）
+	mux.HandleFunc("POST /api/v1/sessions/{id}/close", s.auth(s.handleSessionClose))                   // 关闭（幂等回执；在途轮 409 close_in_flight）
 	mux.HandleFunc("GET /api/v1/directory", s.auth(s.handleDirectory))
 	mux.HandleFunc("POST /api/v1/dispatch-suggest", s.auth(s.handleDispatchSuggest))            // 派发建议（P5.1 D1）
 	mux.HandleFunc("GET /api/v1/prime", s.auth(s.handlePrimeGet))                               // 统筹指定查询（2026-10-23 网页指定）
