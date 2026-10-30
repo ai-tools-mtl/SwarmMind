@@ -4,7 +4,7 @@
 // 执行路径：会话轮任务（Task.Session != nil）在 execute 的既有纪律内分支执行——
 // workdir 互斥、并发信号量、过期复检、started/finished 落盘、结果回传与重发全部
 // 与普通任务共用（投递链白拿），仅执行器从 runner 换为 sessionx 同步内核
-//（runSessionTurn）；普通任务路径零变化。身份分离见 protocol.SessionTurnRef。
+// （runSessionTurn）；普通任务路径零变化。身份分离见 protocol.SessionTurnRef。
 //
 // 轮终映射（四路分离的投影，写进 TaskResult 供 hub 轮终回写）：
 //   - 内核三路成立 → completed + TurnOutcome{NativeIDOk:true}（WorkResult 沿
@@ -212,11 +212,12 @@ func (s *Service) sessionTurnWsKey(task protocol.Task) string {
 }
 
 // taskWsKey 任务的 workdir 互斥键——启动重建占锁（New 的 seed）与执行取锁
-//（execute 的 reserve）唯一键派生口径（W01-02 codex 终审必修②：两处必须同键，
+// （execute 的 reserve）唯一键派生口径（W01-02 codex 终审必修②：两处必须同键，
 // 否则重建按产物根占的锁在执行按会话 cwd 键取/放时永不释放，同根后续任务永久
-// 等待）：会话受理轮按 sessionTurnWsKey（会话 cwd 真实路径），close 轮与普通任
-// 务沿 agent 产物根键。键派生不出的会话轮（如 send 无 cwd 且内核无绑定）返回 ""
-// ——重建不占锁、执行不取锁，两处口径仍一致。
+// 等待）：会话受理轮按 sessionTurnWsKey（会话 cwd 真实路径）；会话键派生不出
+// （如 send 无 cwd 且内核无绑定）与 close 轮、普通任务一样回退 agent 产物根键
+// （终审建议修：原注释误称返回 ""——实际两处同一函数一致回退，与既有 execute
+// 语义相同，该形态任务真实执行并以 session_not_found 如实失败后释放，无悬挂）。
 func (s *Service) taskWsKey(task protocol.Task) string {
 	if k := s.sessionTurnWsKey(task); k != "" {
 		return k
@@ -551,7 +552,7 @@ func (s *Service) localSessionOp(req LocalSessionTurnRequest) (op string, seq in
 // 号，localMu 互斥段内推导+入账即原子预留——T2-R1 建议3，与 hub 写事务内分配
 // 轮号同一原则）。T2-R2 N4：高水位与受理同事务推进并随账本文件持久化，取消/
 // 过期/重启/保留期清理后不回退——替换原先「扫描账本现存条目取 max」的口径
-//（条目被 CleanupAcked 清理后即回退、与 hub 持久轮行漂移）；内核 TurnCount
+// （条目被 CleanupAcked 清理后即回退、与 hub 持久轮行漂移）；内核 TurnCount
 // 单独用会撞并发预留（执行收束才推进）且不含未进 CLI 的受理轮，二者取大互为
 // 补位，谁都不替代谁。
 func localNextTurnSeq(sess protocol.Session, l *ledger.Ledger, sessionID string) int64 {
