@@ -258,7 +258,7 @@ func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 func openAccessForTest(t *testing.T) (*McpAccess, string) {
 	t.Helper()
 	dir := t.TempDir()
-	acc, _, err := OpenMcpAccess(dir, "", "")
+	acc, _, _, err := OpenMcpAccess(dir, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +365,7 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 	t.Run("M2_有管家有token_启用", func(t *testing.T) {
 		dir := t.TempDir()
 		writeToken(t, filepath.Join(dir, "prime_token"), 64)
-		acc, migrated, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
+		acc, migrated, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
 		if err != nil || !migrated || !acc.Enabled() {
 			t.Fatalf("旧已授权配置应迁移为 enabled: migrated=%v enabled=%v err=%v", migrated, acc.Enabled(), err)
 		}
@@ -376,14 +376,14 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 	t.Run("M3_无管家_禁用", func(t *testing.T) {
 		dir := t.TempDir()
 		writeToken(t, filepath.Join(dir, "prime_token"), 64)
-		acc, migrated, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
+		acc, migrated, _, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
 		if err != nil || !migrated || acc.Enabled() {
 			t.Fatalf("无 prime_agent 应迁移为 disabled: migrated=%v enabled=%v err=%v", migrated, acc.Enabled(), err)
 		}
 	})
 	t.Run("M4a_token缺失_禁用", func(t *testing.T) {
 		dir := t.TempDir()
-		acc, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
+		acc, _, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
 		if err != nil || acc.Enabled() {
 			t.Fatalf("token 文件缺失应 disabled: enabled=%v err=%v", acc.Enabled(), err)
 		}
@@ -391,13 +391,13 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 	t.Run("M4b_token过短_禁用", func(t *testing.T) {
 		dir := t.TempDir()
 		writeToken(t, filepath.Join(dir, "prime_token"), 10)
-		acc, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
+		acc, _, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
 		if err != nil || acc.Enabled() {
 			t.Fatalf("token 文件过短应 disabled: enabled=%v err=%v", acc.Enabled(), err)
 		}
 	})
 	t.Run("M5_全新实例_禁用", func(t *testing.T) {
-		acc, migrated, err := OpenMcpAccess(t.TempDir(), "", "")
+		acc, migrated, _, err := OpenMcpAccess(t.TempDir(), "", "")
 		if err != nil || !migrated || acc.Enabled() {
 			t.Fatalf("全新实例应 disabled: migrated=%v enabled=%v err=%v", migrated, acc.Enabled(), err)
 		}
@@ -406,12 +406,12 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 		dir := t.TempDir()
 		writeToken(t, filepath.Join(dir, "prime_token"), 64)
 		// 先落显式禁用状态
-		acc1, migrated1, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
+		acc1, migrated1, _, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
 		if err != nil || !migrated1 || acc1.Enabled() {
 			t.Fatalf("前置迁移失败: %v", err)
 		}
 		// 此后即便 prime_agent 与 token 均在位，重启也不重推导
-		acc2, migrated2, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
+		acc2, migrated2, _, err := OpenMcpAccess(dir, "echo", filepath.Join(dir, "prime_token"))
 		if err != nil || migrated2 {
 			t.Fatalf("显式状态存在不得再迁移: migrated=%v err=%v", migrated2, err)
 		}
@@ -425,7 +425,7 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 		if err := os.Remove(filepath.Join(dir, "prime_token")); err != nil {
 			t.Fatal(err)
 		}
-		acc3, _, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
+		acc3, _, _, err := OpenMcpAccess(dir, "", filepath.Join(dir, "prime_token"))
 		if err != nil || !acc3.Enabled() {
 			t.Fatalf("显式启用应唯一真相: enabled=%v err=%v", acc3.Enabled(), err)
 		}
@@ -436,13 +436,13 @@ func TestMcpAccessMigrationTable(t *testing.T) {
 		if err := os.WriteFile(path, []byte(`{oops`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := OpenMcpAccess(dir, "", ""); err == nil {
+		if _, _, _, err := OpenMcpAccess(dir, "", ""); err == nil {
 			t.Fatal("损坏状态文件应拒载（授权状态不猜测）")
 		}
 		if err := os.WriteFile(path, []byte(`{"version":99,"enabled":true}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := OpenMcpAccess(dir, "", ""); err == nil || !strings.Contains(err.Error(), "版本") {
+		if _, _, _, err := OpenMcpAccess(dir, "", ""); err == nil || !strings.Contains(err.Error(), "版本") {
 			t.Fatalf("未知版本应拒载: %v", err)
 		}
 	})
@@ -591,7 +591,7 @@ func TestMcpAccessRotateWiresAndSerializes(t *testing.T) {
 	var mu sync.Mutex
 	s := New(Config{
 		NodeID: "nodeA", Service: svc, Ledger: led,
-		Agents: newState(t, dir, []protocol.ExecProfile{echo}),
+		Agents:     newState(t, dir, []protocol.ExecProfile{echo}),
 		LocalToken: "tok-local", PrimeToken: "tok-seed", PrimeAgent: "echo",
 		LocalListen: "127.0.0.1:8445", DataDir: dir,
 		McpAccess: NewMcpAccessMemory(true),

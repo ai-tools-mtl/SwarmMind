@@ -389,15 +389,13 @@ func run(cfgPath, dataDirOverride string) error {
 	// 迁移判定时点在生成之前（旧配置=node.yaml 已声明 prime_agent 且盘上已有
 	// 旧 prime_token → enabled；其余含全新实例一律 disabled）。落盘后显式状态
 	// 即唯一真相：重启/管家增删不再重推导。
-	mcpAccess, migrated, err := localapi.OpenMcpAccess(cfg.DataDir, cfg.PrimeAgent, primeTokenPath)
+	// 迁移日志依据（终审建议②闭环）：凭据在位性复用 OpenMcpAccess 迁移判定时点
+	// 的同一单次读取观测（migTokPresent，仅 migrated=true 有意义）——调用方二次
+	// 独立读盘会在「token 恰在两读之间被创建」的窗口输出与判定自相矛盾的日志。
+	mcpAccess, migrated, migTokPresent, err := localapi.OpenMcpAccess(cfg.DataDir, cfg.PrimeAgent, primeTokenPath)
 	if err != nil {
 		return fmt.Errorf("初始化 MCP 编排授权状态失败: %w", err)
 	}
-	// 迁移日志依据（终审建议修）：prime_token 在位性必须在 ensureTokenFile 自动
-	// 生成**之前**取样——生成之后读盘恒在位，无法反映迁移判定时点的事实（M4
-	// 场景会假报「文件在位」）；判定口径与 OpenMcpAccess 迁移一致（可读且 ≥32 字节）。
-	migTok, migTokErr := os.ReadFile(primeTokenPath)
-	migTokPresent := migTokErr == nil && len(migTok) >= 32
 	primeTok, err := ensureTokenFile(primeTokenPath)
 	if err != nil {
 		return fmt.Errorf("生成 prime_token 失败: %w", err)

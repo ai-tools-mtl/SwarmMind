@@ -59,7 +59,10 @@ type McpAccess struct {
 }
 
 // OpenMcpAccess 打开（或按迁移规则初始化一次）data_dir 内的 MCP 编排授权状态
-// （cmd/node 装配点调用；返回 migrated=true 表示本次执行了迁移推导）。
+// （cmd/node 装配点调用；返回 migrated=true 表示本次执行了迁移推导；migTokPresent
+// =迁移判定时点对 prime_token 的单次读取观测——终审建议②：调用方日志必须复用
+// 同一观测值，二次独立读盘会在「token 恰在两读之间被创建」窗口输出自相矛盾日志；
+// 仅 migrated=true 时有意义，其余路径恒 false）。
 //
 // 迁移判定（RFC §二，仅当状态文件不存在时执行一次；判定时点先于 prime_token
 // 自动生成——保证「只有启动自动生成的 token 文件不能视为授权」）：
@@ -69,24 +72,25 @@ type McpAccess struct {
 //
 // 落盘后显式状态即唯一真相：重启/管家增删不再重推导。加载/迁移写盘失败返回
 // 错误（授权状态不允许带病猜测，装配方拒绝启动）。
-func OpenMcpAccess(dataDir, primeAgent, primeTokenPath string) (*McpAccess, bool, error) {
+func OpenMcpAccess(dataDir, primeAgent, primeTokenPath string) (*McpAccess, bool, bool, error) {
 	if dataDir == "" {
-		return nil, false, errors.New("localapi: data_dir 为空，无法定位 MCP 授权状态文件")
+		return nil, false, false, errors.New("localapi: data_dir 为空，无法定位 MCP 授权状态文件")
 	}
 	path := filepath.Join(dataDir, mcpAccessFileName)
 	if raw, err := os.ReadFile(path); err == nil {
 		var st McpAccessState
 		if err := json.Unmarshal(raw, &st); err != nil {
-			return nil, false, fmt.Errorf("解析 %s 失败（授权状态不猜测；请检查或删除该文件后重启重新迁移）: %w", path, err)
+			return nil, false, false, fmt.Errorf("解析 %s 失败（授权状态不猜测；请检查或删除该文件后重启重新迁移）: %w", path, err)
 		}
 		if st.Version != mcpAccessVersion {
-			return nil, false, fmt.Errorf("%s 版本 %d 未知（支持 %d），拒绝按未知格式判定授权", path, st.Version, mcpAccessVersion)
+			return nil, false, false, fmt.Errorf("%s 版本 %d 未知（支持 %d），拒绝按未知格式判定授权", path, st.Version, mcpAccessVersion)
 		}
-		return &McpAccess{path: path, enabled: st.Enabled, source: st.Source, updated: st.UpdatedAt}, false, nil
+		return &McpAccess{path: path, enabled: st.Enabled, source: st.Source, updated: st.UpdatedAt}, false, false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, false, fmt.Errorf("读取 %s 失败: %w", path, err)
+		return nil, false, false, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
-	// 迁移推导（M2–M5）：角色声明与凭据在位双条件。
+	// 迁移推导（M2–M5）：角色声明与凭据在位双条件（单次读取，观测值随返回值交
+	// 调用方用于日志——见函数注释）。
 	tokenOK := false
 	if b, err := os.ReadFile(primeTokenPath); err == nil && len(b) >= 32 {
 		tokenOK = true
@@ -94,9 +98,9 @@ func OpenMcpAccess(dataDir, primeAgent, primeTokenPath string) (*McpAccess, bool
 	enabled := primeAgent != "" && tokenOK
 	m := &McpAccess{path: path, enabled: enabled, source: mcpSourceMigration, updated: nowUTCString()}
 	if err := m.persistLocked(); err != nil {
-		return nil, false, fmt.Errorf("迁移结果落盘 %s 失败（授权状态必须显式落盘，拒绝仅内存推导值启动）: %w", path, err)
+		return nil, false, false, fmt.Errorf("迁移结果落盘 %s 失败（授权状态必须显式落盘，拒绝仅内存推导值启动）: %w", path, err)
 	}
-	return m, true, nil
+	return m, true, tokenOK, nil
 }
 
 // NewMcpAccessMemory 仅内存态授权开关（测试/未装配持久化场景）：门按显式给定
@@ -264,6 +268,9 @@ func enabledWord(v bool) string {
 // 同一 muPrime 互斥段——并发轮换不得出现「A 写盘 → B 写盘 → B 更新 → A 更新」
 // 的盘上/内存分叉。轮换不改变授权开关状态（enabled 独立持久）。
 func (s *Server) handleMcpAccessRotate(w http.ResponseWriter, r *http.Request) {
+	// 凭据面全路径统一 no-store（终审建议①闭环——失败体虽无明文，传输纪律不留
+	// 例外面；此前仅成功路径设置，失败 500 不带头属已登记限制）。
+	noStore(w)
 	if s.cfg.RotatePrime == nil {
 		writeErr(w, http.StatusServiceUnavailable, "internal", "共享编排凭据轮换未装配（RotatePrime 回调缺失）")
 		return
@@ -287,7 +294,6 @@ func (s *Server) handleMcpAccessRotate(w http.ResponseWriter, r *http.Request) {
 	enabled, _, _ := s.mcpAccessState() // 锁内取一致快照（仅取 McpAccess.mu，锁序 muPrime→McpAccess.mu 无反向）
 	s.muPrime.Unlock()
 
-	noStore(w)
 	resp := map[string]any{
 		"prime_token": tok, // 仅此一次展示
 		"prime_agent": agent,
