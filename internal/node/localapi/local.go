@@ -23,20 +23,29 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
-// localAgentView 本机目录单条：完整 ExecProfile（本机主人视角）+ 今日执行数。
+// localAgentView 本机目录单条：完整 ExecProfile（本机主人视角）+ 今日执行数 +
+// 检测摘要（W06-02 加法字段：数据源=上次 discover/registration-preview 的内存
+// 缓存，未发现过=not_checked 如实；检测摘要属节点本地真相，hub 目录投影归
+// W07-01/C 阶段，本轮不动）。
 type localAgentView struct {
 	protocol.ExecProfile
-	TodayTasks int `json:"today_tasks"`
+	TodayTasks int                `json:"today_tasks"`
+	Detect     agentDetectSummary `json:"detect"`
 }
 
 // handleLocalAgents GET /api/v1/local/agents：本机 ExecProfile 列表 + 今日任务数
-// （账本中该 agent 名下、创建于今天（UTC）的任务条数——旅程①的调用统计）。
+// （账本中该 agent 名下、创建于今天（UTC）的任务条数——旅程①的调用统计）+ 检测
+// 摘要四值投影（加法字段，旧字段零变化）。
 func (s *Server) handleLocalAgents(w http.ResponseWriter, r *http.Request) {
 	profiles := s.effectiveProfiles()
 	views := make([]localAgentView, 0, len(profiles))
 	today := protocol.NowUTC()
 	for _, p := range profiles {
-		views = append(views, localAgentView{ExecProfile: p, TodayTasks: s.todayTaskCount(p.Name, today)})
+		views = append(views, localAgentView{
+			ExecProfile: p,
+			TodayTasks:  s.todayTaskCount(p.Name, today),
+			Detect:      s.detectSummaryFor(p.Name),
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"node_id": s.cfg.NodeID, "agents": views})
 }

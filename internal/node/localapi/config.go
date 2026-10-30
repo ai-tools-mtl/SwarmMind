@@ -482,11 +482,14 @@ func (s *Server) setPendingRestart(v bool) {
 // ---------- yaml.Node round-trip（保留注释与未知字段，矩阵 #19） ----------
 
 // agentFieldOrder 已知字段规范序（配置编辑字段全集；与示例配置同序）。补写缺失键
-// 按此序定位插入点；agentYAMLFields 由其派生，防两处漂移。
+// 按此序定位插入点；agentYAMLFields 由其派生，防两处漂移。session_adapter 入列
+// （W06-02 登记面「适配器」）：此前作为未知键仅在更新时被原样保留、新增条目永不
+// 落盘——登记面写适配器必须落盘；整表提交契约下缺省（空）写空串，与 exposed 等
+// 缺省语义一致。
 var agentFieldOrder = []string{
 	"name", "kind", "command", "workdir", "agent_args", "timeout_sec",
 	"allow_args", "allow_env", "config_home", "description", "permission_mode", "exposed",
-	"stdin_to_arg",
+	"stdin_to_arg", "session_adapter",
 }
 
 // agentFieldRank 字段规范序位（未知键 -1）。
@@ -689,6 +692,8 @@ func agentFieldIsDefault(field string, p AgentProfile) bool {
 		return p.Exposed == nil || *p.Exposed
 	case "stdin_to_arg":
 		return !p.StdinToArg
+	case "session_adapter":
+		return p.SessionAdapter == ""
 	}
 	return true
 }
@@ -733,6 +738,9 @@ func newAgentEntry(p AgentProfile) *yaml.Node {
 	if p.StdinToArg {
 		add("stdin_to_arg", boolNode(true))
 	}
+	if p.SessionAdapter != "" {
+		add("session_adapter", strNode(p.SessionAdapter))
+	}
 	return m
 }
 
@@ -773,6 +781,8 @@ func agentFieldNode(field string, p AgentProfile) *yaml.Node {
 		return boolNode(exposed)
 	case "stdin_to_arg":
 		return boolNode(p.StdinToArg)
+	case "session_adapter":
+		return strNode(p.SessionAdapter)
 	}
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!null"}
 }

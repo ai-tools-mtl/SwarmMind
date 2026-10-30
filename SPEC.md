@@ -740,6 +740,7 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    - `GET /api/v1/local/mcp/access`（授权状态视图）：只读但同属主人管理面组（应答仅凭据脱敏引用+影响范围人话，绝无明文；内容含本机编排授权态与凭据在位性，不对 agent 面开放）；
    - `PUT /api/v1/local/mcp/access`（主人显式启停编排授权）：启/停即本机编排调用权总闸翻转，agent 可自调即自授权（与豁免④「写 agents 表=执行权」同级的本机主权面）；
    - `POST /api/v1/local/mcp/access/rotate`（轮换共享编排凭据；旧别名 `POST /api/v1/local/prime/rotate` 同一实现保留不删，与豁免④互为注记）：换发即凭据授予（豁免③同源口径），新明文仅应答一次展示、No-store，agent 可自调=可自行换发统筹凭证。
+   ⑫ `POST /api/v1/local/agents/discover`、`POST /api/v1/local/agents/registration-preview`（node 本机 agent 发现与登记预览，W06-02，2026-10-30）：本机主人专属（仅 local_token 可调，authLocal 门，prime_token 一律 401）——扫描探测=主人授权行为（只探测主人逐个显式给出的候选命令与受控 config_home，零全盘扫描、零写盘、绝不自动开放能力；检测结果纯元数据，HOME 配置内容与凭证永不返回）；登记预览=登记面与现有配置的差异计算+检测四层即时结果（同一零写盘），保存仍走既有 PUT /api/v1/local/config（豁免④，零双写、无第二写路径）；登记写盘=执行权配置（写 agents 表即执行权，与豁免④同级主权面），发现/登记面暴露给 agent 面即 agent 可自行探测宿主 HOME 布局并改写本机执行配置，属越权通道，豁免 MCP 映射。`GET /api/v1/local/agents` 增量检测摘要为既有只读目录的加法字段（检测摘要属节点本地真相，未发现过=not_checked 如实；hub 目录投影归 W07-01/C 阶段），不构成新端点、不触发本规则。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。

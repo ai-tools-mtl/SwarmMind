@@ -1566,6 +1566,8 @@ async function cfgRestart(btn) {
 }
 
 // normalizeProfile 编辑副本归一（服务端字段全集；exposed 三态归一布尔）。
+// session_adapter 入副本（W06-02 登记面「适配器」）：随整表提交 round-trip，
+// 网页编辑不再把已声明的适配器静默丢成缺省空值。
 function normalizeProfile(p) {
   return {
     name: p.name || '', kind: p.kind || 'cli', command: p.command || '', workdir: p.workdir || '',
@@ -1573,17 +1575,22 @@ function normalizeProfile(p) {
     allow_args: !!p.allow_args, allow_env: p.allow_env || [], config_home: p.config_home || '',
     description: p.description || '', permission_mode: p.permission_mode || '', exposed: p.exposed !== false, orchestrator: !!p.orchestrator,
     stdin_to_arg: !!p.stdin_to_arg,
+    session_adapter: p.session_adapter || '',
   };
 }
 
 /* ---------- 页面②：我的服务（旅程①服务提供者：开关三态 + 只读配置） ---------- */
 function servicesPage() {
+  /* P06/P00 指引（W06-02）：「本机独立使用为正常态」为锚点文案——不连中心一切
+   * 功能照常；连接走既有「连接」页接入向导（不建新页）。 */
   const head = `<div class="page-head"><div><h1>服务</h1>
-    <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p></div></div>`;
+    <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p>
+    <p class="muted small">本机独立使用为完全正常的形态（发现 / 登记 / 派单 / 通知离线照常）；需要跨机协作时，${button('走「连接」页的接入向导', 'go:wizard', 'link')}，凭据人工核对。</p></div></div>`;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
   // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
   const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
-    <p class="muted">在下方「能力配置」点「＋ 新增 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p></div></section>`;
+    <p class="muted">在下方「能力配置」点「＋ 新增 agent」或「发现本机 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p>
+    <p class="muted small">本机独立使用为正常态；连接中心走「连接」页接入向导。</p></div></section>`;
   /* 通知卡上移至页头后第一位（2026-10-26 notify-polish 改动四：渠道配置是服务页
    * 高频入口，不再沉底；空态/agent 服务卡居中，能力配置编辑区沉底）。 */
   return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +
@@ -1619,12 +1626,14 @@ function cfgSection() {
     <tbody>${rows}</tbody></table></div>
     <div class="row spaced">
       ${button('＋ 新增 agent', 'cfg-add', '')}
+      ${button('发现本机 agent', 'discover-open', '')}
       ${button('保存全部（校验+写盘）', 'cfg-save', 'primary')}
       ${button('从文件重载', 'cfg-reload', '')}
     </div>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
-    关闭开放（exposed=false）只影响其他机器调用，本机派单不受限。结构性变更（增删 / command / agent_args / kind）保存后需「应用并重启」。</p></details></section>`;
+    关闭开放（exposed=false）只影响其他机器调用，本机派单不受限。结构性变更（增删 / command / agent_args / kind / session_adapter）保存后需「应用并重启」。</p>
+    <p class="muted small">「发现本机 agent」只探测你逐个显式给出的候选命令（零磁盘扫描、零写盘）；「登记预览」算差异与检测结果，确认后回到本表，<b>保存仍走「保存全部」</b>（整表 PUT，无第二写路径）。全权档位 permission_mode（yolo / danger-full-access）保存链拒绝。</p></details></section>`;
 }
 
 function cfgRow(a, i) {
@@ -1736,6 +1745,35 @@ function orchNote(a) {
   return `<div class="notice ok spaced" id="${name}"><b>智行管家已声明</b>：复合目标将交由本能力拆解派发汇总（hub 汇聚全网声明，冲突时告警并回退名字识别）。</div>`;
 }
 
+/* ---------- 能力卡检测徽标（W06-02 四值投影，加法） ----------
+ * detectGlyph 单值 → 徽标：pass 绿 ✓ / fail 红 ✗ / not_checked 灰 –（未检测如实
+ * 灰置，绝不冒认已检测）；detectBadgeHtml 能力卡头部四值行；旧后端无 detect 字段
+ * 不渲染（不冒认）。execution_ready pass 必带「模型未验证」口径行——绝不合并绿灯。 */
+function detectGlyphHtml(label, v, reason) {
+  const mark = v === 'pass' ? '✓' : v === 'fail' ? '✗' : '–';
+  const cls = v === 'pass' ? 'online' : v === 'fail' ? 'offline' : '';
+  const tip = (reason ? reason + ' · ' : '') + (v === 'pass' ? '通过' : v === 'fail' ? '未通过' : '未检测（如实呈现，不推断）');
+  return `<span class="badge ${cls}" title="${esc(tip)}">${esc(label)} ${mark}</span>`;
+}
+function detectBadgeHtml(a) {
+  const d = a?.detect;
+  if (!d) return '';
+  return ` ${detectGlyphHtml('安装', d.installed, '')}${detectGlyphHtml('配置', d.config_recognized, '')}` +
+    detectGlyphHtml('就绪', d.execution_ready, '') + detectGlyphHtml('调用', d.call_allowed, '');
+}
+/* detectSummaryRow 配置详情表「检测摘要」行：四值 + 检查时间 + 未验证原因；
+ * execution_ready pass 时强制带原注记（执行前置检查通过（模型未验证））。 */
+function detectSummaryRow(a) {
+  const d = a?.detect;
+  if (!d) return '';
+  const fmt = v => v === 'pass' ? '通过' : v === 'fail' ? '未通过' : '未检测';
+  const parts = [`安装 ${fmt(d.installed)}`, `配置识别 ${fmt(d.config_recognized)}`, `执行就绪 ${fmt(d.execution_ready)}`, `本机调用 ${fmt(d.call_allowed)}`];
+  if (d.execution_ready === 'pass') parts.push('执行前置检查通过（模型未验证）：未运行真实模型探针，不声称账号/额度可用');
+  if (d.checked_at) parts.push('检查于 ' + timeFull(d.checked_at));
+  if (d.not_checked_reason) parts.push(d.not_checked_reason);
+  return `<tr><th>检测摘要</th><td><small class="muted">${parts.map(esc).join(' · ')}</small><small>数据源=本机「发现/登记预览」的最近一次检测（进程内存，重启后如实回到未检测）；全网投影不在本端</small></td></tr>`;
+}
+
 function svcCard(a) {
   const on = !!a.exposed;
   const syncNote = a._pending
@@ -1746,7 +1784,7 @@ function svcCard(a) {
         ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录（经 hub）。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
   return `<section class="card svc-card spaced ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
-    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span>${a.orchestrator ? ' <span class="badge online">管家 · 本机</span>' : ''}</h2>
+    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span>${a.orchestrator ? ' <span class="badge online">管家 · 本机</span>' : ''}${detectBadgeHtml(a)}</h2>
       <small class="muted">${esc(a.description || '（无描述）')} · ${esc(permLabel(a.permission_mode))} · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
     <div class="actions"><div class="expose-ctl">
     ${/* 开放控件单开关化（2026-10-29 部署后走查反馈二）：开放/停止双按钮视觉权重
@@ -1766,6 +1804,7 @@ function svcCard(a) {
         <tr><th>config_home</th><td><code>${esc(a.config_home || '（空 = data_dir/home）')}</code><small>进程 HOME 指此，与 workdir 分离；凭证不出本机</small></td></tr>
         <tr><th>agent_args</th><td>${(a.agent_args || []).length ? '<code>' + a.agent_args.map(esc).join(' ') + '</code>' : '（无固定附加参数）'}<small>固定拼在任务参数前，任务不可改</small></td></tr>
         <tr><th>permission_mode</th><td>${esc(a.permission_mode || '未声明')}<small>${esc(permissionNote(a.permission_mode))}</small></td></tr>
+        ${detectSummaryRow(a)}
       </tbody></table></div>
       <p class="footer-note">这些字段永不离开本机；对外只可见能力卡（名称/描述/权限模式/开关）。</p></details></section>`;
 }
@@ -2051,6 +2090,245 @@ function deleteNotifyChannel(id, name) {
       toast('删除失败 · ' + (r ? errLine(r.data) : '网络异常'));
     }
   });
+}
+
+/* ---------- 本机 agent 发现与登记预览（W06-02） ----------
+ * 双端形态约定：node 单端能力（hub 无发现/登记按钮，任务书双端形态表明列差异）；
+ * 弹层沿用居中 modal 家族（openNotifyForm 同壳：#layer + .overlay > .modal，
+ * modalHead 复用 shared block 同词 ×，不触碰块内）。发现=只探测显式候选（零磁盘
+ * 扫描、零写盘）；登记预览=差异三态+检测四层（同零写盘）；确认只把登记面加进
+ * 能力配置编辑表，保存仍走 cfgSave 的既有 PUT 整表链——前端不发明第二保存路径。
+ * 层状态词与后端口径逐字对齐：pass=通过 / fail=未通过 / not_checked=未检测；
+ * execution_ready pass 必带「模型未验证」注记，绝不合并绿灯。 */
+let disc = null;          // 发现会话：{form:{name,host,command,config_home}, results:[], note:'', err:'', busy}
+let discReturnFocus = null;
+let prevReg = null;       // 登记预览会话：{idx, draft:{...登记面}, preview, err, busy}
+let prevReturnFocus = null;
+
+function openDiscoverModal() {
+  if (S.drawer) closeDrawer();       // 同一 #layer 互斥：任务详情抽屉让位
+  if (S.sessDrawer) closeSessionDrawer();
+  if (cfgEdit) closeCfgDrawer(true); // 能力配置抽屉让位（还原快照）
+  if (!disc) disc = { form: { name: '', host: '', command: '', config_home: '' }, results: [], note: '', err: '', busy: false };
+  const fa = document.activeElement;
+  discReturnFocus = fa && fa !== document.body ? fa : null;
+  paintDiscoverModal();
+}
+function paintDiscoverModal() {
+  $('#layer').innerHTML = `<div class="overlay"><section class="modal" id="disc-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">
+    ${modalHead('发现本机 agent')}
+    <p class="muted small">只探测你在下方逐个显式给出的候选（command 填绝对路径）；不做磁盘 / PATH 扫描。检测纯元数据：宿主配置只回「是否可用 + 引用路径」，内容与凭证永不读取返回。</p>
+    <div class="cfg-form-cols">
+      <label>名称<input data-disc="name" value="${esc(disc.form.name)}" placeholder="预备登记名（如 my-codex）"></label>
+      <label>宿主<select data-disc="host">
+        <option value=""${disc.form.host === '' ? ' selected' : ''}>未知宿主（按通用手动检测）</option>
+        <option value="codex"${disc.form.host === 'codex' ? ' selected' : ''}>codex</option>
+        <option value="zcode"${disc.form.host === 'zcode' ? ' selected' : ''}>zcode</option>
+      </select></label>
+      <label>command（绝对路径，只探测它）<input data-disc="command" value="${esc(disc.form.command)}" placeholder="/usr/local/bin/codex"></label>
+      <label>config_home（可空；空=配置层不检测）<input data-disc="config_home" value="${esc(disc.form.config_home)}" placeholder="/Users/me"></label>
+    </div>
+    <div class="row spaced">${button(disc.busy ? '探测中…' : '探测此候选', 'disc-run', 'primary', disc.busy ? 'disabled' : '')}${disc.results.length ? button('清空结果', 'disc-clear', 'link') : ''}</div>
+    <div id="disc-zone" class="spaced">${discResultsHtml()}</div>
+  </section></div>`;
+  layerInert(true);
+  $('#layer [role=dialog]')?.focus();
+  playDrawerOpen();
+  $('#layer').addEventListener('click', discMaskClose); // 具名引用重复注册幂等去重
+}
+function discMaskClose(e) {
+  if (!$('#disc-modal')) return; // 弹层已关后残留监听不动作（同 nfMaskClose 机制）
+  if (e.target.classList.contains('overlay')) closeDiscoverModal();
+}
+function closeDiscoverModal() {
+  disc = null;
+  layerInert(false);
+  $('#layer').innerHTML = '';
+  const back = discReturnFocus;
+  discReturnFocus = null;
+  if (back?.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
+}
+/* discLayerChip 检测层徽标：状态词与四层口径同源（未检测不冒认、失败带原因）。 */
+function discLayerChip(label, lc) {
+  const st = lc?.status || 'not_checked';
+  const word = st === 'pass' ? '通过' : st === 'fail' ? '未通过' : '未检测';
+  const cls = st === 'pass' ? 'online' : st === 'fail' ? 'offline' : '';
+  return `<span class="badge ${cls}" title="${esc(lc?.reason || '')}">${esc(label)} ${word}</span>`;
+}
+function discResultsHtml() {
+  if (disc.err) return `<div class="notice warn"><b>探测失败</b>：${esc(disc.err)}</div>`;
+  if (!disc.results.length) return `<p class="muted small">尚无结果：填好候选后点「探测此候选」。发现≠登记——结果零写盘、不自动开放能力。</p>`;
+  return disc.results.map((r, i) => {
+    const rep = r.report || {};
+    return `<div class="chan-card${r.registered ? '' : ' off'}" id="disc-res-${i}">
+      <div class="row"><div><b>${esc(r.name)}</b> <span class="badge">${esc(r.host || '未知宿主')}</span>${r.registered ? ` <span class="badge online">已登记（${r.registered_by === 'command' ? '按命令命中' : '按名命中'}）</span>` : ' <span class="badge">未登记</span>'}</div>
+      <div class="actions">${button('登记预览…', 'disc-preview:' + i, '')}</div></div>
+      <div class="spaced">${discLayerChip('安装', rep.installed)}${discLayerChip('配置识别', rep.config_recognized)}${discLayerChip('执行就绪', rep.execution_ready)}${discLayerChip('本机调用', rep.call_allowed)}</div>
+      ${rep.execution_ready?.status === 'pass' ? `<p class="muted small">${esc(rep.execution_ready.reason || '')}</p>` : (rep.execution_ready?.reason ? `<p class="muted small">执行就绪：${esc(rep.execution_ready.reason)}</p>` : '')}
+      <p class="muted small">允许本机调用：${esc(r.local_call?.note || '')}<br>exposed 对中心开放：${esc(r.exposed?.note || '')}</p>
+    </div>`;
+  }).join('') + (disc.note ? `<p class="footer-note">${esc(disc.note)}</p>` : '');
+}
+async function discRun(btn) {
+  if (disc.busy) return;
+  disc.busy = true;
+  disc.err = '';
+  busyBtn(btn, '探测中…');
+  try {
+    const r = await api('POST', '/api/v1/local/agents/discover', { candidates: [disc.form] });
+    if (r.code === 200) {
+      const d = r.data || {};
+      disc.results = (d.results || []).concat(disc.results); // 新结果在前（同候选重跑=最新在前）
+      disc.note = d.note || '';
+    } else {
+      disc.err = errLine(r.data);
+    }
+  } catch (e) {
+    if (!e?.unauthorized) disc.err = '网络层失败：结果未知';
+  }
+  disc.busy = false;
+  paintDiscoverModal();
+}
+/* draftFor 登记面预填：已登记名优先取现有编辑副本（改名式修正从现状出发），
+ * 未登记名取候选回显 + 缺省（workdir 必填留空待填）。 */
+function draftFor(r) {
+  const existing = (S.cfg.agents || []).find(x => x.name === r.name);
+  if (existing) return JSON.parse(JSON.stringify(existing));
+  return {
+    name: r.name || '', kind: 'cli', command: r.command || '', workdir: '',
+    agent_args: [], timeout_sec: 600, allow_args: false, allow_env: [],
+    config_home: r.config_home || '', description: '', permission_mode: '',
+    exposed: true, stdin_to_arg: false,
+    session_adapter: (r.host === 'codex' || r.host === 'zcode') ? r.host : '',
+  };
+}
+function openPreviewModal(idx) {
+  const r = disc?.results[idx];
+  if (!r) return;
+  const fa = document.activeElement;
+  prevReturnFocus = fa && fa !== document.body ? fa : null;
+  prevReg = { idx, draft: draftFor(r), preview: null, err: '', busy: false };
+  paintPreviewModal();
+  prevRefresh(); // 打开即出预览（零写盘，可反复改参重出）
+}
+function paintPreviewModal() {
+  const d = prevReg.draft;
+  const fld = (field, label, value, type = 'text') => `<label>${esc(label)}<input data-prev="${field}" type="${type}" value="${esc(value)}"></label>`;
+  $('#layer').innerHTML = `<div class="overlay"><section class="modal" id="prev-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">
+    ${modalHead('登记预览 · ' + (esc(d.name) || '（未命名）'))}
+    <p class="muted small">登记面与现有配置的差异 + 检测四层即时结果。<b>预览零写盘</b>；确认后加入下方能力配置表，保存仍走「保存全部」（整表 PUT，无第二写路径）。</p>
+    <div class="cfg-form-cols">
+      ${fld('name', '名称', d.name)}
+      ${fld('command', 'command（绝对路径）', d.command)}
+      ${fld('workdir', 'workdir（绝对路径，必填）', d.workdir)}
+      ${fld('agent_args', 'agent_args（逗号分隔）', (d.agent_args || []).join(','))}
+      ${fld('allow_env', 'allow_env（逗号分隔或 *）', (d.allow_env || []).join(','))}
+      ${fld('timeout_sec', 'timeout_sec（秒）', String(d.timeout_sec ?? 600), 'number')}
+      ${fld('config_home', 'config_home（可空）', d.config_home)}
+      ${fld('description', '描述', d.description)}
+      ${fld('permission_mode', 'permission_mode（全权档位 yolo / danger-full-access 预览即拒）', d.permission_mode)}
+      <label>适配器 session_adapter<select data-prev="session_adapter">
+        <option value=""${!d.session_adapter ? ' selected' : ''}>无（不支持持久会话）</option>
+        <option value="codex"${d.session_adapter === 'codex' ? ' selected' : ''}>codex</option>
+        <option value="zcode"${d.session_adapter === 'zcode' ? ' selected' : ''}>zcode</option>
+      </select></label>
+      <label class="cfg-check"><input type="checkbox" data-prev="exposed" ${d.exposed !== false ? 'checked' : ''}> 开放给其他机器调用（exposed；本机派单不受限）</label>
+      <label class="cfg-check"><input type="checkbox" data-prev="allow_args" ${d.allow_args ? 'checked' : ''}> allow_args（允许任务传参）</label>
+    </div>
+    <div class="row spaced">${button(prevReg.busy ? '预览生成中…' : '按当前表单重新出预览', 'prev-refresh', '', prevReg.busy ? 'disabled' : '')}${button('返回发现结果', 'prev-back', 'link')}</div>
+    <div id="prev-zone" class="spaced">${prevZoneHtml()}</div>
+  </section></div>`;
+  layerInert(true);
+  $('#layer [role=dialog]')?.focus();
+  playDrawerOpen();
+  $('#layer').addEventListener('click', prevMaskClose);
+}
+function prevMaskClose(e) {
+  if (!$('#prev-modal')) return;
+  if (e.target.classList.contains('overlay')) closePreviewModal(true);
+}
+function closePreviewModal(back) {
+  prevReg = null;
+  if (back && disc) { paintDiscoverModal(); return; } // 返回发现结果（层重开）
+  layerInert(false);
+  $('#layer').innerHTML = '';
+  const b = prevReturnFocus;
+  prevReturnFocus = null;
+  if (b?.isConnected) b.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
+}
+async function prevRefresh(btn) {
+  if (prevReg.busy) return;
+  prevReg.busy = true;
+  prevReg.err = '';
+  if (btn) busyBtn(btn, '预览生成中…');
+  try {
+    const d = prevReg.draft;
+    const r = await api('POST', '/api/v1/local/agents/registration-preview', { agent: {
+      name: d.name, kind: d.kind || 'cli', command: d.command, workdir: d.workdir,
+      agent_args: d.agent_args || [], timeout_sec: d.timeout_sec, allow_args: !!d.allow_args,
+      allow_env: d.allow_env || [], config_home: d.config_home, description: d.description,
+      permission_mode: d.permission_mode, exposed: d.exposed !== false, stdin_to_arg: !!d.stdin_to_arg,
+      session_adapter: d.session_adapter || '',
+    }, detect_host: disc?.results[prevReg.idx]?.host || '' });
+    if (r.code === 200) prevReg.preview = r.data;
+    else { prevReg.err = errLine(r.data); prevReg.preview = null; }
+  } catch (e) {
+    if (!e?.unauthorized) prevReg.err = '网络层失败：结果未知';
+  }
+  prevReg.busy = false;
+  paintPreviewModal(); // 表单值从 prevReg.draft 回填（input 委托实时落 draft，输入不丢）
+}
+function prevZoneHtml() {
+  if (prevReg.err) return `<div class="notice warn"><b>预览被拒</b>：${esc(prevReg.err)}<br>登记面未写盘，修正表单后可重新出预览。</div>`;
+  const p = prevReg.preview;
+  if (!p) return '<p class="muted small">点「按当前表单重新出预览」查看与现有配置的差异与本机检测（零写盘）。</p>';
+  const diff = p.diff || {};
+  let diffHtml = '';
+  if (diff.kind === 'create') diffHtml = '<span class="badge online">新增</span> <small class="muted">保存后为结构性变更，需「应用并重启」生效。</small>';
+  else if (diff.kind === 'none') diffHtml = '<span class="badge">无变化</span> <small class="muted">与现有配置完全一致。</small>';
+  else diffHtml = '<span class="badge">修改</span><div class="table-wrap spaced"><table><tbody>' +
+    (diff.changed_fields || []).map(f => `<tr><th>${esc(f.field)}</th><td>${esc(f.old || '（空）')} → <b>${esc(f.new || '（空）')}</b></td></tr>`).join('') +
+    '</tbody></table></div>';
+  const rep = p.detect || {};
+  const lay = (label, lc) => {
+    const st = lc?.status || 'not_checked';
+    const word = st === 'pass' ? '通过' : st === 'fail' ? '未通过' : '未检测';
+    const cls = st === 'pass' ? 'online' : st === 'fail' ? 'offline' : '';
+    return `<tr><th>${esc(label)}</th><td><span class="badge ${cls}">${word}</span>${lc?.reason ? ` <small class="muted">${esc(lc.reason)}</small>` : ''}</td></tr>`;
+  };
+  return `<div class="spaced"><h3>与现有配置的差异</h3>${diffHtml}
+    <h3 class="spaced">检测（即时四层 · 只读探测）</h3>
+    <div class="table-wrap"><table><tbody>${lay('安装', rep.installed)}${lay('配置识别', rep.config_recognized)}${lay('执行就绪', rep.execution_ready)}${lay('本机调用', rep.call_allowed)}</tbody></table></div>
+    ${rep.execution_ready?.status === 'pass' ? `<p class="muted small">${esc(rep.execution_ready.reason)}</p>` : ''}
+    ${(p.structural || []).length ? `<div class="notice warn spaced"><b>结构性变更</b>：${esc((p.structural || []).join('；'))}——保存后需「应用并重启」生效。</div>` : ''}
+    <p class="footer-note">${esc(p.note || '')}</p></div>`;
+}
+/* prevConfirm 确认登记：只把登记面写入能力配置编辑副本（同名替换防重名），保存
+ * 仍由主人点「保存全部（校验+写盘）」走既有 PUT 整表链——前端零第二写路径。 */
+function prevConfirm() {
+  const d = prevReg.draft;
+  if (!S.cfg.loaded || S.cfg.unavailable) { toast('能力配置未加载：先在「能力配置」点「加载配置」'); return; }
+  const entry = {
+    name: d.name, kind: d.kind || 'cli', command: d.command, workdir: d.workdir,
+    agent_args: d.agent_args || [], timeout_sec: d.timeout_sec, allow_args: !!d.allow_args,
+    allow_env: d.allow_env || [], config_home: d.config_home, description: d.description,
+    permission_mode: d.permission_mode, exposed: d.exposed !== false, stdin_to_arg: !!d.stdin_to_arg,
+    session_adapter: d.session_adapter || '',
+  };
+  const i = S.cfg.agents.findIndex(x => x.name === entry.name);
+  if (i >= 0) S.cfg.agents[i] = entry; else S.cfg.agents.push(entry);
+  closePreviewModal(true);
+  render();
+  toast('已加入能力配置表（未写盘）：点「保存全部（校验+写盘）」完成登记。' +
+    (i >= 0 ? '这是对既有能力的修改。' : '新增能力保存后需「应用并重启」生效。'));
 }
 
 /* ---------- 页面③：派任务·我的任务（旅程②消费者） ---------- */
@@ -2808,6 +3086,14 @@ document.addEventListener('click', e => {
         return;
       }
       case 'cfg-save': cfgSave(btn); return;
+      /* ---------- 本机 agent 发现与登记预览（W06-02） ---------- */
+      case 'discover-open': openDiscoverModal(); return;
+      case 'disc-run': discRun(btn); return;
+      case 'disc-clear': if (disc) { disc.results = []; disc.note = ''; disc.err = ''; paintDiscoverModal(); } return;
+      case 'disc-preview': openPreviewModal(parseInt(arg, 10)); return;
+      case 'prev-refresh': prevRefresh(btn); return;
+      case 'prev-back': closePreviewModal(true); return;
+      case 'prev-confirm': prevConfirm(); return;
       case 'notify-add': openNotifyForm(null); return;
       case 'notify-retry': loadNotifyChannels(); return;
       case 'notify-edit': {
@@ -2833,7 +3119,9 @@ document.addEventListener('click', e => {
         return;
       }
       case 'close':   // shared modalHead ×/取消 同词关闭动作（与 hub 同词，notify-polish 改动三）；守护防误清其他层
-        if ($('#notify-modal')) closeNotifyForm();
+        if ($('#prev-modal')) closePreviewModal(true);   // 预览层 × = 返回发现结果（无发现会话则全关）
+        else if ($('#disc-modal')) closeDiscoverModal();
+        else if ($('#notify-modal')) closeNotifyForm();
         else if ($('#confirm-modal')) closeConfirm();
         else if ($('#copy-modal')) closeCopyModal();
         return;
@@ -2940,6 +3228,18 @@ document.addEventListener('input', e => {
   if (e.target.id === 'sess-agent') { S.sess.agent = e.target.value; render(); }   // 目标切换重绘（适配器展示随行，与 f-target 同口径）
   if (e.target.id === 'sess-cwd') { S.sess.cwd = e.target.value; syncSessFormPaint(); }   // 镜像更新即同步表单槽缓存（防轮询误判重写冲焦点）
   if (e.target.id === 'sess-prompt') { S.sess.prompt = e.target.value; syncSessFormPaint(); }
+  // 发现候选表单（data-disc）：直写 disc.form 不重绘（保输入焦点），探测时统一提交
+  const dk = e.target.dataset?.disc;
+  if (dk && disc) { disc.form[dk] = e.target.value; return; }
+  // 登记预览表单（data-prev）：直写 prevReg.draft 不重绘（重出预览后回填不丢输入）
+  const pv = e.target.dataset?.prev;
+  if (pv && prevReg) {
+    if (e.target.type === 'checkbox') { prevReg.draft[pv] = e.target.checked; return; }
+    if (pv === 'timeout_sec') { prevReg.draft.timeout_sec = parseInt(e.target.value, 10) || 0; return; }
+    if (pv === 'agent_args' || pv === 'allow_env') { prevReg.draft[pv] = e.target.value.split(',').map(x => x.trim()).filter(Boolean); return; }
+    prevReg.draft[pv] = e.target.value;
+    return;
+  }
   // 能力配置编辑（data-cfg="<idx>.<field>"）：直写副本不重绘（保输入焦点），保存时统一提交
   const cfgT = e.target.dataset?.cfg;
   if (cfgT) {
@@ -2961,6 +3261,8 @@ document.addEventListener('keydown', e => {
    * Esc，抽屉键盘可绕到被遮页面。 */
   if (e.key === 'Escape') {
     if ($('#confirm-modal')) { e.preventDefault(); closeConfirm(); return; }
+    if ($('#prev-modal')) { e.preventDefault(); closePreviewModal(true); return; }
+    if ($('#disc-modal')) { e.preventDefault(); closeDiscoverModal(); return; }
     if ($('#notify-modal')) { e.preventDefault(); closeNotifyForm(); return; }
     if ($('#copy-modal')) { e.preventDefault(); closeCopyModal(); return; }
     if (cfgEdit) { e.preventDefault(); closeCfgDrawer(true); return; }

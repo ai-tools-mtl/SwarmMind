@@ -145,11 +145,18 @@ type Server struct {
 	// （同包测试专用：确定性构造「提交穿插读取窗口」的并发交错，codex 审查①；
 	// 生产恒为 nil，不构成公共配置面）。
 	tasksRaceHook func()
+
+	// detectMu / detectCache 本机 agent 检测投影缓存（W06-02：discover 与
+	// registration-preview 写入，GET /api/v1/local/agents 增量摘要读取；进程内存
+	// 态，重启清零——未发现过=not_checked 如实，不落盘、不外发）。
+	detectMu    sync.Mutex
+	detectCache map[string]detectCacheEntry
 }
 
 // New 构造本地 API 服务。
 func New(cfg Config) *Server {
-	return &Server{cfg: cfg, primeTok: cfg.PrimeToken, primeAgentName: cfg.PrimeAgent}
+	return &Server{cfg: cfg, primeTok: cfg.PrimeToken, primeAgentName: cfg.PrimeAgent,
+		detectCache: map[string]detectCacheEntry{}}
 }
 
 // SetPrimeAgent 总理声明外部更新（declare 钦定即时生效；装配方/测试用）。
@@ -246,6 +253,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local/agents", s.authRead(s.handleLocalAgents))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/exposed", s.authRead(s.handleSetExposed))
 	mux.HandleFunc("PATCH /api/v1/local/agents/{name}/orchestrator", s.authRead(s.handleSetAgentOrchestrator))
+	mux.HandleFunc("POST /api/v1/local/agents/discover", s.authLocal(s.handleAgentsDiscover))                  // 本机发现（W06-02，主人专属·六.六豁免⑫）
+	mux.HandleFunc("POST /api/v1/local/agents/registration-preview", s.authLocal(s.handleRegistrationPreview)) // 登记预览（W06-02，主人专属·六.六豁免⑫）
 	mux.HandleFunc("GET /api/v1/local/status", s.authRead(s.handleLocalStatus))
 	mux.HandleFunc("GET /api/v1/local/tasks", s.authRead(s.handleLocalTasks))
 	mux.HandleFunc("GET /api/v1/local/config", s.authRead(s.handleGetConfig))
