@@ -151,8 +151,16 @@ func isLoopbackServiceURL(raw string) bool {
 	if err != nil {
 		return false
 	}
-	h := u.Hostname()
-	return h == "localhost" || h == "::1" || h == "127.0.0.1" || strings.HasPrefix(h, "127.")
+	// url.Parse 不归一 host 大小写（Hostname() 原样返回），大写 LOCALHOST 曾漏
+	// AC07 回环警告（终审建议修）；顺带覆盖三个边缘回环形态：IPv4-mapped
+	//（::ffff:127.x）、带 zone 的 ::1（Hostname() 保留 %zone 后缀，剥除后比对）、
+	// 0.0.0.0。
+	h := strings.ToLower(u.Hostname())
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i]
+	}
+	h = strings.TrimPrefix(h, "::ffff:") // IPv4-mapped IPv6 回环（::ffff:127.0.0.1）
+	return h == "localhost" || h == "::1" || h == "0.0.0.0" || h == "127.0.0.1" || strings.HasPrefix(h, "127.")
 }
 
 // templateCredentialRef 模板凭据位（脱敏纪律出口）：非空 → maskCredential 脱敏

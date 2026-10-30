@@ -440,8 +440,15 @@ func TestLoopbackServiceSemantics(t *testing.T) {
 			{"http://localhost:8445", true},
 			{"http://[::1]:8445", true},
 			{"http://127.200.1.2:9", true},
+			// 终审建议修+边缘形态：大小写不归一曾漏 LOCALHOST；IPv4-mapped/zone
+			// 后缀/0.0.0.0 三形态顺带覆盖（均属回环，漏警告=AC07 advisory 缺口）。
+			{"http://LOCALHOST:8445", true},
+			{"http://[::ffff:127.0.0.1]:8445", true},
+			{"http://[::1%25eth0]:8445", true},
+			{"http://0.0.0.0:8445", true},
 			{"http://10.0.0.1:8445", false},
 			{"https://hub.example.com", false},
+			{"http://[::ffff:10.0.0.1]:8445", false}, // mapped 非回环不误报
 			{"not a url", false},
 		}
 		for _, tc := range cases {
