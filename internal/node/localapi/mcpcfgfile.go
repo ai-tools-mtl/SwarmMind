@@ -524,6 +524,13 @@ func (s *Server) mcpCfgPreviewResponse(req *mcpCfgRequest) (map[string]any, *mcp
 		SupportLevel:      view.HostSupportLevel,
 		ApplyRequirements: applyReqs,
 	}
+	// hub 目标永不自动写（禁远程写调用者文件）：reasons 必须携带原因供页面渲染
+	// 手动指引（终审建议②——此前 hub+已知宿主 reasons 为空，apply_requirements
+	// 三条对 hub 场景误导；apply 对 hub 实为 400 manual_only）。
+	if req.Scope == ScopeHub {
+		writability.Reasons = append(writability.Reasons,
+			"目标范围为 hub：中心端只提供调用机手动指引，宿主配置写入属调用机本机动作（禁远程写调用者文件）")
+	}
 	if cmdSymlink {
 		notes = append(notes, "command 路径为符号链接：如实注记不拒绝（exec 由内核解析，本端不展开）")
 	}
@@ -995,7 +1002,7 @@ func (s *Server) handleMcpCfgRevert(w http.ResponseWriter, r *http.Request) {
 	defer muMcpCfgFile.Unlock()
 	reg, lerr := s.mcpCfgRegistryLoad()
 	if lerr != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", "撤回登记读取失败: "+lerr.Error())
+		writeErr(w, http.StatusInternalServerError, "write_failed", "撤回登记读取失败: "+lerr.Error()) // 与 apply 侧同场景同码（RFC §9：登记失败=write_failed；internal 仅限 DataDir 未装配）——终审建议①
 		return
 	}
 	rec, ok := reg.findByID(req.RevertID)
