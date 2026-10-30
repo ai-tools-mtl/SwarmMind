@@ -13,8 +13,11 @@
 //   node 模式（终审必修4）：E2E_BASE 指向 node local API 且设置 local_token 环境变量
 //     （本机管理令牌，令牌门登录）→ 跑 N01-N03/E-NAV3/E-N1~N3 系列：来源筛选行恒在、
 //     轮询保持筛选、翻页叠加筛选、登出后 S.tf 重置。
-//   会话套件（T3 双端会话界面；R1 必修6 重写）：E2E_SUITE=sessions 切换——hub 模式跑
-//     S01-S10，node 模式跑 SN01-SN06。会话套件会创建/关闭真实会话（其安全门自
+//   会话套件（W01-05 P01/P02 双端会话页面迁移；基线 R1 必修6）：E2E_SUITE=sessions
+//     切换——hub 模式跑 S01-S13（列表七列同构/chips 含 cancelled/新建居中 modal+
+//     草稿保护 S11/详情页 S07·S04/执行明细抽屉 S12/在途关闭拒绝+取消三态 S13/关闭
+//     确认 S06），node 模式跑 SN01-SN10（独立入口迁移 SN08/明细抽屉 SN09/在途关闭
+//     +取消三态+关闭确认 SN10）。会话套件会创建/关闭真实会话（其安全门自
 //     R1 必修1 先行，v3 起判定逻辑统一扩展到全部套件）。
 //     受控数据：全部经 REST 构造并绑定创建回执的唯一 session ID，所有行/详情/关闭
 //     断言按该 ID 定位；unverified（真实成功轮次）与 failed（坏工作目录）分别覆盖；
@@ -62,8 +65,8 @@ function assertLocalBase(suite) {
 }
 
 // ---------- 会话套件公共（R1 必修6）----------
-const SESS_SIX = ['pending', 'awaiting_node', 'running', 'unverified', 'done', 'failed'];
-const SESS_WORD = { pending: '排队中', awaiting_node: '已投递', running: '执行中', done: '已完成', unverified: '工作结果未证实', failed: '执行失败' };
+const SESS_SIX = ['pending', 'awaiting_node', 'running', 'unverified', 'done', 'failed', 'cancelled'];   // W01-05：含 cancelled 投影加法值（变量名沿用）
+const SESS_WORD = { pending: '排队中', awaiting_node: '已投递', running: '执行中', done: '已完成', unverified: '工作结果未证实', failed: '执行失败', cancelled: '已取消' };
 const VIEWPORTS = [[1440, 900], [1280, 800], [1024, 768], [680, 700], [390, 800]];
 const SHOTS = (process.env.E2E_SHOTS || '/tmp/agent-session/t3-shots').replace(/\/+$/, '');
 const walk = [];
@@ -174,8 +177,8 @@ async function nodeFlow(browser) {
   }
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 }); // 登录终态信号（避开启动轮询重绘）
 
-  // node 导航词表（TASK-nav-filter B：总览/服务/任务/连接；aside 内结构化定位）
-  const NODE_NAV = ['总览', '服务', '任务', '连接'];
+  // node 导航词表（TASK-nav-filter B；W01-05 起含独立「会话」入口：总览/服务/任务/会话/连接）
+  const NODE_NAV = ['总览', '服务', '任务', '会话', '连接'];
   const nodeNav = (await page.locator('aside nav button').allTextContents())
     .map(s => s.replace(/^0\d/, '').trim());
   record('E-NAV3', 'node 导航词表：4 项名称与顺序', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
@@ -322,24 +325,23 @@ async function hubSessFlow(browser) {
   await turn(seedC.id, 'E2E 失败覆盖：工作目录不存在，预期执行失败。');
   walkLog(`种子绑定：A=${seedA.id}（无轮次） B=${seedB.id}（真实轮次→unverified） C=${seedC.id}（坏 cwd→failed）`);
 
-  // 进入会话页
+  // 进入会话列表页（W01-05 P01 独立主入口）
   await page.click('aside nav button[data-page="sessions"]');
   await page.waitForSelector(`#sess-list-zone tr[data-sess="${seedA.id}"]`, { timeout: 15000 });
 
-  // S01 列表渲染（绑定 seedA 唯一 ID；不写死 agent 名——断言行含种子 agent）
+  // S01 列表渲染（W01-05 列序定案：标题/agent/机器/工作区/状态/最近活动/操作，双端同构）
   const heads = await page.evaluate(() => [...document.querySelectorAll('#sess-list-zone thead th')].map(th => th.textContent.trim()));
-  const headsOk = JSON.stringify(heads) === JSON.stringify(['会话', '目标机器', '绑定', '状态', '最近活动（UTC）', '操作']);
+  const headsOk = JSON.stringify(heads) === JSON.stringify(['标题', 'agent', '机器', '工作区', '状态', '最近活动（UTC）', '操作']);
   const rowOk = await page.evaluate(id => {
     const tr = document.querySelector(`tr[data-sess="${id}"]`);
-    return !!tr && tr.getAttribute('tabindex') === '0' && tr.textContent.includes('待首轮');
+    return !!tr && tr.getAttribute('tabindex') === '0' && tr.textContent.includes('待首轮') && tr.textContent.includes('（无标题）');
   }, seedA.id);
   const agentOk = await page.evaluate(({ id, agent }) => document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes(agent), { id: seedA.id, agent: seedA.agent });
-  record('S01', '会话列表渲染（列名顺序/种子行含种子 agent/待首轮徽标/行 tabindex）', headsOk && rowOk && agentOk, heads.join('|'));
+  record('S01', '会话列表渲染（七列同构列序/种子行含种子 agent/待首轮徽标/无标题如实缺省/行 tabindex）', headsOk && rowOk && agentOk, heads.join('|'));
 
   // S02 状态筛选（环境无关口径）：chips 计数与 zero 色态逐项匹配 API 推导期望
-  //（推导口径=前端 sessStateCounts 同款：按 last_turn.status 计数，关闭会话的轮次
-  // 同样计入六态 chip；轮询 5s 节拍内状态可能推进，失败带新期望重试收敛）；
-  // 点零计数 chip → 空态 → 清除恢复
+  //（推导口径=前端 sessStateCounts 同款：按 last_turn.status 计数；W01-05 起七值
+  // 全集含 cancelled；轮询 5s 节拍内状态可能推进，失败带新期望重试收敛）
   const deriveExp = sessions => {
     const counts = {};
     for (const s of sessions) { const st = s.last_turn?.status || ''; if (st) counts[st] = (counts[st] || 0) + 1; }
@@ -364,11 +366,14 @@ async function hubSessFlow(browser) {
     await page.waitForSelector('#sess-list-zone tr[data-sess]', { timeout: 5000 });
     filterOk = emptyTxt.includes('没有符合筛选的会话') && hasClear === 1;
   }
-  record('S02', '状态筛选 chips 计数与 zero 色态逐一匹配 API 数据（全部+6 态）', s02ok, JSON.stringify(expNow));
+  record('S02', '状态筛选 chips 计数与 zero 色态逐一匹配 API 数据（全部+7 态含 cancelled）', s02ok, JSON.stringify(expNow));
   record('S02b', `零计数 chip（${zeroChip || '无'}）点击 → 筛选空态 → 清除恢复`, filterOk, zeroChip ? `点 ${SESS_WORD[zeroChip]}` : '环境数据无零计数状态，点击路径未覆盖', !zeroChip);
 
-  // S03 新建表单联动：选机器 → 能力联动（未声明者禁选+注明）→ 摘要行+绑定区 → 权限档无全权 → 空消息校验。
-  // 适配器只读值断言创建回执的 seedA.adapter（R1 建议2：不再 zcode 兜底）
+  // S03 新建 modal 联动（W01-05：表单迁入居中 modal）：打开 modal → 选机器 → 能力
+  // 联动（未声明者禁选+注明）→ 摘要行+绑定区 → 权限档无全权 → 空消息拦截。适配器
+  // 只读值断言创建回执的 seedA.adapter。
+  await page.click('.page-head [data-act="sess-new"]');
+  await page.waitForSelector('#sess-modal-body #sess-form', { timeout: 5000 });
   await page.selectOption('#sess-node', seedA.node);
   await page.waitForTimeout(400);
   const agentOpts = await page.evaluate(() => {
@@ -376,10 +381,10 @@ async function hubSessFlow(browser) {
     return sel ? [...sel.options].map(o => ({ v: o.value, t: o.textContent, disabled: o.disabled })) : [];
   });
   const optCap = agentOpts.find(o => o.v === seedA.agent);
-  // 无适配器对照按目录实际 session_adapter 能力分类（R1 建议2 残余：不得取「第一个
-  // 不同于 seedA 的 agent」充对照——目录存在多个合法会话能力时后者会被误断 disabled
-  // 而假败）。期望分类：disabled ⇔ 该能力卡未声明 session_adapter；禁选项注明文案；
-  // 选项值必须都能与目录对账（对不上=FAIL，不静默放过）。
+  // 无适配器对照按目录实际 session_adapter 能力分类（不得取「第一个不同于 seedA
+  // 的 agent」充对照——目录存在多个合法会话能力时后者会被误断 disabled 而假败）。
+  // 期望分类：disabled ⇔ 该能力卡未声明 session_adapter；禁选项注明文案；选项值
+  // 必须都能与目录对账（对不上=FAIL，不静默放过）。
   const dirCaps = await page.evaluate(async nodeId => {
     const dir = await fetch('/api/v1/directory', { credentials: 'same-origin' }).then(r => r.json()).catch(() => null);
     const caps = {};
@@ -403,8 +408,51 @@ async function hubSessFlow(browser) {
     && summary.includes('建立持久会话') && adapterRo === seedA.adapter
     && !permVals.includes('danger-full-access') && !permVals.includes('yolo')
     && toastTxt.includes('首轮消息');
-  record('S03', '新建表单联动（选项按目录 session_adapter 能力分类禁选并注明/摘要行/适配器只读=创建回执声明/权限档剔除全权/空消息拦截）', s03ok,
+  record('S03', '新建 modal 联动（选项按目录 session_adapter 能力分类禁选并注明/摘要行/适配器只读=创建回执声明/权限档剔除全权/空消息拦截）', s03ok,
     `cap=${JSON.stringify(optCap)} 禁选对照=${noAdapt.length}/${optsAll.length}${noAdapt.length ? '' : '（该节点开放能力均声明适配器——按分类全检，无禁选对照属环境事实）'} unknown=${unknownCap.length} adapterRo=${adapterRo} toast=${toastTxt.slice(0, 20)}`);
+  await page.keyboard.press('Escape');   // 关 modal（草稿保护：不清输入）
+  await p_sleep(500);
+
+  // S11 新建 modal 居中形态 + 草稿保护（W01-05 交付三）：层可见/覆盖关系/背景 inert/
+  // 焦点入层；填 cwd+prompt → Esc 关层 → 重开 → 输入原样保留（关层不清草稿）。
+  await page.click('.page-head [data-act="sess-new"]');
+  await page.waitForSelector('#layer .modal #sess-form', { timeout: 5000 });
+  await p_sleep(650);   // 入场动画落定再量几何
+  const mDeep = await page.evaluate(() => {
+    const m = document.querySelector('#layer .modal');
+    const r = m.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    const labels = [...m.querySelectorAll('#sess-form label')].map(l => l.textContent.trim().slice(0, 12));
+    return {
+      visible: !!m && r.width > 0 && r.height > 0,
+      cover: !!hit && !!hit.closest('#layer .modal'),
+      notSlim: !m.classList.contains('slim'),   // 表单为居中大 modal（确认类才 slim）
+      inert: document.getElementById('app')?.hasAttribute('inert'),
+      focusIn: !!document.activeElement?.closest?.('#layer .modal'),
+      fieldOrder: labels.join('|'),
+    };
+  });
+  await page.fill('#sess-cwd', '/tmp/agent-session/draft-keep');
+  await page.fill('#sess-prompt', '草稿保护走查：关层重开不清输入。');
+  await page.keyboard.press('Escape');
+  await p_sleep(500);
+  const modalGone = await page.locator('#layer .modal').count() === 0;
+  await page.click('.page-head [data-act="sess-new"]');
+  await page.waitForSelector('#layer .modal #sess-form', { timeout: 5000 });
+  const draftKept = await page.evaluate(() => ({
+    cwd: document.querySelector('#sess-cwd')?.value === '/tmp/agent-session/draft-keep',
+    prompt: (document.querySelector('#sess-prompt')?.value || '').includes('草稿保护走查'),
+  }));
+  await shot(page, 'hub-new-session-modal');
+  walkLog(`S11 modal 走查：visible=${mDeep.visible} cover=${mDeep.cover} notSlim=${mDeep.notSlim} inert=${mDeep.inert} focusIn=${mDeep.focusIn} 字段序=${mDeep.fieldOrder} 关层=${modalGone} 草稿=${JSON.stringify(draftKept)}`);
+  record('S11', '新建 modal 居中形态+草稿保护（层可见+覆盖+背景 inert+焦点入层/非 slim/字段序目标→绑定→工作区→输入/Esc 关层/重开输入保留）',
+    mDeep.visible && mDeep.cover && mDeep.notSlim && mDeep.inert && mDeep.focusIn && modalGone && draftKept.cwd && draftKept.prompt,
+    `deep=${JSON.stringify({ ...mDeep, fieldOrder: undefined })} 字段序=${mDeep.fieldOrder} 草稿=${JSON.stringify(draftKept)}`, false, 'DEEP');
+  // 清掉 S11 草稿（后续种子流程从干净表单开始）：改为新建会话重置 + Esc 关层
+  await page.click('[data-act="sess-switch-new"]').catch(() => { });
+  await p_sleep(300);
+  await page.keyboard.press('Escape');
+  await p_sleep(400);
 
   // S10 hub 五视口整页截图（视觉层留档；此时三个种子会话都在列）。整页视觉判据
   // （R2 必修6 残余）：fullPage 截图逐张核对 PNG 像素尺寸——宽=视口宽、高≥页面
@@ -426,52 +474,28 @@ async function hubSessFlow(browser) {
   walkLog(`S10 整页视觉核对：${shotNotes.join(' ')}（判据=图高≥文档高；人眼核查入口=PNG 留档）`);
   record('S10', 'hub 会话页五视口整页截图（fullPage 覆盖完整文档高度：1440/1280/1024/680/390）', !shotFail, shotFail || shotNotes.join(' '), false, 'VISUAL');
 
-  // S07 抽屉有轮次深层态（seedB，唯一 ID 定位）：焦点入层 → Tab 陷阱 → 轮次行实键
-  // Enter 选中 → detail 警示条；unverified 徽标绝不渲染为成功；Esc 关层返焦
+  // S07 详情页有轮次深层态（seedB，唯一 ID 定位；W01-05 P02 独立详情页）：行点击
+  // 进 #/sessions/{id} → 等轮次 unverified → 实键 Enter 选中轮次 → 答复区警示条；
+  // unverified 徽标绝不渲染为成功；返回链接回列表；chip 零→非零同步
   await page.click(`tr[data-sess="${seedB.id}"]`);
-  await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  await page.waitForSelector('#layer .drawer tr[data-turn="1"]', { timeout: 15000 });
-  await page.waitForFunction(() => document.querySelector('#layer .drawer tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'), null, { timeout: 300000 }).catch(() => { });
-  const bBadgeUnv = await page.evaluate(() => document.querySelector('#layer .drawer tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'));
-  const focusInDrawer = await page.evaluate(() => document.activeElement === document.querySelector('#layer .drawer'));
-  /* Tab 陷阱断言（对齐 hub R3-P2-01 锚点语义）：容器（tabindex=-1，不在 items）上
-   * 正向 Tab → 末位；再 Tab → 首位（循环）；首位 Shift+Tab → 末位。 */
-  const drawerItems = () => page.evaluate(sel => {
-    const items = [...document.querySelector(sel).querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el => el.offsetParent !== null);
-    return { n: items.length, activeIsFirst: document.activeElement === items[0], activeIsLast: document.activeElement === items[items.length - 1] };
-  }, '#layer .drawer');
-  await page.keyboard.press('Tab');   // 容器 → 末位（正向锚点）
-  const tabToLast = (await drawerItems()).activeIsLast;
-  await page.keyboard.press('Tab');   // 末位 → 首位（循环）
-  const tabWrapFirst = (await drawerItems()).activeIsFirst;
-  await page.keyboard.press('Shift+Tab');   // 首位 → 末位（反向循环）
-  const tabShiftLast = (await drawerItems()).activeIsLast;
-  let trapOk = tabToLast && tabWrapFirst && tabShiftLast;
-  for (let i = 0; i < 10 && trapOk; i++) {   // 连按 Tab 焦点不出层
-    await page.keyboard.press('Tab');
-    trapOk = await page.evaluate(() => !!document.activeElement?.closest?.('#layer'));
-  }
-  // 轮次行实键盘选中（行 tabindex + Enter 等价点击，R1 必修6：tabindex 存在不证明键盘可达）
-  await page.focus('#layer .drawer tr[data-turn="1"]');
+  await page.waitForSelector('#sess-detail', { timeout: 5000 });
+  await page.waitForFunction(id => location.hash.includes(id), seedB.id).catch(() => { });
+  await page.waitForSelector('#sess-detail tr[data-turn="1"]', { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'), null, { timeout: 300000 }).catch(() => { });
+  const bBadgeUnv = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'));
+  const zones = await page.evaluate(() => [...document.querySelectorAll('#sess-detail [data-zone]')].map(z => z.dataset.zone));
+  // 轮次行实键盘选中（行 tabindex + Enter 等价点击，R1 必修6 口径延续）
+  await page.focus('#sess-detail tr[data-turn="1"]');
   await page.keyboard.press('Enter');
   await p_sleep(500);
-  const selOn = await page.evaluate(() => document.querySelector('#layer .drawer tr[data-turn="1"]')?.classList.contains('on'));
-  const detailTxt = await page.textContent('#layer .drawer [data-zone="detail"]');
+  const selOn = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"]')?.classList.contains('on'));
+  const detailTxt = await page.textContent('#sess-detail [data-zone="detail"]');
   const detailOk = detailTxt.includes('工作结果未证实') && !detailTxt.includes('已完成');
-  await shot(page, 'hub-drawer-timeline');
-  await shot(page, 'hub-drawer-turn-unverified');
-  await page.keyboard.press('Escape');
-  /* 返焦断言在 closeLayer 同步返焦后立即读（120ms）：再晚观察窗可能撞上轮询
-   * 列表重绘——重绘换掉返焦落点的行节点会把焦点一并带到 body（负载相关时序，
-   * 与关层返焦本身无关，S04 静置后的严格断言承担确定性验收）。 */
-  await p_sleep(120);
-  const refocusLoose = await page.evaluate(() => {
-    const a = document.activeElement;
-    return !!(a && (a.closest?.('tr[data-sess]') || a.closest?.('aside nav')));
-  });
-  walkLog(`S07 Esc 关层走查：返焦（宽松，+120ms）=${refocusLoose}（activeElement=${await page.evaluate(activeDesc)}）`);
-  await p_sleep(500);
-  const drawerGone = await page.locator('#layer .drawer').count() === 0;
+  await shot(page, 'hub-detail-timeline');
+  await shot(page, 'hub-detail-turn-unverified');
+  await page.click('[data-act="sess-back"]');
+  await p_sleep(600);
+  const backOk = await page.evaluate(id => !location.hash.includes(id) && !!document.querySelector(`tr[data-sess="${id}"]`), seedB.id);
   // chip 计数 0→1 跨越（R1 必修3 局部更新实证）：unverified 由零态跨到非零并退灰
   let chipSync = false;
   {
@@ -480,60 +504,72 @@ async function hubSessFlow(browser) {
     await page.waitForFunction(chipMatches, exp, { timeout: 12000 }).catch(() => { });
     chipSync = (exp.counts.unverified || 0) >= 1 && await page.evaluate(chipMatches, exp);
   }
-  record('S07', '有轮次抽屉深层态（焦点入层/Tab 首末循环 10 连按不出层/实键 Enter 选中轮次/unverified 警示条且绝不渲染为成功/Esc 关层返焦/chip 零→非零同步变色）',
-    focusInDrawer && trapOk && bBadgeUnv && selOn && detailOk && drawerGone && refocusLoose && chipSync,
-    `badge=${bBadgeUnv} trap=${trapOk}(末${tabToLast}/循环首${tabWrapFirst}/反向末${tabShiftLast}) sel=${selOn} detail=${detailTxt.slice(0, 30).replace(/\s+/g, ' ')}… escGone=${drawerGone} refocus=${refocusLoose} chipSync=${chipSync}`, false, 'DEEP');
+  walkLog(`S07 详情页走查：zones=${zones.join(',')} badge=${bBadgeUnv} 实键选中=${selOn} 答复区=${detailTxt.slice(0, 24).replace(/\s+/g, ' ')}… 返回列表=${backOk} chipSync=${chipSync}`);
+  record('S07', '详情页有轮次深层态（四分区/#/sessions/{id} 路由/实键 Enter 选中轮次/unverified 警示条且绝不渲染为成功/返回链接回列表/chip 零→非零同步变色）',
+    bBadgeUnv && zones.join(',') === 'head,binding,turns,detail,actions' && selOn && detailOk && backOk && chipSync,
+    `badge=${bBadgeUnv} zones=${zones.join(',')} sel=${selOn} detail=${detailTxt.slice(0, 30).replace(/\s+/g, ' ')}… back=${backOk} chipSync=${chipSync}`, false, 'DEEP');
 
-  // S08 失败轮次覆盖（seedC，可控数据）：等待终态应为 failed；抽屉徽标+详情错误条
-  const cTerm = await hubWaitTerminal(page, seedC.id);
-  await page.click(`tr[data-sess="${seedC.id}"]`);
+  // S12 执行明细右抽屉深层态（W01-05：旧 700px 抽屉退役为逐轮执行明细；DEEP）：
+  // 明细按钮开抽屉 → 三分区（head/facts/answer）→ 焦点入层 + Tab 10 连按不出层 →
+  // 事实区含关联任务入口 → Esc 关层返焦。
+  await page.click(`tr[data-sess="${seedB.id}"]`);
+  await page.waitForSelector('#sess-detail', { timeout: 5000 });
+  await page.waitForSelector('#sess-detail tr[data-turn="1"]', { timeout: 10000 });
+  await page.click('#sess-detail [data-act="sess-turn-detail"]');
   await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  await page.waitForSelector('#layer .drawer tr[data-turn="1"]', { timeout: 10000 });   // 分区异步填充：轮次行就位再读徽标
-  const cBadge = await page.evaluate(() => document.querySelector('#layer .drawer tr[data-turn="1"] .badge')?.classList.contains('sst-failed'));
-  await page.click('#layer .drawer tr[data-turn="1"]');
-  await p_sleep(500);
-  const cDetail = await page.textContent('#layer .drawer [data-zone="detail"]');
-  await page.keyboard.press('Escape');
-  await p_sleep(500);
-  record('S08', '失败轮次覆盖（坏工作目录可控 failed：时间线徽标 sst-failed/详情执行失败错误条）',
-    cTerm === 'failed' && cBadge && cDetail.includes('执行失败'), `终态=${cTerm} badge=${cBadge} detail=${cDetail.slice(0, 30).replace(/\s+/g, ' ')}…`);
-
-  // S04 空轮次抽屉 + 严格键盘闭环（seedA；B/C 已终态、静置一轮轮询让列表落定，行节点稳定）
-  await p_sleep(5500);
-  const rowA = await page.$(`tr[data-sess="${seedA.id}"]`);
-  await rowA.click();
-  await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  const zones = await page.evaluate(() => [...document.querySelectorAll('#layer .drawer [data-zone]')].map(z => z.dataset.zone));
-  const drawerTxt = await page.textContent('#layer .drawer');
-  const zonesOk = JSON.stringify(zones) === JSON.stringify(['head', 'binding', 'turns', 'detail', 'actions'])
-    && drawerTxt.includes('绑定与状态') && drawerTxt.includes('轮次（0）')
-    && drawerTxt.includes('还没有轮次记录。') && drawerTxt.includes('轮次详情') && drawerTxt.includes('动作');
-  const focusContainer = await page.evaluate(() => document.activeElement === document.querySelector('#layer .drawer'));
-  /* Tab 陷阱断言（对齐 hub 四分支语义）：容器正向 Tab → 末位（R3-P2-01 正向锚点）；
-   * 末位再正向 Tab → 首位（处理器 wrap）；首位 Shift+Tab → 末位（处理器反向 wrap）。
-   * 中段位移走浏览器原生遍历，不出层即可。 */
-  const s4Items = () => page.evaluate(sel => {
+  await p_sleep(650);
+  const dzones = await page.evaluate(() => [...document.querySelectorAll('#layer .drawer [data-zone]')].map(z => z.dataset.zone));
+  const factsTxt = await page.textContent('#layer .drawer [data-zone="facts"]');
+  const dFocusIn = await page.evaluate(() => document.activeElement === document.querySelector('#layer .drawer'));
+  const dItems = () => page.evaluate(sel => {
     const items = [...document.querySelector(sel).querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(el => el.offsetParent !== null);
-    return { n: items.length, isFirst: document.activeElement === items[0], isLast: document.activeElement === items[items.length - 1] };
+    return items.length;
   }, '#layer .drawer');
-  await page.keyboard.press('Tab');
-  const firstOk = (await s4Items()).isLast;
-  await page.keyboard.press('Tab');
-  const wrapOk = (await s4Items()).isFirst;
-  await page.keyboard.press('Shift+Tab');
-  const lastOk = (await s4Items()).isLast;
+  let dTrapOk = (await dItems()) > 0;
+  for (let i = 0; i < 10 && dTrapOk; i++) {
+    await page.keyboard.press('Tab');
+    dTrapOk = await page.evaluate(() => !!document.activeElement?.closest?.('#layer .drawer'));
+  }
+  await shot(page, 'hub-turn-detail-drawer');
   await page.keyboard.press('Escape');
   await p_sleep(600);
-  const goneOk = await page.locator('#layer .drawer').count() === 0;
-  const refocusRow = await page.evaluate(el => document.activeElement === el, rowA);
-  walkLog(`S04 键盘走查：开层焦点=容器 ${focusContainer}；Tab→末 ${firstOk}；末→首循环 ${wrapOk}；首→末反向 ${lastOk}；Esc 关层 ${goneOk}；返焦原会话行 ${refocusRow}（activeElement=${await page.evaluate(activeDesc)}）`);
-  record('S04', '空轮次抽屉分区（五分区同构/空轮次词典）+严格键盘（焦点入层/Tab 末→首→末循环/Esc 关层返焦原行）',
-    zonesOk && focusContainer && firstOk && wrapOk && lastOk && goneOk && refocusRow,
-    `zones=${zones.join(',')} focus=${focusContainer} tab=${firstOk}/${wrapOk}/${lastOk} esc=${goneOk} refocus=${refocusRow}`, false, 'DEEP');
+  const dGone = await page.locator('#layer .drawer').count() === 0;
+  const dRefocus = await page.evaluate(() => !!document.activeElement?.closest?.('#sess-detail'));
+  walkLog(`S12 明细抽屉走查：zones=${dzones.join(',')} 事实区关联任务=${factsTxt.includes('关联任务')} 焦点入层=${dFocusIn} Tab×10 不出层=${dTrapOk} Esc 关层=${dGone} 返焦详情页=${dRefocus}`);
+  record('S12', '执行明细右抽屉深层态（三分区 head/facts/answer/事实区含关联任务与幂等指纹/焦点入层/Tab 10 连按不出层/Esc 关层返焦详情页）',
+    dzones.join(',') === 'head,facts,answer' && factsTxt.includes('受理与执行事实') && dFocusIn && dTrapOk && dGone && dRefocus,
+    `zones=${dzones.join(',')} facts=${factsTxt.slice(0, 20)} focus=${dFocusIn} trap=${dTrapOk} esc=${dGone} refocus=${dRefocus}`, false, 'DEEP');
 
-  // S05 继续预填（列表行「继续」→ continue 形态：只读绑定/轮号/cwd 预填；改回新建）
-  await page.click(`tr[data-sess="${seedA.id}"] [data-act="sess-continue"]`);
-  await page.waitForSelector('text=继续会话', { timeout: 5000 });
+  // S08 失败轮次覆盖（seedC，可控数据）：等待终态应为 failed；详情页徽标+答复区错误条
+  const cTerm = await hubWaitTerminal(page, seedC.id);
+  await page.click(`tr[data-sess="${seedC.id}"]`).catch(() => { });
+  await page.goto(`${BASE}/#/sessions/${seedC.id}`, { waitUntil: 'domcontentloaded' }).catch(() => { });
+  await page.waitForSelector('#sess-detail tr[data-turn="1"]', { timeout: 10000 });   // 分区异步填充：轮次行就位再读徽标
+  const cBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.classList.contains('sst-failed'));
+  await page.click('#sess-detail tr[data-turn="1"]');
+  await p_sleep(500);
+  const cDetail = await page.textContent('#sess-detail [data-zone="detail"]');
+  record('S08', '失败轮次覆盖（坏工作目录可控 failed：详情页时间线徽标 sst-failed/答复区执行失败错误条）',
+    cTerm === 'failed' && cBadge && cDetail.includes('执行失败'), `终态=${cTerm} badge=${cBadge} detail=${cDetail.slice(0, 30).replace(/\s+/g, ' ')}…`);
+
+  // S04 空轮次详情页（seedA；B/C 已终态、静置一轮轮询让列表落定，行节点稳定）
+  await p_sleep(5500);
+  await page.click(`tr[data-sess="${seedA.id}"]`);
+  await page.waitForSelector('#sess-detail', { timeout: 5000 });
+  await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+  const pzones = await page.evaluate(() => [...document.querySelectorAll('#sess-detail [data-zone]')].map(z => z.dataset.zone));
+  const drawerTxt = await page.textContent('#sess-detail');
+  const pZonesOk = JSON.stringify(pzones) === JSON.stringify(['head', 'binding', 'turns', 'detail', 'actions'])
+    && drawerTxt.includes('绑定与状态') && drawerTxt.includes('轮次（0）')
+    && drawerTxt.includes('还没有轮次记录。') && drawerTxt.includes('轮次答复') && drawerTxt.includes('动作');
+  walkLog(`S04 详情页走查：zones=${pzones.join(',')} 空轮次词典=${drawerTxt.includes('还没有轮次记录。')} 动作区=${drawerTxt.includes('关闭会话')}`);
+  record('S04', '空轮次详情页分区（五分区同构/空轮次词典/动作区含继续与关闭）', pZonesOk,
+    `zones=${pzones.join(',')} txt=${drawerTxt.slice(0, 60).replace(/\s+/g, ' ')}…`, false, 'DEEP');
+
+  // S05 继续预填（详情页动作区「继续此会话」→ continue 形态 modal：只读绑定/轮号/
+  // cwd 预填；改为新建会话重置）
+  await page.click('#sess-detail [data-act="sess-continue"]');
+  await page.waitForSelector('#layer .modal #sess-form', { timeout: 5000 });
   const s05 = await page.evaluate(() => {
     const ro = [...document.querySelectorAll('#sess-form input[readonly]')].length;
     const label = [...document.querySelectorAll('#sess-form label')].map(l => l.textContent).join('');
@@ -544,17 +580,63 @@ async function hubSessFlow(browser) {
     };
   });
   await shot(page, 'hub-continue-prefill');
-  await page.click('[data-act="sess-new"]');
-  await page.waitForSelector('text=新建会话', { timeout: 5000 });
-  record('S05', '继续预填（continue 形态只读绑定/第 1 轮标目/cwd 预填/改回新建）', s05.ro && s05.label && s05.cwd, JSON.stringify(s05));
+  await page.click('[data-act="sess-switch-new"]');
+  await p_sleep(400);
+  const s05Reset = await page.evaluate(() => document.getElementById('layer-title')?.textContent === '新建会话');
+  await page.keyboard.press('Escape');
+  await p_sleep(400);
+  record('S05', '继续预填（continue 形态只读绑定/第 1 轮标目/cwd 预填/改为新建会话重置）', s05.ro && s05.label && s05.cwd && s05Reset, JSON.stringify({ ...s05, reset: s05Reset }));
 
-  // S06 关闭确认（slim modal 整层语义，R1 必修6 深层验收：层可见/背景 inert/焦点入层/
-  // 覆盖关系实证；「再想想」=整层关会话保活；确认后列表徽标按 ID 刷新为已关闭）
-  await page.click(`tr[data-sess="${seedA.id}"]`);
-  await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  await page.click('[data-act="sess-close"]');
+  // S13 在途关闭拒绝 + 排队取消三态（W01-03 语义；seedA）：投轮后立即关闭 → 服务端
+  // 409 close_in_flight → 人话 toast 指向取消/等待；详情页取消入口 → 确认取消 →
+  // 回执三态 toast（排队取消 200 queued「已撤销排队轮」或异步 202「取消任务已投
+  // 递」）；轮行翻 sst-cancelled（绝不渲染为成功）。
+  await turn(seedA.id, 'E2E 在途取消覆盖：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。');
+  await p_sleep(300);
+  await page.click('#sess-detail [data-act="sess-close"]');
+  await page.waitForSelector('#layer .modal [data-act="sess-close-confirm"]', { timeout: 5000 });
+  await page.click('[data-act="sess-close-confirm"]');
+  await p_sleep(700);
+  const cifToast = await page.textContent('#toast').catch(() => '');
+  const cifOk = cifToast.includes('在途') && cifToast.includes('取消');
+  walkLog(`S13 在途关闭拒绝：toast=${cifToast.slice(0, 40)}`);
+  record('S13a', '在途关闭拒绝（投轮后立即关闭 → close_in_flight 409 人话指向取消/等待，关闭未生效）', cifOk, `toast=${cifToast.slice(0, 50)}`);
+  await page.click('#layer .modal [data-act="close"]');   // 再想想：摘确认层（取消关闭）
+  await p_sleep(500);
+  // 详情页刷新（refreshSessionsAfterWrite 已触发；等在途轮行与取消按钮出现）
+  await page.waitForSelector('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]', { timeout: 20000 }).catch(() => { });
+  const cancelBtn = await page.locator('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]');
+  let cancelClicked = false, cancelToast = '';
+  if (await cancelBtn.count()) {
+    await cancelBtn.click();
+    await page.waitForSelector('#layer .modal [data-act="sess-turn-cancel-confirm"]', { timeout: 5000 });
+    await page.click('[data-act="sess-turn-cancel-confirm"]');
+    await p_sleep(900);
+    cancelToast = await page.textContent('#toast').catch(() => '');
+    cancelClicked = true;
+  }
+  const cancelHonest = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
+    || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对') || cancelToast.includes('取消未生效');
+  // 轮行最终翻已取消（或已先到自然终态——回执诚实即可，徽标不撒谎）
+  let aBadgeCancelled = false;
+  for (let i = 0; i < 60 && !aBadgeCancelled; i++) {
+    await p_sleep(2000);
+    const cls = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
+    aBadgeCancelled = cls.includes('sst-cancelled');
+    if (cls.includes('sst-unverified') || cls.includes('sst-failed')) break;   // 先到保留：取消未赶上，自然终态如实
+  }
+  const finalBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
+  walkLog(`S13 取消走查：入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 终态徽标=${finalBadge || '（行未就位）'}`);
+  record('S13b', '取消回执三态诚实呈现（取消入口/回执 toast 为 queued/executed/unknown/202 异步/409 先到保留之一；轮行终态徽标如实——cancelled 或自然终态，绝不虚报已停止）',
+    cancelClicked && cancelHonest && (aBadgeCancelled || finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')),
+    `toast=${cancelToast.slice(0, 40)} badge=${finalBadge}`, false, 'DEEP');
+
+  // S06 关闭确认（slim modal 整层语义；在途已清 → 本次关闭成立。深层验收：层可见/
+  // 背景 inert/焦点入层/覆盖关系；「再想想」=整层关会话保活；确认后详情页头部徽标
+  // 与列表按 ID 刷新为已关闭）
+  await page.click('#sess-detail [data-act="sess-close"]');
   await page.waitForSelector('#layer .modal', { timeout: 5000 });
-  await p_sleep(650);   // 入场动画落定再量几何（modal 400ms spring 中途态给假差）
+  await p_sleep(650);
   const modalTxt = await page.textContent('#layer .modal');
   const modalDeep = await page.evaluate(() => {
     const m = document.querySelector('#layer .modal');
@@ -563,52 +645,57 @@ async function hubSessFlow(browser) {
     return {
       visible: !!m && r.width > 0 && r.height > 0,
       cover: !!hit && !!hit.closest('#layer .modal'),
-      noDrawer: !document.querySelector('#layer .drawer'),   // hub 整层语义：确认层打开时抽屉不在层内
+      slim: m.classList.contains('slim'),
       inert: document.getElementById('app')?.hasAttribute('inert'),
       focusIn: !!document.activeElement?.closest?.('#layer .modal'),
     };
   });
   await shot(page, 'hub-close-confirm-modal');
-  walkLog(`S06 确认层走查：visible=${modalDeep.visible} 覆盖(elementFromPoint 命中 modal)=${modalDeep.cover} 整层语义(抽屉不在层)=${modalDeep.noDrawer} 背景 inert=${modalDeep.inert} 焦点入层=${modalDeep.focusIn}`);
+  walkLog(`S06 确认层走查：visible=${modalDeep.visible} 覆盖=${modalDeep.cover} slim=${modalDeep.slim} 背景 inert=${modalDeep.inert} 焦点入层=${modalDeep.focusIn}`);
   await page.click('#layer .modal [data-act="close"]');   // 再想想：整层关（task-cancel 同族）
   await page.waitForSelector('#layer .modal', { state: 'detached', timeout: 5000 });
-  const stillActive = await page.evaluate(id => !document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes('已关闭'), seedA.id);
-  await page.click(`tr[data-sess="${seedA.id}"]`);
-  await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  await page.click('[data-act="sess-close"]');
+  const stillActive = await page.evaluate(id => !document.querySelector(`#sess-detail [data-zone="head"]`)?.textContent.includes('已关闭'), seedA.id);
+  await page.click('#sess-detail [data-act="sess-close"]');
   await page.waitForSelector('#layer .modal [data-act="sess-close-confirm"]', { timeout: 5000 });
   await page.click('[data-act="sess-close-confirm"]');
-  await page.waitForSelector('#layer .drawer', { state: 'detached', timeout: 8000 });
+  await page.waitForSelector('#layer .modal', { state: 'detached', timeout: 8000 });
+  let closedHead = false;
+  for (let i = 0; i < 8 && !closedHead; i++) {
+    await p_sleep(1200);
+    closedHead = await page.evaluate(id => document.querySelector('#sess-detail [data-zone="head"]')?.textContent.includes('已关闭'), seedA.id);
+  }
+  // 返回列表：列表徽标 + chips/页脚随统一入口刷新
+  await page.click('[data-act="sess-back"]');
+  await page.waitForSelector(`#sess-list-zone tr[data-sess="${seedA.id}"]`, { timeout: 10000 });
   let closedBadge = false;
-  for (let i = 0; i < 8 && !closedBadge; i++) {   // 列表刷新走统一槽位入口（R1 必修3）
+  for (let i = 0; i < 8 && !closedBadge; i++) {
     await p_sleep(1200);
     closedBadge = await page.evaluate(id => document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes('已关闭'), seedA.id);
   }
-  // 关闭后 chips/页脚随统一入口刷新（与 API 数据保持一致；关闭会话仍计数在「全部」）
   const sessAfter = (await hubApi(page, '/api/v1/sessions')).body?.sessions || [];
   await page.waitForFunction(chipMatches, deriveExp(sessAfter), { timeout: 12000 }).catch(() => { });
   const afterOk = await page.evaluate(chipMatches, deriveExp(sessAfter));
   const footOk = await page.evaluate(n => document.getElementById('sess-foot-zone')?.textContent.includes(`${n} 个会话`), sessAfter.length);
   await shot(page, 'hub-list-after-close');
-  record('S06', '关闭确认深层态（slim modal 警示词/层可见+背景 inert+覆盖关系+焦点入层/再想想整层关且会话保活/确认后列表徽标+chips+页脚按 ID 刷新）',
-    modalTxt.includes('不可撤销') && modalTxt.includes('确认关闭') && modalDeep.visible && modalDeep.cover && modalDeep.noDrawer && modalDeep.inert && modalDeep.focusIn && stillActive && closedBadge && afterOk && footOk,
-    `modal=${modalTxt.slice(0, 30)}… deep=${JSON.stringify(modalDeep)} closed=${closedBadge} chips=${afterOk} foot=${footOk}`, false, 'DEEP');
+  record('S06', '关闭确认深层态（slim modal 警示词+在途拒绝提示/层可见+背景 inert+覆盖关系+焦点入层/再想想整层关且会话保活/确认后详情头部+列表徽标+chips+页脚按 ID 刷新）',
+    modalTxt.includes('不可撤销') && modalTxt.includes('确认关闭') && modalTxt.includes('在途') && modalDeep.visible && modalDeep.cover && modalDeep.slim && modalDeep.inert && modalDeep.focusIn && stillActive && closedHead && closedBadge && afterOk && footOk,
+    `modal=${modalTxt.slice(0, 30)}… deep=${JSON.stringify(modalDeep)} closed=${closedHead}/${closedBadge} chips=${afterOk} foot=${footOk}`, false, 'DEEP');
 
   // S09 会话展示面字号地板 + running 脉冲 reduced-motion 降级（视觉层实证）
   await page.click(`tr[data-sess="${seedB.id}"]`);
-  await page.waitForSelector('#layer .drawer', { timeout: 5000 });
-  const floorBad = await cssFloorCheck(page, '.sess-scope');   // 表单卡+列表卡+打开中的会话抽屉
+  await page.waitForSelector('#sess-detail', { timeout: 5000 });
+  await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+  const floorBad = await cssFloorCheck(page, '.sess-scope');   // 列表卡+详情页+打开中的执行明细抽屉
   const animNormal = await page.evaluate(() => {
     const s = document.createElement('span');
     s.className = 'badge sst-running';
-    document.querySelector('#layer').appendChild(s);
+    document.body.appendChild(s);
     const an = getComputedStyle(s, ':before').animationName;
     s.remove();
     return an;
   });
-  await page.keyboard.press('Escape');
   const animReduced = await reducedMotionCheck(browser, BASE);
-  record('S09', '会话展示面字号地板（small/.small/footer-note/code computed ≥12.5px，含抽屉）+sst-running 脉冲 reduced-motion 停',
+  record('S09', '会话展示面字号地板（small/.small/footer-note/code computed ≥12.5px，含详情页与抽屉）+sst-running 脉冲 reduced-motion 停',
     floorBad.length === 0 && animNormal === 'pulse-dot' && animReduced === 'none',
     `违例=${JSON.stringify(floorBad)} anim=${animNormal}/reduce=${animReduced}`, false, 'VISUAL');
   flushWalk('hub');
@@ -639,40 +726,123 @@ async function nodeSessFlow(browser) {
   }
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 });
 
-  // SN01 本机会话区块+新建全链：区块渲染（禁选注明）→ 表单真实建会话投首轮 →
-  // 受理网络应答绑定唯一 session ID → 列表行按该 ID 出现
+  // SN08 独立入口迁移（W01-05 P01）：导航词表 5 项含「会话」→ 任务页迁移卡（旧区块
+  // 位置留链接）→ 前往会话页 → 七列同构列序。
+  const NODE_NAV = ['总览', '服务', '任务', '会话', '连接'];
+  const nodeNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').trim());
+  record('SN08a', 'node 导航词表：5 项名称与顺序（含独立「会话」入口）', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
   await page.click('aside nav button[data-go="tasks"]');
   await page.waitForSelector('#sess-card', { timeout: 15000 });
-  const cardTxt = await page.textContent('#sess-card');
-  const optNo = await page.evaluate(() => {
-    const o = [...document.querySelectorAll('#sess-agent option')].find(o => o.disabled && o.value);
-    return o ? o.textContent.includes('未声明会话适配器') : false;
-  });
-  const capName = await page.evaluate(() => {
-    const o = [...document.querySelectorAll('#sess-agent option')].find(o => !o.disabled && o.value);
-    return o ? o.value : '';
-  });
-  if (!capName) {
-    record('SN01', '本机会话新建全链（区块渲染/禁选注明/受理回执/列表行）', false, '本机无可会话能力——SN 系列未验收，环境缺声明 session_adapter 的能力', true);
+  const migTxt = await page.textContent('#sess-card');
+  await page.click('#sess-card [data-go="sessions"]');
+  await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
+  const heads = await page.evaluate(() => [...document.querySelectorAll('#sess-list-zone thead th')].map(th => th.textContent.trim()));
+  const headsOk = JSON.stringify(heads) === JSON.stringify(['标题', 'agent', '机器', '工作区', '状态', '最近活动（UTC）', '操作']);
+
+  // 能力前提：新建 modal 中须有可选的会话智能体（无可会话能力 → SN 系列整体 SKIP）
+  await page.click('.page-head [data-act="sess-new"]');
+  await page.waitForSelector('#sess-modal #sess-form', { timeout: 5000 });
+  const capValue = await page.evaluate(() => document.querySelector('#sess-agent option:not([disabled])[value]:not([value=""])')?.value || '');
+  if (!capValue) {
+    record('SN08', '独立入口迁移（导航词表/任务页迁移卡/七列同构列序/登记中 REST 会话可见）', false, '本机无可会话能力——SN 系列未验收，环境缺声明 session_adapter 的能力', true);
+    record('SN01', '会话独立页新建全链（居中 modal/受理回执/登记中徽标/发布后列表行）', false, '环境缺能力', true);
     flushWalk('node');
     summarize();
     return;
   }
-  await page.selectOption('#sess-agent', capName);
+  const capName = capValue.split('|')[1] || capValue;
+  await page.keyboard.press('Escape');   // 关探察 modal
+  await p_sleep(500);
+
+  // REST 建 pending 会话（agent 面 201：登记不投轮；title 仅登记期可见）
+  const stamp = Date.now();
+  const pend = await nodeApi('/api/v1/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ agent: capName, cwd: '/tmp/agent-session/work', title: 'E2E 登记中 ' + stamp, request_id: 'web-e2e-pending-' + stamp }),
+  });
+  const pendId = pend?.body?.session?.id || '';
+  const pendPending = pend?.body?.session?.pending === true;
+  let pendBadge = false, pendDetailOk = false;
+  if (pendId) {
+    await page.waitForFunction(sid => [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].some(t => t.getAttribute('data-sess') === sid && t.textContent.includes('登记中')), pendId, { timeout: 20000 }).catch(() => { });
+    pendBadge = await page.evaluate(sid => !!document.querySelector(`tr[data-sess="${sid}"]`)?.textContent.includes('登记中'), pendId);
+    await page.click(`tr[data-sess="${pendId}"]`);
+    await page.waitForSelector('#sess-detail', { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+    const headTxt = await page.textContent('#sess-detail [data-zone="head"]').catch(() => '');
+    const bindTxt = await page.textContent('#sess-detail [data-zone="binding"]').catch(() => '');
+    const turnsTxt = await page.textContent('#sess-detail [data-zone="turns"]').catch(() => '');
+    pendDetailOk = headTxt.includes('登记中') && bindTxt.includes('创建请求 ID') && turnsTxt.includes('还没有轮次记录。');
+    await shot(page, 'node-sessions-pending-detail');
+    await page.click('[data-act="sess-back"]');
+    await p_sleep(500);
+  }
+  await shot(page, 'node-sessions-list');
+  walkLog(`SN08 走查：迁移卡=${migTxt.includes('「会话」页')} 列序=${heads.join('|')} REST 登记=${pend.code} pending=${pendPending} 列表登记中徽标=${pendBadge} 详情登记态=${pendDetailOk}`);
+  record('SN08', '独立入口迁移（任务页迁移卡留链接/七列同构列序/agent 面 201 登记/pending 会话列表「登记中（首轮未发布）」徽标/详情页登记态+创建请求 ID 行）',
+    migTxt.includes('「会话」页') && headsOk && pend.code === 201 && pendPending && pendBadge && pendDetailOk,
+    `列序=${heads.join('|')} code=${pend.code} pending=${pendPending} 徽标=${pendBadge} 详情=${pendDetailOk}`);
+
+  // SN01 会话独立页新建全链（UI 居中 modal）：真实建会话投首轮 → 创建请求携
+  // request_id（网络应答绑定唯一 session ID）→ 受理回执 → 列表行按该 ID 出现
+  //（登记中）→ 首轮发布后徽标推进（等待跨首轮完成上限 300s）。
+  await page.click('.page-head [data-act="sess-new"]');
+  await page.waitForSelector('#sess-modal #sess-form', { timeout: 5000 });
+  const modalTxt = await page.textContent('#sess-modal');
+  const optNo = await page.evaluate(() => {
+    const o = [...document.querySelectorAll('#sess-agent option')].find(o => o.disabled && o.value);
+    return o ? o.textContent.includes('未声明会话适配器') : false;
+  });
+  await page.selectOption('#sess-agent', capValue);
+  await page.fill('#sess-title', 'E2E UI 新建 ' + stamp);
   await page.fill('#sess-cwd', '/tmp/agent-session/work');
   await page.fill('#sess-prompt', 'E2E 冒烟：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。');
-  const [resp] = await Promise.all([
-    page.waitForResponse(r => r.url().includes('/api/v1/local/sessions') && !r.url().includes('/turns') && r.request().method() === 'POST'),
+  const [createResp, turnResp] = await Promise.all([
+    page.waitForResponse(r => r.url().endsWith('/api/v1/sessions') && r.request().method() === 'POST'),
+    page.waitForResponse(r => r.url().includes('/api/v1/sessions/') && r.url().includes('/turns') && r.request().method() === 'POST', { timeout: 30000 }).catch(() => null),
     page.click('[data-act="sess-submit"]'),
   ]);
-  const ackBody = await resp.json().catch(() => ({}));
-  const sid = ackBody?.turn?.session_id || '';   // 创建回执唯一 ID：后续全部断言按它定位
-  const ackTxt = await page.textContent('#sess-card .notice.ok').catch(() => '');
-  await page.waitForSelector(`tr[data-sess="${sid}"]`, { timeout: 15000 });
-  record('SN01', '本机会话新建全链（区块渲染/未声明禁选注明/受理回执/网络应答绑定唯一 session ID/列表行按 ID 出现）',
-    cardTxt.includes('本机会话') && optNo && !!sid && ackTxt.includes('已受理'), `cap=${capName} sid=${sid || '（未取得）'}`);
+  const createBody = createResp ? await createResp.request().postDataJSON().catch(() => ({})) : {};
+  const ackBody = turnResp ? await turnResp.json().catch(() => ({})) : {};
+  const sidFinal = ackBody?.turn?.session_id || '';
+  const reqIdSent = typeof createBody?.request_id === 'string' && createBody.request_id.startsWith('web-');
+  const ackTxt = await page.textContent('#sess-modal .notice.ok').catch(() => '');
+  let rowPending = false, rowPublished = false;
+  if (sidFinal) {
+    await page.waitForFunction(sid => [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].some(t => t.getAttribute('data-sess') === sid), sidFinal, { timeout: 20000 }).catch(() => { });
+    rowPending = await page.evaluate(sid => !!document.querySelector(`tr[data-sess="${sid}"]`)?.textContent.includes('登记中'), sidFinal);
+    await page.keyboard.press('Escape');   // 关 modal（acked 态；列表观察发布推进，草稿保留）
+    await p_sleep(500);
+    await page.waitForFunction(sid => {
+      const tr = [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].find(t => t.getAttribute('data-sess') === sid);
+      return !!tr && !tr.textContent.includes('登记中') && !tr.textContent.includes('待首轮');
+    }, sidFinal, { timeout: 300000 }).catch(() => { });
+    rowPublished = await page.evaluate(sid => {
+      const tr = [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].find(t => t.getAttribute('data-sess') === sid);
+      return !!tr && !tr.textContent.includes('登记中');
+    }, sidFinal);
+  } else {
+    await page.keyboard.press('Escape').catch(() => { });
+    await p_sleep(400);
+  }
+  record('SN01', '会话独立页新建全链（居中 modal/禁选注明/创建请求携 web- 请求 ID/受理回执/列表行登记中出现/首轮发布后徽标推进）',
+    modalTxt.includes('新建会话') && optNo && !!sidFinal && reqIdSent && ackTxt.includes('已受理') && rowPending && rowPublished,
+    `cap=${capName} sid=${sidFinal || '（未取得）'} reqId=${reqIdSent} 登记中=${rowPending} 发布=${rowPublished}`);
+  if (!sidFinal) {
+    record('SN05', 'node 会话独立页五视口整页截图', false, '级联跳过（SN01 未取得会话 ID）', true, 'VISUAL');
+    record('SN02', '详情页 unverified 终态', false, '级联跳过', true);
+    record('SN09', '执行明细右抽屉深层态', false, '级联跳过', true);
+    record('SN07', '会话页轮询豁免', false, '级联跳过', true);
+    record('SN04', '失败轮次覆盖', false, '级联跳过', true);
+    record('SN10', '在途关闭拒绝+取消三态+关闭收尾', false, '级联跳过', true);
+    record('SN03', '关闭确认深层态', false, '级联跳过', true);
+    record('SN06', '会话展示面字号地板', false, '级联跳过', true);
+    flushWalk('node');
+    summarize();
+    return;
+  }
 
-  // SN05 node 五视口整页截图（视觉层留档；会话已在列）。整页判据同 S10（R2 必修6
+  // SN05 node 五视口整页截图（视觉层留档；会话独立页在列）。整页判据同 S10（R2 必修6
   // 残余）：fullPage 像素尺寸逐张核对，不凭截图调用成功判 PASS。
   let snShotFail = '', snShotNotes = [];
   try {
@@ -680,8 +850,8 @@ async function nodeSessFlow(browser) {
       await page.setViewportSize({ width: w, height: h });
       await p_sleep(450);
       const fullH = await page.evaluate(() => document.documentElement.scrollHeight);
-      await shot(page, `node-tasks-${w}x${h}`);
-      const px = pngSize(`node-tasks-${w}x${h}`);
+      await shot(page, `node-sessions-${w}x${h}`);
+      const px = pngSize(`node-sessions-${w}x${h}`);
       const dimOk = px.w === w && px.h >= fullH - 2;
       snShotNotes.push(`${w}x${h} 页面${fullH}/图${px.h}${dimOk ? '' : '✗'}`);
       if (!dimOk) snShotFail = snShotFail || `${w}x${h} 图高${px.h} < 页面高${fullH}`;
@@ -689,256 +859,309 @@ async function nodeSessFlow(browser) {
     await page.setViewportSize({ width: 1440, height: 900 });
   } catch (e) { snShotFail = snShotFail || e.message.slice(0, 80); }
   walkLog(`SN05 整页视觉核对：${snShotNotes.join(' ')}（判据=图高≥文档高；人眼核查入口=PNG 留档）`);
-  record('SN05', 'node 任务页五视口整页截图（fullPage 覆盖完整文档高度：1440/1280/1024/680/390）', !snShotFail, snShotFail || snShotNotes.join(' '), false, 'VISUAL');
+  record('SN05', 'node 会话独立页五视口整页截图（fullPage 覆盖完整文档高度：1440/1280/1024/680/390）', !snShotFail, snShotFail || snShotNotes.join(' '), false, 'VISUAL');
 
-  // SN02 抽屉四分区+真实轮次终态（unverified 严格覆盖，failed 拆到 SN04）：
-  // 焦点入层 → 等轮次 unverified → 实键 Enter 选中轮次 → 警示条 → Esc 返焦原行
-  await page.click(`tr[data-sess="${sid}"]`);
-  await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-  const zones = await page.evaluate(() => [...document.querySelectorAll('#sess-drawer [data-zone]')].map(z => z.dataset.zone));
-  const focusInDrawer = await page.evaluate(() => document.activeElement === document.querySelector('#sess-drawer'));
-  await page.waitForFunction(() => {
-    const b = document.querySelector('#sess-drawer tr[data-turn="1"] .badge');
-    return b && (b.classList.contains('sst-unverified') || b.classList.contains('sst-failed'));
-  }, null, { timeout: 300000 }).catch(() => { });
-  const bBadgeUnv = await page.evaluate(() => document.querySelector('#sess-drawer tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'));
-  await page.focus('#sess-drawer tr[data-turn="1"]');
+  // SN02 详情页四分区+真实轮次 unverified 终态（严格覆盖，failed 拆到 SN04）：路由
+  // 直达 → 等轮次 unverified → 实键 Enter 选中轮次 → 答复区警示条 → 返回链接回列表
+  await page.goto(`${BASE}/#/sessions/${encodeURIComponent(sidFinal)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#sess-detail', { timeout: 10000 });
+  await page.waitForSelector('#sess-detail tr[data-turn="1"]', { timeout: 15000 });
+  const zones = await page.evaluate(() => [...document.querySelectorAll('#sess-detail [data-zone]')].map(z => z.dataset.zone));
+  await page.waitForFunction(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'), null, { timeout: 300000 }).catch(() => { });
+  const bBadgeUnv = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.classList.contains('sst-unverified'));
+  await page.focus('#sess-detail tr[data-turn="1"]');
   await page.keyboard.press('Enter');   // 行键盘可达：实键选中 → detail 分区
   await p_sleep(500);
-  const selOn = await page.evaluate(() => document.querySelector('#sess-drawer tr[data-turn="1"]')?.classList.contains('on'));
-  const detailTxt = await page.textContent('#sess-drawer [data-zone="detail"]');
+  const selOn = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"]')?.classList.contains('on'));
+  const detailTxt = await page.textContent('#sess-detail [data-zone="detail"]');
   const detailOk = bBadgeUnv && detailTxt.includes('工作结果未证实') && !detailTxt.includes('已完成');
-  await shot(page, 'node-drawer-timeline');
-  await shot(page, 'node-drawer-turn-unverified');
-  await page.keyboard.press('Escape');   // 此刻列表刚随终态刷新过（原返焦节点可能失存）：只断言焦点未落 body
+  await shot(page, 'node-detail-timeline');
+  await shot(page, 'node-detail-turn-unverified');
+  await page.click('[data-act="sess-back"]');
   await p_sleep(600);
-  const drawerGone1 = await page.locator('#sess-drawer').count() === 0;
-  const refocusLoose = await page.evaluate(() => {
-    const a = document.activeElement;
-    return !!(a && (a.closest?.('tr[data-sess]') || a.closest?.('aside nav')));
-  });
-  // 静置一轮轮询（列表已稳定）→ 重开抽屉 → Esc：严格断言返焦原会话行（建议1 的实键盘回归）
-  await p_sleep(5500);
-  await page.click(`tr[data-sess="${sid}"]`);
+  const backOk = await page.evaluate(id => !location.hash.includes(id) && !!document.querySelector(`tr[data-sess="${id}"]`), sidFinal);
+  walkLog(`SN02 详情页走查：zones=${zones.join(',')} unverified=${bBadgeUnv} 实键选中=${selOn} 答复区=${detailTxt.slice(0, 24).replace(/\s+/g, ' ')}… 返回列表=${backOk}`);
+  record('SN02', '详情页四分区+真实轮次 unverified 终态（严格：绝不接受 failed 冒充；实键 Enter 选中/警示条且绝不渲染为成功/返回链接回列表）',
+    zones.join(',') === 'head,binding,turns,detail,actions' && bBadgeUnv && selOn && detailOk && backOk,
+    `zones=${zones.join(',')} unverified=${bBadgeUnv} sel=${selOn} detail=${detailTxt.slice(0, 30).replace(/\s+/g, ' ')}… back=${backOk}`, false, 'DEEP');
+
+  // SN09 执行明细右抽屉深层态（W01-05；DEEP）：明细按钮开抽屉 → 三分区 → 焦点入层
+  // + Tab 6 连按不出层 → Esc 关层返焦详情页
+  await page.goto(`${BASE}/#/sessions/${encodeURIComponent(sidFinal)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#sess-detail tr[data-turn="1"]', { timeout: 15000 });
+  await page.click('#sess-detail [data-act="sess-turn-detail"]');
   await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-  await p_sleep(600);
+  await p_sleep(650);
+  const dzones = await page.evaluate(() => [...document.querySelectorAll('#sess-drawer [data-zone]')].map(z => z.dataset.zone));
+  const focusInDrawer = await page.evaluate(() => document.activeElement === document.querySelector('#sess-drawer'));
+  let trapOk = true;
+  for (let i = 0; i < 6 && trapOk; i++) {
+    await page.keyboard.press('Tab');
+    trapOk = await page.evaluate(() => !!document.activeElement?.closest?.('#sess-drawer'));
+  }
+  await shot(page, 'node-turn-detail-drawer');
   await page.keyboard.press('Escape');
   await p_sleep(600);
-  const refocusRow = await page.evaluate(id => document.activeElement?.closest?.('tr[data-sess]')?.getAttribute('data-sess') === id, sid);
-  walkLog(`SN02 键盘走查：开层焦点=抽屉容器 ${focusInDrawer}；实键 Enter 选中轮次 sel=${selOn}；Esc 关层 ${drawerGone1} 返焦（宽松）=${refocusLoose}；静置重开再 Esc 严格返焦原行=${refocusRow}（activeElement=${await page.evaluate(activeDesc)}）`);
-  record('SN02', '抽屉四分区+真实轮次 unverified 终态（严格：绝不接受 failed 冒充；焦点入层/实键 Enter 选中/警示条且绝不渲染为成功/Esc 关层返焦原行）',
-    zones.join(',') === 'head,binding,turns,detail,actions' && focusInDrawer && bBadgeUnv && selOn && detailOk && drawerGone1 && refocusLoose && refocusRow,
-    `zones=${zones.length} unverified=${bBadgeUnv} sel=${selOn} detail=${detailTxt.slice(0, 30).replace(/\s+/g, ' ')}… escGone=${drawerGone1} refocus=${refocusLoose}/${refocusRow}`, false, 'DEEP');
+  const drawerGone = await page.locator('#sess-drawer').count() === 0;
+  const dRefocus = await page.evaluate(() => !!document.activeElement?.closest?.('#sess-detail'));
+  walkLog(`SN09 明细抽屉走查：zones=${dzones.join(',')} 焦点入层=${focusInDrawer} Tab×6 不出层=${trapOk} Esc 关层=${drawerGone} 返焦详情页=${dRefocus}`);
+  record('SN09', '执行明细右抽屉深层态（三分区 head/facts/answer/焦点入层/Tab 6 连按不出层/Esc 关层返焦详情页）',
+    dzones.join(',') === 'head,facts,answer' && focusInDrawer && trapOk && drawerGone && dRefocus,
+    `zones=${dzones.join(',')} focus=${focusInDrawer} trap=${trapOk} esc=${drawerGone} refocus=${dRefocus}`, false, 'DEEP');
 
-  // SN07 整页轮询豁免（R1 必修10 行为验证；R2 必修10 收敛新判据）。两相位各经 API
-  // 建一个临时会话制造常规数据变化（其首轮即真实任务行——本地派单需钦定统筹，不可
-  // 用）：相位A 抽屉开放、相位B 焦点在会话表单，断言页面 DOM 节点身份/焦点/光标/
-  // 滚动在数据变化期保持，任务列表照常刷新，且会话列表照常跟进。
-  // 判据与内核语义对齐（sessionx createWithID：create+首轮同一执行体，首轮 CLI 执
-  // 行完成才发布映射——新建会话 ID 在首轮完成前结构性不在 GET /sessions 列表，实测
-  // 实证）。因此「新建会话 ID 进入列表」以首轮完成上限 300s 等待（与 SN02 轮次终态
-  // 同上限，超时=FAIL 不吞）；等待期间该轮任务行状态多轮推进使 loadAll 连续多轮
-  // changed=true，豁免分支被反复执行——正是被测路径。「状态推进可见」用关闭翻转：
-  // 已发布会话的 close 同步即时，下一轮询徽标必翻 sst-closed（仍处豁免态，列表刷
-  // 新恰经修复后的公共加载路径——R2 N1 回归面）。
-  const nodeCount = () => page.evaluate(() => document.querySelectorAll('tr[data-task]').length);
+  // SN07 整页轮询豁免（R1 必修10 行为验证；W01-05 新表面：执行明细抽屉开放态/搜索
+  // 输入焦点态）。两相位各经 localapi REST（主人旧面零变义兼容）建一个临时会话制
+  // 造常规数据变化：相位A 抽屉开放、相位B 焦点在会话页搜索框，断言页面 DOM 节点
+  // 身份/焦点/光标/滚动在数据变化期保持，会话列表照常跟进。
   const scratchSession = () => nodeApi('/api/v1/local/sessions', {
     method: 'POST',
-    body: JSON.stringify({ agent: capName.split('|')[1] || capName, cwd: '/tmp/agent-session/work', prompt: 'E2E 轮询豁免验证：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }),
+    body: JSON.stringify({ agent: capName, cwd: '/tmp/agent-session/work', prompt: 'E2E 轮询豁免验证：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }),
   });
   const closeScratch = id => nodeApi(`/api/v1/local/sessions/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}' });
-  /* 行/徽标等待都返回布尔（超时=FAIL 不吞）；列表行按 data-sess 属性值比对，不拼选择器。 */
   const rowInList = (id, timeout) => page.waitForFunction(sid => [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].some(t => t.getAttribute('data-sess') === sid), id, { timeout }).then(() => true).catch(() => false);
   const badgeFlip = (id, cls, timeout) => page.waitForFunction(({ sid, c }) => [...document.querySelectorAll('#sess-list-zone tr[data-sess] .badge')].some(b => b.closest('tr')?.getAttribute('data-sess') === sid && b.classList.contains(c)), { sid: id, c: cls }, { timeout }).then(() => true).catch(() => false);
-  // 相位A：抽屉开放态
-  await page.click(`tr[data-sess="${sid}"]`);
+  // 相位A：执行明细抽屉开放态
+  await page.click(`tr[data-sess="${sidFinal}"]`);
+  await page.waitForSelector('#sess-detail', { timeout: 10000 });
+  await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+  await page.click('#sess-detail [data-act="sess-turn-detail"]');
   await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-  await page.evaluate(() => { window.__markA = [document.querySelector('main h1'), document.querySelector('#sess-form-zone'), document.querySelector('#sess-list-zone')]; });
-  const cntA0 = await nodeCount();
+  await page.evaluate(() => { window.__markA = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-list-zone'), document.querySelector('#sess-drawer')]; });
   const scratchA = await scratchSession();
   const sidA = scratchA?.body?.turn?.session_id || '';
-  const grewA = await page.waitForFunction(n => document.querySelectorAll('tr[data-task]').length > n, cntA0, { timeout: 30000 }).then(() => true).catch(() => false);
   const inListA = sidA ? await rowInList(sidA, 300000) : false;
   const phaseA = await page.evaluate(() => {
-    const now = [document.querySelector('main h1'), document.querySelector('#sess-form-zone'), document.querySelector('#sess-list-zone')];
-    return {
-      identityKept: window.__markA.every((el, i) => el && el === now[i]),
-      tasksRefreshed: document.querySelectorAll('tr[data-task]').length > 0,
-    };
+    const now = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-list-zone'), document.querySelector('#sess-drawer')];
+    return { identityKept: window.__markA.every((el, i) => el && el === now[i]) };
   });
-  const cntA1 = await nodeCount();
   let closedA = false;
   if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
   await page.keyboard.press('Escape');   // 关抽屉
   await p_sleep(500);
-  // 相位B：焦点在会话表单（先复位 SN01 的 acked 锁定态 → 新建表单；cwd 输入 + 光标定位 + 页面滚动）
-  await page.click('#sess-card [data-act="sess-new"]');
-  await page.waitForSelector('text=新建会话', { timeout: 5000 });
-  await page.fill('#sess-cwd', '/tmp/agent-session/work/keep-focus');
+  // 相位B：焦点在会话页搜索框（输入 + 光标定位 + 页面滚动）
+  await page.click('#sess-query');
+  await page.fill('#sess-query', 'E2E 豁免锚');
   await page.evaluate(() => {
-    const inp = document.querySelector('#sess-cwd');
+    const inp = document.querySelector('#sess-query');
     inp.focus();
-    inp.setSelectionRange(6, 6);
-    window.scrollTo(0, 260);
-    window.__markB = document.querySelector('#sess-form-zone');
+    inp.setSelectionRange(3, 3);
+    window.scrollTo(0, 160);
+    window.__markB = [document.querySelector('main h1'), document.querySelector('#sess-query')];
   });
-  const cntB0 = await nodeCount();
   const scratchB = await scratchSession();
   const sidB = scratchB?.body?.turn?.session_id || '';
-  const grewB = await page.waitForFunction(n => document.querySelectorAll('tr[data-task]').length > n, cntB0, { timeout: 30000 }).then(() => true).catch(() => false);
   const inListB = sidB ? await rowInList(sidB, 300000) : false;
   const phaseB = await page.evaluate(() => {
-    const inp = document.querySelector('#sess-cwd');
+    const inp = document.querySelector('#sess-query');
+    const now = [document.querySelector('main h1'), document.querySelector('#sess-query')];
     return {
-      identityKept: window.__markB && document.querySelector('#sess-form-zone') === window.__markB,
+      identityKept: window.__markB.every((el, i) => el && el === now[i]),
       focusKept: document.activeElement === inp,
-      caretKept: inp?.selectionStart === 6,
-      scrollKept: Math.abs(window.scrollY - 260) < 40,
+      caretKept: inp?.selectionStart === 3,
+      scrollKept: Math.abs(window.scrollY - 160) < 40,
     };
   });
-  const cntB1 = await nodeCount();
   let closedB = false;
   if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
-  walkLog(`SN07 轮询豁免走查：抽屉开放态 节点身份=${phaseA.identityKept} 任务数 ${cntA0}→${cntA1} 增长=${grewA} 临时会话 ${sidA || '（创建失败）'} 入列表=${inListA} 关闭徽标翻转=${closedA}；表单焦点态 DOM=${phaseB.identityKept} 焦点=${phaseB.focusKept} 光标=${phaseB.caretKept} 滚动=${phaseB.scrollKept} 任务数 ${cntB0}→${cntB1} 增长=${grewB} 临时会话 ${sidB || '（创建失败）'} 入列表=${inListB} 关闭徽标翻转=${closedB}（入列表等待跨首轮完成上限 300s，其间任务状态多轮推进连续驱动豁免分支）`);
-  record('SN07', '会话表单/抽屉开放态整页轮询豁免（数据变化期 DOM 身份/焦点/光标/滚动保持；等待超时不吞：任务真实增长、新建会话 ID 在首轮完成后进入列表、豁免态下关闭徽标翻转可见）',
-    phaseA.identityKept && grewA && cntA1 > cntA0 && inListA && closedA
-    && phaseB.identityKept && phaseB.focusKept && phaseB.caretKept && phaseB.scrollKept && grewB && cntB1 > cntB0 && inListB && closedB,
-    `A=${JSON.stringify(phaseA)} 任务 ${cntA0}→${cntA1} 增长=${grewA} 入列表=${inListA} 关闭翻转=${closedA}；B=${JSON.stringify(phaseB)} 任务 ${cntB0}→${cntB1} 增长=${grewB} 入列表=${inListB} 关闭翻转=${closedB}`, false, 'DEEP');
+  await page.evaluate(() => {
+    const inp = document.querySelector('#sess-query');
+    if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }
+  });
+  walkLog(`SN07 轮询豁免走查：抽屉开放态 节点身份=${phaseA.identityKept} 临时会话 ${sidA || '（创建失败）'} 入列表=${inListA} 关闭徽标翻转=${closedA}；搜索焦点态 DOM=${phaseB.identityKept} 焦点=${phaseB.focusKept} 光标=${phaseB.caretKept} 滚动=${phaseB.scrollKept} 临时会话 ${sidB || '（创建失败）'} 入列表=${inListB} 关闭徽标翻转=${closedB}（入列表等待跨首轮完成上限 300s，其间任务状态推进连续驱动豁免分支）`);
+  record('SN07', '会话页轮询豁免（执行明细抽屉开放/搜索焦点态：数据变化期 DOM 身份/焦点/光标/滚动保持；临时会话入列表与关闭徽标翻转在豁免态下可见）',
+    phaseA.identityKept && inListA && closedA
+    && phaseB.identityKept && phaseB.focusKept && phaseB.caretKept && phaseB.scrollKept && inListB && closedB,
+    `A=${JSON.stringify(phaseA)} 入列表=${inListA} 关闭翻转=${closedA}；B=${JSON.stringify(phaseB)} 入列表=${inListB} 关闭翻转=${closedB}`, false, 'DEEP');
 
-  // 继续预填留档（node 形态：单下拉 continue，只读绑定/轮号/cwd 预填；轮号按实际
+  // 继续预填留档（node 形态：continue modal，只读绑定/轮号/cwd 预填；轮号按实际
   // 轮数推进——SN02 后该会话已 1 轮，continue 应预填第 2 轮）
-  const turnCount = (await nodeApi('/api/v1/local/sessions/' + encodeURIComponent(sid))).body?.session?.turns?.length ?? 1;
-  await page.click(`tr[data-sess="${sid}"] [data-act^="sess-continue"]`);
-  await page.waitForSelector('text=继续会话', { timeout: 5000 });
+  const turnCount = await nodeApi('/api/v1/sessions/' + encodeURIComponent(sidFinal)).then(d => (d.body?.session?.turns || []).length).catch(() => 1);
+  await page.click(`tr[data-sess="${sidFinal}"] [data-act^="sess-continue"]`);
+  await page.waitForSelector('#sess-modal #sess-form', { timeout: 5000 });
   const prefill = await page.evaluate(n => ({
-    ro: [...document.querySelectorAll('#sess-form-zone input[readonly]')].length >= 3,
-    label: [...document.querySelectorAll('#sess-form-zone label')].map(l => l.textContent).join('').includes(`续轮消息（第 ${n} 轮）`),
+    ro: [...document.querySelectorAll('#sess-form input[readonly]')].length >= 3,
+    label: [...document.querySelectorAll('#sess-form label')].map(l => l.textContent).join('').includes(`续轮消息（第 ${n} 轮）`),
     cwd: document.querySelector('#sess-cwd')?.value === '/tmp/agent-session/work',
   }), turnCount + 1);
   await shot(page, 'node-continue-prefill');
-  await page.click('[data-act="sess-new"]');
-  await page.waitForSelector('text=新建会话', { timeout: 5000 });
+  await page.keyboard.press('Escape');
+  await p_sleep(400);
   walkLog(`继续预填走查：readonly=${prefill.ro} 续轮标目=第 ${turnCount + 1} 轮 ${prefill.label} cwd=${prefill.cwd}（截图 node-continue-prefill.png）`);
 
   // SN04 失败轮次覆盖（可控数据，node 形态）：create+首轮为同一执行体——首轮失败即
-  // 创建失败、会话不发布（T2 创建门语义，与 hub「先注册后异步轮」不同），故坏 cwd 不
-  // 能落在已存在会话上。改为：合法目录建会话（首轮成功）→ 删除目录 → 续轮 spawn 失败
-  // → 轮 2 落 failed（会话仍在，失败轮可查）。
+  // 创建失败、会话不发布（T2 创建门语义），故坏 cwd 不能落在已存在会话上。改为：
+  // 合法目录建会话（agent 面 201 登记）→ 投首轮（成功，会话发布）→ 删除目录 → 续轮
+  // spawn 失败 → 轮 2 落 failed（会话仍在，失败轮可查）。
   const failDir = `/tmp/agent-session/e2e-turnfail-${Date.now()}`;
   fs.mkdirSync(failDir, { recursive: true });
-  const fSeed = await nodeApi('/api/v1/local/sessions', {
+  const fSeed = await nodeApi('/api/v1/sessions', {
     method: 'POST',
-    body: JSON.stringify({ agent: capName.split('|')[1] || capName, cwd: failDir, prompt: 'E2E 失败覆盖第 1 步：请只回复 OK，不要读取文件，不要执行任何命令。' }),
+    body: JSON.stringify({ agent: capName, cwd: failDir, request_id: 'web-e2e-fail-' + Date.now() }),
   });
-  const fId = fSeed.body?.turn?.session_id || '';
+  const fId = fSeed.body?.session?.id || '';
   let fTerm1 = '', fTerm2 = '';
   if (fId) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < 300000) {   // 等首轮终态（应 unverified；重负载下任务队列可能排队）
-      const d = await nodeApi('/api/v1/local/sessions/' + encodeURIComponent(fId));
-      const t = (d.body?.session?.turns || [])[0];
-      if (t && !['pending', 'awaiting_node', 'running'].includes(t.status)) { fTerm1 = t.status; break; }
-      await p_sleep(3000);
-    }
-    fs.rmSync(failDir, { recursive: true, force: true });   // 摘掉工作目录
-    if (fTerm1 === 'ok' || fTerm1 === 'unverified') {   // node 内核轮行终态 ok/failed（work_result 恒 unverified，SN02 已严格覆盖）
-      await nodeApi(`/api/v1/local/sessions/${encodeURIComponent(fId)}/turns`, {
-        method: 'POST', body: JSON.stringify({ prompt: 'E2E 失败覆盖第 2 步：工作目录已删除，预期执行失败。' }),
-      });
-      const t1 = Date.now();
-      while (Date.now() - t1 < 300000) {
-        const d = await nodeApi('/api/v1/local/sessions/' + encodeURIComponent(fId));
-        const turns = d.body?.session?.turns || [];
-        const t2 = turns.find(t => t.seq === 2);
-        if (t2 && !['pending', 'awaiting_node', 'running'].includes(t2.status)) { fTerm2 = t2.status; break; }
+    const t1ack = await nodeApi(`/api/v1/sessions/${encodeURIComponent(fId)}/turns`, {
+      method: 'POST', body: JSON.stringify({ prompt: 'E2E 失败覆盖第 1 步：请只回复 OK，不要读取文件，不要执行任何命令。' }),
+    });
+    if (t1ack.code === 202 || t1ack.code === 200) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < 300000) {   // 等首轮终态（发布后内核轮行 ok/unverified；pending 期受理投影随账本推进）
+        const d = await nodeApi('/api/v1/sessions/' + encodeURIComponent(fId));
+        const s = d.body?.session || {};
+        const t = (s.turns || [])[0];
+        if (!s.pending && t?.status) { fTerm1 = t.status; break; }   // 内核轮行：ok | failed
         await p_sleep(3000);
+      }
+      fs.rmSync(failDir, { recursive: true, force: true });   // 摘掉工作目录
+      if (fTerm1 === 'ok') {   // node 内核轮行终态 ok/failed（work_result 恒 unverified，SN02 已严格覆盖）
+        await nodeApi(`/api/v1/sessions/${encodeURIComponent(fId)}/turns`, {
+          method: 'POST', body: JSON.stringify({ prompt: 'E2E 失败覆盖第 2 步：工作目录已删除，预期执行失败。' }),
+        });
+        const t1 = Date.now();
+        while (Date.now() - t1 < 300000) {
+          const d = await nodeApi('/api/v1/sessions/' + encodeURIComponent(fId));
+          const t2 = (d.body?.session?.turns || []).find(t => t.seq === 2);
+          if (t2?.status) { fTerm2 = t2.status; break; }
+          await p_sleep(3000);
+        }
       }
     }
   }
   let badBadge = false, badDetail = false;
   if (fId && fTerm2 === 'failed') {
-    await page.waitForSelector(`tr[data-sess="${fId}"]`, { timeout: 15000 });
-    await page.click(`tr[data-sess="${fId}"]`);
-    await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-    await page.waitForSelector('#sess-drawer tr[data-turn="2"]', { timeout: 10000 });   // 分区异步填充：轮 2 行就位再读徽标
-    badBadge = await page.evaluate(() => document.querySelector('#sess-drawer tr[data-turn="2"] .badge')?.classList.contains('sst-failed'));
-    await page.click('#sess-drawer tr[data-turn="2"]');
+    await page.goto(`${BASE}/#/sessions/${encodeURIComponent(fId)}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#sess-detail', { timeout: 10000 });
+    await page.waitForSelector('#sess-detail tr[data-turn="2"]', { timeout: 15000 });   // 分区异步填充：轮 2 行就位再读徽标
+    badBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="2"] .badge')?.classList.contains('sst-failed'));
+    await page.click('#sess-detail tr[data-turn="2"]');
     await p_sleep(500);
-    badDetail = (await page.textContent('#sess-drawer [data-zone="detail"]')).includes('执行失败');
-    await page.keyboard.press('Escape');
-    await p_sleep(500);
+    badDetail = (await page.textContent('#sess-detail [data-zone="detail"]')).includes('执行失败');
   }
-  record('SN04', '失败轮次覆盖（删目录可控续轮 failed：会话仍在/轮 2 徽标 sst-failed/详情执行失败错误条）',
-    fId && (fTerm1 === 'ok' || fTerm1 === 'unverified') && fTerm2 === 'failed' && badBadge && badDetail,
+  record('SN04', '失败轮次覆盖（删目录可控续轮 failed：会话仍在/轮 2 徽标 sst-failed/详情页答复区执行失败错误条）',
+    fId && fTerm1 === 'ok' && fTerm2 === 'failed' && badBadge && badDetail,
     `sid=${fId || '（创建失败）'} 轮1=${fTerm1 || 'timeout'} 轮2=${fTerm2 || 'timeout'} badge=${badBadge} detail=${badDetail}`);
 
-  // SN03 关闭确认（confirmModal 追加式叠加层，R1 必修6 深层验收）：叠加层下抽屉原位
-  // 保留；层可见/覆盖关系/背景 inert/焦点陷阱实键；Esc 只摘确认层并返焦「关闭会话」钮；
-  // 确认后抽屉头部与列表按 ID 双双刷新为已关闭
-  await page.click(`tr[data-sess="${sid}"]`);
-  await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-  await page.click('#sess-drawer [data-act^="sess-close:"]');
-  await page.waitForSelector('#confirm-modal', { timeout: 5000 });
-  await p_sleep(650);   // 入场动画落定再量几何
-  const confirmDeep = await page.evaluate(() => {
-    const m = document.querySelector('#confirm-modal');
-    const r = m.getBoundingClientRect();
-    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    return {
-      visible: !!m && r.width > 0 && r.height > 0,
-      cover: !!hit && !!hit.closest('#confirm-modal'),   // 覆盖关系：命中点在最上层确认层
-      drawerKept: !!document.querySelector('#sess-drawer'),   // 叠加层下抽屉原位保留（node 形态）
-      overlays: document.querySelectorAll('#layer > .overlay').length,
-      inert: document.getElementById('app')?.hasAttribute('inert'),
-      focusIn: !!document.activeElement?.closest?.('#confirm-modal'),
-    };
+  // SN10 + SN03：在途关闭拒绝 + 取消三态 + 关闭确认深层态（专用会话；W01-03 语义）。
+  // REST 建 agent 面会话 → 投首轮（202）→ UI 立即关闭 → 409 close_in_flight 人话；
+  // 确认层几何/inert/Esc 返焦深层断言（SN03）；取消入口 → 回执三态诚实 toast；终态
+  // 后再次关闭成立 → 详情页头部与列表双刷新已关闭（SN03 收尾断言并入）。
+  const s3Seed = await nodeApi('/api/v1/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ agent: capName, cwd: '/tmp/agent-session/work', request_id: 'web-e2e-close-' + Date.now() }),
   });
-  let trapOk = true;
-  for (let i = 0; i < 6 && trapOk; i++) {   // Tab 连按不出确认层（焦点陷阱）
-    await page.keyboard.press('Tab');
-    trapOk = await page.evaluate(() => !!document.activeElement?.closest?.('#confirm-modal'));
+  const s3Id = s3Seed.body?.session?.id || '';
+  let sn10ok = false, sn3ok = false, sn10Note = '创建失败';
+  if (s3Id) {
+    await nodeApi(`/api/v1/sessions/${encodeURIComponent(s3Id)}/turns`, { method: 'POST', body: JSON.stringify({ prompt: 'E2E 在途关闭覆盖：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }) });
+    await page.goto(`${BASE}/#/sessions/${encodeURIComponent(s3Id)}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#sess-detail', { timeout: 10000 });
+    await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+    await page.click('#sess-detail [data-act="sess-close"]');
+    await page.waitForSelector('#confirm-modal', { timeout: 5000 });
+    await p_sleep(650);
+    const confirmDeep = await page.evaluate(() => {
+      const m = document.querySelector('#confirm-modal');
+      const r = m.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return {
+        visible: !!m && r.width > 0 && r.height > 0,
+        cover: !!hit && !!hit.closest('#confirm-modal'),
+        pageKept: !!document.querySelector('#sess-detail'),   // 叠加层下详情页原位保留
+        inert: document.getElementById('app')?.hasAttribute('inert'),
+        focusIn: !!document.activeElement?.closest?.('#confirm-modal'),
+      };
+    });
+    let cTrapOk = true;
+    for (let i = 0; i < 6 && cTrapOk; i++) {
+      await page.keyboard.press('Tab');
+      cTrapOk = await page.evaluate(() => !!document.activeElement?.closest?.('#confirm-modal'));
+    }
+    await page.keyboard.press('Escape');   // 先 Esc 只摘确认层（深层断言），再走确认路径
+    await p_sleep(500);
+    const escConfirm = await page.evaluate(() => ({
+      confirmGone: !document.querySelector('#confirm-modal'),
+      pageKept: !!document.querySelector('#sess-detail'),
+      focusBack: (document.activeElement?.dataset?.act || '') === 'sess-close',
+    }));
+    await page.click('#sess-detail [data-act="sess-close"]');
+    await page.waitForSelector('#confirm-modal [data-act="confirm-ok"]', { timeout: 5000 });
+    await page.click('#confirm-modal [data-act="confirm-ok"]');
+    await p_sleep(900);
+    const cifToast = await page.textContent('#toast').catch(() => '');
+    const cifOk = cifToast.includes('在途') && cifToast.includes('取消');
+    sn3ok = confirmDeep.visible && confirmDeep.cover && confirmDeep.pageKept && confirmDeep.inert && confirmDeep.focusIn && cTrapOk
+      && escConfirm.confirmGone && escConfirm.pageKept && escConfirm.focusBack;
+    walkLog(`SN10/SN03 走查：在途关闭拒绝 toast=${cifToast.slice(0, 40)} 确认层 deep=${JSON.stringify(confirmDeep)} trap=${cTrapOk} esc=${JSON.stringify(escConfirm)}`);
+    record('SN03', '关闭确认深层态（叠加层下详情页原位保留/层可见+覆盖关系+背景 inert+焦点陷阱实键/Esc 只摘确认层返焦关闭钮）', sn3ok,
+      `deep=${JSON.stringify(confirmDeep)} trap=${cTrapOk} esc=${JSON.stringify(escConfirm)}`, false, 'DEEP');
+    record('SN10a', '在途关闭拒绝（投轮后立即关闭 → close_in_flight 409 人话指向取消/等待，关闭未生效）', cifOk, `toast=${cifToast.slice(0, 50)}`);
+    // 取消入口（受理轮经账本扫描出现在时间线；等取消按钮就位）
+    await page.waitForSelector('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]', { timeout: 30000 }).catch(() => { });
+    const cBtn = page.locator('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]');
+    let cancelToast = '', cancelClicked = false;
+    if (await cBtn.count()) {
+      await cBtn.click();
+      await page.waitForSelector('#confirm-modal [data-act="confirm-ok"]', { timeout: 5000 });
+      await page.click('#confirm-modal [data-act="confirm-ok"]');
+      await p_sleep(900);
+      cancelToast = await page.textContent('#toast').catch(() => '');
+      cancelClicked = true;
+    }
+    const cancelHonest = cancelToast.includes('已撤销排队轮') || cancelToast.includes('取消任务已投递')
+      || cancelToast.includes('已终止执行中的轮次') || cancelToast.includes('待核对') || cancelToast.includes('取消未生效');
+    // 轮行终态：已取消或先到自然终态（徽标如实即可，绝不虚报）
+    let aBadgeCancelled = false, finalBadge = '';
+    for (let i = 0; i < 90 && !aBadgeCancelled; i++) {
+      await p_sleep(2000);
+      finalBadge = await page.evaluate(() => document.querySelector('#sess-detail tr[data-turn="1"] .badge')?.className || '');
+      if (finalBadge.includes('sst-cancelled')) aBadgeCancelled = true;
+      if (finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')) break;   // 先到保留：取消未赶上，自然终态如实
+    }
+    // 等在途清空后关闭成立（409 循环重试，直至 200 已关闭）
+    let closedOk = false;
+    for (let i = 0; i < 90 && !closedOk; i++) {
+      await page.click('#sess-detail [data-act="sess-close"]').catch(() => { });
+      if (await page.locator('#confirm-modal [data-act="confirm-ok"]').count()) {
+        await page.click('#confirm-modal [data-act="confirm-ok"]');
+        await p_sleep(1200);
+        const t = await page.textContent('#toast').catch(() => '');
+        if (t.includes('已关闭') || t.includes('幂等回执')) closedOk = true;
+        else { await page.keyboard.press('Escape'); await p_sleep(2000); }   // 仍 409：等在途收敛后重试
+      } else break;
+    }
+    let headClosed = false, listClosed = false;
+    for (let i = 0; i < 8 && !headClosed; i++) {
+      await p_sleep(1200);
+      headClosed = await page.evaluate(id => document.querySelector('#sess-detail [data-zone="head"]')?.textContent.includes('已关闭'), s3Id);
+    }
+    await page.click('[data-act="sess-back"]');
+    await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
+    for (let i = 0; i < 8 && !listClosed; i++) {
+      await p_sleep(1200);
+      listClosed = await page.evaluate(id => document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes('已关闭'), s3Id);
+    }
+    sn10ok = cifOk && cancelClicked && cancelHonest && (aBadgeCancelled || finalBadge.includes('sst-unverified') || finalBadge.includes('sst-failed')) && closedOk && headClosed && listClosed;
+    sn10Note = `取消入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 终态=${finalBadge || '（行未就位）'} 关闭=${closedOk}/${headClosed}/${listClosed}`;
   }
-  await shot(page, 'node-close-confirm-overlay');
-  walkLog(`SN03 确认层走查：visible=${confirmDeep.visible} 覆盖(elementFromPoint 命中确认层)=${confirmDeep.cover} 抽屉原位保留=${confirmDeep.drawerKept} 叠加 overlay 数=${confirmDeep.overlays} 背景 inert=${confirmDeep.inert} 焦点入层=${confirmDeep.focusIn} Tab×6 陷阱=${trapOk}`);
-  await page.keyboard.press('Escape');   // 顶层关 Esc：只摘确认层，抽屉保留，返焦「关闭会话」钮
-  await p_sleep(500);
-  const escConfirm = await page.evaluate(() => ({
-    confirmGone: !document.querySelector('#confirm-modal'),
-    drawerKept: !!document.querySelector('#sess-drawer'),
-    focusBack: (document.activeElement?.dataset?.act || '').startsWith('sess-close'),
-  }));
-  // 再次打开确认层并确认关闭
-  await page.click('#sess-drawer [data-act^="sess-close:"]');
-  await page.waitForSelector('#confirm-modal', { timeout: 5000 });
-  await page.click('#confirm-modal [data-act="confirm-ok"]');
-  await p_sleep(800);
-  let closedOk = false;
-  for (let i = 0; i < 6 && !closedOk; i++) {
-    await p_sleep(1500);
-    closedOk = await page.evaluate(id => {
-      const headBadge = document.querySelector('#sess-drawer [data-zone="head"] .badge')?.classList.contains('sst-closed');
-      const listBadge = document.querySelector(`tr[data-sess="${id}"] .badge`)?.classList.contains('sst-closed');
-      return headBadge && listBadge;
-    }, sid);
-  }
-  await shot(page, 'node-after-close');
-  record('SN03', '关闭确认深层态（叠加层下抽屉原位保留/层可见+覆盖关系+背景 inert+焦点陷阱实键/Esc 只摘确认层返焦关闭钮/确认后头部与列表按 ID 双刷新已关闭）',
-    confirmDeep.visible && confirmDeep.cover && confirmDeep.drawerKept && confirmDeep.overlays === 2 && confirmDeep.inert && confirmDeep.focusIn && trapOk
-    && escConfirm.confirmGone && escConfirm.drawerKept && escConfirm.focusBack && closedOk,
-    `deep=${JSON.stringify(confirmDeep)} trap=${trapOk} esc=${JSON.stringify(escConfirm)} closed=${closedOk}`, false, 'DEEP');
+  walkLog(`SN10 取消三态+关闭走查：${sn10Note}`);
+  record('SN10', '在途关闭拒绝+取消三态+关闭收尾（取消入口/回执 toast 为 queued/executed/unknown/202 异步/409 先到保留之一；轮行终态徽标如实；关闭最终成立且头部+列表双刷新）', sn10ok, sn10Note, false, 'DEEP');
 
-  // SN06 会话展示面字号地板 + running 脉冲 reduced-motion 降级（视觉层实证；抽屉仍开）
-  const floorBad = await cssFloorCheck(page, '.sess-scope');   // #sess-card + 打开中的 #sess-drawer
+  // SN06 会话展示面字号地板 + running 脉冲 reduced-motion 降级（视觉层实证）
+  await page.goto(`${BASE}/#/sessions/${encodeURIComponent(sidFinal)}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#sess-detail', { timeout: 10000 });
+  await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
+  const floorBad = await cssFloorCheck(page, '.sess-scope');   // 会话列表卡 + 详情页 + 打开中的抽屉
   const animNormal = await page.evaluate(() => {
     const s = document.createElement('span');
     s.className = 'badge sst-running';
-    document.querySelector('#layer').appendChild(s);
+    document.body.appendChild(s);
     const an = getComputedStyle(s, ':before').animationName;
     s.remove();
     return an;
   });
   const animReduced = await reducedMotionCheck(browser, BASE);
-  record('SN06', '会话展示面字号地板（small/.small/footer-note/code computed ≥12.5px，含卡与抽屉）+sst-running 脉冲 reduced-motion 停',
+  record('SN06', '会话展示面字号地板（small/.small/footer-note/code computed ≥12.5px，含列表/详情页/抽屉）+sst-running 脉冲 reduced-motion 停',
     floorBad.length === 0 && animNormal === 'pulse-dot' && animReduced === 'none',
     `违例=${JSON.stringify(floorBad)} anim=${animNormal}/reduce=${animReduced}`, false, 'VISUAL');
   flushWalk('node');

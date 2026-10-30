@@ -69,12 +69,19 @@ func TestWebDrawerSharedBlocks(t *testing.T) {
 			t.Errorf("抽屉展示词典 shared block 应含 %q", want)
 		}
 	}
-	// 会话词典（T3 双端会话界面）：六值轮状态机 + node ok 键 + unverified 警示词
-	//（绝不渲染为成功）+ 权限断言下拉剔除全权档位 + 分区表同构
+	// 会话词典（T3 双端会话界面；W01-05 加法锚点：会话登记态 pending、轮次投影
+	// 加法值 cancelled、取消记账码人话与错误码人话表——旧值不改名不删，W01-01 §3）
 	for _, want := range []string{
-		"const SESS_STATES = { active: '进行中', open: '进行中', closed: '已关闭' };",
+		"const SESS_STATES = { active: '进行中', open: '进行中', closed: '已关闭', pending: '登记中（首轮未发布）' };",
 		"pending: '排队中', awaiting_node: '已投递', running: '执行中',",
 		"unverified: '工作结果未证实', failed: '执行失败',",
+		"cancelled: '已取消',",
+		"const SESS_TURN_SEVEN = SESS_TURN_SIX.concat(['cancelled']);",
+		"turn_cancel_outcome_unknown: '取消已触发，但停止事实未证实——待核对',",
+		"close_in_flight: '会话仍有在途轮次，已拒绝关闭——请先取消或等待在途轮次完成',",
+		"function sessCancelKind(t) {",
+		"function sessErrHuman(data) {",
+		"function sessWsSummary(cwd) {",
 		"const SESS_TURN_ZONES = ['head', 'binding', 'turns', 'detail', 'actions'];",
 		"function sessBadge(s) {",
 		"const SESS_UNVERIFIED_NOTE = ",
@@ -389,7 +396,7 @@ func TestWebDrawerComponentStyles(t *testing.T) {
 		".badge.sst-running:before{display:inline-block;background:var(--live);animation:pulse-dot 2.2s infinite}",
 		".badge.sst-unverified{background:var(--heat-bg);color:var(--heat);font-weight:650;box-shadow:inset 0 0 0 1px var(--heat-ring)}",
 		".badge.sst-failed{color:var(--danger)}",
-		".badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node{color:var(--ink-4)}",
+		".badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node,.badge.sst-cancelled{color:var(--ink-4)}",
 		"tr[data-turn]{cursor:pointer}",
 		"tr[data-turn].on{background:var(--accent-bg)}",
 		".sess-prompt{white-space:pre-wrap;word-break:break-word}",

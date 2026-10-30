@@ -122,7 +122,7 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 .badge.sst-unverified{background:var(--heat-bg);color:var(--heat);font-weight:650;box-shadow:inset 0 0 0 1px var(--heat-ring)}
 .badge.sst-unverified:before{display:inline-block}
 .badge.sst-failed{color:var(--danger)}
-.badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node{color:var(--ink-4)}
+.badge.sst-closed,.badge.sst-done,.badge.sst-ok,.badge.sst-pending,.badge.sst-awaiting_node,.badge.sst-cancelled{color:var(--ink-4)}
 /* 会话轮次表（T3）：选中轮行 accent 淡底；输入留痕原样换行（不截断不横向滚动） */
 tr[data-turn]{cursor:pointer}
 tr[data-turn].on{background:var(--accent-bg)}

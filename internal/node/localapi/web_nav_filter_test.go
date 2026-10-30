@@ -95,8 +95,8 @@ func TestWebNavFilterStructure(t *testing.T) {
 			t.Errorf("hub app.js 应含 %q", want)
 		}
 	}
-	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['wizard', '连接']];`) {
-		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/服务/任务/连接）")
+	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['wizard', '连接']];`) {
+		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/服务/任务/会话/连接；W01-05 P01 会话独立主入口，任务页区块迁出）")
 	}
 	for _, want := range []string{
 		"<h1>服务</h1>",
