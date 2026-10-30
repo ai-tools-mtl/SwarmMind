@@ -723,8 +723,8 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
 3. **人工管理专属豁免（2026-10-22）**：以下管理面端点不设 MCP 工具——
    ① `POST /api/v1/tasks/{id}/cancel`（任务取消）：取消是管理面的人工干预能力，暴露给 agent 会引入互删任务风险；agent 侧只能等待终态（wait 对 cancelled 即时返回并提示已取消）；
    ② `POST /api/v1/nodes/enroll-bundle`（节点接入部署包生成）：端点为管理端人工装机操作专属——生成的部署包内嵌节点 register_token 凭据，agent 无权获取凭据，部署包亦不经 agent 面分发，只对管理端会话开放。
-   ③ `POST /api/v1/local/prime/declare`（node 网页指定统筹载体，2026-10-22）：本机主人人工操作专属（仅 local_token 可调）——指定即凭据授予（应答带新 prime_token 与 MCP 连接片段），暴露给 agent 面等于 agent 可自行换发统筹凭证，属提权通道；授权交接由本机主人在 node 控制台完成。t20261023-62a2 自动接线补充口径：指定/轮换后 node 合并写入被指定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
-   ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接统筹凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
+   ③ `POST /api/v1/local/prime/declare`（node 网页指定统筹载体，2026-10-22；2026-10-30 W02-01 去换发修订）：本机主人人工操作专属（仅 local_token 可调）——原「指定即凭据授予（应答带新 prime_token 与 MCP 连接片段）」口径随 W02-01 调用权与管家角色解耦**退役**：declare 只做管家声明+以当前凭据自动接线，应答 prime_token 恒空、mcp_config 凭据位为脱敏引用，不再换发/展示明文凭据，凭据作废改由显式轮换承担（⑪ rotate 行）；豁免根据随之修订为「主人管理面的角色声明与本机资源配置动作」（写 node.yaml prime_agent=声明持有人翻转、写管家影子 home 宿主配置=本机资源写入，与豁免④同级主权面），暴露给 agent 面仍属越权通道，豁免结论不变。t20261023-62a2 自动接线补充口径：指定/轮换后 node 合并写入被指定 agent 影子 home 内的宿主 MCP 配置，动作发生在 declare/rotate 这个主人人工操作的事务内、走主人授权，不构成 agent 面暴露（豁免结论不变）。
+   ④ node 本机主人管理端点（2026-10-22 功能闭环修复轮补豁免）：`PUT /api/v1/local/config`、`POST /api/v1/local/agents/reload`、`POST /api/v1/local/restart`、`POST /api/v1/local/prime/rotate`（2026-10-30 起新路径 `POST /api/v1/local/mcp/access/rotate` 同一实现，登记见⑪）、`POST /api/v1/local/setup/parse|apply|disconnect`——口径同 declare：本机主人专属管理操作（写 agents 表=执行权、整表落盘/重启/断开切形态、轮换交接统筹凭证），全部仅 local_token 可调，经 agent 面暴露即提权/破坏通道，正式豁免 MCP 映射；node MCP 六工具（本机 nodes/agents/submit/status/wait/artifact）已覆盖 agent 侧全部合法能力。
    ⑤ `GET /api/v1/nodes/enroll-info`（节点接入入口地址查询，2026-10-23 第六轮修复 2）：接入向导人工装机流程的配套元数据端点（与豁免 ② 同一人工流程）——返回 hub 自身节点接入入口地址（node_listen 推导，无凭据），供控制台向导预填 hub_url；agent 面无使用场景，豁免 MCP 映射。
    ⑥ `GET /api/v1/prime`（统筹指定汇聚查询，2026-10-28 客户端声明制）：只读汇聚展示（恰一声明生效 designation；多声明冲突 conflicts 清单回退名字约定；零声明 null 回退名字约定），统筹智能体自身无需读写该状态，豁免 MCP 映射。PUT /api/v1/prime 已退役（2026-10-23 网页指定 → 2026-10-28 客户端声明制：指定权在 node——能力卡 Orchestrator 声明随能力表上报，hub 只接收汇聚；声明入口在各机器 node 控制台总览页「本机管家 · 形态」卡——2026-10-29 走查反馈一起能力卡管家按钮退役，钦定/换/取消/轮换唯一入口收敛该卡，同机互斥由 node 侧保证，跨机冲突由 hub 告警）。
    ⑦ `/api/v1/notify/*` 全组（通知渠道管理，2026-10-24 P4③ 控制台化升级）：人工专属管理面配置（凭据授予类）——渠道配置体内含明文凭证（飞书 webhook 地址、SMTP 口令、自定义头 token），agent 读写该面即等于可自行获取/篡改主人的通知出口与凭据（改渠道=把任务结果重定向到任意地址，属信息外带通道）；通知是「系统主动找人」的人工动线，agent 对通知配置无合法使用场景（agent 感知任务结果走 swarmmind_wait，与通知解耦）。管理台「设置 → 通知」为唯一配置入口；hub.yaml 旧 notify 段仅作一次性兼容导入。
@@ -736,6 +736,10 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    - `GET /api/v1/local/sessions`（列表）/ `GET /api/v1/local/sessions/{id}`（详情）：主人线程目录与留痕读取——只读但同属主人管理面组（仅 local_token 门禁一致；数据含本机工作区路径与原生线程绑定，不对 agent 面开放）；
    - `POST /api/v1/local/sessions/{id}/close`（关闭，同步幂等）：主人关线程——与 hub close ①同源的互删通道豁免。
    「hub 会话工具组已全覆盖」的适用边界：该理由仅指 **hub 模式下 agent 面的跨机会话协作**（session_create/send/list/status）不因本机端点缺 MCP 而留盲区；**standalone（node 未接 hub）时 hub 工具组不存在**，本机五端点仍豁免——其豁免根据是「主人管理面」本身（本机原生线程管理不经任何 agent 面，node MCP 六工具不含会话），而非与 hub 工具组互补。
+   ⑪ `/api/v1/local/mcp/access*` 端点组（MCP 编排授权管理，W02-01，2026-10-30 codex 终审补登记）：本机主人凭据授予/编排授权管理面——授权开关即本机编排调用权总闸、轮换即共享凭据的授予/作废，暴露给 agent 面=可自行启停调用权/换发全体调用者密钥，属提权通道；仅 local_token 可调（authLocal 门，prime_token 一律 401）；凭据明文只一次展示（轮换应答），不对 agent 开放授权管理。逐端点依据：
+   - `GET /api/v1/local/mcp/access`（授权状态视图）：只读但同属主人管理面组（应答仅凭据脱敏引用+影响范围人话，绝无明文；内容含本机编排授权态与凭据在位性，不对 agent 面开放）；
+   - `PUT /api/v1/local/mcp/access`（主人显式启停编排授权）：启/停即本机编排调用权总闸翻转，agent 可自调即自授权（与豁免④「写 agents 表=执行权」同级的本机主权面）；
+   - `POST /api/v1/local/mcp/access/rotate`（轮换共享编排凭据；旧别名 `POST /api/v1/local/prime/rotate` 同一实现保留不删，与豁免④互为注记）：换发即凭据授予（豁免③同源口径），新明文仅应答一次展示、No-store，agent 可自调=可自行换发统筹凭证。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。

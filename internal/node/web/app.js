@@ -1414,7 +1414,7 @@ function primeCard() {
 /* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
+  return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）——且须主人在「MCP 授权」区显式启用编排授权（新实例默认禁用，禁用期间该派单被 403 mcp_disabled 拒绝）；本机主人网页派单不依赖管家凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
@@ -1463,9 +1463,9 @@ function primeDoneView() {
       : `<div class="notice warn spaced"><b>共享编排凭据不变</b>：钦定不换发凭据。管家 MCP 连接未自动写入——下方片段中凭据位为脱敏占位、不可直接贴用；请先「轮换管家凭证」获取一次性明文（SWARM_NODE_PRIME_TOKEN）再配给管家，或重新钦定命中可接线的宿主布局。</div>`);
   return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启）；共享编排凭据与授权状态不变，现有 MCP 连接持续有效。</div>${declNote}${wiredNote}
   ${credBlock}
-  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '凭据位为脱敏占位——结构可复用，凭据需轮换获取明文后替换'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
+  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制（复制片段的凭据位为脱敏占位，迁移时须替换为有效明文）' : '凭据位为脱敏占位——结构可复用，凭据需轮换获取明文后替换'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
   <div class="row spaced">${retryBtn}${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
-  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权），写入的是当前共享凭据；轮换管家凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段的结构粘进管家 agent 的 MCP 服务器配置；凭据位（SWARM_NODE_PRIME_TOKEN）为脱敏占位，须经「轮换管家凭证」获取一次性明文后替换，重连后它即可本机派单。'}</p>`;
+  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权），写入的是当前共享凭据；轮换管家凭证时会自动刷新同一配置，无需重复操作。管家实际派单还须主人在「MCP 授权」区显式启用编排授权（新实例默认禁用，未启用时管家派单被 403 mcp_disabled 拒绝）。' : '把上方 JSON 片段的结构粘进管家 agent 的 MCP 服务器配置；凭据位（SWARM_NODE_PRIME_TOKEN）为脱敏占位，须经「轮换管家凭证」获取一次性明文后替换，且主人在「MCP 授权」区显式启用编排授权（新实例默认禁用）后它才可本机派单。'}</p>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -2404,7 +2404,12 @@ async function copyPrimeDeclare() {
 async function copyPrimeMcp() {
   const d = S.primeDecl.done;
   if (!d?.mcp) { toast('没有可复制的 MCP 配置'); return; }
-  await copyText(JSON.stringify(d.mcp, null, 2), 'MCP 配置', 'MCP 配置已复制 · 粘贴进管家 agent 的 mcpServers 即完成授权');
+  /* W02-01 解耦后 mcp_config 凭据位恒为脱敏占位（wired=宿主内已是当前凭据，片段
+   * 仅供迁移其他宿主）——复制出的片段直接贴用会认证失败，toast 必须如实告知须
+   * 替换，不得宣称「即完成授权」。 */
+  await copyText(JSON.stringify(d.mcp, null, 2), 'MCP 配置', d.wired
+    ? '已复制（凭据位为脱敏占位）——本片段用于迁移其他宿主，贴用前须替换为「轮换管家凭证」获取的一次性明文'
+    : '已复制（凭据位为脱敏占位）——贴用前须替换为「轮换管家凭证」获取的一次性明文，否则认证失败');
 }
 
 /* ---------- 任务详情抽屉 ----------

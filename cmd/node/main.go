@@ -393,6 +393,11 @@ func run(cfgPath, dataDirOverride string) error {
 	if err != nil {
 		return fmt.Errorf("初始化 MCP 编排授权状态失败: %w", err)
 	}
+	// 迁移日志依据（终审建议修）：prime_token 在位性必须在 ensureTokenFile 自动
+	// 生成**之前**取样——生成之后读盘恒在位，无法反映迁移判定时点的事实（M4
+	// 场景会假报「文件在位」）；判定口径与 OpenMcpAccess 迁移一致（可读且 ≥32 字节）。
+	migTok, migTokErr := os.ReadFile(primeTokenPath)
+	migTokPresent := migTokErr == nil && len(migTok) >= 32
 	primeTok, err := ensureTokenFile(primeTokenPath)
 	if err != nil {
 		return fmt.Errorf("生成 prime_token 失败: %w", err)
@@ -403,9 +408,12 @@ func run(cfgPath, dataDirOverride string) error {
 	}
 	accessStatePath := filepath.Join(cfg.DataDir, "mcp_access.json")
 	if migrated {
-		if cfg.PrimeAgent != "" {
-			log.Printf("[node] MCP 编排授权迁移：旧配置（prime_agent=%s、prime_token 文件在位）推导为%s，已落盘 %s——此后显式状态为唯一真相，重启/管家增删不再重推导", cfg.PrimeAgent, accessStateWord, accessStatePath)
-		} else {
+		switch {
+		case cfg.PrimeAgent != "" && migTokPresent:
+			log.Printf("[node] MCP 编排授权迁移：旧配置（prime_agent=%s、prime_token 文件在位）双条件在位，推导为%s，已落盘 %s——此后显式状态为唯一真相，重启/管家增删不再重推导", cfg.PrimeAgent, accessStateWord, accessStatePath)
+		case cfg.PrimeAgent != "":
+			log.Printf("[node] MCP 编排授权迁移：旧配置已声明 prime_agent=%s，但迁移判定时点 prime_token 文件缺失/不可读/过短（<32 字节）——凭据不在位不能认定已授权，推导为禁用，已落盘 %s（主人可在控制台显式启用）", cfg.PrimeAgent, accessStatePath)
+		default:
 			log.Printf("[node] MCP 编排授权迁移：未声明 prime_agent，推导为禁用（默认禁用），已落盘 %s", accessStatePath)
 		}
 	} else {

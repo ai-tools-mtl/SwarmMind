@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -51,6 +52,34 @@ func newAccessSrv(t *testing.T, access *McpAccess, rotate func() (string, error)
 			`{"target_node":"nodeA","target_agent":"echo","submitted_by":"p"}`)
 	}
 	return srv, submit
+}
+
+// doJSONHdr 同 doJSON，并回传响应头（Cache-Control 等传输面契约断言用）。
+func doJSONHdr(t *testing.T, srv *httptest.Server, token, method, path, body string) (int, string, http.Header) {
+	t.Helper()
+	req, err := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b), resp.Header
+}
+
+// requireNoStore 断言响应携带 Cache-Control: no-store（授权/凭据面传输纪律，
+// RFC §三「响应统一 no-store」——此前测试名声称覆盖但未查头，终审建议⑥补断言）。
+func requireNoStore(t *testing.T, h http.Header, where string) {
+	t.Helper()
+	if cc := h.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("%s 应带 Cache-Control: no-store, got %q", where, cc)
+	}
 }
 
 // TestMcpAccessAuthorizationMatrix 授权矩阵（RFC §4.1 判定表）：
@@ -141,8 +170,9 @@ func TestMcpAccessAuthorizationMatrix(t *testing.T) {
 }
 
 // TestMcpAccessRotateOneTimePlaintext 轮换（RFC §3.3）：旧值即失效、新明文仅在
-// 轮换应答出现一次（GET/PUT 应答与轮换失败应答绝无明文）、No-store、新旧别名同
-// 一实现、失败不报成功（旧凭证仍有效）。
+// 轮换应答出现一次（GET/PUT 应答与轮换失败应答绝无明文）、No-store（新旧两路径
+// 与 GET/PUT 均断查响应头，终审建议⑥）、新旧别名同一实现、失败不报成功（旧凭证
+// 仍有效，重试即成功）。
 func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 	const newTok = "tok-rotated-fresh"
 	n := 0
@@ -159,11 +189,12 @@ func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 	if code, _ := submit("tok-prime"); code != http.StatusAccepted {
 		t.Fatalf("前置旧凭据应 202")
 	}
-	// 新端点轮换：一次返回新明文 + No-store
-	code, out := doJSON(t, srv, "tok-local", http.MethodPost, "/api/v1/local/mcp/access/rotate", "")
+	// 新端点轮换：一次返回新明文 + No-store 响应头
+	code, out, hdr := doJSONHdr(t, srv, "tok-local", http.MethodPost, "/api/v1/local/mcp/access/rotate", "")
 	if code != http.StatusOK || !strings.Contains(out, newTok) {
 		t.Fatalf("rotate 应 200 且一次返回新明文, got %d: %s", code, out)
 	}
+	requireNoStore(t, hdr, "rotate 新路径")
 	if !strings.Contains(out, `"enabled":true`) || !strings.Contains(out, `"prime_agent":""`) {
 		t.Fatalf("rotate 应答应带 enabled 与 prime_agent 兼容字段: %s", out)
 	}
@@ -174,11 +205,12 @@ func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 	if code, _ := submit(newTok); code != http.StatusAccepted {
 		t.Fatalf("轮换后新凭据应 202")
 	}
-	// 明文仅此一次：GET 视图只含脱敏引用
-	code, out = doJSON(t, srv, "tok-local", http.MethodGet, "/api/v1/local/mcp/access", "")
+	// 明文仅此一次：GET 视图只含脱敏引用；响应头 No-store
+	code, out, hdr = doJSONHdr(t, srv, "tok-local", http.MethodGet, "/api/v1/local/mcp/access", "")
 	if code != http.StatusOK {
 		t.Fatalf("GET 应 200, got %d: %s", code, out)
 	}
+	requireNoStore(t, hdr, "GET 视图")
 	if strings.Contains(out, newTok) {
 		t.Fatalf("GET 应答不得含明文凭据: %s", out)
 	}
@@ -193,11 +225,12 @@ func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 	if !view.Enabled || view.CredentialMasked != "to********" || !strings.Contains(view.Scope, "禁用不等于撤销凭据") {
 		t.Fatalf("GET 视图不符（脱敏引用/影响说明）: %s", out)
 	}
-	// PUT 应答同样无明文（保存开关不返回任何密钥）；随后恢复启用供失败轮换断言
-	code, out = doJSON(t, srv, "tok-local", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":false}`)
+	// PUT 应答同样无明文（保存开关不返回任何密钥）且 No-store；随后恢复启用供失败轮换断言
+	code, out, hdr = doJSONHdr(t, srv, "tok-local", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":false}`)
 	if code != http.StatusOK || strings.Contains(out, newTok) {
 		t.Fatalf("PUT 应答不得含明文凭据, got %d: %s", code, out)
 	}
+	requireNoStore(t, hdr, "PUT 视图")
 	if code, out = doJSON(t, srv, "tok-local", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":true}`); code != http.StatusOK {
 		t.Fatalf("恢复启用应 200, got %d: %s", code, out)
 	}
@@ -208,6 +241,16 @@ func TestMcpAccessRotateOneTimePlaintext(t *testing.T) {
 	}
 	if code, _ := submit(newTok); code != http.StatusAccepted {
 		t.Fatalf("轮换失败后旧凭据（未换发）应仍 202")
+	}
+	// 旧别名成功路径同一实现同传输纪律：失败后重试 200 + No-store（新旧两路径
+	// 响应头均断查——终审建议⑥，此前旧别名仅断言失败分支未查头）
+	code, out, hdr = doJSONHdr(t, srv, "tok-local", http.MethodPost, "/api/v1/local/prime/rotate", "")
+	if code != http.StatusOK || !strings.Contains(out, newTok) {
+		t.Fatalf("旧别名重试轮换应 200 返回新明文, got %d: %s", code, out)
+	}
+	requireNoStore(t, hdr, "rotate 旧别名")
+	if code, _ := submit(newTok); code != http.StatusAccepted {
+		t.Fatalf("旧别名轮换后新凭据应 202")
 	}
 }
 
@@ -266,24 +309,28 @@ func TestMcpAccessPutPersistence(t *testing.T) {
 	}
 
 	// 失败场景一：rename 目标被目录占位（EISDIR——temp 写成功、rename 失败窗口）
+	// updated 以固定历史时刻取样：nowUTCString 秒级粒度，同秒内跑会掩盖「回滚缺
+	// 失 updated」的回归（终审必修④——三元组断言须能稳定区分新时刻与旧态）。
+	const seededUpdated = "2026-01-01T00:00:00Z"
 	dir2 := t.TempDir()
 	blocked := filepath.Join(dir2, mcpAccessFileName)
 	if err := os.Mkdir(blocked, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	acc2 := &McpAccess{path: blocked, enabled: true, source: mcpSourceOwner, updated: nowUTCString()}
+	acc2 := &McpAccess{path: blocked, enabled: true, source: mcpSourceOwner, updated: seededUpdated}
 	srv2, _ := newAccessSrv(t, acc2, nil)
+	beforeEn, beforeSrc, beforeUp := acc2.Snapshot()
 	code, out = doJSON(t, srv2, "tok-local", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":false}`)
 	if code != http.StatusInternalServerError || !strings.Contains(out, "保存失败") || !strings.Contains(out, "启用") {
 		t.Fatalf("写失败应 500 且注明旧态保留（启用）, got %d: %s", code, out)
 	}
-	if acc2.Enabled() != true {
-		t.Fatal("写失败后内存态应保留旧值（启用）")
+	if en, src, up := acc2.Snapshot(); en != beforeEn || src != beforeSrc || up != beforeUp {
+		t.Fatalf("写失败后内存三元组应与操作前逐字节一致, got (%v,%s,%s) want (%v,%s,%s)", en, src, up, beforeEn, beforeSrc, beforeUp)
 	}
 	// 失败场景二：目录只读（CreateTemp 失败）——盘上旧文件逐字节保留
 	dir3 := t.TempDir()
 	path3 := filepath.Join(dir3, mcpAccessFileName)
-	if err := os.WriteFile(path3, []byte(`{"version":1,"enabled":true,"updated_at":"2026-10-30T00:00:00Z","source":"owner"}`), 0o600); err != nil {
+	if err := os.WriteFile(path3, []byte(`{"version":1,"enabled":true,"updated_at":"`+seededUpdated+`","source":"owner"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before := mustRead(t, path3)
@@ -291,8 +338,9 @@ func TestMcpAccessPutPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir3, 0o755) })
-	acc3 := &McpAccess{path: path3, enabled: true, source: mcpSourceOwner, updated: nowUTCString()}
+	acc3 := &McpAccess{path: path3, enabled: true, source: mcpSourceOwner, updated: seededUpdated}
 	srv3, _ := newAccessSrv(t, acc3, nil)
+	beforeEn3, beforeSrc3, beforeUp3 := acc3.Snapshot()
 	code, out = doJSON(t, srv3, "tok-local", http.MethodPut, "/api/v1/local/mcp/access", `{"enabled":false}`)
 	if code != http.StatusInternalServerError || strings.Contains(out, `"enabled":false`) {
 		t.Fatalf("只读目录写失败应 500 不虚报, got %d: %s", code, out)
@@ -300,8 +348,8 @@ func TestMcpAccessPutPersistence(t *testing.T) {
 	if got := mustRead(t, path3); got != before {
 		t.Fatalf("写失败不得损坏盘上旧态:\n got %s\nwant %s", got, before)
 	}
-	if acc3.Enabled() != true {
-		t.Fatal("写失败后内存态应保留旧值")
+	if en, src, up := acc3.Snapshot(); en != beforeEn3 || src != beforeSrc3 || up != beforeUp3 {
+		t.Fatalf("写失败后内存三元组应与操作前逐字节一致, got (%v,%s,%s) want (%v,%s,%s)", en, src, up, beforeEn3, beforeSrc3, beforeUp3)
 	}
 }
 

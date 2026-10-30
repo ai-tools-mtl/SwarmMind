@@ -9,8 +9,8 @@
 //   - POST /api/v1/local/prime/rotate      旧别名 → 同一实现（兼容不删）。
 //
 // 三端点均仅 local_token 可调（authLocal 门，本机主人管理面；prime_token 调用
-// 401）——凭据授予/主人管理面，SPEC 六.六人工专属豁免类（豁免登记见 RFC §七，
-// SPEC 表由归属批次回写）。编排门（server.go authOrchestrate）只读 Enabled()；
+// 401）——凭据授予/主人管理面，SPEC 六.六人工专属豁免⑪（2026-10-30 终审补登
+// 记）。编排门（server.go authOrchestrate）只读 Enabled()；
 // prime_token 编排请求需显式 enabled，local_token（主人）恒放行。
 //
 // 安全纪律：凭据只在轮换应答中一次展示（declare 不再携带明文，prime.go）；
@@ -116,16 +116,18 @@ func (m *McpAccess) Enabled() bool {
 }
 
 // Set 显式启停（PUT 端点）：持久化成功才提交内存态；持久化失败返回错误且内存
-// 保留旧值、盘上旧文件原样——不虚报成功（RFC §一失败语义）。
+// 保留旧值、盘上旧文件原样——不虚报成功（RFC §一失败语义）。回滚覆盖完整旧
+// 三元组（enabled/source/updated）：只回滚 enabled 会让 GET 的 updated_at 变成
+// 失败操作时刻、source 从 migration 漂成 owner，违反「旧态保留」契约。
 func (m *McpAccess) Set(enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	old := m.enabled
+	oldEnabled, oldSource, oldUpdated := m.enabled, m.source, m.updated // 旧态全量留存
 	m.enabled = enabled
 	m.source = mcpSourceOwner
 	m.updated = nowUTCString()
 	if err := m.persistLocked(); err != nil {
-		m.enabled = old // 回滚内存态：调用方拿到错误即旧态仍生效
+		m.enabled, m.source, m.updated = oldEnabled, oldSource, oldUpdated // 全三元组回滚：旧态逐字节保留
 		return err
 	}
 	return nil
