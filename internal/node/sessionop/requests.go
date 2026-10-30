@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -118,6 +119,14 @@ func (s *Service) saveRequestsLocked() error {
 	if err := os.Rename(tmp, s.reqPath); err != nil {
 		os.Remove(tmp)
 		return err
+	}
+	// 目录 fsync 尽力而为（RFC §1 声明的崩溃收敛语义）：rename 已完成不可回滚，
+	// fsync 失败只降级为「尽力而为」并如实注记，不虚报持久化失败。
+	if d, derr := os.Open(filepath.Dir(s.reqPath)); derr == nil {
+		if serr := d.Sync(); serr != nil {
+			s.reqLog.Printf("sessionop: 请求登记目录 fsync 失败（尽力而为，rename 已完成）: %v", serr)
+		}
+		_ = d.Close()
 	}
 	return nil
 }

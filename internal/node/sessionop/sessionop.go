@@ -225,19 +225,56 @@ func (s *Service) CloseGuard(sessionID string) error {
 }
 
 // AuthorizeWorkspace 工作区授权：未配置根 = 放行（保持现状）；cwd 经
-// EvalSymlinks 归一后必须等于某根或位于某根之内（前缀含路径分隔符边界），
-// 符号链接别名按真实路径判定，别名越界同样拒绝。
+// resolveWorkspace 归一后必须等于某根或位于某根之内（前缀含路径分隔符边界；
+// 根本身为文件系统根 "/" 时不追加分隔符——"//x" 形态的伪前缀会误拒全部子目录，
+// codex 联审必修项）。解析失败策略见 resolveWorkspace：最近已存在祖先解析后拼接
+// 剩余段，全部失败回退 Abs+Clean 并如实注记——目录存在性由执行层如实失败，
+// 授权不因回退放行越界路径。
 func (s *Service) AuthorizeWorkspace(cwd string) error {
 	if len(s.roots) == 0 {
 		return nil
 	}
-	resolved, _ := agentid.Resolve(cwd)
+	resolved := resolveWorkspace(cwd)
 	for _, root := range s.roots {
-		if resolved == root || strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		prefix := root
+		if !strings.HasSuffix(root, string(filepath.Separator)) {
+			prefix = root + string(filepath.Separator)
+		}
+		if resolved == root || strings.HasPrefix(resolved, prefix) {
 			return nil
 		}
 	}
 	return fmt.Errorf("%w: %q（归一 %q 不在任何允许根内）", ErrWorkspaceDenied, cwd, resolved)
+}
+
+// resolveWorkspace 会话工作区路径归一（授权判定专用；codex 联审必修项的解析
+// 失败策略）：优先整体 EvalSymlinks；失败（cwd 尚不存在等）向上找最近的已存在
+// 祖先解析其真实路径后拼接剩余段——防止 /var→/private/var 这类前缀别名让新建
+// 子目录被误判越界；连祖先都解析不了（全链不存在）回退 Abs+Clean（调用方日志
+// 注记回退态）。只读路径运算，无文件系统变更。
+func resolveWorkspace(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	abs = filepath.Clean(abs)
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r
+	}
+	rest := ""
+	cur := abs
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break // 到达文件系统根仍不可解析：全链不存在，回退
+		}
+		rest = string(filepath.Separator) + filepath.Base(cur) + rest
+		cur = parent
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			return r + rest
+		}
+	}
+	return abs
 }
 
 // ---------- 取消句柄：登记 / 绑定 / 意图 / 收敛 ----------

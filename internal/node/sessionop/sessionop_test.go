@@ -157,6 +157,36 @@ func TestAuthorizeWorkspaceRoots(t *testing.T) {
 	}
 }
 
+// TestAuthorizeWorkspaceRootEdgeAndFallback codex 联审必修项回归：根为文件系统根
+// "/" 时不得因 "root+分隔符" 拼出 "//" 伪前缀误拒全部子目录；解析失败（cwd 不
+// 存在，EvalSymlinks 失败）按 Abs+Clean 回退结果判定——根内回退放行、根外回退
+// 仍拒绝（授权不因回退放行越界路径）。
+func TestAuthorizeWorkspaceRootEdgeAndFallback(t *testing.T) {
+	sRoot, _, _ := newTestService(t, Options{AllowedWorkspaceRoots: []string{"/"}})
+	for _, ok := range []string{"/tmp", "/tmp/sessions/a", "/"} {
+		if err := sRoot.AuthorizeWorkspace(ok); err != nil {
+			t.Fatalf("根 / 下 %s 应放行: %v", ok, err)
+		}
+	}
+
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.MkdirAll(filepath.Join(root, "inner"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := newTestService(t, Options{AllowedWorkspaceRoots: []string{root}})
+	// 回退放行：根内不存在的 cwd（EvalSymlinks 失败）按 Abs+Clean 判定入根
+	nonexistentIn := filepath.Join(root, "not-yet-created")
+	if err := s.AuthorizeWorkspace(nonexistentIn); err != nil {
+		t.Fatalf("根内不存在目录（回退路径）应放行: %v", err)
+	}
+	// 回退拒绝：根外不存在的 cwd 仍拒绝
+	nonexistentOut := filepath.Join(base, "elsewhere", "missing")
+	if err := s.AuthorizeWorkspace(nonexistentOut); !errors.Is(err, ErrWorkspaceDenied) {
+		t.Fatalf("根外不存在目录（回退路径）应 ErrWorkspaceDenied: %v", err)
+	}
+}
+
 // TestResolveRequestLifecycle N01 同源幂等语义：同键同文返回原受理；同键异文
 // ErrRequestConflict；Lookup 可查回。
 func TestResolveRequestLifecycle(t *testing.T) {
