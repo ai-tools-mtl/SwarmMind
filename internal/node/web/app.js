@@ -1355,7 +1355,7 @@ function overviewPage() {
   ${primeCard()}${recentTasksCard()}`;
 }
 /* 本机管家 · 形态（方案 3.1/3.2.1）：网页钦定闭环——未钦定/换管家走选择视图
- * → declare → 钦定完成视图（一次性凭证 + MCP 配置片段）→ 已钦定常态（轮换 +
+ * → declare → 钦定完成视图（凭据事实块 + MCP 配置片段；W02-01 起钦定不换发/不返回凭据）→ 已钦定常态（轮换 +
  * 换管家 + 取消管家入口）。2026-10-29 部署后走查反馈一：能力卡管家按钮全退役
  * （能力卡只留「管家·本机」徽标做身份展示），钦定/换/取消/轮换唯一入口收敛到
  * 本卡；取消管家沿用 2026-10-28 声明制口径（弱化文字链，PATCH orchestrator=false）。
@@ -1391,7 +1391,7 @@ function primeCard() {
     const names = declaredList.map(n => `<code>${esc(n)}</code>`).join('、');
     let txt;
     if (declaredList.length === 1 && declaredList[0] === pa) {
-      txt = `本机凭证持有人 <code>${esc(pa)}</code> · 本机声明 <code>${esc(declaredList[0])}</code>（两源一致）。声明随能力表上报 hub 汇聚，全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）；取消管家只撤本机声明，凭证不动（换管家时旧凭证随钦定失效）。`;
+      txt = `本机凭证持有人 <code>${esc(pa)}</code> · 本机声明 <code>${esc(declaredList[0])}</code>（两源一致）。声明随能力表上报 hub 汇聚，全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）；取消管家只撤本机声明，凭证不动（换管家同样不换发凭据；作废凭据走「轮换管家凭证」）。`;
     } else if (declaredList.length === 1) {
       txt = `本机凭证持有人 <code>${esc(pa || '（未设）')}</code> / 本机声明 <code>${esc(declaredList[0])}</code>——两源不一致：「取消管家」将撤声明 <code>${esc(declaredList[0])}</code>，凭证持有人不动。`;
     } else if (declaredList.length > 1) {
@@ -1414,12 +1414,12 @@ function primeCard() {
 /* 钦定选择视图（未钦定引导态与「换一个管家」共用；数据源本机 agents 列表）。 */
 function primePickView(pa) {
   const opts = S.agents.map(a => `<option value="${esc(a.name)}">${esc(a.name)}${a.description ? ' — ' + esc(a.description) : ''}</option>`).join('');
-  return `<small class="muted">${pa ? '当前管家将被替换：钦定即换凭证，旧凭证立即失效。' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
+  return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : '钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）；本机主人网页派单不依赖管家凭证。'}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
     : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
 }
-/* 钦定完成视图：成功提示 + 一次性凭证 + MCP 配置片段。wired=true（t20261023-62a2
+/* 钦定完成视图：成功提示 + 凭据事实块 + MCP 配置片段。wired=true（t20261023-62a2
    自动接线）：明示已写入的影子 home 配置路径，零手贴；降级：保留手动粘贴指引。 */
 function primeDoneView() {
   const d = S.primeDecl.done;
@@ -1430,12 +1430,14 @@ function primeDoneView() {
     : '';
   const tokTail = d.wired ? '凭证已随接线写入宿主配置，此处展示仅供留档备份。' : '请立即配给管家的 MCP 连接（SWARM_NODE_PRIME_TOKEN）。';
   /* 声明三态（P1-02，2026-10-29 走查反馈批）：消费 declare 应答的
-   * orchestrator/orchestrator_error/hub_synced——orch=false 凭证已交接但本机声明
-   * 失败（原因+重试入口，失败态随 done 持久展示）；orch=true & hub_synced=true
+   * orchestrator/orchestrator_error/hub_synced——orch=false 本机声明失败（原因+
+   * 重试入口，失败态随 done 持久展示）；orch=true & hub_synced=true
    * 已提交上报（措辞不越界：提交成功≠hub 全网恰一确认，恰一以 hub 目录为准）；
    * hub_synced=false 本机成功、hub 待同步（重连随注册收敛）；hub_synced 缺省=
    * standalone 未组网（无上报环节）。orch 缺省=应答未带声明位（测试构造），
-   * 不作任何声明承诺。一次性凭证展示不受声明态影响。 */
+   * 不作任何声明承诺。W02-01 起钦定不换发/不返回共享凭据（调用权与管家角色
+   * 解耦）：应答 prime_token 恒空、mcp_config 凭据位脱敏——凭证展示块仅在应答
+   * 真带明文时出现（兼容构造），缺省呈现「凭据不变」事实与轮换指引。 */
   /* 失败说明（fix2 去臆测，2026-10-29 复审 P1-02 残余）：只陈述本机事实——
    * 本次目标声明未完成 + 既有有效声明保持原样（先写后见：失败整集不发布）+
    * 本机当前声明位实值（S.agents 同源）。不推断 hub 目录内容：落盘失败时 hub
@@ -1443,7 +1445,7 @@ function primeDoneView() {
   const declaredNow = (S.agents || []).filter(a => a.orchestrator).map(a => a.name);
   const declList = declaredNow.length ? declaredNow.map(n => '<code>' + esc(n) + '</code>').join('、') : '无';
   const declNote = d.orch === false
-    ? `<div class="notice warn spaced"><b>凭证已交接，本机声明失败</b>（${esc(d.orchErr || '原因未返回')}）：本机管家与凭证交接已生效（旧凭证已失效），本次目标声明未完成；既有有效声明保持原样——本机当前声明位：${declList}。点「重试声明」补写（沿用本次钦定的凭证，不重新轮换），或「换一个管家」重新走钦定。</div>`
+    ? `<div class="notice warn spaced"><b>钦定已生效，本机声明失败</b>（${esc(d.orchErr || '原因未返回')}）：管家声明（node.yaml prime_agent）已写入并即时生效，本次能力目录 Orchestrator 位声明未完成；既有有效声明保持原样——本机当前声明位：${declList}。点「重试声明」补写（声明补写不涉及凭据），或「换一个管家」重新走钦定。</div>`
     : d.orch === true
       ? (d.synced === true
         ? `<small class="muted decl-note">本机声明已随钦定一并提交上报 hub（能力目录 Orchestrator 位）；hub 全网是否恰一以 hub 控制台目录为准（跨机冲突由 hub 告警）。</small>`
@@ -1452,11 +1454,18 @@ function primeDoneView() {
           : `<small class="muted decl-note">本机声明已生效（standalone 未组网，无 hub 上报环节）。</small>`)
       : '';
   const retryBtn = d.orch === false ? button('重试声明', 'prime-retry-orch', '', '', `data-agent="${esc(d.agent)}"`) : '';
-  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启），旧凭证已随本次钦定失效。</div>${declNote}${wiredNote}
-  <div class="notice warn spaced"><b>管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>
-  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '加入管家 agent 的 mcpServers 即完成授权——贴入即生效'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
+  /* 凭据事实块（W02-01 解耦）：declare 不换发不返回明文——仅在应答真带明文时
+   * 展示（兼容构造）；缺省按 wired 两态如实呈现当前凭据状态与作废指引。 */
+  const credBlock = d.token
+    ? `<div class="notice warn spaced"><b>管家凭证（仅此一次展示，立即复制）</b>：<code>${esc(d.token)}</code> ${button('复制凭证', 'copy-prime-declare', 'link')}<br><small>${tokTail}</small></div>`
+    : (d.wired
+      ? `<div class="notice warn spaced"><b>共享编排凭据不变</b>：钦定不换发凭据；当前凭据已随自动接线写入管家宿主配置，现有 MCP 连接持续有效。如需作废旧凭据请用「轮换管家凭证」（新明文仅轮换时一次展示）。</div>`
+      : `<div class="notice warn spaced"><b>共享编排凭据不变</b>：钦定不换发凭据。管家 MCP 连接未自动写入——下方片段中凭据位为脱敏占位、不可直接贴用；请先「轮换管家凭证」获取一次性明文（SWARM_NODE_PRIME_TOKEN）再配给管家，或重新钦定命中可接线的宿主布局。</div>`);
+  return `<div class="notice ok spaced"><b>钦定完成</b>：「${esc(d.agent)}」已是本机管家——已写入 node.yaml 的 prime_agent 并即时生效（无需重启）；共享编排凭据与授权状态不变，现有 MCP 连接持续有效。</div>${declNote}${wiredNote}
+  ${credBlock}
+  <label>MCP 配置片段（${d.wired ? '已自动写入——如需手工迁移其他宿主可复制' : '凭据位为脱敏占位——结构可复用，凭据需轮换获取明文后替换'}）<pre><code>${esc(mcpJSON)}</code></pre></label>
   <div class="row spaced">${retryBtn}${button('复制 MCP 配置', 'copy-prime-mcp', '')}${button('换一个管家', 'prime-pick', 'link')}</div>
-  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权）；轮换管家凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段粘进管家 agent 的 MCP 服务器配置（SWARM_NODE_PRIME_TOKEN 已随片段带出）；重连后它即可本机派单。'}</p>`;
+  <p class="footer-note">${d.wired ? '接线发生在钦定事务内（走本机主人授权），写入的是当前共享凭据；轮换管家凭证时会自动刷新同一配置，无需重复操作。' : '把上方 JSON 片段的结构粘进管家 agent 的 MCP 服务器配置；凭据位（SWARM_NODE_PRIME_TOKEN）为脱敏占位，须经「轮换管家凭证」获取一次性明文后替换，重连后它即可本机派单。'}</p>`;
 }
 function recentTasksCard() {
   const rows = S.tasks.slice(0, 8);
@@ -2288,8 +2297,8 @@ function primeRotate(btn) {
   });
 }
 
-// primeDeclare 网页钦定（方案 3.2.1 UX 收口）：confirmModal 确认（含旧凭证失效警示）→
-// declare → 钦定完成视图（一次性凭证 + MCP 配置片段）。成功后主动刷新 status
+// primeDeclare 网页钦定（方案 3.2.1 UX 收口）：confirmModal 确认（含凭据不变说明）→
+// declare → 钦定完成视图（凭据事实块 + MCP 配置片段）。成功后主动刷新 status
 // （prime_agent 即时反映，不等 5s 轮询）。
 function primeDeclare(btn) {
   const name = $('#prime-select')?.value;
@@ -2313,7 +2322,7 @@ function primeDeclare(btn) {
       S.primeDecl.picking = false;
       S.primeNew = ''; // 轮换提示与钦定完成视图不同时堆叠
       S.primeNewWire = null;
-      toast(r.data?.wired ? '钦定完成 · MCP 连接已自动写入管家宿主配置' : '钦定完成 · 管家凭证仅此一次展示，请立即复制');
+      toast(r.data?.wired ? '钦定完成 · MCP 连接已自动写入管家宿主配置（凭据不变）' : '钦定完成 · 凭据不变；未接线宿主请轮换获取一次性凭据后配置');
       S.snap = '';
       await loadAll().catch(() => {});
     } else {
@@ -2326,7 +2335,7 @@ function primeDeclare(btn) {
   S.primeDecl.busy = false;
   render();
   };
-  confirmModal('钦定本机管家', `钦定「${esc(name)}」为本机管家：旧管家凭证将立即失效，正在使用旧凭证的 MCP 连接需改配新凭证。`, '确认钦定', run);
+  confirmModal('钦定本机管家', `钦定「${esc(name)}」为本机管家：写入 prime_agent 并即时生效；不换发共享编排凭据，现有 MCP 连接持续有效（作废凭据请用「轮换管家凭证」）。`, '确认钦定', run);
 }
 
 /* retryPrimeDeclare 声明失败补写（P1-02 重试入口）：不重换凭证，走既有单翻转
