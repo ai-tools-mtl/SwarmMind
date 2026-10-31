@@ -7,6 +7,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -506,17 +507,17 @@ func TestSpaceLeaseExpiryAutoPause(t *testing.T) {
 		t.Fatalf("d2: %v", err)
 	}
 
-	// 越过租约（1s）+ 扫查节拍（40ms）：自动暂停为可观测条件——条件探针等待
-	//（截止 8s > 租约 1s + 扫查节拍 + 余量；不看钟数拍，等状态到达）。
-	f.waitSpaceStatus(sp.ID, collab.StatusPaused, "租约", 8*time.Second)
-	f.waitIntent(sp.ID, "d2", collab.IntentCancelled, 3*time.Second)
-	if it, _ := f.intent(sp.ID, "d1"); it.Status != collab.IntentAccepted {
-		t.Fatalf("已投递在途不受影响: %+v", it)
-	}
-
-	// 在途照常收敛（N04）：放行后 d1 轮终 → converged；暂停态不投新棒。
+	// 越过租约（1s）：时钟事实等待（租约到期是时钟事件，非可探测条件；1300ms >
+	// 1s 租约 + 多个 40ms 扫查节拍）。S1 口径下 accepted 在途时推进面不做租约判定
+	//（不暂停）——在途照常收敛（N04：租约过期后完成的结果照常落账）。
+	time.Sleep(1300 * time.Millisecond)
 	f.releaseBarrier()
 	f.waitIntent(sp.ID, "d1", collab.IntentConverged, 8*time.Second)
+
+	// d1 收敛后 d2 成为队首 pending → 租约过期自动暂停 + 未投递取消收束（条件探
+	// 针等可观测）；暂停态不投新棒。
+	f.waitSpaceStatus(sp.ID, collab.StatusPaused, "租约", 8*time.Second)
+	f.waitIntent(sp.ID, "d2", collab.IntentCancelled, 3*time.Second)
 	if n := countLines(f.runLines(), "start"); n != 2 {
 		t.Fatalf("暂停态不得投新棒: start=%d", n)
 	}
@@ -768,6 +769,421 @@ func TestSpaceRestartReconcile(t *testing.T) {
 	// 空间状态不因重启变更（HTTP 空闲不判死——重启不暂停不回拨租约）。
 	if got, ok := st2.Space(spB.ID); !ok || got.Status != collab.StatusRunning {
 		t.Fatalf("重启不得改空间状态: ok=%v status=%s", ok, got.Status)
+	}
+}
+
+// TestSpaceDispatchRapidMultiAdmission M1 必修复现形态入仓：同空间快速连续受理
+// q1..q5（不等投递）——受理期轮号预留锚定在途意图，seq 严格递增无同号；随后全部
+// 投递、串行完成，无同 seq 无叠投。
+func TestSpaceDispatchRapidMultiAdmission(t *testing.T) {
+	f := newSpaceSvcFixture(t, spaceSvcOpt{envkv: map[string]string{"FAKE_ON_RESUME": "1"}})
+	sid := f.createSession(f.cwd)
+	sp := f.newManualSpace(sid)
+
+	// q1 受理并阻塞在屏障（accepted）；q2..q5 快速连续受理（不等待投递）。
+	if _, dup, err := f.dispatch(sp.ID, "q1", "q1"); err != nil || dup {
+		t.Fatalf("q1 受理: err=%v dup=%v", err, dup)
+	}
+	f.waitIntent(sp.ID, "q1", collab.IntentAccepted, 5*time.Second)
+	f.waitRunLine("start", 2) // create + q1 已 spawn 并阻塞
+
+	var seqs []int64
+	seen := map[int64]string{}
+	for i := 2; i <= 5; i++ {
+		it, dup, err := f.dispatch(sp.ID, fmt.Sprintf("q%d", i), fmt.Sprintf("q%d", i))
+		if err != nil || dup {
+			t.Fatalf("q%d 受理: err=%v dup=%v", i, err, dup)
+		}
+		if it.Status != collab.IntentPending {
+			t.Fatalf("q%d 应 pending（q1 在途串行门）: %+v", i, it)
+		}
+		if prev, clash := seen[it.TurnSeq]; clash {
+			t.Fatalf("M1 轮号重复：q%d 与 %s 同 seq=%d", i, prev, it.TurnSeq)
+		}
+		seen[it.TurnSeq] = fmt.Sprintf("q%d", i)
+		seqs = append(seqs, it.TurnSeq)
+	}
+	// 受理 seq 严格递增（受理期预留核心断言）。
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("受理 seq 应严格递增: %v", seqs)
+		}
+	}
+	if n := len(f.st.Intents(sp.ID)); n != 5 {
+		t.Fatalf("应恰 5 笔意图: %d", n)
+	}
+
+	// 放行：全部投递、串行完成（逐棒收敛；执行留痕无重叠）。
+	f.releaseBarrier()
+	for i := 1; i <= 5; i++ {
+		f.waitIntent(sp.ID, fmt.Sprintf("q%d", i), collab.IntentConverged, 20*time.Second)
+	}
+	lines := f.runLines()
+	if n := countLines(lines, "start"); n != 6 { // create + q1..q5
+		t.Fatalf("执行留痕应恰 6 个 start: %d", n)
+	}
+	// 串行佐证：每棒 spawn 在前一棒 end 之后（k=2..6 对应 q1..q5 的 spawn）。
+	for k := 2; k <= 6; k++ {
+		prevEnd := nthIndexOf(lines, "end", k-1)
+		if spawn := nthIndexOf(lines, "start", k); spawn < prevEnd {
+			t.Fatalf("第 %d 棒与前一棒执行重叠（非串行）: %v", k-1, lines)
+		}
+	}
+	if u := f.mustSpace(sp.ID).Used.DispatchRounds; u != 5 {
+		t.Fatalf("派发预算应为 5: %d", u)
+	}
+}
+
+// claimAndStartExternal external 空间全链（创建→领取（指定租约秒）→配置→就绪→
+// 启动），返回空间 ID 与当前任期。
+func claimAndStartExternal(f *spaceSvcFixture, sid string, leaseSeconds int) (string, uint64) {
+	f.t.Helper()
+	sp, _, err := f.st.CreateSpace(collab.CreateRequest{Goal: "g", Mode: collab.ModeExternal,
+		Members: []collab.Member{{Name: "coder", SessionID: sid}}}, spSteward)
+	if err != nil {
+		f.t.Fatalf("创建 external: %v", err)
+	}
+	claim, _, err := f.st.Control(sp.ID, collab.ControlRequest{
+		RequestID: "claim-" + sp.ID, Action: collab.ActTakeover, ExpectedVersion: sp.Version,
+		ExpectedTerm: 0, LeaseSeconds: leaseSeconds,
+	}, spSteward)
+	if err != nil {
+		f.t.Fatalf("领取: %v", err)
+	}
+	term := claim.Space.Leader.Term
+	cfg, _, err := f.st.Control(sp.ID, collab.ControlRequest{
+		RequestID: "cfg-" + sp.ID, Action: collab.ActConfigureMembers,
+		ExpectedVersion: claim.Space.Version, Term: term,
+		Members: []collab.Member{{Name: "coder", SessionID: sid}},
+	}, spSteward)
+	if err != nil {
+		f.t.Fatalf("配置成员: %v", err)
+	}
+	rdy, _, err := f.st.Control(sp.ID, collab.ControlRequest{
+		RequestID: "rdy-" + sp.ID, Action: collab.ActReady, ExpectedVersion: cfg.Space.Version, Term: term,
+	}, spSteward)
+	if err != nil {
+		f.t.Fatalf("ready: %v", err)
+	}
+	if _, _, err := f.st.Control(sp.ID, collab.ControlRequest{
+		RequestID: "str-" + sp.ID, Action: collab.ActStart, ExpectedVersion: rdy.Space.Version, Term: term,
+	}, spSteward); err != nil {
+		f.t.Fatalf("start: %v", err)
+	}
+	return sp.ID, term
+}
+
+// TestSpaceLeaseExpiryAcceptedOnlyNoPause S1 口径：租约过期但仅 accepted 在途
+//（无待投递意图）——不触发自动暂停（避免过度暂停），在途照常收敛后自然停。
+func TestSpaceLeaseExpiryAcceptedOnlyNoPause(t *testing.T) {
+	f := newSpaceSvcFixture(t, spaceSvcOpt{
+		envkv: map[string]string{"FAKE_ON_RESUME": "1"},
+		sweep: 40 * time.Millisecond,
+	})
+	sid := f.createSession(f.cwd)
+	spID, term := claimAndStartExternal(f, sid, 1) // 租约 1s
+
+	if _, _, err := f.svc.SpaceDispatch(SpaceDispatchRequest{
+		SpaceID: spID, Member: "coder", RequestID: "a1", Term: term,
+		ExpectedVersion: f.mustSpace(spID).Version, Note: "仅此一棒",
+	}, spSteward); err != nil {
+		t.Fatalf("d1: %v", err)
+	}
+	f.waitIntent(spID, "a1", collab.IntentAccepted, 5*time.Second)
+	f.waitRunLine("start", 2)
+
+	// 越过租约（1s）+ 多个扫查节拍（40ms）：accepted-only 无待投递——PauseExpired
+	// 不触发（推进面无 pending 即不做租约判定）。放行后在途照常收敛，空间保持
+	// running（非 paused）。
+	time.Sleep(1300 * time.Millisecond) // 时钟事实等待（租约到期是时钟事件，非可探测条件）
+	f.releaseBarrier()
+	f.waitIntent(spID, "a1", collab.IntentConverged, 8*time.Second)
+	got := f.mustSpace(spID)
+	if got.Status != collab.StatusRunning {
+		t.Fatalf("accepted-only 租约过期不得自动暂停（S1 口径）: status=%s reason=%q", got.Status, got.PausedReason)
+	}
+}
+
+// TestSpaceRestartRapidAdmissionReconcile M1 场景重启对账：快速受理形态下重启，
+// 已投递意图（accepted）不再被全取消——按实物留待核对；仅无实物未投递意图取消；
+// 已收敛意图与空间状态不动、绝不重跑。
+func TestSpaceRestartRapidAdmissionReconcile(t *testing.T) {
+	dir := t.TempDir()
+	fake := buildSessionFakeCLI(t)
+	barrier := filepath.Join(dir, "go.barrier")
+	runLog := filepath.Join(dir, "run.log")
+	touch := filepath.Join(dir, "touch.marker")
+	ledDir := filepath.Join(dir, "ledger")
+	kernDir := filepath.Join(dir, "kernel")
+	opsDir := filepath.Join(dir, "ops")
+	stDir := filepath.Join(dir, "collab")
+	if err := os.MkdirAll(stDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	art := filepath.Join(dir, "art")
+	if err := os.MkdirAll(art, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkSpecs := func(withTouch bool) map[string]sessionx.AgentSpec {
+		env := []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex,
+			"FAKE_THREAD_ID=thr-rapid", "FAKE_LOG=" + runLog}
+		if withTouch {
+			env = append(env, "FAKE_TOUCH="+touch)
+		}
+		slow := append(append([]string{}, env...), "FAKE_WAIT_FILE="+barrier, "FAKE_ON_RESUME=1")
+		return map[string]sessionx.AgentSpec{
+			"coder": {Adapter: protocol.SessionAdapterCodex, Command: fake, PermissionMode: "workspace-write", TimeoutSec: 30, Env: env},
+			"slow":  {Adapter: protocol.SessionAdapterCodex, Command: fake, PermissionMode: "workspace-write", TimeoutSec: 60, Env: slow},
+		}
+	}
+
+	// ---- 代 1：同空间双成员（fast 收敛一棒 + slow 快速连续受理三笔）。----
+	led1, _, err := ledger.Open(ledDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr1, err := sessionx.NewManager(kernDir, mkSpecs(false), sessionx.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops1, err := sessionop.New(opsDir, led1, sessionop.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st1, err := collab.Open(stDir, collab.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc1 := New(Config{
+		Ledger: led1, Runners: map[string]Runner{}, ArtifactRoots: map[string]string{"coder": art, "slow": art},
+		Sessions: mgr1, SessionOps: ops1, Collab: st1, NodeID: "n1",
+	}, transport.NewBus().Endpoint("n1"))
+	f1 := &spaceSvcFixture{t: t, svc: svc1, mgr: mgr1, led: led1, ops: ops1, st: st1, dir: dir, cwd: ws, runLog: runLog}
+	fastSID := f1.createSession(ws)
+	slowAck, err := svc1.SubmitSessionTurnLocal(LocalSessionTurnRequest{NodeID: "n1", Agent: "slow", Cwd: ws, Prompt: "首轮"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f1.waitTurnFinished(slowAck.SessionID, 1, protocol.ResultCompleted, 8*time.Second)
+
+	sp, _, err := st1.CreateSpace(collab.CreateRequest{
+		Goal: "g", Mode: collab.ModeManual,
+		Members: []collab.Member{{Name: "fast", SessionID: fastSID}, {Name: "slow", SessionID: slowAck.SessionID}},
+	}, spOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := st1.Control(sp.ID, collab.ControlRequest{RequestID: "r", Action: collab.ActReady, ExpectedVersion: sp.Version}, spOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st1.Control(sp.ID, collab.ControlRequest{RequestID: "s", Action: collab.ActStart, ExpectedVersion: res.Space.Version}, spOwner); err != nil {
+		t.Fatal(err)
+	}
+	// f0（fast 成员）受理并收敛。
+	if _, _, err := f1.svc.SpaceDispatch(SpaceDispatchRequest{SpaceID: sp.ID, Member: "fast", RequestID: "f0",
+		ExpectedVersion: f1.mustSpace(sp.ID).Version, Note: "fast 棒"}, spOwner); err != nil {
+		t.Fatal(err)
+	}
+	f1.waitIntent(sp.ID, "f0", collab.IntentConverged, 8*time.Second)
+	// q1..q3 快速连续受理（slow 成员）：q1 阻塞屏障（accepted），q2/q3 排队。
+	v := func() int64 { s, _ := st1.Space(sp.ID); return s.Version }
+	for i, name := range []string{"q1", "q2", "q3"} {
+		if _, _, err := f1.svc.SpaceDispatch(SpaceDispatchRequest{SpaceID: sp.ID, Member: "slow", RequestID: name,
+			ExpectedVersion: v(), Note: name}, spOwner); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if i == 0 {
+			f1.waitIntent(sp.ID, name, collab.IntentAccepted, 5*time.Second)
+		}
+	}
+	f1.waitRunLine("start", 4) // 两首轮 + f0 + q1（spawn 并阻塞）
+	for _, name := range []string{"q2", "q3"} {
+		if it, _ := st1.IntentByRequest(sp.ID, name); it.Status != collab.IntentPending {
+			t.Fatalf("%s 应 pending: %+v", name, it)
+		}
+	}
+
+	// ---- 重启。----
+	svc1.Close()
+	_ = st1.Close()
+	_ = led1.Close()
+	led2, _, err := ledger.Open(ledDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = led2.Close() })
+	mgr2, err := sessionx.NewManager(kernDir, mkSpecs(true), sessionx.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops2, err := sessionop.New(opsDir, led2, sessionop.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st2, err := collab.Open(stDir, collab.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st2.Close() })
+	svc2 := New(Config{
+		Ledger: led2, Runners: map[string]Runner{}, ArtifactRoots: map[string]string{"coder": art, "slow": art},
+		Sessions: mgr2, SessionOps: ops2, Collab: st2, NodeID: "n1",
+	}, transport.NewBus().Endpoint("n2"))
+	t.Cleanup(svc2.Close)
+
+	// q1（accepted，轮终被 Close 中断为待核对）→ 留待核对（不取消）。
+	e, okLed := findLedgerTurn(led2, slowAck.SessionID, 2)
+	if !okLed || e.State != ledger.StateFinished || e.Result.Status != protocol.ResultNeedsReview {
+		t.Fatalf("q1 轮应中断收敛为待核对终态: ok=%v %+v", okLed, e)
+	}
+	if it, _ := st2.IntentByRequest(sp.ID, "q1"); it.Status != collab.IntentAccepted {
+		t.Fatalf("已投递意图不得被对账取消（M1 场景不再全取消）: %+v", it)
+	}
+	// q2/q3（无账本实物）→ 取消收束（未投递不自动重跑）。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		i2, ok2 := st2.IntentByRequest(sp.ID, "q2")
+		i3, ok3 := st2.IntentByRequest(sp.ID, "q3")
+		if ok2 && ok3 && i2.Status == collab.IntentCancelled && i3.Status == collab.IntentCancelled {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, name := range []string{"q2", "q3"} {
+		if it, _ := st2.IntentByRequest(sp.ID, name); it.Status != collab.IntentCancelled {
+			t.Fatalf("%s（未投递）应对账取消: %+v", name, it)
+		}
+	}
+	// f0 已收敛不动；空间状态不因重启变更；零重跑。
+	if it, _ := st2.IntentByRequest(sp.ID, "f0"); it.Status != collab.IntentConverged {
+		t.Fatalf("已收敛意图不得被对账改写: %+v", it)
+	}
+	if got, ok := st2.Space(sp.ID); !ok || got.Status != collab.StatusRunning {
+		t.Fatalf("重启不得改空间状态: ok=%v status=%s", ok, got.Status)
+	}
+	if _, serr := os.Stat(touch); serr == nil {
+		t.Fatal("重启后不得自动重跑（启动标记存在）")
+	}
+	lines, _ := os.ReadFile(runLog)
+	if n := strings.Count(string(lines), "start"); n != 4 {
+		t.Fatalf("重启后不得重跑（start 留痕应恰 4）: %d", n)
+	}
+}
+
+// TestSpaceRestartCancelledConvergePauses S2：重启对账按账本实物收敛为 cancelled
+// 时补系统暂停（与活路径一致）——预置「accepted 意图 + 账本终态 cancelled 轮」
+//（受理→投递崩溃窗的实物形态），代 2 装配期对账后空间如实停队等人工确认。
+func TestSpaceRestartCancelledConvergePauses(t *testing.T) {
+	dir := t.TempDir()
+	stDir := filepath.Join(dir, "collab")
+	if err := os.MkdirAll(stDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "s-s2paus000000000000000000000000000000001"
+	const taskID = "t-s2pause-cancelled"
+
+	// ---- 预置（无服务）：running 空间 + accepted 意图 + 账本终态 cancelled 轮。----
+	st1, err := collab.Open(stDir, collab.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp, _, err := st1.CreateSpace(collab.CreateRequest{
+		Goal: "g", Mode: collab.ModeManual, Members: []collab.Member{{Name: "coder", SessionID: sid}},
+	}, spOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, _, err := st1.Control(sp.ID, collab.ControlRequest{RequestID: "r", Action: collab.ActReady, ExpectedVersion: sp.Version}, spOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res2, _, err := st1.Control(sp.ID, collab.ControlRequest{RequestID: "s", Action: collab.ActStart, ExpectedVersion: res.Space.Version}, spOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := st1.RecordDispatch(sp.ID, collab.DispatchRequest{
+		RequestID: "cx", Member: "coder", SessionID: sid, TurnSeq: 2,
+		TaskID: taskID, ExpectedVersion: res2.Space.Version,
+	}, spOwner); err != nil {
+		t.Fatalf("预置 accepted 意图: %v", err)
+	}
+	ledDir := filepath.Join(dir, "ledger")
+	led1, _, err := ledger.Open(ledDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := protocol.NowUTC()
+	task := protocol.Task{
+		ID: taskID, TraceID: "tr-s2", TargetNode: "n1", TargetAgent: "coder",
+		Input: protocol.TaskInput{Stdin: "被取消棒"}, SubmittedBy: "space:" + sp.ID,
+		IdemKey: "lsturn:" + sid + ":2", Status: protocol.StatusSubmitted,
+		CreatedAt: now, UpdatedAt: now, ExpireAt: now.Add(protocol.TaskRetention),
+		Session: &protocol.SessionTurnRef{SessionID: sid, TurnSeq: 2, Op: protocol.SessionTurnOpSend, Cwd: ws},
+	}
+	if err := led1.AcceptOrigin(task, ledger.OriginLocal); err != nil {
+		t.Fatal(err)
+	}
+	if err := led1.MarkFinished(taskID, protocol.TaskResult{
+		Status: protocol.ResultCancelled, ExitCode: protocol.ExitCodeNotRun,
+		Error:      sessionop.CodeCancelExecuted + ": 本轮执行已被取消（进程组已整组终止并回收，无孤儿）",
+		FinishedAt: protocol.NowUTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = st1.Close()
+	_ = led1.Close()
+
+	// ---- 代 2：开服务（New 内对账）——cancelled 收敛 + 系统暂停停队。----
+	led2, _, err := ledger.Open(ledDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = led2.Close() })
+	st2, err := collab.Open(stDir, collab.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st2.Close() })
+	svc2 := New(Config{
+		Ledger: led2, Runners: map[string]Runner{}, Collab: st2, NodeID: "n1",
+	}, transport.NewBus().Endpoint("n2"))
+	t.Cleanup(svc2.Close)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var it collab.DispatchIntent
+	var ok bool
+	for time.Now().Before(deadline) {
+		if it, ok = st2.IntentByRequest(sp.ID, "cx"); ok && it.Status == collab.IntentCancelled {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ok || it.Status != collab.IntentCancelled {
+		t.Fatalf("cancelled 轮终的意图应对账收敛为 cancelled: %+v ok=%v", it, ok)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	var got collab.Space
+	for time.Now().Before(deadline) {
+		got, _ = st2.Space(sp.ID)
+		if got.Status == collab.StatusPaused {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got.Status != collab.StatusPaused {
+		t.Fatalf("S2：对账 cancelled 收敛应补系统暂停停队: status=%s reason=%q", got.Status, got.PausedReason)
+	}
+	if !strings.Contains(got.PausedReason, "重启对账") {
+		t.Fatalf("暂停原因应对账语义: %q", got.PausedReason)
 	}
 }
 

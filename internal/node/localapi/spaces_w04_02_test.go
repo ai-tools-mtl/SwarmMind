@@ -201,8 +201,15 @@ func TestW0402N10ExternalClaimFlow(t *testing.T) {
 	f := newSpaceStack(t)
 	sid := f.createMemberSession()
 
+	// S3：capabilities.features.spaces 正向锚——collab 装配即 true（防装配判定
+	// 改坏零告警；禁空壳承诺的回归锚）。
+	code, out := f.do("tok-prime", "GET", "/api/v1/capabilities", "")
+	if code != 200 || !strings.Contains(out, `"spaces":true`) {
+		t.Fatalf("capabilities spaces 应为 true（collab 装配判定）: %d %s", code, out)
+	}
+
 	// 编排主体创建 external（成员可空）→ 201。
-	code, out := f.do("tok-prime", "POST", "/api/v1/spaces",
+	code, out = f.do("tok-prime", "POST", "/api/v1/spaces",
 		`{"request_id":"n10-create","goal":"外部交付","mode":"external"}`)
 	if code != 201 {
 		t.Fatalf("external 创建应 201: %d %s", code, out)
@@ -516,6 +523,31 @@ func TestW0402MessageGateN01(t *testing.T) {
 	// N01 零执行：账本无任务（未装配会话面亦可查——空视图）。
 	if n := len(f.led.View()); n != 0 {
 		t.Fatalf("消息与游标不得触发执行（账本应空）: %d", n)
+	}
+}
+
+// TestW0402DispatchMissingSession404 S4：成员 configure 填错 session_id（无内核
+// 映射也无受理登记）的派发 → 404 session_not_found（会话面事实不存在，非 500）。
+func TestW0402DispatchMissingSession404(t *testing.T) {
+	f := newSpaceStack(t)
+	code, out := f.do("tok-local", "POST", "/api/v1/spaces",
+		`{"request_id":"s4-m","goal":"g","mode":"manual","members":[{"name":"coder","session_id":"s-nonexistent00000000000000000000000"}]}`)
+	if code != 201 {
+		t.Fatalf("创建: %d %s", code, out)
+	}
+	mID := gjsonStr(t, out, "space.id")
+	if code, _ = f.do("tok-local", "POST", "/api/v1/spaces/"+mID+"/control",
+		`{"request_id":"s4-r","action":"ready","expected_version":1}`); code != 200 {
+		t.Fatalf("ready 应成功")
+	}
+	if code, _ = f.do("tok-local", "POST", "/api/v1/spaces/"+mID+"/control",
+		`{"request_id":"s4-s","action":"start","expected_version":2}`); code != 200 {
+		t.Fatalf("start 应成功")
+	}
+	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+mID+"/dispatches",
+		`{"member":"coder","expected_version":3,"note":"x","request_id":"s4-d1"}`)
+	if code != 404 || !strings.Contains(out, "session_not_found") {
+		t.Fatalf("错绑会话的派发应 404 session_not_found: %d %s", code, out)
 	}
 }
 

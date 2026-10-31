@@ -340,7 +340,9 @@ func writeSpaceDispatchErr(w http.ResponseWriter, err error) {
 		switch re.Code {
 		case "invalid", "input_invalid":
 			code = http.StatusBadRequest
-		case collab.CodeNotFound, "member_not_found":
+		// S4：成员 configure 填错 session_id（绑定串无内核映射也无受理登记）的派发
+		// → 404（会话面事实不存在，非服务端故障）。
+		case collab.CodeNotFound, "member_not_found", "session_not_found":
 			code = http.StatusNotFound
 		case collab.CodeForbidden, "mcp_disabled":
 			code = http.StatusForbidden

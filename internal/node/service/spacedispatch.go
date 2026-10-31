@@ -16,9 +16,14 @@
 //	    + 系统暂停停队（不再派发下一棒） / 未知（needs_review）→留待核对不收敛
 //	  → kick → 下一意图（串行推进）
 //
-// 纪律锚点：调度前置检查只在「有新增派发意图」时触发（HTTP 空闲不判死）；恢复走
-// 显式 resume（在途时须 confirm——localapi 门）；重启对账：pending（未投递）取消
-// 收束、accepted（已投递）按账本实物分类，needs_review 留待核对，绝不重跑。
+// 纪律锚点：轮号单源三层——受理期预留（max(账本高水位, 本会话在途意图最大 seq)+1，
+// 快速连续受理严格递增不撞号）、投递期以意图登记 seq 入账（一致性校验：账本高水
+// 位 ≥ 意图 seq 即真漂移 → 取消收敛+系统暂停，绝不静默跳过）、advance 漂移容错
+// （跳过漂移队首取下一棒，保队列流动）；调度前置检查只在「有新增派发意图」时触发
+// （HTTP 空闲不判死；accepted-only 不暂停——收敛后无 pending 自然停）；恢复走
+// 显式 resume（在途时须 confirm——localapi 门）；重启对账：无实物的 pending（未投
+// 递）取消收束、有实物按账本终态分类（与 accepted 同口径），cancelled 收敛补系统
+// 暂停停队（对齐活路径），needs_review 留待核对，绝不重跑。
 package service
 
 import (
@@ -84,6 +89,14 @@ func (s *Service) SpaceDispatch(req SpaceDispatchRequest, subj collab.Subject) (
 	if derr == nil {
 		_, seq, _, _, aerr := s.deriveSessionTurn(sid)
 		if aerr == nil {
+			// M1 必修·受理期轮号预留锚定在途意图：派生基准（账本高水位+1）只反映
+			// 已入账轮——「已受理未投递」的意图不在账本，快速连续受理会在同一窗口
+			// 派生出相同 seq。基准扩为 max(账本派生号, 本会话全部在途意图最大 seq+1)
+			// （pending+accepted 都计入），受理 seq 严格递增不撞号；localMu 互斥段
+			// 内推导+落意图即原子预留（与 T2-R1 账本受理序号同一原则）。
+			if ihw := s.spaceIntentSeqHighWater(sid); ihw >= seq {
+				seq = ihw + 1
+			}
 			it, _, _, rerr := s.collab.RecordDispatch(req.SpaceID, collab.DispatchRequest{
 				RequestID:       req.RequestID,
 				Member:          req.Member,
@@ -136,6 +149,27 @@ func (s *Service) spaceMemberSession(spaceID, member string) (string, error) {
 	return "", &RemoteError{Code: collab.CodeMemberNotFound, Msg: "成员 " + member + " 不在空间内"}
 }
 
+// spaceIntentSeqHighWater 本会话全部在途意图的最大已声称轮号（M1 受理期预留的
+// 基准成分：pending+accepted 都计入——pending 未入账、accepted 在途，二者占用的
+// seq 都不能被新受理复用）。会话未绑定空间（无从产生意图）返回 0。仅查会话归属
+// 的单一空间（一线程唯一归属），O(该空间意图数)。
+func (s *Service) spaceIntentSeqHighWater(sid string) int64 {
+	if s.collab == nil {
+		return 0
+	}
+	spaceID, ok := s.collab.SessionOwnerSpace(sid)
+	if !ok {
+		return 0
+	}
+	var hw int64
+	for _, it := range s.collab.Intents(spaceID) {
+		if it.SessionID == sid && it.Status.InFlight() && it.TurnSeq > hw {
+			hw = it.TurnSeq
+		}
+	}
+	return hw
+}
+
 // derr2remote 派生错误归一（deriveSessionTurn 已返回 RemoteError）。
 func derr2remote(err error) error {
 	var re *RemoteError
@@ -184,10 +218,14 @@ func (s *Service) NotifySpaceResumed(spaceID string) { s.kick(spaceID) }
 // advanceSpace 单空间调度推进（调度前置检查面——只在空间存在待投递意图时动作；
 // HTTP 空闲、无意图的空间零触碰，租约过期不判死）：
 //  1. 非运行态 → 不投递（排队意图等待显式 resume）；
-//  2. 运行态 + 租约过期 → 系统自动暂停（PauseExpired：暂停原因=租约过期，未投递
-//     意图同事务取消收束——意图授权随租约失效，绝不在过期权限下执行）；
-//  3. 存在 accepted 在途 → 串行等待（轮终收敛 hook 驱动下一步）；
-//  4. 队首 pending → submitSpaceIntent 投递（每次至多一棒，串行保证）。
+//  2. 存在 accepted 在途 → 串行等待（轮终收敛 hook 驱动下一步）；
+//  3. 首个 pending 处执行租约前置检查（S1 口径：仅存在待投递意图时触发——
+//     accepted-only 时不暂停，收敛后无 pending 自然停）：租约过期 → PauseExpired
+//     （暂停原因=租约过期，未投递意图同事务取消收束——意图授权随租约失效，绝不
+//     在过期权限下执行）；
+//  4. 队首漂移（账本高水位 ≥ 意图 seq——该轮号已被真实受理占用）→ 取消收敛留痕、
+//     跳过取下一棒（M1 容错：保后续可投递，不静默跳过也绝不死锁全队）；
+//  5. 队首健康 → submitSpaceIntent 投递（每次至多一棒，串行保证）。
 func (s *Service) advanceSpace(spaceID string) {
 	sp, ok := s.collab.Space(spaceID)
 	if !ok {
@@ -196,29 +234,48 @@ func (s *Service) advanceSpace(spaceID string) {
 	if sp.Status != collab.StatusRunning {
 		return
 	}
-	now := protocol.NowUTC()
-	if !sp.Leader.LeaseValid(now) && !sp.Leader.LeaseUntil.IsZero() {
-		reason := "负责人租约已过期（调度前置检查，任期 " + itoa(sp.Leader.Term) + "）：自动暂停，恢复须显式 resume"
-		updated, cancelled, err := s.collab.PauseExpired(spaceID, reason)
-		if err != nil {
-			log.Printf("[node] 空间租约过期自动暂停失败 space=%s: %v（下次前置检查重试）", spaceID, err)
-			return
-		}
-		log.Printf("[node] 空间租约过期自动暂停 space=%s 任期=%d 取消未投递意图=%d 暂停原因=%q",
-			spaceID, updated.Leader.Term, cancelled, updated.PausedReason)
-		return
-	}
 	intents := s.collab.Intents(spaceID)
 	for _, it := range intents {
 		if it.Status == collab.IntentAccepted {
 			return // 串行门：已有在途投递，等其收敛
 		}
 	}
+	now := protocol.NowUTC()
+	leaseChecked := false
 	for _, it := range intents {
-		if it.Status == collab.IntentPending {
-			s.submitSpaceIntent(spaceID, it)
-			return // 串行：一次推进至多投递一棒
+		if it.Status != collab.IntentPending {
+			continue
 		}
+		if !leaseChecked {
+			// S1 口径：租约前置检查仅在存在待投递意图时执行（无人等待投递时，租约
+			// 过期只是事实记录，不构成暂停理由——避免过度暂停）。
+			if !sp.Leader.LeaseValid(now) && !sp.Leader.LeaseUntil.IsZero() {
+				reason := "负责人租约已过期（调度前置检查，任期 " + itoa(sp.Leader.Term) + "）：自动暂停，恢复须显式 resume"
+				updated, cancelled, err := s.collab.PauseExpired(spaceID, reason)
+				if err != nil {
+					log.Printf("[node] 空间租约过期自动暂停失败 space=%s: %v（下次前置检查重试）", spaceID, err)
+					return
+				}
+				log.Printf("[node] 空间租约过期自动暂停 space=%s 任期=%d 取消未投递意图=%d 暂停原因=%q",
+					spaceID, updated.Leader.Term, cancelled, updated.PausedReason)
+				return
+			}
+			leaseChecked = true
+		}
+		// M1 容错：队首 seq 与账本高水位冲突（真漂移）→ 取消收敛留痕，跳过取下一
+		// 棒；此处不做系统暂停（容错路径保队列流动——投递期 tripwire 才停队）。
+		if s.cfg.Ledger.SessionTurnHighWater(it.SessionID) >= it.TurnSeq {
+			note := "轮号漂移（账本高水位 ≥ 意图 seq，该轮号已被真实受理占用）：取消收束留痕"
+			if _, cerr := s.collab.ConvergeIntent(spaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID, note, spaceSystemSubject()); cerr != nil {
+				log.Printf("[node] 漂移队首取消收敛失败 space=%s intent=%s: %v（下次推进重试）", spaceID, it.RequestID, cerr)
+				return
+			}
+			log.Printf("[node] 空间意图轮号漂移取消 space=%s intent=%s seq=%d 高水位=%d（跳过取下一棒）",
+				spaceID, it.RequestID, it.TurnSeq, s.cfg.Ledger.SessionTurnHighWater(it.SessionID))
+			continue
+		}
+		s.submitSpaceIntent(spaceID, it)
+		return // 串行：一次推进至多投递一棒
 	}
 }
 
@@ -237,11 +294,14 @@ func itoa(v uint64) string {
 	return string(b[i:])
 }
 
-// submitSpaceIntent 投递单条待执行意图（复用既有会话投递链：派生复核 → 受理守卫
-// → 账本入账 → AttachDispatchTask（pending→accepted）→ execute——不另造投递链）。
-// 可重试失败（队列满/入账失败）保持 pending 等下次推进；确定性不可达（会话已关/
-// 不存在）按取消收束（如实注记，绝不留幽灵执行窗口）；轮号漂移防御（会话已有更
-// 新受理——该意图的轮号已被占用或其投递在途，跳过等收敛/对账）。
+// submitSpaceIntent 投递单条待执行意图（复用既有会话投递链：操作类型解析 →
+// 轮号一致性校验 → 受理守卫 → 账本入账 → AttachDispatchTask（pending→accepted）
+// → execute——不另造投递链）。M1 必修·投递期以意图已登记 seq 为准，不得重派生：
+// 派生仅取操作类型/cwd/agent；校验「账本高水位 < 意图 seq」即按序入账（记账顺序
+// 与 seq 一致性核对），高水位 ≥ 意图 seq = 真漂移 → 该意图按取消收敛 + 系统暂停
+// 停队 + 日志如实，绝不静默跳过。可重试失败（队列满/入账失败）保持 pending 等下
+// 次推进；确定性不可达（会话已关/不存在）按取消收束（如实注记，绝不留幽灵执行
+// 窗口）。
 func (s *Service) submitSpaceIntent(spaceID string, it collab.DispatchIntent) {
 	sid := it.SessionID
 	s.localMu.Lock()
@@ -250,7 +310,7 @@ func (s *Service) submitSpaceIntent(spaceID string, it collab.DispatchIntent) {
 		s.cancelUndeliverableIntent(spaceID, it, "本机未装配会话内核，意图不可投递")
 		return
 	}
-	op, seq, cwd, agentName, err := s.deriveSessionTurn(sid)
+	op, _, cwd, agentName, err := s.deriveSessionTurn(sid)
 	if err != nil {
 		s.localMu.Unlock()
 		var re *RemoteError
@@ -262,14 +322,26 @@ func (s *Service) submitSpaceIntent(spaceID string, it collab.DispatchIntent) {
 		log.Printf("[node] 空间意图投递暂缓 space=%s intent=%s session=%s: %v", spaceID, it.RequestID, sid, err)
 		return
 	}
-	if seq != it.TurnSeq {
+	// M1·投递期轮号一致性校验（记账顺序与 seq 一致）：意图 seq 必须严格接在账本
+	// 高水位之后；≥ 即真漂移（该轮号已被其他真实受理占用）——取消收敛 + 系统暂停
+	// 停队（异常态落成可见状态等人工核对），绝不静默跳过也绝不叠投。
+	if hw := s.cfg.Ledger.SessionTurnHighWater(sid); hw >= it.TurnSeq {
 		s.localMu.Unlock()
-		// 轮号漂移：意图轮号 ≠ 当前派生号，说明该会话已有更早受理未收束（串行门
-		// 之外的异常在途）——跳过投递，等其终态收敛或重启对账，绝不叠投。
-		log.Printf("[node] 空间意图轮号漂移 space=%s intent=%s 意图seq=%d 派生seq=%d，跳过投递待收束",
-			spaceID, it.RequestID, it.TurnSeq, seq)
+		note := "轮号真漂移（账本高水位 ≥ 意图 seq）：取消收束并暂停停队，待人工核对"
+		if _, cerr := s.collab.ConvergeIntent(spaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID, note, spaceSystemSubject()); cerr != nil {
+			log.Printf("[node] 空间意图真漂移取消收敛失败 space=%s intent=%s: %v（重启对账兜底）", spaceID, it.RequestID, cerr)
+			return
+		}
+		if _, applied, perr := s.collab.SystemPause(spaceID, "意图轮号真漂移（投递期一致性校验失败）：串行队列暂停，显式 resume 恢复"); perr != nil {
+			log.Printf("[node] 漂移停队系统暂停失败 space=%s: %v", spaceID, perr)
+		} else if applied {
+			log.Printf("[node] 空间已因意图轮号真漂移暂停停队 space=%s", spaceID)
+		}
+		log.Printf("[node] 空间意图轮号真漂移 space=%s intent=%s 意图seq=%d 账本高水位=%d：取消收敛+暂停停队",
+			spaceID, it.RequestID, it.TurnSeq, hw)
 		return
 	}
+	seq := it.TurnSeq // 投递期以意图登记 seq 为准（受理期已预留，不重派生）
 	now := protocol.NowUTC()
 	task := protocol.Task{
 		ID:          protocol.NewTaskID(),
@@ -444,11 +516,13 @@ func itoa64i(v int64) string {
 
 // recoverSpaceIntents 重启对账闭环（New 装配期一次性；先于任何恢复重投——与
 // sessionop 重启收敛同序位之后执行，账本条目均已终态化）：按实物分类、绝不重跑。
-//   - pending（未投递）：取消收束——「进程恢复不得凭回调自动重跑」，排队意图不
-//     自动续投，恢复后由调用方显式重新派发；
 //   - accepted（已投递）：按账本终态实物分类（completed→converged / failed→记账
-//     码如实 / cancelled→cancelled / 其他→留待核对）；账本无实物或非终态 → 留
-//     待核对（在途），绝不猜测。
+//     码如实 / cancelled→cancelled+系统暂停停队（S2：与活路径一致，重启后如实停
+//     队等人工确认）/ 其他→留待核对）；账本无实物或非终态 → 留待核对（在途），
+//     绝不猜测；
+//   - pending：先查账本实物——有实物（M1 受理→投递崩溃窗：AcceptOrigin 已落、接
+//     单登记未及落盘）按实物分类（同 accepted 口径，绝不臆断未投递）；无实物才
+//     取消收束（「进程恢复不得凭回调自动重跑」，恢复后由调用方显式重新派发）。
 func (s *Service) recoverSpaceIntents() {
 	if s.collab == nil {
 		return
@@ -456,32 +530,53 @@ func (s *Service) recoverSpaceIntents() {
 	for _, it := range s.collab.RecoverIntents() {
 		switch it.Status {
 		case collab.IntentPending:
-			if _, err := s.collab.ConvergeIntent(it.SpaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID,
-				"进程恢复对账：未投递意图不自动重跑（恢复后显式重新派发）", spaceSystemSubject()); err != nil {
-				log.Printf("[node] 重启对账：pending 意图取消收束失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
+			if _, delivered := findLedgerTurn(s.cfg.Ledger, it.SessionID, it.TurnSeq); !delivered {
+				if _, err := s.collab.ConvergeIntent(it.SpaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID,
+					"进程恢复对账：未投递意图不自动重跑（恢复后显式重新派发）", spaceSystemSubject()); err != nil {
+					log.Printf("[node] 重启对账：pending 意图取消收束失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
+					continue
+				}
+				log.Printf("[node] 重启对账：未投递意图已取消收束（不自动重跑）space=%s intent=%s member=%s", it.SpaceID, it.RequestID, it.Member)
 				continue
 			}
-			log.Printf("[node] 重启对账：未投递意图已取消收束（不自动重跑）space=%s intent=%s member=%s", it.SpaceID, it.RequestID, it.Member)
+			// 有账本实物：已投递（受理→投递崩溃窗），按实物分类。
+			s.convergeIntentByLedgerFact(it, "pending+实物")
 		case collab.IntentAccepted:
-			e, ok := findLedgerTurn(s.cfg.Ledger, it.SessionID, it.TurnSeq)
-			if !ok {
-				log.Printf("[node] 重启对账：意图轮无账本实物，留待核对 space=%s intent=%s session=%s seq=%d", it.SpaceID, it.RequestID, it.SessionID, it.TurnSeq)
-				continue
-			}
-			if e.State != ledger.StateFinished || e.Result == nil {
-				log.Printf("[node] 重启对账：意图轮非终态，留待核对 space=%s intent=%s state=%v", it.SpaceID, it.RequestID, e.State)
-				continue
-			}
-			outcome, note, _ := classifySpaceTurn(*e.Result)
-			if outcome == "" {
-				log.Printf("[node] 重启对账：轮终不确定（%s），意图留待核对 space=%s intent=%s", e.Result.Status, it.SpaceID, it.RequestID)
-				continue
-			}
-			if _, err := s.collab.ConvergeIntent(it.SpaceID, it.RequestID, outcome, it.TaskID, note+"（重启对账）", spaceSystemSubject()); err != nil {
-				log.Printf("[node] 重启对账：意图收敛失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
-				continue
-			}
-			log.Printf("[node] 重启对账：意图按账本实物收敛 space=%s intent=%s → %s", it.SpaceID, it.RequestID, outcome)
+			s.convergeIntentByLedgerFact(it, "accepted")
+		}
+	}
+}
+
+// convergeIntentByLedgerFact 按账本实物收敛单条在途意图（重启对账共用体）：
+// completed→converged / failed→记账码如实 / cancelled→cancelled+系统暂停停队（S2
+// 对齐活路径）/ 其他→留待核对不收敛。失败（落盘）留待下次启动重试。
+func (s *Service) convergeIntentByLedgerFact(it collab.DispatchIntent, via string) {
+	e, ok := findLedgerTurn(s.cfg.Ledger, it.SessionID, it.TurnSeq)
+	if !ok {
+		log.Printf("[node] 重启对账：意图轮无账本实物，留待核对 space=%s intent=%s session=%s seq=%d via=%s", it.SpaceID, it.RequestID, it.SessionID, it.TurnSeq, via)
+		return
+	}
+	if e.State != ledger.StateFinished || e.Result == nil {
+		log.Printf("[node] 重启对账：意图轮非终态，留待核对 space=%s intent=%s state=%v via=%s", it.SpaceID, it.RequestID, e.State, via)
+		return
+	}
+	outcome, note, halt := classifySpaceTurn(*e.Result)
+	if outcome == "" {
+		log.Printf("[node] 重启对账：轮终不确定（%s），意图留待核对 space=%s intent=%s via=%s", e.Result.Status, it.SpaceID, it.RequestID, via)
+		return
+	}
+	if _, err := s.collab.ConvergeIntent(it.SpaceID, it.RequestID, outcome, it.TaskID, note+"（重启对账）", spaceSystemSubject()); err != nil {
+		log.Printf("[node] 重启对账：意图收敛失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
+		return
+	}
+	log.Printf("[node] 重启对账：意图按账本实物收敛 space=%s intent=%s → %s via=%s", it.SpaceID, it.RequestID, outcome, via)
+	if halt {
+		// S2：取消收敛与活路径同语义——系统暂停把「已取消/不再派发」落成可见状态，
+		// 重启后如实停队等人工确认（显式 resume 恢复）。
+		if _, applied, perr := s.collab.SystemPause(it.SpaceID, "重启对账：成员轮取消（人工介入）落账，串行队列暂停，显式 resume 恢复"); perr != nil {
+			log.Printf("[node] 重启对账取消停队系统暂停失败 space=%s: %v", it.SpaceID, perr)
+		} else if applied {
+			log.Printf("[node] 重启对账：空间已因取消意图收敛暂停停队 space=%s", it.SpaceID)
 		}
 	}
 }
