@@ -969,10 +969,12 @@ async function nodeSessFlow(browser) {
     dzones.join(',') === 'head,facts,answer' && focusInDrawer && trapOk && drawerGone && dRefocus,
     `zones=${dzones.join(',')} focus=${focusInDrawer} trap=${trapOk} esc=${drawerGone} refocus=${dRefocus}`, false, 'DEEP');
 
-  // SN07 整页轮询豁免（R1 必修10 行为验证；W01-05 新表面：执行明细抽屉开放态/搜索
-  // 输入焦点态）。两相位各经 localapi REST（主人旧面零变义兼容）建一个临时会话制
-  // 造常规数据变化：相位A 抽屉开放、相位B 焦点在会话页搜索框，断言页面 DOM 节点
-  // 身份/焦点/光标/滚动在数据变化期保持，会话列表照常跟进。
+  // SN07 整页轮询豁免（R1 必修10 行为验证；T5c 按现 DOM 结构重写观察点——W01-05
+  // 独立详情页路由后列表分区不在详情页 DOM：旧相位A 标记/轮询 #sess-list-zone 致
+  // identityKept 恒 false、300s 等待不可满足；旧相位B「入列表在豁免态下可见」与
+  // 豁免设计相悖——豁免=暂停绘制不截断加载）。用例意图保持：抽屉开放/搜索焦点态
+  // 下页面 DOM 身份/焦点/光标/滚动保持，且豁免窗内数据装载不截断（窗内创建的
+  // scratch 会话数据在回列表后到达——rowInList 移到列表面断言）。
   // T5 修复（与 hub T1 同族，采证三轮：SN09 尾态在详情页直点列表行 15s 超时崩出
   // 致 SN03/SN04/SN06/SN07/SN10 未执行）——相位A 前回列表守卫。
   await page.goto(`${BASE}/#/sessions`, { waitUntil: 'domcontentloaded' });
@@ -984,27 +986,27 @@ async function nodeSessFlow(browser) {
   const closeScratch = id => nodeApi(`/api/v1/local/sessions/${encodeURIComponent(id)}/close`, { method: 'POST', body: '{}' });
   const rowInList = (id, timeout) => page.waitForFunction(sid => [...document.querySelectorAll('#sess-list-zone tr[data-sess]')].some(t => t.getAttribute('data-sess') === sid), id, { timeout }).then(() => true).catch(() => false);
   const badgeFlip = (id, cls, timeout) => page.waitForFunction(({ sid, c }) => [...document.querySelectorAll('#sess-list-zone tr[data-sess] .badge')].some(b => b.closest('tr')?.getAttribute('data-sess') === sid && b.classList.contains(c)), { sid: id, c: cls }, { timeout }).then(() => true).catch(() => false);
-  // 相位A：执行明细抽屉开放态
+
+  // 相位A（详情页+执行明细抽屉开放）：观察点=详情页稳定元素（main h1/#sess-detail/
+  // #sess-drawer）——豁免窗内创建 scratchA（其首轮数据经 loadSessions 持续装载，
+  // 到达断言移相位B），本相位不做列表分区断言（分区不在详情页 DOM）。
   await page.click(`tr[data-sess="${sidFinal}"]`);
   await page.waitForSelector('#sess-detail', { timeout: 10000 });
   await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
   await page.click('#sess-detail [data-act="sess-turn-detail"]');
   await page.waitForSelector('#sess-drawer', { timeout: 5000 });
-  await page.evaluate(() => { window.__markA = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-list-zone'), document.querySelector('#sess-drawer')]; });
+  await page.evaluate(() => { window.__markA = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-drawer')]; });
   const scratchA = await scratchSession();
   const sidA = scratchA?.body?.turn?.session_id || '';
-  const inListA = sidA ? await rowInList(sidA, 300000) : false;
   const phaseA = await page.evaluate(() => {
-    const now = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-list-zone'), document.querySelector('#sess-drawer')];
-    return { identityKept: window.__markA.every((el, i) => el && el === now[i]) };
+    const now = [document.querySelector('main h1'), document.querySelector('#sess-detail'), document.querySelector('#sess-drawer')];
+    return { identityKept: window.__markA.every((el, i) => el && el === now[i]), drawerKept: !!document.querySelector('#sess-drawer') };
   });
-  let closedA = false;
-  if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
-  await page.keyboard.press('Escape');   // 关抽屉
+  await page.keyboard.press('Escape');   // 关抽屉（豁免面撤除）
   await p_sleep(500);
-  // 相位B：焦点在会话页搜索框（输入 + 光标定位 + 页面滚动）
-  // T5b（终审轮工具缺陷，与相位A 同族）：相位A 抽验后停在详情页（scratch 会话入列
-  // 等待跨首轮完成），此处必须先回列表再点搜索框——直点 #sess-query 会 15s 超时崩出。
+
+  // 相位B（回列表后）：搜索框焦点/光标/滚动保持 + 两窗 scratch 数据装载到达
+  //（rowInList：相位A 窗=sidA、相位B 窗=sidB）+ 关闭徽标翻转（列表面可见）。
   await page.goto(BASE + '/#/sessions');
   await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
   await page.click('#sess-query');
@@ -1018,7 +1020,6 @@ async function nodeSessFlow(browser) {
   });
   const scratchB = await scratchSession();
   const sidB = scratchB?.body?.turn?.session_id || '';
-  const inListB = sidB ? await rowInList(sidB, 300000) : false;
   const phaseB = await page.evaluate(() => {
     const inp = document.querySelector('#sess-query');
     const now = [document.querySelector('main h1'), document.querySelector('#sess-query')];
@@ -1029,17 +1030,23 @@ async function nodeSessFlow(browser) {
       scrollKept: Math.abs(window.scrollY - 160) < 40,
     };
   });
-  let closedB = false;
-  if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
+  // 清搜索过滤（焦点/光标断言已取毕）：过滤词不匹配任何会话，不清除则行永不出
+  // 现、rowInList 不可满足（焦点态构造与行到达断言解耦）。
   await page.evaluate(() => {
     const inp = document.querySelector('#sess-query');
     if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }
   });
-  walkLog(`SN07 轮询豁免走查：抽屉开放态 节点身份=${phaseA.identityKept} 临时会话 ${sidA || '（创建失败）'} 入列表=${inListA} 关闭徽标翻转=${closedA}；搜索焦点态 DOM=${phaseB.identityKept} 焦点=${phaseB.focusKept} 光标=${phaseB.caretKept} 滚动=${phaseB.scrollKept} 临时会话 ${sidB || '（创建失败）'} 入列表=${inListB} 关闭徽标翻转=${closedB}（入列表等待跨首轮完成上限 300s，其间任务状态推进连续驱动豁免分支）`);
-  record('SN07', '会话页轮询豁免（执行明细抽屉开放/搜索焦点态：数据变化期 DOM 身份/焦点/光标/滚动保持；临时会话入列表与关闭徽标翻转在豁免态下可见）',
-    phaseA.identityKept && inListA && closedA
-    && phaseB.identityKept && phaseB.focusKept && phaseB.caretKept && phaseB.scrollKept && inListB && closedB,
-    `A=${JSON.stringify(phaseA)} 入列表=${inListA} 关闭翻转=${closedA}；B=${JSON.stringify(phaseB)} 入列表=${inListB} 关闭翻转=${closedB}`, false, 'DEEP');
+  const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①）
+  const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
+  let closedA = false, closedB = false;
+  if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
+  if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
+  walkLog(`SN07 轮询豁免走查（T5c 重写）：相位A 详情页+抽屉开放 DOM 身份=${phaseA.identityKept} 抽屉保持=${phaseA.drawerKept} scratchA ${sidA || '（创建失败）'}；相位B 列表 DOM=${phaseB.identityKept} 焦点=${phaseB.focusKept} 光标=${phaseB.caretKept} 滚动=${phaseB.scrollKept} scratchB ${sidB || '（创建失败）'}；豁免窗装载不截断 到达A=${inListA} 到达B=${inListB} 关闭翻转 A=${closedA} B=${closedB}（rowInList 等待跨首轮完成上限 300s，等待发生在回列表后的列表面——豁免只暂停绘制不截断加载）`);
+  record('SN07', '会话页轮询豁免（T5c 重写）：相位A 详情页+执行明细抽屉开放——豁免期页面/抽屉 DOM 身份保持不重建；相位B 回列表——搜索框焦点/光标/滚动保持；豁免窗内数据装载不截断——两窗 scratch 会话数据回列表后到达（rowInList）且关闭徽标翻转在列表面可见',
+    phaseA.identityKept && phaseA.drawerKept
+    && phaseB.identityKept && phaseB.focusKept && phaseB.caretKept && phaseB.scrollKept
+    && inListA && inListB && closedA && closedB,
+    `A=${JSON.stringify(phaseA)}；B=${JSON.stringify(phaseB)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
 
   // 继续预填留档（node 形态：continue modal，只读绑定/轮号/cwd 预填；轮号按实际
   // 轮数推进——SN02 后该会话已 1 轮，continue 应预填第 2 轮）
@@ -1125,7 +1132,7 @@ async function nodeSessFlow(browser) {
     await page.goto(`${BASE}/#/sessions/${encodeURIComponent(s3Id)}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#sess-detail', { timeout: 10000 });
     await page.waitForFunction(() => !document.getElementById('sess-detail-loading'), null, { timeout: 10000 }).catch(() => { });
-    await page.click('#sess-detail [data-act="sess-close"]');
+    await page.click('#sess-detail [data-act^="sess-close:"]');
     await page.waitForSelector('#confirm-modal', { timeout: 5000 });
     await p_sleep(650);
     const confirmDeep = await page.evaluate(() => {
@@ -1150,9 +1157,9 @@ async function nodeSessFlow(browser) {
     const escConfirm = await page.evaluate(() => ({
       confirmGone: !document.querySelector('#confirm-modal'),
       pageKept: !!document.querySelector('#sess-detail'),
-      focusBack: (document.activeElement?.dataset?.act || '') === 'sess-close',
+      focusBack: (document.activeElement?.dataset?.act || '').startsWith('sess-close'),
     }));
-    await page.click('#sess-detail [data-act="sess-close"]');
+    await page.click('#sess-detail [data-act^="sess-close:"]');
     await page.waitForSelector('#confirm-modal [data-act="confirm-ok"]', { timeout: 5000 });
     await page.click('#confirm-modal [data-act="confirm-ok"]');
     await p_sleep(900);
@@ -1204,7 +1211,7 @@ async function nodeSessFlow(browser) {
     // 等在途清空后关闭成立（409 循环重试，直至 200 已关闭）
     let closedOk = false;
     for (let i = 0; i < 90 && !closedOk; i++) {
-      await page.click('#sess-detail [data-act="sess-close"]').catch(() => { });
+      await page.click('#sess-detail [data-act^="sess-close:"]').catch(() => { });
       if (await page.locator('#confirm-modal [data-act="confirm-ok"]').count()) {
         await page.click('#confirm-modal [data-act="confirm-ok"]');
         await p_sleep(1200);
