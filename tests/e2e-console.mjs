@@ -1019,14 +1019,17 @@ async function nodeSessFlow(browser) {
     const inp = document.querySelector('#sess-query');
     inp.focus();
     inp.setSelectionRange(3, 3);
-    return { focusKept: document.activeElement === inp, caretKept: inp.selectionStart === 3 };
+    return { identityKept: !!document.querySelector('main h1') && !!inp, focusKept: document.activeElement === inp, caretKept: inp.selectionStart === 3 };
   });
+  // T5c-2（r8 根因：搜索框持焦=轮询豁免窗，列表绘制暂停、行不上 DOM——产品豁免语义
+  // 正确，观察点必须分窗）：焦点窗内只断言身份/焦点/光标；blur 后绘制恢复，滚动/行/
+  // 徽标观察全部移到 blur 面（r8 对照实验：无焦点时行就位+scrollY 稳定 160）。
+  await page.evaluate(() => { const inp = document.querySelector('#sess-query'); if (inp) inp.blur(); });
   await page.evaluate(() => {
     const inp = document.querySelector('#sess-query');
-    if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }   // 清过滤恢复全量列表（滚动可达）
+    if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }   // 清过滤恢复全量列表
   });
-  // 全量列表重绘落在下一个轮询节拍——scrollTo 前条件等待行就位（终审轮：空态 DOM 下
-  // scrollTo 被钳制、mark 后重绘致 scrollY 停在钳制值，r6/r7 两轮同值确定性为假）。
+  // 绘制已恢复（blur）——行就位条件等待，scrollTo 不再被空态钳制。
   await page.waitForSelector('#sess-list-zone tr[data-sess]', { timeout: 15000 }).catch(() => { });
   await page.evaluate(() => {
     window.scrollTo(0, 160);
@@ -1035,25 +1038,24 @@ async function nodeSessFlow(browser) {
   const scratchB = await scratchSession();
   const sidB = scratchB?.body?.turn?.session_id || '';
   const phaseB = await page.evaluate(() => {
-    const inp = document.querySelector('#sess-query');
     const now = [document.querySelector('main h1'), document.querySelector('#sess-query')];
     return {
       identityKept: window.__markB.every((el, i) => el && el === now[i]),
-      focusKept: document.activeElement === inp,
       scrollKept: Math.abs(window.scrollY - 160) < 40,
     };
   });
-  const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①）
+  const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①——blur 后列表面可见）
   const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
   let closedA = false, closedB = false;
   if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
   if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
-  walkLog(`SN07 轮询豁免走查（T5c 重写+收口1 次序）：相位A 详情页+抽屉开放 DOM 身份=${phaseA.identityKept} 抽屉保持=${phaseA.drawerKept} scratchA ${sidA || '（创建失败）'}；相位B 列表 DOM=${phaseB.identityKept} 焦点 取毕=${phaseBFocus.focusKept}/终验=${phaseB.focusKept} 光标 取毕=${phaseBFocus.caretKept} 滚动=${phaseB.scrollKept} scratchB ${sidB || '（创建失败）'}；豁免窗装载不截断 到达A=${inListA} 到达B=${inListB} 关闭翻转 A=${closedA} B=${closedB}（rowInList 等待跨首轮完成上限 300s，等待发生在回列表后的列表面——豁免只暂停绘制不截断加载）`);
-  record('SN07', '会话页轮询豁免（T5c 重写+收口1 次序）：相位A 详情页+执行明细抽屉开放——豁免期页面/抽屉 DOM 身份保持不重建；相位B 回列表——搜索框焦点/光标保持（先取毕）+全量列表滚动标记点保持（轮询期不重置）；豁免窗内数据装载不截断——两窗 scratch 会话数据回列表后到达（rowInList）且关闭徽标翻转在列表面可见',
+  walkLog(`SN07 轮询豁免走查（T5c-2 分窗重写）：相位A 详情页+抽屉开放 DOM 身份=${phaseA.identityKept} 抽屉保持=${phaseA.drawerKept} scratchA ${sidA || '（创建失败）'}；相位B 焦点窗 身份=${phaseBFocus.identityKept} 焦点=${phaseBFocus.focusKept} 光标=${phaseBFocus.caretKept}（持焦=豁免窗，行观察按设计移到 blur 后）；blur 面 列表 DOM=${phaseB.identityKept} 滚动=${phaseB.scrollKept} scratchB ${sidB || '（创建失败）'}；豁免窗装载不截断 到达A=${inListA} 到达B=${inListB} 关闭翻转 A=${closedA} B=${closedB}（rowInList 等待发生在 blur 后列表面——豁免只暂停绘制不截断加载）`);
+  record('SN07', '会话页轮询豁免（T5c-2 分窗重写）：相位A 详情页+执行明细抽屉开放——豁免期页面/抽屉 DOM 身份保持不重建；相位B 焦点窗（搜索框持焦=豁免设计暂停绘制）只断言身份/焦点/光标；blur 后绘制恢复——全量列表滚动标记点保持（轮询期不重置）+豁免窗内数据装载不截断（两窗 scratch 会话数据回列表后到达）+关闭徽标翻转在列表面可见',
     phaseA.identityKept && phaseA.drawerKept
-    && phaseB.identityKept && phaseBFocus.focusKept && phaseBFocus.caretKept && phaseB.focusKept && phaseB.scrollKept
+    && phaseBFocus.identityKept && phaseBFocus.focusKept && phaseBFocus.caretKept
+    && phaseB.identityKept && phaseB.scrollKept
     && inListA && inListB && closedA && closedB,
-    `A=${JSON.stringify(phaseA)}；B=${JSON.stringify(phaseB)} 焦点光标取毕=${JSON.stringify(phaseBFocus)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
+    `A=${JSON.stringify(phaseA)}；焦点窗=${JSON.stringify(phaseBFocus)}；blur 面=${JSON.stringify(phaseB)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
 
   // 继续预填留档（node 形态：continue modal，只读绑定/轮号/cwd 预填；轮号按实际
   // 轮数推进——SN02 后该会话已 1 轮，continue 应预填第 2 轮）
