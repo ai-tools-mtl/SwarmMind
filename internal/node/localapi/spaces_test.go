@@ -57,22 +57,53 @@ func spaceDo(t *testing.T, srv *httptest.Server, token, method, path, body strin
 
 func TestSpacesAuthGateMatrix(t *testing.T) {
 	srv := newSpaceSrv(t, true)
-	// 无令牌 / 错令牌 / prime_token（编排凭据不冒充主人——六.六豁免⑯口径）→ 401。
-	for _, tok := range []string{"", "wrong", "tok-prime"} {
+	// 无令牌 / 错令牌 → 401（全部空间端点）。
+	for _, tok := range []string{"", "wrong"} {
 		for _, spec := range [][2]string{
 			{http.MethodPost, "/api/v1/spaces"},
 			{http.MethodGet, "/api/v1/spaces"},
 			{http.MethodGet, "/api/v1/spaces/sp-x"},
 			{http.MethodPost, "/api/v1/spaces/sp-x/control"},
+			{http.MethodPost, "/api/v1/spaces/sp-x/dispatches"},
+			{http.MethodGet, "/api/v1/spaces/sp-x/dispatches/disp-x"},
+			{http.MethodPost, "/api/v1/spaces/sp-x/messages"},
+			{http.MethodGet, "/api/v1/spaces/sp-x/messages"},
 		} {
 			code, out := spaceDo(t, srv, tok, spec[0], spec[1], `{"goal":"g","mode":"manual"}`)
 			if code != http.StatusUnauthorized {
-				t.Fatalf("token=%q %s %s 应 401（主人面）, got %d: %s", tok, spec[0], spec[1], code, out)
+				t.Fatalf("token=%q %s %s 应 401, got %d: %s", tok, spec[0], spec[1], code, out)
 			}
 		}
 	}
+	// W04-02 豁免⑯收窄（分层开线）：prime_token（编排凭据）——
+	//   读面（列表/详情/派发查询/消息读）authRead 放行（与 agent 会话查询同界）；
+	//   写面 authSpaceSubject 放行到模型层逐动作授权（主人专属动作 403 forbidden，
+	//   非法动作参数照常 4xx）——不再是一律 401 的恒错门。
+	// 未启用 mcpaccess 时写面 403 mcp_disabled：见 TestSpacesOrchestrateGate。
+	code, out := spaceDo(t, srv, "tok-prime", http.MethodGet, "/api/v1/spaces", "")
+	if code != http.StatusOK {
+		t.Fatalf("prime_token 列表应 200（authRead）, got %d: %s", code, out)
+	}
+	if code, out := spaceDo(t, srv, "tok-prime", http.MethodPost, "/api/v1/spaces",
+		`{"goal":"g","mode":"manual"}`); code != http.StatusForbidden || !strings.Contains(out, "编排主体仅可创建 external") {
+		t.Fatalf("prime_token 建 manual 应 403（模型层逐动作授权）, got %d: %s", code, out)
+	}
+	// 主人建一个空间供主体判定用（set_budget 的 403 需真实空间——存在性校验先于授权）。
+	code, cout := spaceDo(t, srv, "tok-local", http.MethodPost, "/api/v1/spaces",
+		`{"request_id":"c-mx","goal":"g","mode":"manual"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("主人建空间应 201, got %d: %s", code, cout)
+	}
+	var created struct {
+		Space collab.Space `json:"space"`
+	}
+	_ = json.Unmarshal([]byte(cout), &created)
+	if code, out := spaceDo(t, srv, "tok-prime", http.MethodPost, "/api/v1/spaces/"+created.Space.ID+"/control",
+		`{"request_id":"c-p1","action":"set_budget","expected_version":1,"budget":{}}`); code != http.StatusForbidden || !strings.Contains(out, collab.CodeForbidden) {
+		t.Fatalf("prime_token set_budget 应 403（主人专属，豁免收窄保留面）, got %d: %s", code, out)
+	}
 	// local_token 放行到达业务层。
-	code, out := spaceDo(t, srv, "tok-local", http.MethodGet, "/api/v1/spaces", "")
+	code, out = spaceDo(t, srv, "tok-local", http.MethodGet, "/api/v1/spaces", "")
 	if code != http.StatusOK {
 		t.Fatalf("local_token 列表应 200, got %d: %s", code, out)
 	}

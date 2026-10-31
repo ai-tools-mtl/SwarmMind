@@ -186,6 +186,10 @@ type ControlRequest struct {
 	FinalOutcome string     `json:"final_outcome,omitempty"` // finalize: done|abandoned
 	Reason       string     `json:"reason,omitempty"`        // finalize(abandoned)/set_budget 原因
 	Note         string     `json:"note,omitempty"`          // 暂停原因/备注（审计）
+	// Confirm 显式确认（W04-02 恢复保护：存在在途/排队意图时 resume 须 confirm=true
+	// ——判定在端点层（localapi），模型层不消费本字段；omitempty 保证旧请求序列化
+	// 形态与幂等指纹不变）。
+	Confirm bool `json:"confirm,omitempty"`
 }
 
 // Control 控制动作总入口（RFC §三 逐动作表）。事务内顺序：空间存在 → 版本 CAS
@@ -698,11 +702,15 @@ type MessageRecord struct {
 	Used    BudgetUsed `json:"used"`
 }
 
-// MessageRequest 消息预算扣账请求。
+// MessageRequest 消息预算扣账请求。W04-02 增量（加法字段，omitempty——旧请求
+// 序列化形态与指纹不变，跨版本重放兼容）：Text 正文 + Member 发言归属成员
+// （空=主人发言）。落账即追加空间消息账本（Seq 空间内单调递增），仍零执行。
 type MessageRequest struct {
 	RequestID       string `json:"request_id"`
 	ExpectedVersion int64  `json:"expected_version"`
 	Note            string `json:"note,omitempty"`
+	Text            string `json:"text,omitempty"`
+	Member          string `json:"member,omitempty"`
 }
 
 // RecordMessage 普通发言预算扣账（RFC §1.5）：消息计数独立于执行轮次；落账本身
@@ -710,6 +718,9 @@ type MessageRequest struct {
 // 主体做非空/取值基校验（终审 S3）；「谁能向空间发言」的细粒度授权归 W04-02
 // messages 端点门（本模型层不承担），扣账只对已过门的有效主体记账。幂等指纹含
 // 目标空间维度（终审 M1，同 Control/RecordDispatch）。
+// W04-02：Text/Member 非空时追加空间消息账本（与扣账同事务——原子：要么消息与
+// 计数同时落账，要么整体拒绝零副作用）；Member 须为空间在册成员（归属校验，
+// 伪造成员拒绝）。旧形态（Text 空）不产生消息行，仅记账。
 func (s *Store) RecordMessage(spaceID string, req MessageRequest, subj Subject) (MessageRecord, bool, error) {
 	if !subj.Valid() {
 		return MessageRecord{}, false, errf(ErrInvalid, "主体缺失（name/class 必填且取值合法；消息授权门归 W04-02 messages 端点）")
@@ -732,8 +743,29 @@ func (s *Store) RecordMessage(spaceID string, req MessageRequest, subj Subject) 
 		if sp.Budget.MaxMessages > 0 && sp.Used.Messages >= sp.Budget.MaxMessages {
 			return nil, errf(ErrBudgetExhausted, "message_count 已达上限 %d", sp.Budget.MaxMessages)
 		}
+		if req.Member != "" && sp.memberOf(strings.TrimSpace(req.Member)) < 0 {
+			return nil, errf(ErrMemberNotFound, "发言归属成员 %q 不在空间内（发言≠调度权；伪造成员拒绝）", req.Member)
+		}
 		sp.Version++
 		sp.Used.Messages++
+		if strings.TrimSpace(req.Text) != "" {
+			list := next.Messages[spaceID]
+			var seq int64
+			if len(list) > 0 {
+				seq = list[len(list)-1].Seq
+			}
+			seq++
+			list = append(list, SpaceMessage{
+				Seq: seq, Member: strings.TrimSpace(req.Member),
+				Text:      truncateText(req.Text),
+				By:        subj.String(),
+				CreatedAt: s.now(),
+			})
+			if len(list) > maxMessagesPerSpace {
+				list = append(make([]SpaceMessage, 0, maxMessagesPerSpace), list[len(list)-maxMessagesPerSpace:]...)
+			}
+			next.Messages[spaceID] = list
+		}
 		return MessageRecord{SpaceID: sp.ID, Used: sp.Used}, nil
 	})
 	if err != nil {
@@ -742,6 +774,14 @@ func (s *Store) RecordMessage(spaceID string, req MessageRequest, subj Subject) 
 	var out MessageRecord
 	_ = json.Unmarshal(raw, &out)
 	return out, dup, nil
+}
+
+// truncateText 消息正文截断（防快照膨胀；按字节截断同 truncateNote 口径）。
+func truncateText(s string) string {
+	if len(s) <= MaxMessageText {
+		return s
+	}
+	return s[:MaxMessageText]
 }
 
 // ConvergeIntent 意图收敛（执行事实落账；W04-02 接线）：仅 owner/system 主体
@@ -801,6 +841,176 @@ func (s *Store) ConvergeIntent(spaceID, requestID, outcome, taskID, note string,
 		return DispatchIntent{}, err
 	}
 	return result, nil
+}
+
+// AttachDispatchTask 意图接单登记（W04-02 执行侧接线；仅 owner/system 主体——
+// 执行侧记账，与 ConvergeIntent 同权限面）：pending 意图附 TaskID 转 accepted
+// （执行侧已接单，RFC §1.6 状态语义）。幂等指纹 = attach:<request_id> + 目标空间
+// 包装：同 ID 同 taskID 重放回原结果（零变更）；同 ID 异 taskID 冲突（绝不把一个
+// 意图接到两个任务上）。收敛后的意图拒绝（illegal_transition——接单只发生在投递
+// 窗口内）。
+func (s *Store) AttachDispatchTask(spaceID, requestID, taskID string, subj Subject) (DispatchIntent, error) {
+	if subj.Class != ClassOwner && subj.Class != ClassSystem {
+		return DispatchIntent{}, errf(ErrForbidden, "意图接单登记仅执行侧主体（owner/system）")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return DispatchIntent{}, errf(ErrInvalid, "task_id 必填（执行侧已接单的凭证）")
+	}
+	raw, _, err := s.apply("attach:"+requestID, "attach_dispatch_task",
+		struct {
+			SpaceID   string `json:"space_id"`
+			RequestID string `json:"request_id"`
+			TaskID    string `json:"task_id"`
+		}{spaceID, requestID, taskID}, func(next *state) (any, error) {
+			if _, ok := next.Spaces[spaceID]; !ok {
+				return nil, ErrNotFound
+			}
+			list := next.Intents[spaceID]
+			for i := range list {
+				if list[i].RequestID != requestID {
+					continue
+				}
+				it := &list[i]
+				if it.Status == IntentAccepted && it.TaskID == taskID {
+					return *it, nil // 幂等命中：同意图同任务（投递重放）
+				}
+				if it.Status != IntentPending {
+					return nil, errf(ErrIllegalTransition, "意图 %s 状态 %s 不可接单（接单只发生在投递窗口内）", requestID, it.Status)
+				}
+				it.Status = IntentAccepted
+				it.TaskID = taskID
+				it.UpdatedAt = s.now()
+				if sp, ok := next.Spaces[spaceID]; ok {
+					sp.appendEvent(s.now(), "intent_accepted", subj.String(),
+						fmt.Sprintf("意图 %s 已接单（task %s）——执行侧投递登记", requestID, taskID))
+				}
+				return *it, nil
+			}
+			return nil, errf(ErrInvalid, "意图 %s 不在空间 %s", requestID, spaceID)
+		})
+	if err != nil {
+		return DispatchIntent{}, err
+	}
+	var result DispatchIntent
+	_ = json.Unmarshal(raw, &result)
+	return result, nil
+}
+
+// SystemPause 系统自动暂停（W04-02 执行侧；仅 system 主体——内置服务独立可审计
+// 主体）：运行态空间转 paused（经 CanTransition 表边，无直赋通道），暂停原因落
+// PausedReason。只停新增派发，不取消在途、不换任期（任务书 pause 语义）。已暂停/
+// 非运行态为幂等零变更（applied=false）。回执携带原次结果：同事件重放返回原空间
+// 与原 applied 值。
+func (s *Store) SystemPause(spaceID, reason string) (Space, bool, error) {
+	type pauseResult struct {
+		Space   Space `json:"space"`
+		Applied bool  `json:"applied"`
+	}
+	// 幂等键含空间版本 + 秒级时钟 + 原因：零变更尝试不阻断后续真实暂停（同版本
+	// 同因同秒的重试命中回执；版本推进/时间推进后的真实暂停是全新事件）。
+	opID := fmt.Sprintf("syspause:%s:%s:v%d:t%d", spaceID, truncateNote(reason), spVersionOf(s, spaceID), s.now().Unix())
+	raw, _, err := s.apply(opID, "system_pause",
+		struct {
+			SpaceID string `json:"space_id"`
+			Reason  string `json:"reason"`
+		}{spaceID, reason}, func(next *state) (any, error) {
+			sp, ok := next.Spaces[spaceID]
+			if !ok {
+				return nil, ErrNotFound
+			}
+			out := pauseResult{Space: *cloneSpace(sp)}
+			if sp.Status != StatusRunning {
+				return out, nil // 幂等零变更（非运行态无需系统暂停）
+			}
+			if !CanTransition(sp.Status, StatusPaused) {
+				return nil, errf(ErrIllegalTransition, "system_pause：状态 %s 不可暂停", sp.Status)
+			}
+			now := s.now()
+			sp.Used.settleRunning(now)
+			sp.Status = StatusPaused
+			sp.PausedReason = truncateNote(reason)
+			sp.Version++
+			sp.UpdatedAt = now
+			sp.appendEvent(now, "system_pause", systemSubject.String(), truncateNote(reason))
+			out.Space = *cloneSpace(sp)
+			out.Applied = true
+			return out, nil
+		})
+	if err != nil {
+		return Space{}, false, err
+	}
+	var out pauseResult
+	_ = json.Unmarshal(raw, &out)
+	return out.Space, out.Applied, nil
+}
+
+// systemSubject 系统动作统一主体（独立可审计；与 builtin 负责人 principal 同名）。
+var systemSubject = Subject{Name: "system", Class: ClassSystem}
+
+// PauseExpired 租约过期自动暂停（W04-02 调度前置检查专用；system 主体内部动作，
+// 仅在「有新增派发意图待投递」时由调度器触发——HTTP 空闲不判死纪律）：运行态 +
+// 当前负责人租约已过期（严格 now > LeaseUntil）→ 空间转 paused（暂停原因=租约
+// 过期），同一事务内把未投递的 pending 意图按取消收束（意图授权随租约失效，绝不
+// 在过期权限下执行；已投递的 accepted 意图不受影响——在途结果照常收敛落账）。
+// 返回变更后的空间与被取消的意图数（重放返回原回执）。幂等：非运行态或租约未过期
+// 零变更。
+func (s *Store) PauseExpired(spaceID, reason string) (Space, int, error) {
+	type expireResult struct {
+		Space     Space `json:"space"`
+		Cancelled int   `json:"cancelled"`
+	}
+	now := s.now()
+	opID := fmt.Sprintf("syspausex:%s:%s:v%d:t%d", spaceID, truncateNote(reason), spVersionOf(s, spaceID), now.Unix())
+	raw, _, err := s.apply(opID, "pause_expired",
+		struct {
+			SpaceID string `json:"space_id"`
+			Reason  string `json:"reason"`
+		}{spaceID, reason}, func(next *state) (any, error) {
+			sp, ok := next.Spaces[spaceID]
+			if !ok {
+				return nil, ErrNotFound
+			}
+			out := expireResult{Space: *cloneSpace(sp)}
+			if sp.Status != StatusRunning || sp.Leader.LeaseValid(now) || sp.Leader.LeaseUntil.IsZero() {
+				return out, nil // 幂等零变更（已暂停/未过期/无租约形态）
+			}
+			if !CanTransition(sp.Status, StatusPaused) {
+				return nil, errf(ErrIllegalTransition, "pause_expired：状态 %s 不可暂停", sp.Status)
+			}
+			sp.Used.settleRunning(now)
+			sp.Status = StatusPaused
+			sp.PausedReason = truncateNote(reason)
+			sp.Version++
+			sp.UpdatedAt = now
+			sp.appendEvent(now, "lease_expired_pause", systemSubject.String(), truncateNote(reason))
+			list := next.Intents[spaceID]
+			for i := range list {
+				if list[i].Status != IntentPending {
+					continue
+				}
+				list[i].Status = IntentCancelled
+				list[i].Note = truncateNote("租约过期自动暂停：未投递意图取消收束（不执行；重新派发须待恢复后显式发起）")
+				list[i].UpdatedAt = now
+				out.Cancelled++
+			}
+			out.Space = *cloneSpace(sp)
+			return out, nil
+		})
+	if err != nil {
+		return Space{}, 0, err
+	}
+	var out expireResult
+	_ = json.Unmarshal(raw, &out)
+	return out.Space, out.Cancelled, nil
+}
+
+// spVersionOf 空间当前版本快照（幂等键成分；空间不存在返回 0——fn 内 NotFound）。
+func spVersionOf(s *Store, spaceID string) int64 {
+	sp, ok := s.Space(spaceID)
+	if !ok {
+		return 0
+	}
+	return sp.Version
 }
 
 // derivedHex 由请求 ID 派生定长 hex（确定性空间 ID；sha256 前 16 字节）。

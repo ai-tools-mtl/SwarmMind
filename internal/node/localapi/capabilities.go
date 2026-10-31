@@ -8,8 +8,9 @@
 //     布尔（编排门同源 McpAccess.Enabled()），非凭据非配置内容；
 //   - 功能标记反映**实际装配**：会话内核未装配 → sessions=false（与端点 503
 //     session_unsupported 同一判定源 Service.SessionsEnabled()）；hub 专属能力
-//     （工作单/协作群/派发建议）node 面恒 false——如实标注不虚构；spaces 恒
-//     false（未实现）；
+//     （工作单/协作群/派发建议）node 面恒 false——如实标注不虚构；spaces 与
+//     collab 存储装配同源（W04-02 起派发/消息/MCP 空间工具全链在位，装配即
+//     true——禁空壳承诺：未装配仍 false）；
 //   - 版本复用 Config.Version（cmd/node 经 -X main.version 注入，与
 //     /api/v1/local/status 的 server_version 同源，maturity-version-var）；
 //   - 鉴权 authRead 只读门（local_token/prime_token 皆可）：元信息无敏感，持任
@@ -41,7 +42,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"groups":             false, // hub 专属
 			"dispatch_suggest":   false, // hub 专属（决策服务内嵌 hub）
 			"notify":             s.cfg.Notify != nil,
-			"spaces":             false, // 未实现（规划中），如实标注不虚构
+			"spaces":             s.cfg.Collab != nil, // W04-02：与 collab 装配同源（派发/消息/MCP 工具全链在位；未装配 false 如实）
 		},
 	})
 }

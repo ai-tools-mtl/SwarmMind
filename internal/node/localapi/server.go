@@ -310,10 +310,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local/sessions", s.authLocal(s.handleLocalSessionList))              // 列表（内核快照）
 	mux.HandleFunc("GET /api/v1/local/sessions/{id}", s.authLocal(s.handleLocalSessionGet))          // 详情（含轮次留痕）
 	mux.HandleFunc("POST /api/v1/local/sessions/{id}/close", s.authLocal(s.handleLocalSessionClose)) // 关闭（幂等）
-	mux.HandleFunc("POST /api/v1/spaces", s.authLocal(s.handleSpaceCreate))                          // 空间创建（W04-01，主人面·六.六豁免⑯）
-	mux.HandleFunc("GET /api/v1/spaces", s.authLocal(s.handleSpaceList))                             // 列表
-	mux.HandleFunc("GET /api/v1/spaces/{id}", s.authLocal(s.handleSpaceGet))                         // 详情
-	mux.HandleFunc("POST /api/v1/spaces/{id}/control", s.authLocal(s.handleSpaceControl))            // 控制骨架（逐动作授权表）
+	mux.HandleFunc("POST /api/v1/spaces", s.authSpaceSubject(s.handleSpaceCreate))                               // 空间创建（W04-02 分层：主人/orchestrate·豁免⑯收窄）
+	mux.HandleFunc("GET /api/v1/spaces", s.authRead(s.handleSpaceList))                                          // 列表（只读，双凭证）
+	mux.HandleFunc("GET /api/v1/spaces/{id}", s.authRead(s.handleSpaceGet))                                      // 详情
+	mux.HandleFunc("POST /api/v1/spaces/{id}/control", s.authSpaceSubject(s.handleSpaceControl))                 // 控制骨架（逐动作授权表+resume 确认门）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/dispatches", s.authSpaceSubject(s.handleSpaceDispatch))             // 指名派发（W04-02：意图持久+串行调度）
+	mux.HandleFunc("GET /api/v1/spaces/{id}/dispatches/{request_id}", s.authRead(s.handleSpaceDispatchGet))      // 派发/意图查询（轮终投影）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/messages", s.authSpaceSubject(s.handleSpaceMessagePost))            // 发言（零唤醒记账，N01）
+	mux.HandleFunc("GET /api/v1/spaces/{id}/messages", s.authRead(s.handleSpaceMessagesGet))                     // 增量读（since 游标只读）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

@@ -156,10 +156,10 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	srv, led, workdir := newLocalNode(t, "echo")
 	bd := newNodeBackendFor(srv.URL)
 
-	// 工具清单：本机十一件套（六件套 + W01-04 会话四工具 + W02-02 capabilities；
-	// 无 hub 专属工具）。W02-02 契约改写：submit 描述按新授权语义断言（mcpaccess
-	// 授权门 + 403 mcp_disabled 指路），「接入即统筹」旧话术退役
-	// （docs/tasks/v3/W02-01-rfc.md §4.2 / W02-mcp-access.md W02-02 行）。
+	// 工具清单：本机十七件套（六件套 + W01-04 会话四工具 + W04-02 空间六工具
+	// + W02-02 capabilities；无 hub 专属工具）。W02-02 契约改写：submit 描述按新
+	// 授权语义断言（mcpaccess 授权门 + 403 mcp_disabled 指路），「接入即统筹」
+	// 旧话术退役（docs/tasks/v3/W02-01-rfc.md §4.2 / W02-mcp-access.md W02-02 行）。
 	names := []string{}
 	for _, td := range bd.tools() {
 		names = append(names, td.Name)
@@ -167,7 +167,10 @@ func TestNodeBackendToolsEndToEnd(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
 		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact",
 		"swarmmind_session_create", "swarmmind_session_send",
-		"swarmmind_session_list", "swarmmind_session_status", "swarmmind_capabilities"}
+		"swarmmind_session_list", "swarmmind_session_status",
+		"swarmmind_space_create", "swarmmind_space_list", "swarmmind_space_status",
+		"swarmmind_space_dispatch", "swarmmind_space_control", "swarmmind_space_messages",
+		"swarmmind_capabilities"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("node 工具清单不符: %v", names)
 	}
@@ -549,8 +552,19 @@ func TestSubprocessNodeStdioHandshake(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &listRes); err != nil {
 		t.Fatalf("tools/list 应答解析失败: %v", err)
 	}
-	if len(listRes.Tools) != 11 {
-		t.Fatalf("node 模式应 11 工具, got %d", len(listRes.Tools))
+	// W04-02 起十七件：六件套 + 会话四工具 + 空间六工具（W04-02，豁免⑯收窄装配）
+	// + capabilities。
+	if len(listRes.Tools) != 17 {
+		t.Fatalf("node 模式应 17 工具, got %d", len(listRes.Tools))
+	}
+	var hasSpaceDispatch bool
+	for _, td := range listRes.Tools {
+		if td.Name == "swarmmind_space_dispatch" {
+			hasSpaceDispatch = true
+		}
+	}
+	if !hasSpaceDispatch {
+		t.Fatal("tools/list 应含 swarmmind_space_dispatch（W04-02 空间六工具）")
 	}
 	var hasCap bool
 	for _, td := range listRes.Tools {

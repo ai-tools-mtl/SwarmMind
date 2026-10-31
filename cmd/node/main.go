@@ -384,6 +384,11 @@ func run(cfgPath, dataDirOverride string) error {
 		// 会话操作服务（W01-03）：受理守卫/取消记账/关闭防护/重启收敛/工作区授权
 		//（见上方装配注记）。
 		SessionOps: sessionOps,
+		// 空间协作存储（W04-02 执行侧）：串行调度/意图收敛/重启对账/绑定守卫
+		//（spacedispatch.go；spaces REST 派发/消息面的数据链）。与 localapi 同一
+		// spacesStore 实例——单进程单真相。
+		Collab: spacesStore,
+		NodeID: cfg.NodeID,
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；

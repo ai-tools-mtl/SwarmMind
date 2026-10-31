@@ -166,7 +166,8 @@ func TestNodeBackendSessionToolsEndToEnd(t *testing.T) {
 	srv, _, cwd := newLocalSessionNode(t, "")
 	bd := newNodeBackendFor(srv.URL)
 
-	// 工具清单：node 十一件套（六件套 + 会话四工具 + W02-02 capabilities）；无取消/关闭类工具
+	// 工具清单：node 十七件套（六件套 + 会话四工具 + W04-02 空间六工具 + W02-02
+	// capabilities）；会话组无取消/关闭类工具。
 	names := []string{}
 	for _, td := range bd.tools() {
 		names = append(names, td.Name)
@@ -174,7 +175,10 @@ func TestNodeBackendSessionToolsEndToEnd(t *testing.T) {
 	want := []string{"swarmmind_nodes", "swarmmind_agents", "swarmmind_submit",
 		"swarmmind_status", "swarmmind_wait", "swarmmind_artifact",
 		"swarmmind_session_create", "swarmmind_session_send",
-		"swarmmind_session_list", "swarmmind_session_status", "swarmmind_capabilities"}
+		"swarmmind_session_list", "swarmmind_session_status",
+		"swarmmind_space_create", "swarmmind_space_list", "swarmmind_space_status",
+		"swarmmind_space_dispatch", "swarmmind_space_control", "swarmmind_space_messages",
+		"swarmmind_capabilities"}
 	if fmt.Sprint(names) != fmt.Sprint(want) {
 		t.Fatalf("node 工具清单不符: %v", names)
 	}

@@ -47,6 +47,11 @@ const (
 	// MaxEventsPerSpace 单空间审计事件滚动上限（超限丢最旧；审计主链在意图与
 	// 空间字段，事件表是解释面）。
 	MaxEventsPerSpace = 200
+	// MaxMessagesPerSpace 单空间消息滚动上限（超限丢最旧；增量读响应标注裁剪
+	// 位置 pruned_before_seq，同旧群信箱约定——since 游标只对窗口内消息有效）。
+	MaxMessagesPerSpace = 1000
+	// MaxMessageText 单条消息正文上限（字节，截断；防快照膨胀）。
+	MaxMessageText = 16 << 10
 	// MaxBodyNote 控制备注/原因字段上限（字节），防快照膨胀。
 	MaxNoteBytes = 4 << 10
 )

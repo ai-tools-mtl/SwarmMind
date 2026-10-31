@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/inputs"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
@@ -80,6 +81,16 @@ type Config struct {
 	// 收敛（New 内一次性执行，先于任何恢复重投）。生产装配归 W01-03（cmd/node
 	// 属 W01-02 批次禁区）；docs/tasks/v3/W01-02-rfc.md 为定案依据。
 	SessionOps *sessionop.Service
+	// Collab 空间协作存储（W04-02 执行侧接线，internal/collab；nil = 全部空间
+	// 判定短路，既有非空间行为零变化）。职责：空间派发串行调度（spacedispatch.go，
+	// 意图 outbox → 串行投递 → 轮终收敛分类）、会话空间绑定守卫
+	//（space_dispatch_required——绑定会话的普通续轮拒绝，指向空间派发）、重启
+	// 对账闭环（RecoverIntents 按实物分类，绝不自动重跑）。生产装配 cmd/node。
+	// docs/tasks/v3/W04-01-rfc.md 为模型定案依据。
+	Collab *collab.Store
+	// NodeID 本机节点 ID（空间派发任务的 TargetNode 展示值；localapi 同源）。
+	// 空 = 空间派发任务 TargetNode 留空（仅展示，不影响执行）。
+	NodeID string
 }
 
 // Service node 任务服务：transport.Transport 的订阅者与发送方。
@@ -144,6 +155,15 @@ type Service struct {
 	// 不再得到相同 seq/IdemKey（与 hub 侧「写事务内分配轮号」同一原则，边界为
 	// 本机提交互斥锁；锁内仅账本追加，微秒级，不同会话串行无感）。
 	localMu sync.Mutex
+
+	// collab 空间协作存储（W04-02，Config.Collab 注入；nil = 全部空间判定短路，
+	// 零行为变化）。串行调度/收敛分类/重启对账/绑定守卫的接线点见 spacedispatch.go。
+	collab *collab.Store
+
+	// muSpaceAdv / spaceAdv 单空间调度推进单飞标记（kick 合并并发触发；map 仅在
+	// muSpaceAdv 内读写——进程内并发面，无持久化）。
+	muSpaceAdv sync.Mutex
+	spaceAdv   map[string]bool
 }
 
 // EnableRemoteInputs 启用跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 模式
@@ -198,6 +218,8 @@ func New(cfg Config, tr transport.Transport) *Service {
 		roots:             cfg.ArtifactRoots,
 		sessions:          cfg.Sessions,
 		sessionOps:        cfg.SessionOps,
+		collab:            cfg.Collab,
+		spaceAdv:          make(map[string]bool),
 	}
 	for agent, root := range cfg.ArtifactRoots {
 		s.wsByAgent[agent] = agentid.WorkspaceID(root)
@@ -216,6 +238,13 @@ func New(cfg Config, tr transport.Transport) *Service {
 		} else if n > 0 {
 			log.Printf("[node] 会话轮重启收敛：非终态受理轮 %d 条已落待核对终态（不重跑）", n)
 		}
+	}
+	// 空间意图重启对账（W04-02 RecoverIntents 对账闭环，spacedispatch.go）——接在
+	// 会话轮收敛之后（账本受理轮已终态化，按实物分类有据）：pending（未投递）取消
+	// 收束不自动重跑；accepted（已投递）按账本终态分类，不确定留待核对。绝不凭回
+	// 调自动重跑（任务书红线）。
+	if s.collab != nil {
+		s.recoverSpaceIntents()
 	}
 	// 孤儿清扫（maturity-orphan-guard）：崩溃重启后，账本 recover 收集的孤儿
 	// 清单（started 降级时登记 pgid>0 的条目）做身份校验并整组终止（校验不过/
@@ -263,10 +292,17 @@ func New(cfg Config, tr transport.Transport) *Service {
 		}
 	}
 	tr.Subscribe(s.HandleFrame)
-	s.wg.Add(3)
+	n := 3
+	if s.collab != nil {
+		n++ // 空间串行调度兜底扫查（spacedispatch.go；仅扫有在途意图的空间）
+	}
+	s.wg.Add(n)
 	go s.resendWorker()
 	go s.resendLoop()
 	go s.cleanupLoop()
+	if s.collab != nil {
+		go s.spaceSweepLoop()
+	}
 	return s
 }
 
@@ -533,6 +569,7 @@ func (s *Service) execute(task protocol.Task) {
 				return
 			}
 			s.convergeSessionTurn(task) // 过期=终态：释放 CancelTurn 等待者（回执按账本判定）
+			s.spaceConvergeTurn(task, res) // 空间意图收敛分类（非空间任务零操作；failed→记账码如实）
 			s.notifyTerminal(task.ID) // 过期=终态，同走终态旁路（standalone 通知）
 			s.sendResult(task.ID, res)
 			return
@@ -606,6 +643,10 @@ func (s *Service) execute(task protocol.Task) {
 		// 终态已落盘：收敛会话轮取消句柄（释放 CancelTurn 等待者；回执按账本终态
 		// 直读，落盘先行消除回执轮询窗口）。意图复查不依赖句柄（句柄此刻才移除）。
 		s.convergeSessionTurn(task)
+		// 空间意图轮终收敛分类（W04-02，spacedispatch.go）：completed→converged /
+		// failed→记账码如实 / cancelled→cancelled+停队 / 不确定→留待核对。非空间
+		// 任务零操作（SessionOwnerSpace 未绑定早退）。
+		s.spaceConvergeTurn(task, final)
 		s.notifyTerminal(task.ID) // 首次落终态即通知（重臂失败早退也不漏——终态已成立）
 		// P1-2 取消回写对账：确以 cancelled 收尾时，账本租约与本帧 cancel_fence
 		// 取大者重臂后再回带——重派租约已推进而 node 未及重臂（如 ack 丢后重派

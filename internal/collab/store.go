@@ -31,7 +31,9 @@ type OpReceipt struct {
 
 // state 快照根结构。Intents 按 spaceID 分组追加（收敛不改写历史行，只改
 // Status/UpdatedAt）；SessionOwners 全局会话归属（一线程唯一空间）；Ops 回执表
-// 滚动上限淘汰；TermSeq 服务端 term 分配计数（永不复用的结构保证）。
+// 滚动上限淘汰；TermSeq 服务端 term 分配计数（永不复用的结构保证）；Messages
+// 按 spaceID 分组的消息账本（W04-02，滚动保留最新 MaxMessagesPerSpace 条——
+// 加法字段：旧快照缺省为空，加载 nil 守卫补齐，不升 stateVersion）。
 type state struct {
 	Version       int                         `json:"version"`
 	Spaces        map[string]*Space           `json:"spaces"`
@@ -39,6 +41,7 @@ type state struct {
 	SessionOwners map[string]string           `json:"session_owners"`
 	Ops           map[string]OpReceipt        `json:"ops"`
 	TermSeq       map[string]uint64           `json:"term_seq"`
+	Messages      map[string][]SpaceMessage   `json:"messages,omitempty"`
 }
 
 func newState() *state {
@@ -49,6 +52,7 @@ func newState() *state {
 		SessionOwners: map[string]string{},
 		Ops:           map[string]OpReceipt{},
 		TermSeq:       map[string]uint64{},
+		Messages:      map[string][]SpaceMessage{},
 	}
 }
 
@@ -70,6 +74,9 @@ func (st *state) clone() *state {
 	}
 	for id, t := range st.TermSeq {
 		n.TermSeq[id] = t
+	}
+	for id, list := range st.Messages {
+		n.Messages[id] = append(make([]SpaceMessage, 0, len(list)), list...)
 	}
 	return n
 }
@@ -195,6 +202,9 @@ func loadState(path string) (*state, error) {
 	}
 	if st.TermSeq == nil {
 		st.TermSeq = map[string]uint64{}
+	}
+	if st.Messages == nil {
+		st.Messages = map[string][]SpaceMessage{}
 	}
 	return st, nil
 }
@@ -415,6 +425,36 @@ func (s *Store) RecoverIntents() []DispatchIntent {
 	return out
 }
 
+// IntentByRequest 按请求 ID 查空间意图（W04-02 派发受理重放预检与
+// GET /dispatches/{request_id} 查询的数据源；登记序扫描，意图列表有界）。
+func (s *Store) IntentByRequest(spaceID, requestID string) (DispatchIntent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, it := range s.st.Intents[spaceID] {
+		if it.RequestID == requestID {
+			return it, true
+		}
+	}
+	return DispatchIntent{}, false
+}
+
+// SpaceMessages 空间消息增量读（since 之后的消息升序；返回裁剪位置——窗口外
+// 更早消息已滚动淘汰，调用方以 pruned_before 校正游标，同旧群信箱约定）。
+func (s *Store) SpaceMessages(spaceID string, since int64) (msgs []SpaceMessage, prunedBefore int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.st.Messages[spaceID]
+	if len(list) > 0 {
+		prunedBefore = list[0].Seq - 1 // 窗口首条之前的 seq 已淘汰
+	}
+	for _, m := range list {
+		if m.Seq > since {
+			msgs = append(msgs, m)
+		}
+	}
+	return msgs, prunedBefore
+}
+
 // SessionOwnerSpace 会话归属空间查询（一线程唯一归属；sessionop W04-02 接线的
 // 判定源：命中即拒绝普通 session_send，指向 space dispatch，RFC §1.4 方案 A）。
 func (s *Store) SessionOwnerSpace(sessionID string) (string, bool) {
@@ -423,6 +463,10 @@ func (s *Store) SessionOwnerSpace(sessionID string) (string, bool) {
 	spid, ok := s.st.SessionOwners[sessionID]
 	return spid, ok
 }
+
+// maxMessagesPerSpace 消息滚动上限生效值（var 仅为测试缩小——生产恒等于
+// MaxMessagesPerSpace；同账本清理节拍先例，不做配置面）。
+var maxMessagesPerSpace = MaxMessagesPerSpace
 
 // leaseTTLFor 单次授予/续约时长：显式秒数（>0）截到上限，否则默认 TTL。
 func (s *Store) leaseTTLFor(seconds int) (time.Duration, error) {

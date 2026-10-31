@@ -264,6 +264,18 @@ type DispatchIntent struct {
 	UpdatedAt  time.Time    `json:"updated_at"`
 }
 
+// SpaceMessage 空间消息（W04-02 消息账本）：普通发言落账独立于执行——消息与
+// 游标不触发任何执行（N01 零唤醒）。Seq 空间内单调递增从 1 起（增量读 since
+// 游标）；滚动保留最新 MaxMessagesPerSpace 条（更早的经 pruned_before_seq 如实
+// 标注，同旧群信箱约定）。Member 空 = 主人发言（主体归属见 By）。
+type SpaceMessage struct {
+	Seq       int64     `json:"seq"`
+	Member    string    `json:"member,omitempty"` // 发言归属成员（空=主人）
+	Text      string    `json:"text"`
+	By        string    `json:"by"` // 服务端已验证调用主体（Class:Name；审计主体非请求自报）
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // SpaceEvent 空间审计事件（滚动保留最新 MaxEventsPerSpace 条；解释面）。
 type SpaceEvent struct {
 	At    time.Time `json:"at"`

@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/agentid"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/sessionop"
@@ -92,6 +93,13 @@ func (s *Service) sessionTurnFinish(task protocol.Task, res protocol.TaskResult,
 		return sessionCancelledResult(seq, sessionop.ClassifyCancelTurn(conv.kernelTurn), res, protocol.NowUTC())
 	}
 	return res
+}
+
+// spaceDispatchRequiredErr 空间绑定会话的普通续轮拒绝（W04-01 RFC §1.4 方案 A
+// 定案：调度单入口=space dispatch；文案固定，指向空间派发）。
+func spaceDispatchRequiredErr() *RemoteError {
+	return &RemoteError{Code: collab.CodeSpaceDispatchRequired,
+		Msg: strings.TrimPrefix(collab.ErrSpaceDispatchRequired.Error(), "collab: ")}
 }
 
 // sessionCancelledResult 取消意图轮的终态改写（RFC §3 矩阵）：queued/executed →
@@ -190,6 +198,9 @@ func (s *Service) finishCancelledSessionTurnBeforeRun(task protocol.Task) {
 			task.ID, task.Session.SessionID, task.Session.TurnSeq)
 	}
 	s.convergeSessionTurn(task)
+	// 空间意图取消收敛（W04-02）：排队取消落 cancelled 终态 → 意图按取消收束 +
+	// 停队（不再派发下一棒）；非空间任务零操作。
+	s.spaceConvergeTurn(task, res)
 }
 
 // sessionTurnWsKey 会话轮的 workdir 互斥键（RFC §5：扩展既有 wsMutex 键口径，
@@ -259,6 +270,14 @@ func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (p
 	}
 	if ref.PermissionMode != "" && sessionPermissionDenylist[ref.PermissionMode] {
 		return failed(sessionErrPermission, fmt.Sprintf("权限模式 %q 为全权档位，平台拒绝执行（提权须本机主人显式改配）", ref.PermissionMode))
+	}
+	// 空间绑定执行口守卫（W04-02，RFC §1.4 方案 A 的执行侧兜底）：已绑定协作空间
+	// 的会话，建轮/续轮只允许本调度器投递的意图轮（意图 accepted 且 TaskID 与本
+	// 任务一致——服务端生成不可伪造），hub 下发或本机直投的旁路轮一律拒绝并指向
+	// 空间派发；cancel/close 管理动作放行（取消保护依赖）。非空间会话零变化。
+	if !s.spaceTurnAllowed(task) {
+		return failed(collab.CodeSpaceDispatchRequired,
+			"该会话已绑定协作空间：普通会话轮不得绕过空间调度推进成员线程，请经空间派发（space dispatch）")
 	}
 	switch ref.Op {
 	case protocol.SessionTurnOpCreate:
@@ -465,6 +484,15 @@ func (s *Service) SubmitSessionTurnLocal(req LocalSessionTurnRequest) (*LocalTur
 		s.localMu.Unlock()
 		return nil, err
 	}
+	// 空间绑定守卫（W04-02，RFC §1.4 方案 A）：已绑定协作空间的会话不得经普通
+	// 续轮推进成员线程——调度单入口是 space dispatch（主人 local 直连同样受控；
+	// 新会话 ID 不可能已绑定，零开销跳过）。非空间会话零变化。
+	if s.collab != nil && req.SessionID != "" {
+		if _, bound := s.collab.SessionOwnerSpace(sessionID); bound {
+			s.localMu.Unlock()
+			return nil, spaceDispatchRequiredErr()
+		}
+	}
 	// sessionop 受理守卫（W01-02 RFC §2/§5；与入账同锁域，杜绝「检查后入账」竞态；
 	// 拒绝即零副作用——无账本条目、高水位不推进、CLI 不执行）。未装配 sessionop
 	// 时全部短路（行为与既有逐字节一致）。
@@ -634,7 +662,7 @@ func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, prom
 					Msg: fmt.Sprintf("turn_seq=%d 已被不同内容占用（响应丢失重试须原样重发同文）", req.TurnSeq)}
 			}
 			return &LocalTurnAck{SessionID: sid, TurnSeq: req.TurnSeq,
-				Op:     replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
+				Op: replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
 				TaskID: e.Task.ID, TraceID: e.Task.TraceID}, protocol.Task{}, true, nil
 		}
 		if inKernel && req.TurnSeq <= int64(sess.TurnCount) {
@@ -642,6 +670,14 @@ func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, prom
 			//（绝不拿不可核对的序号冒充重放回执）。
 			return nil, protocol.Task{}, false, &RemoteError{Code: "turn_seq_conflict",
 				Msg: fmt.Sprintf("turn_seq=%d 已执行且受理留痕已过保留期，无法核对原文重放", req.TurnSeq)}
+		}
+	}
+	// 空间绑定守卫（W04-02，RFC §1.4 方案 A）：重放路径已先行返回（零副作用回执
+	// 不受守卫影响），此处拦新投递——已绑定协作空间的会话不得经普通 session_send
+	// 推进成员线程（指向空间派发；主人面同规，提交侧 sessionturn.go）。
+	if s.collab != nil {
+		if _, bound := s.collab.SessionOwnerSpace(sid); bound {
+			return nil, protocol.Task{}, false, spaceDispatchRequiredErr()
 		}
 	}
 	// 推导（内核已发布 / pending 登记双源）。

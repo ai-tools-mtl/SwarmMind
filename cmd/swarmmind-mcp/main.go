@@ -224,14 +224,18 @@ func (nodeBackend) initResult() map[string]any {
 			capDiscoverHint +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。" +
 			"会话四工具（session_create/send/list/status）投影本机 agent 会话面：会话固定建在本机，" +
-			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。",
+			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。" +
+			"空间六工具（space_create/list/status/dispatch/control/messages）投影本机协作空间面：" +
+			"编排主体可领取待领取空间、配置成员、显式启动并指名派发（同空间串行，结果落账不自动触发下一轮）；" +
+			"预算/策略/定版/归档为主人专属（control 工具不受理）；消息只读不唤醒。",
 	}
 }
 
-// nodeTools node 模式工具清单：本机六件套（全网目录/群聊/decide/dispatch_suggest
-// 为 hub 专属——决策服务在 hub 内嵌，node 无此能力，不静默降级）。
+// nodeTools node 模式工具清单：本机六件套 + 会话四工具 + 空间六工具（W04-02）+
+// capabilities（全网目录/群聊/decide/dispatch_suggest 为 hub 专属——决策服务在
+// hub 内嵌，node 无此能力，不静默降级）。
 func (nodeBackend) tools() []toolDef {
-	return []toolDef{
+	tools := []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看本机节点信息（单条）：节点 ID、形态（setup/standalone/组网）、本机管家声明、hub 连接、执行账本三态计数与账本终态保留生效值", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看本机可用能力（agent 目录）：本机提供哪些可调用的 agent、各自描述与今日执行次数", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_submit", Description: "向本机 agent 派发任务（本机编排：需共享编排凭据 SWARM_NODE_PRIME_TOKEN，且本机主人已启用 MCP 编排授权——授权未启用返回 403 mcp_disabled，由主人在控制台启用，与管家角色无关；swarmmind_capabilities 可查当前授权态）。返回任务 ID，用 swarmmind_wait 等结果；传 idem_key 重试不重复执行", InputSchema: toolObj(map[string]any{
@@ -272,9 +276,14 @@ func (nodeBackend) tools() []toolDef {
 		{Name: "swarmmind_session_status", Description: "查看本机持久会话详情：绑定快照、逐轮状态与答复摘要（轮终查询主路径）。unverified 轮=执行成立但工作结果未经证实——禁止基于未核对轮次下结论（与 hub 同词表强制提醒）。登记中会话（首轮未发布）可见 request_id、标题与受理轮态", InputSchema: toolObj(map[string]any{
 			"session_id": toolStr("会话 ID"),
 		}, "session_id")},
-		// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
-		capToolDef(),
 	}
+	// 空间六工具（W04-02，SPEC 六.六豁免⑯收窄兑现）：投影本机空间面 /api/v1/spaces*
+	// ——编排主体领取/配置/启动/派发/控制/消息读全链；预算/策略/定版/归档为主人
+	// 专属不装配（control 工具显式拒绝指路主人）。定义见 node_spaces.go。
+	tools = append(tools, spaceToolDefs()...)
+	// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
+	tools = append(tools, capToolDef())
+	return tools
 }
 
 /* ---------- 工具定义 ---------- */
@@ -1429,6 +1438,19 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		text, err = b.toolSessionList()
 	case "swarmmind_session_status":
 		text, err = b.toolSessionStatus(args)
+	// 空间六工具（W04-02，node 面；hub 模式不装配——hub 空间归 W07）。
+	case "swarmmind_space_create":
+		text, err = b.toolSpaceCreate(args)
+	case "swarmmind_space_list":
+		text, err = b.toolSpaceList()
+	case "swarmmind_space_status":
+		text, err = b.toolSpaceStatus(args)
+	case "swarmmind_space_dispatch":
+		text, err = b.toolSpaceDispatch(args)
+	case "swarmmind_space_control":
+		text, err = b.toolSpaceControl(args)
+	case "swarmmind_space_messages":
+		text, err = b.toolSpaceMessages(args)
 	case "swarmmind_capabilities":
 		text, err = b.toolCapabilities()
 	default:
