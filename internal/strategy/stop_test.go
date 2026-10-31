@@ -162,26 +162,50 @@ func TestStopFixRoundsConfigurableLimit(t *testing.T) {
 	}
 }
 
-// 失效确认计入未解：确认因版本变更作废 = 仍未解（防反复改版绕过阈值）。
-func TestStopInvalidatedConfirmationCountsAsUnresolved(t *testing.T) {
+// 建议2反例（审查者场景）：confirm@v1→失效→confirm@v2→失效→confirm@v3（对当前
+// 版本）→ 不触发停止——只统计末段连续失败，最新有效确认归零，全量累计历史失效
+// 确认不得误报「2 次未解上报」。
+func TestStopTrailingFailuresResetByValidConfirmation(t *testing.T) {
 	eng := newTestEngine(t)
 	const sp = "sp-s9"
 	v1 := mustRegisterRevision(t, eng, sp, "v1", 1)
-	id := mustIssueFixed(t, eng, sp, v1, SeverityMust) // 对 v1 确认
-	// 版本变更 → 确认失效 → 计入一次未解。
-	v2 := mustRegisterRevision(t, eng, sp, "v2", 2)
-	// 再补一次显式未解 → 累计两次 → 触发。
-	if err := eng.ClaimFix(sp, id, v2, 2, "随 v2 重修"); err != nil {
+	id := mustIssue(t, eng, sp, v1, SeverityMust)
+	space := fixtureSpace(sp, string(PhaseRework), 0)
+	confirm := func(ver string, round int64) {
+		t.Helper()
+		if err := eng.ClaimFix(sp, id, ver, round, "修"); err != nil {
+			t.Fatal(err)
+		}
+		if err := eng.RecordReReview(sp, id, ReReviewInput{Reviewer: "bob", AgainstHash: ver, Result: ReReviewConfirmed}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	confirm(v1, 1)
+	v2 := mustRegisterRevision(t, eng, sp, "v2", 2) // confirm@v1 失效①
+	confirm(v2, 2)
+	v3 := mustRegisterRevision(t, eng, sp, "v3", 3) // confirm@v2 失效②
+	confirm(v3, 3)
+	if ev := eng.EvaluateStop(space, newFakeClock().Now()); ev.ShouldPause {
+		t.Fatalf("两轮修复实际都通过复审（最新确认对当前版本）不得触发：%+v", ev.Triggers)
+	}
+	// 对照：末段连续两次显式 still_open → 触发（连续失败语义仍在）。
+	if err := eng.ClaimFix(sp, id, v3, 4, "修四"); err != nil {
 		t.Fatal(err)
 	}
-	if err := eng.RecordReReview(sp, id, ReReviewInput{Reviewer: "bob", AgainstHash: v2, Result: ReReviewStillOpen}); err != nil {
+	if err := eng.RecordReReview(sp, id, ReReviewInput{Reviewer: "bob", AgainstHash: v3, Result: ReReviewStillOpen}); err != nil {
 		t.Fatal(err)
 	}
-	ev := eng.EvaluateStop(fixtureSpace(sp, string(PhaseRework), 0), newFakeClock().Now())
+	if err := eng.ClaimFix(sp, id, v3, 5, "修五"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.RecordReReview(sp, id, ReReviewInput{Reviewer: "bob", AgainstHash: v3, Result: ReReviewStillOpen}); err != nil {
+		t.Fatal(err)
+	}
+	ev := eng.EvaluateStop(space, newFakeClock().Now())
 	if !ev.ShouldPause {
-		t.Fatal("失效确认 + 显式未解应累计达阈值触发")
+		t.Fatal("末段连续两次 still_open 应触发")
 	}
-	hasTrigger(t, ev, StopFixRounds, "")
+	hasTrigger(t, ev, StopFixRounds, "2 次修复未过复审")
 	_ = v2
 }
 

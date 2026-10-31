@@ -42,21 +42,32 @@ type StopEvaluation struct {
 	Triggers    []StopTrigger `json:"triggers,omitempty"`
 }
 
-// fixFailures 连续修复未过复审的次数（对当前版本的失效投影计入：确认被版本变
-// 更作废 = 仍未解——防反复改版绕过阈值）。pending 复核中的修复不计（还在等）。
+// fixFailures 末段连续「修复未过复审」次数（终审定案，建议2：只统计**当前仍处
+// 未解态**的失败，不全量累计历史）——从最近一次修复向前数：
+//   - still_open：计一次，继续向前（负结论现在仍然成立）；
+//   - confirmed 且对当前版本有效：终止统计并返回累计值——其之前的失败已清账，
+//     其之后（更晚）的失败已计入（「最新确认对当前版本时归零」指它作为最近一次
+//     修复时的形态）；
+//   - confirmed 但已因版本变更失效：不算修复失败（修复本身未被判负，只是版本又
+//     变了——完成门的版本匹配另把它拦住），跳过继续向前；
+//   - pending（复核中）：统计截止（还在等，不算失败）。
+//
+// 反例已封：confirm@v1→失效→confirm@v2→失效→confirm@v3（对当前版本）→ 归零，
+// 不触发「2 次未解上报」（全量累计把实际已解的历史失效确认为误报）。
 func fixFailures(is *Issue, currentHash string) int {
 	n := 0
-	for i := range is.Fixes {
+	for i := len(is.Fixes) - 1; i >= 0; i-- {
 		f := &is.Fixes[i]
 		switch f.Result {
 		case ReReviewStillOpen:
 			n++
 		case ReReviewConfirmed:
-			if f.VerifiedAgainst != currentHash {
-				n++ // 确认因版本变更失效 → 计入未解
+			if f.VerifiedAgainst == currentHash {
+				return n // 有效确认终止统计：其前失败已清账，其后失败已计入 n
 			}
+			// 失效确认：跳过（不算失败），继续向前找末段连续失败
 		default:
-			// pending（复核中）不计
+			return n // pending（复核中）：统计截止
 		}
 	}
 	return n

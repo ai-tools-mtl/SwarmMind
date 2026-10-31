@@ -15,6 +15,16 @@
 // 记录方法（Register*/Record*）是循环事实写入面，供 W05-02/03 装配层调用并自
 // 行持久化快照；StrategyHooks 三方法（strategy.go）只读这些事实做纯判定，绝无
 // 副作用——写入面与判定面严格分离。
+//
+// 【问题重开语义定案（W05-01 终审必修1，供 RFC 引用）】审查问题以稳定 ID 归档
+// 修复闭环；同 key（提出者/文件:行/标题）重报一条**已确认修复**的问题即回归重
+// 开（regression）——重报事实进入有效状态投影（IssueEffectiveState）：最近复审
+// 之后存在同 key 重报 → 有效状态回 open，重新阻塞返工触发（DecidePhaseAdvance）
+// 与完成门（EvaluateCompletion 的必须修清零）。重开问题须对**当前版本**做新一轮
+// 复审（confirmed_fixed 且 against 当前版本 hash）才再次确认。重报不改 ID
+// （Occurrences 计数），留痕区分 issue_reopened（对已确认问题的重报）与
+// issue_rereported（对未解问题的重报）。先后判定用问题事件序号
+// （Issue.EventSeq/LastReportedSeq/ReReviewRecord.Seq）承担，不依赖时钟同刻序。
 package strategy
 
 import (
@@ -198,6 +208,8 @@ type FixAttempt struct {
 // ReReviewRecord 复审记录（按序保留，永不抹改——失效留痕=记录保留 + 失效投影 +
 // Trail 事件）。
 type ReReviewRecord struct {
+	// Seq 事件序号（登记时的 Issue.EventSeq；与 LastReportedSeq 比较判重开投影）。
+	Seq         int64          `json:"seq"`
 	At          time.Time      `json:"at"`
 	Reviewer    string         `json:"reviewer"`
 	AgainstHash string         `json:"against_hash"` // 复审针对版本
@@ -229,6 +241,12 @@ type Issue struct {
 	Occurrences int `json:"occurrences"`
 	// Replies 回复次数（编写人回应往返）。
 	Replies int `json:"replies"`
+	// EventSeq 问题事件单调序号（登记/重报/复审各 +1；重开投影与恢复完整性
+	// 校验用）。
+	EventSeq int64 `json:"event_seq"`
+	// LastReportedSeq 最近一次同 key 重报的事件序号：大于最近复审记录 Seq 即
+	// 回归重开投影（见 IssueEffectiveState——重报已确认问题即回归）。
+	LastReportedSeq int64 `json:"last_reported_seq"`
 	// Fixes 修复声明（次数 = len；逐次带复审回填结论）。
 	Fixes []FixAttempt `json:"fixes,omitempty"`
 	// ReReviews 复审记录（按序保留）。
@@ -479,29 +497,34 @@ func (e *Engine) RecordIssue(spaceID string, in IssueInput) (Issue, error) {
 	now := e.now()
 	for i := range lp.Issues {
 		if lp.Issues[i].ID == id {
-			lp.Issues[i].Occurrences++
-			lp.Issues[i].UpdatedAt = now
+			// 重开投影判定先于序号推进（用推进前状态分留痕种类）。
 			kind := TrailIssueRereported
 			if IssueEffectiveState(&lp.Issues[i], in.FoundInHash) == IssueConfirmedFixed {
 				kind = TrailIssueReopened
 			}
+			lp.Issues[i].Occurrences++
+			lp.Issues[i].EventSeq++
+			lp.Issues[i].LastReportedSeq = lp.Issues[i].EventSeq
+			lp.Issues[i].UpdatedAt = now
 			e.appendTrail(lp, kind, fmt.Sprintf("%s 第 %d 次报告（%s:%d）", id, lp.Issues[i].Occurrences, in.File, in.Line))
 			return cloneIssue(&lp.Issues[i]), nil
 		}
 	}
 	issue := Issue{
-		ID:             id,
-		Severity:       in.Severity,
-		File:           strings.TrimSpace(in.File),
-		Line:           in.Line,
-		Title:          strings.TrimSpace(in.Title),
-		Reviewer:       strings.TrimSpace(in.Reviewer),
-		FoundInVersion: in.FoundInHash,
-		FoundInRound:   in.FoundInRound,
-		CreatedAt:      now,
-		UpdatedAt:      now,
-		Occurrences:    1,
-		Note:           in.Note,
+		ID:              id,
+		Severity:        in.Severity,
+		File:            strings.TrimSpace(in.File),
+		Line:            in.Line,
+		Title:           strings.TrimSpace(in.Title),
+		Reviewer:        strings.TrimSpace(in.Reviewer),
+		FoundInVersion:  in.FoundInHash,
+		FoundInRound:    in.FoundInRound,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		Occurrences:     1,
+		EventSeq:        1,
+		LastReportedSeq: 1,
+		Note:            in.Note,
 	}
 	lp.Issues = append(lp.Issues, issue)
 	e.appendTrail(lp, TrailIssueRecorded, fmt.Sprintf("%s [%s] %s:%d %s", id, string(in.Severity), issue.File, issue.Line, issue.Title))
@@ -567,8 +590,9 @@ func (e *Engine) RecordReReview(spaceID, issueID string, in ReReviewInput) error
 		return ErrIssueNotFound
 	}
 	now := e.now()
+	is.EventSeq++ // 复审事件序号 > LastReportedSeq 即清除重开投影（新一轮复审生效）
 	is.ReReviews = append(is.ReReviews, ReReviewRecord{
-		At: now, Reviewer: strings.TrimSpace(in.Reviewer), AgainstHash: in.AgainstHash,
+		Seq: is.EventSeq, At: now, Reviewer: strings.TrimSpace(in.Reviewer), AgainstHash: in.AgainstHash,
 		Result: in.Result, Note: in.Note,
 	})
 	for i := len(is.Fixes) - 1; i >= 0; i-- {
@@ -585,8 +609,43 @@ func (e *Engine) RecordReReview(spaceID, issueID string, in ReReviewInput) error
 	return nil
 }
 
-// IssueEffectiveState 问题有效状态（原始记录 + 版本匹配投影）：
+// CleanReviewRecord 空间级复审记录（终审建议3：「本轮复审零发现」——审查通过、
+// 零发现是合法终态，必须有锚点表达，否则零问题空间完成门永远版本不匹配死路）。
+type CleanReviewRecord struct {
+	At          time.Time `json:"at"`
+	Reviewer    string    `json:"reviewer"`
+	AgainstHash string    `json:"against_hash"` // 复审针对版本
+	Note        string    `json:"note,omitempty"`
+}
+
+// RecordCleanReview 登记空间级复审（空 issueID 语义的显式形态：本轮复审零发现）。
+// 最近复审锚（LastReviewedHash/At）随之推进——完成判定的版本匹配由本锚承担，
+// 与逐问题复审锚同通道。零发现不豁免其余完成输入（候选/证据/在途照查）。
+func (e *Engine) RecordCleanReview(spaceID, reviewer, againstHash, note string) error {
+	if strings.TrimSpace(reviewer) == "" {
+		return revErrf(ErrReReviewInvalid, "复审者必填")
+	}
+	if !validHash(againstHash) {
+		return revErrf(ErrReReviewInvalid, "复审版本须为 SHA-256 hex64")
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	lp := e.loop(spaceID, true)
+	now := e.now()
+	lp.CleanReviews = append(lp.CleanReviews, CleanReviewRecord{
+		At: now, Reviewer: strings.TrimSpace(reviewer), AgainstHash: againstHash, Note: note,
+	})
+	lp.LastReviewedHash = againstHash
+	lp.LastReviewedAt = now
+	e.appendTrail(lp, TrailCleanReview, fmt.Sprintf("本轮复审零发现（对 %s…，by %s）", tail(againstHash, 12), strings.TrimSpace(reviewer)))
+	return nil
+}
+
+// IssueEffectiveState 问题有效状态（原始记录 + 版本匹配 + 重开投影；不另存状态
+// 字段——单一事实源）：
 //   - 无复审记录 → open；
+//   - 最近复审之后存在同 key 重报（LastReportedSeq > 最近复审 Seq）→ open（回归
+//     重开：重报已确认问题即回归，须对当前版本新一轮复审才再确认——终审必修1）；
 //   - 最近复审 still_open → still_open（负结论不因版本变更「失效变好」）；
 //   - 最近复审 confirmed_fixed 且针对当前版本 → confirmed_fixed；
 //   - 最近复审 confirmed_fixed 但版本已变 → stale（旧 review 失效留痕：记录保留，
@@ -596,6 +655,9 @@ func IssueEffectiveState(is *Issue, currentHash string) IssueState {
 		return IssueOpen
 	}
 	last := is.ReReviews[len(is.ReReviews)-1]
+	if is.LastReportedSeq > last.Seq {
+		return IssueOpen // 回归重开（重报事实进投影；事件序号判先后，不依赖时钟同刻）
+	}
 	switch last.Result {
 	case ReReviewStillOpen:
 		return IssueStillOpen

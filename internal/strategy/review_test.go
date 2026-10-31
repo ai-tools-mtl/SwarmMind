@@ -192,6 +192,111 @@ func TestVersionChangeInvalidatesOldReviewWithTrail(t *testing.T) {
 	wantNoGap(t, gaps, "issue")
 }
 
+// 必修1反例（审查者复现形态）：must 修复闭环@v1 → 同 key 重报 → 回归重开投影
+// （IssueBlocking=true）→ 返工触发 → 完成拒绝且缺口含该问题；对当前版本新一轮
+// 复审确认后解除。
+func TestIssueReopenReblocksCompletionAndRework(t *testing.T) {
+	eng := newTestEngine(t)
+	const sp = "sp-ro1"
+	v1 := mustRegisterRevision(t, eng, sp, "v1", 1)
+	mustEvidence(t, eng, sp, v1)
+	id := mustIssueFixed(t, eng, sp, v1, SeverityMust)
+	mustCandidateFinalized(t, eng, sp, "FINAL: 方案一")
+	// 前置：重开前全满足。
+	if v := eng.EvaluateCompletion(fixtureSpace(sp, string(PhaseReview), 0)); !v.Satisfied {
+		t.Fatalf("重开前应满足：%s", v.Reason)
+	}
+	// 同 key 重报已确认问题 → 回归重开（ID 不变）。
+	re, err := eng.RecordIssue(sp, IssueInput{
+		Reviewer: "bob", Severity: SeverityMust, File: "internal/foo/bar.go", Line: 42,
+		Title: "边界检查缺失", FoundInHash: v1, FoundInRound: 1,
+	})
+	if err != nil || re.ID != id {
+		t.Fatalf("重报应同 ID：%v/%s", err, re.ID)
+	}
+	snap, _ := eng.Snapshot(sp)
+	var is Issue
+	for _, it := range snap.Issues {
+		if it.ID == id {
+			is = it
+		}
+	}
+	if got := IssueEffectiveState(&is, v1); got != IssueOpen {
+		t.Fatalf("重报已确认问题应回 open，得 %s", got)
+	}
+	if !IssueBlocking(&is, v1) {
+		t.Fatal("重开后应重新阻塞")
+	}
+	// 留痕区分：对已确认问题的重报 = issue_reopened。
+	reopened := false
+	for _, ev := range snap.Trail {
+		if ev.Kind == TrailIssueReopened {
+			reopened = true
+		}
+	}
+	if !reopened {
+		t.Fatal("缺 issue_reopened 留痕")
+	}
+	// 返工触发。
+	if d := eng.DecidePhaseAdvance(fixtureSpace(sp, string(PhaseReview), 0)); !d.Advance || d.NextPhase != string(PhaseRework) {
+		t.Fatalf("重开应触发返工判定：%+v", d)
+	}
+	// 完成拒绝且缺口含该问题。
+	gaps := eng.CompletionGaps(fixtureSpace(sp, string(PhaseReview), 0))
+	wantGap(t, gaps, "issue", id)
+	if v := eng.EvaluateCompletion(fixtureSpace(sp, string(PhaseReview), 0)); v.Satisfied {
+		t.Fatal("重开后完成应拒绝")
+	}
+	// 重开后须新一轮复审（针对当前版本）才再确认 → 解除。
+	if err := eng.ClaimFix(sp, id, v1, 2, "回归修复"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.RecordReReview(sp, id, ReReviewInput{Reviewer: "bob", AgainstHash: v1, Result: ReReviewConfirmed}); err != nil {
+		t.Fatal(err)
+	}
+	if v := eng.EvaluateCompletion(fixtureSpace(sp, string(PhaseReview), 0)); !v.Satisfied {
+		t.Fatalf("再确认后应满足：%s", v.Reason)
+	}
+}
+
+// 建议3：零问题干净复审——「复审通过、零发现」合法终态可表达，完成门版本匹配
+// 由空间级复审锚承担，不再死路。
+func TestCleanReviewAnchorsVersionNoDeadEnd(t *testing.T) {
+	eng := newTestEngine(t)
+	const sp = "sp-cr1"
+	v1 := mustRegisterRevision(t, eng, sp, "v1", 1)
+	mustEvidence(t, eng, sp, v1)
+	mustCandidateFinalized(t, eng, sp, "FINAL: 方案一")
+	// 零问题且无任何复审锚：版本不匹配缺口（修复前死路形态）。
+	gaps := eng.CompletionGaps(fixtureSpace(sp, string(PhaseReview), 0))
+	wantGap(t, gaps, "version", "版本不匹配")
+	// 空间级复审（零发现）→ 锚推进 → 放行。
+	if err := eng.RecordCleanReview(sp, "bob", v1, "全量过查无发现"); err != nil {
+		t.Fatal(err)
+	}
+	snap, _ := eng.Snapshot(sp)
+	if snap.LastReviewedHash != v1 || len(snap.CleanReviews) != 1 || snap.LastReviewedAt.IsZero() {
+		t.Fatalf("零发现复审锚未推进：%+v", snap)
+	}
+	wantNoGap(t, gaps2(t, eng, sp), "version")
+	if v := eng.EvaluateCompletion(fixtureSpace(sp, string(PhaseReview), 0)); !v.Satisfied {
+		t.Fatalf("干净复审后应满足：%s", v.Reason)
+	}
+	// 参数校验。
+	if err := eng.RecordCleanReview(sp, "", v1, ""); !errors.Is(err, ErrReReviewInvalid) {
+		t.Fatalf("缺复审者应拒绝：%v", err)
+	}
+	if err := eng.RecordCleanReview(sp, "bob", "nothex", ""); !errors.Is(err, ErrReReviewInvalid) {
+		t.Fatalf("hash 非法应拒绝：%v", err)
+	}
+}
+
+// gaps2 重取缺口清单（wantNoGap 作用在旧切片上的防护）。
+func gaps2(t *testing.T, eng *Engine, sp string) []Gap {
+	t.Helper()
+	return eng.CompletionGaps(fixtureSpace(sp, string(PhaseReview), 0))
+}
+
 func TestEvidenceRecordingRules(t *testing.T) {
 	eng := newTestEngine(t)
 	const sp = "sp-r4"

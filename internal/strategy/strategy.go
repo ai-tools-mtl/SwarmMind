@@ -99,6 +99,7 @@ const (
 	TrailReReviewRecorded  TrailKind = "rereview_recorded"
 	TrailDisputeSet        TrailKind = "dispute_set"
 	TrailDisputeCleared    TrailKind = "dispute_cleared"
+	TrailCleanReview       TrailKind = "clean_review" // 空间级复审零发现（建议3）
 	TrailPhaseChanged      TrailKind = "phase_changed"
 )
 
@@ -119,13 +120,14 @@ type DisputeRecord struct {
 // SpaceLoop 单空间写审循环事实（本包只存事实，不存阶段——阶段真相唯一归属
 // collab.Space.Phase，W05-03 经 Engine.SetPhase 校验后写入 collab）。
 type SpaceLoop struct {
-	SpaceID    string         `json:"space_id"`
-	Candidates []Candidate    `json:"candidates,omitempty"`
-	Revisions  []Revision     `json:"revisions,omitempty"` // 登记序；末位 = 当前版本
-	Issues     []Issue        `json:"issues,omitempty"`
-	Dispute    *DisputeRecord `json:"dispute,omitempty"`
+	SpaceID      string              `json:"space_id"`
+	Candidates   []Candidate         `json:"candidates,omitempty"`
+	Revisions    []Revision          `json:"revisions,omitempty"` // 登记序；末位 = 当前版本
+	Issues       []Issue             `json:"issues,omitempty"`
+	CleanReviews []CleanReviewRecord `json:"clean_reviews,omitempty"` // 空间级复审零发现锚（建议3）
+	Dispute      *DisputeRecord      `json:"dispute,omitempty"`
 	// LastReviewedHash / LastReviewedAt 最近一次复审针对的版本与时刻（版本匹配
-	// 判定锚：代码改变使旧 review 失效）。
+	// 判定锚：代码改变使旧 review 失效；零发现复审同样推进本锚）。
 	LastReviewedHash string    `json:"last_reviewed_hash,omitempty"`
 	LastReviewedAt   time.Time `json:"last_reviewed_at,omitempty"`
 	// PausedFrom 暂停前的循环阶段（恢复目标校验；SetPhase 进 paused 记、出 paused 清）。
@@ -233,8 +235,119 @@ func (e *Engine) Snapshot(spaceID string) (SpaceLoop, bool) {
 		d := *lp.Dispute
 		out.Dispute = &d
 	}
+	out.CleanReviews = append([]CleanReviewRecord(nil), lp.CleanReviews...)
 	out.Trail = append([]TrailEvent(nil), lp.Trail...)
 	return out, true
+}
+
+// RestoreLoop 恢复单空间循环事实（终审建议4：进程重启恢复入口；Snapshot 深拷贝
+// 可逆导入）。完整性校验（损坏拒绝，宁拒恢复不带病）：空间 ID 匹配、ID 唯一且
+// 前缀合法、枚举取值合法、hash 格式合法、事件序号单调不倒挂；恢复目标空间不得
+// 已有循环事实（恢复只在空引擎/未加载空间上进行）。事实原样导入，不重盖时间戳。
+func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
+	if strings.TrimSpace(spaceID) == "" {
+		return errf(ErrInvalid, "恢复目标空间 ID 必填")
+	}
+	if snap.SpaceID != "" && snap.SpaceID != spaceID {
+		return errf(ErrInvalid, "快照空间 %q ≠ 目标空间 %q", snap.SpaceID, spaceID)
+	}
+	if snap.PausedFrom != "" && !snap.PausedFrom.Valid() {
+		return errf(ErrInvalid, "PausedFrom 非法 %q", string(snap.PausedFrom))
+	}
+	if snap.LastReviewedHash != "" && !validHash(snap.LastReviewedHash) {
+		return errf(ErrInvalid, "last_reviewed_hash 格式非法")
+	}
+	candIDs := map[string]bool{}
+	for i := range snap.Candidates {
+		c := &snap.Candidates[i]
+		if !strings.HasPrefix(c.ID, "cand-") || candIDs[c.ID] {
+			return errf(ErrInvalid, "候选 ID 非法或重复：%q", c.ID)
+		}
+		candIDs[c.ID] = true
+		if !c.Status.Valid() || strings.TrimSpace(c.Proposer) == "" {
+			return errf(ErrInvalid, "候选 %s 字段非法", c.ID)
+		}
+	}
+	revIDs := map[string]bool{}
+	for i := range snap.Revisions {
+		r := &snap.Revisions[i]
+		if !strings.HasPrefix(r.ID, "rev-") || revIDs[r.ID] {
+			return errf(ErrInvalid, "版本 ID 非法或重复：%q", r.ID)
+		}
+		revIDs[r.ID] = true
+		if !validHash(r.ContentSHA256) || (r.PatchSHA256 != "" && !validHash(r.PatchSHA256)) {
+			return errf(ErrInvalid, "版本 %s hash 格式非法", r.ID)
+		}
+		for j := range r.Dependencies {
+			if d := &r.Dependencies[j]; d.SHA256 != "" && !validHash(d.SHA256) {
+				return errf(ErrInvalid, "版本 %s 依赖 hash 非法", r.ID)
+			}
+		}
+	}
+	issueIDs := map[string]bool{}
+	for i := range snap.Issues {
+		is := &snap.Issues[i]
+		if !strings.HasPrefix(is.ID, "iss-") || issueIDs[is.ID] {
+			return errf(ErrInvalid, "问题 ID 非法或重复：%q", is.ID)
+		}
+		issueIDs[is.ID] = true
+		if !is.Severity.Valid() || !validHash(is.FoundInVersion) {
+			return errf(ErrInvalid, "问题 %s 字段非法", is.ID)
+		}
+		if is.EventSeq <= 0 || is.LastReportedSeq <= 0 || is.EventSeq < is.LastReportedSeq {
+			return errf(ErrInvalid, "问题 %s 事件序号非法/倒挂", is.ID)
+		}
+		for j := range is.ReReviews {
+			rec := &is.ReReviews[j]
+			if !rec.Result.Valid() || !validHash(rec.AgainstHash) || rec.Seq <= 0 || rec.Seq > is.EventSeq {
+				return errf(ErrInvalid, "问题 %s 复审记录非法", is.ID)
+			}
+		}
+		for j := range is.Fixes {
+			f := &is.Fixes[j]
+			if !validHash(f.VersionHash) || (f.VerifiedAgainst != "" && !validHash(f.VerifiedAgainst)) {
+				return errf(ErrInvalid, "问题 %s 修复记录 hash 非法", is.ID)
+			}
+			if f.Result != "" && !f.Result.Valid() {
+				return errf(ErrInvalid, "问题 %s 修复结论非法", is.ID)
+			}
+		}
+	}
+	for i := range snap.CleanReviews {
+		if cr := &snap.CleanReviews[i]; !validHash(cr.AgainstHash) {
+			return errf(ErrInvalid, "零发现复审记录 hash 非法")
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, exists := e.loops[spaceID]; exists {
+		return errf(ErrInvalid, "空间 %s 循环事实已存在（恢复仅在未加载空间上进行）", spaceID)
+	}
+	lp := &SpaceLoop{
+		SpaceID:          spaceID,
+		LastReviewedHash: snap.LastReviewedHash,
+		LastReviewedAt:   snap.LastReviewedAt,
+		PausedFrom:       snap.PausedFrom,
+	}
+	for _, c := range snap.Candidates {
+		lp.Candidates = append(lp.Candidates, cloneCandidate(c))
+	}
+	for i := range snap.Revisions {
+		lp.Revisions = append(lp.Revisions, cloneRevision(&snap.Revisions[i]))
+	}
+	for i := range snap.Issues {
+		lp.Issues = append(lp.Issues, cloneIssue(&snap.Issues[i]))
+	}
+	for _, cr := range snap.CleanReviews {
+		lp.CleanReviews = append(lp.CleanReviews, cr)
+	}
+	if snap.Dispute != nil {
+		d := *snap.Dispute
+		lp.Dispute = &d
+	}
+	lp.Trail = append([]TrailEvent(nil), snap.Trail...)
+	e.loops[spaceID] = lp
+	return nil
 }
 
 // SetAcceptanceDispute 验收争议登记/解除（停止条件之一；留痕）。
