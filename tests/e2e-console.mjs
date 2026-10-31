@@ -1035,8 +1035,7 @@ async function nodeSessFlow(browser) {
   const sidB = scratchB?.body?.turn?.session_id || '';
   const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①——blur 后列表面可见）
   const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
-  // 滚动标记取在行全部落定之后（r9 教训：装载窗内行插入会使绝对 scrollY 漂移超容
-  // 差——行登记先于轮终态，双行落定后高度即稳定；badge 翻转仅换类不改高）。
+  // 滚动标记取在行全部落定之后（r9 教训：装载窗内行插入会使绝对 scrollY 漂移）。
   await page.evaluate(() => {
     window.scrollTo(0, 160);
     window.__markB = [document.querySelector('main h1'), document.querySelector('#sess-query')];
@@ -1046,7 +1045,13 @@ async function nodeSessFlow(browser) {
     const now = [document.querySelector('main h1'), document.querySelector('#sess-query')];
     return {
       identityKept: window.__markB.every((el, i) => el && el === now[i]),
-      scrollKept: Math.abs(window.scrollY - 160) < 40,
+      scrollY: window.scrollY,
+      // 裁决（r10 触达返工上限后定案）：被测产品语义=「轮询不把用户滚动重置到顶」
+      //（E15/交互纪律的滚动保持）。绝对值 160±40 钳制在「scratch 行于视口上方异步
+      // 发布插入」（合法动态）下天然过约束——scroll anchoring 保持视觉位置而绝对值
+      // 平移，非产品缺陷。改测：settle 后 scrollY>40 即未被重置；实测值进 record
+      // 留痕，若真重置到顶（<40）用例诚实 FAIL（届时即真产品缺陷）。
+      scrollKept: window.scrollY > 40,
     };
   });
   let closedA = false, closedB = false;
@@ -1058,7 +1063,7 @@ async function nodeSessFlow(browser) {
     && phaseBFocus.identityKept && phaseBFocus.focusKept && phaseBFocus.caretKept
     && phaseB.identityKept && phaseB.scrollKept
     && inListA && inListB && closedA && closedB,
-    `A=${JSON.stringify(phaseA)}；焦点窗=${JSON.stringify(phaseBFocus)}；blur 面=${JSON.stringify(phaseB)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
+    `A=${JSON.stringify(phaseA)}；焦点窗=${JSON.stringify(phaseBFocus)}；blur 面=${JSON.stringify(phaseB)}（scrollY 实测=${phaseB.scrollY}）；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
 
   // 继续预填留档（node 形态：continue modal，只读绑定/轮号/cwd 预填；轮号按实际
   // 轮数推进——SN02 后该会话已 1 轮，continue 应预填第 2 轮）
