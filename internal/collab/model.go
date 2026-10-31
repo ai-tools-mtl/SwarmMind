@@ -48,9 +48,11 @@ func (s Status) Terminal() bool { return s == StatusCompleted || s == StatusAban
 
 // statusTransitions 状态转换表（显式枚举；表外路径非法）。resume 后一律回
 // running（paused/blocked/needs_review 只可能来自 running 之后的生命周期，
-// ready 态不可 pause——暂停恒指「运行中的新增派发被阻止」）。
+// ready 态不可 pause——暂停恒指「运行中的新增派发被阻止」）。pending_config →
+// pending_leader 供主人 takeover(open-claim) 开放外部领取（终审 S1：takeover
+// 的状态变更一律经本表 CanTransition 判定，不留直赋的表外通道）。
 var statusTransitions = map[Status][]Status{
-	StatusPendingConfig: {StatusReady, StatusAbandoned},
+	StatusPendingConfig: {StatusReady, StatusPendingLeader, StatusAbandoned},
 	StatusPendingLeader: {StatusPendingConfig, StatusAbandoned},
 	StatusReady:         {StatusRunning, StatusCompleted, StatusAbandoned},
 	StatusRunning:       {StatusPaused, StatusBlocked, StatusNeedsReview, StatusCompleted, StatusAbandoned},

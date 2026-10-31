@@ -190,6 +190,8 @@ type ControlRequest struct {
 
 // Control 控制动作总入口（RFC §三 逐动作表）。事务内顺序：空间存在 → 版本 CAS
 // → 授权（纯判定）→ 动作前置校验（状态机/租约/在途/成员/预算/策略）→ 变更落账。
+// 幂等指纹含目标空间维度（payload 包装 spaceID）：同 request_id 跨目标空间即
+// request_conflict，绝不静默回放他空间回执（终审 M1）。
 func (s *Store) Control(spaceID string, req ControlRequest, subj Subject) (ControlResult, bool, error) {
 	if req.Action == "" {
 		return ControlResult{}, false, errf(ErrInvalid, "action 必填")
@@ -197,8 +199,18 @@ func (s *Store) Control(spaceID string, req ControlRequest, subj Subject) (Contr
 	if !req.Action.Valid() {
 		return ControlResult{}, false, errf(ErrInvalid, "未知动作 %q", string(req.Action))
 	}
+	if req.Action == ActDispatch {
+		// 终审 S2：派发不经 Control 静默 no-op（不落回执不占 request_id）——
+		// 指名派发受理唯一入口是 RecordDispatch（先于执行持久化的 outbox 语义）。
+		return ControlResult{}, false, errf(ErrInvalid, "action=dispatch 须经派发受理入口 RecordDispatch（Control 不受理派发，本请求未登记）")
+	}
 	now := s.now()
-	raw, dup, err := s.apply(req.RequestID, "control:"+string(req.Action), req, func(next *state) (any, error) {
+	// payload 包装目标空间：内容指纹覆盖 spaceID（与 ConvergeIntent 同构，终审 M1）。
+	payload := struct {
+		SpaceID string         `json:"space_id"`
+		Req     ControlRequest `json:"req"`
+	}{spaceID, req}
+	raw, dup, err := s.apply(req.RequestID, "control:"+string(req.Action), payload, func(next *state) (any, error) {
 		sp, ok := next.Spaces[spaceID]
 		if !ok {
 			return nil, ErrNotFound
@@ -414,13 +426,17 @@ func controlPolicy(sp *Space, intents []DispatchIntent, req ControlRequest, now 
 }
 
 // controlTakeover 接管（CAS 单事务）：expected_term 与当前任期不符即拒绝（同刻
-// 两方接管只一成功）；term 服务端分配递增、永不复用。
+// 两方接管只一成功）；term 服务端分配递增、永不复用。状态变更一律经 CanTransition
+// 判定（终审 S1：表外转换直赋即双真相）。
 //   - 主人/system 选择 manual/builtin：直接就任（manual 不设租约；builtin/external
-//     授予租约），调度方式随接管 kind 切换；
+//     授予租约），调度方式随接管 kind 切换，不改状态；
 //   - 主人/system 选择 external：开放领取——清空负责人与任期（旧任期随之失效，
-//     E14「不自动抢回」的 owner 侧出口），空间转待领取，由编排主体按领取约束竞取；
-//   - 编排主体：仅领取（claimable 四条件已在授权层于本事务副本上复核），固定
-//     external，领取成功 pending_leader → pending_config。
+//     E14「不自动抢回」的 owner 侧出口），空间 pending_config → pending_leader
+//     （转换表边；其余状态拒绝 illegal_transition——运行/暂停空间的重新开放领取
+//     须先收束并放弃定版后重建，不设运行中换轨的表外通道）；
+//   - 编排主体：仅领取（claimable 四条件已在授权层于本事务副本上复核，其中
+//     Status==pending_leader 为领取前置），固定 external，领取成功
+//     pending_leader → pending_config。
 func (s *Store) controlTakeover(next *state, sp *Space, req ControlRequest, subj Subject, now time.Time) (bool, string, error) {
 	if sp.Status.Terminal() {
 		return false, "", errf(ErrIllegalTransition, "takeover：终态空间不可接管")
@@ -442,6 +458,9 @@ func (s *Store) controlTakeover(next *state, sp *Space, req ControlRequest, subj
 	if kind == LeaderExternal {
 		// 主人开放领取（或编排主体领取——claimable 保证 Term==0 时才可达此处）。
 		if subj.Class == ClassOrchestrate {
+			if !CanTransition(sp.Status, StatusPendingConfig) {
+				return false, "", errf(ErrIllegalTransition, "takeover(claim)：状态 %s 不可转待配置", sp.Status)
+			}
 			ttl, err := s.leaseTTLFor(req.LeaseSeconds)
 			if err != nil {
 				return false, "", err
@@ -454,11 +473,12 @@ func (s *Store) controlTakeover(next *state, sp *Space, req ControlRequest, subj
 			return true, fmt.Sprintf("领取：任期 %d → %s/%s 任期 %d（租约至 %s）", prev.Term,
 				string(kind), subj.Name, newTerm, sp.Leader.LeaseUntil.UTC().Format(time.RFC3339)), nil
 		}
+		if !CanTransition(sp.Status, StatusPendingLeader) {
+			return false, "", errf(ErrIllegalTransition, "takeover(open-claim)：仅待配置空间可开放外部领取（现 %s；运行中空间先收束并放弃定版）", sp.Status)
+		}
 		sp.Leader = Leader{Kind: LeaderExternal}
 		sp.Mode = ModeExternal
-		if sp.Status == StatusPendingConfig {
-			sp.Status = StatusPendingLeader
-		}
+		sp.Status = StatusPendingLeader
 		return true, fmt.Sprintf("开放外部领取：任期 %d（%s/%s）失效，空间转待领取（领取约束 policy_version=%d 不变）",
 			prev.Term, string(prev.Kind), prev.Principal, sp.Policy.PolicyVersion), nil
 	}
@@ -596,10 +616,15 @@ type DispatchRequest struct {
 // RecordDispatch 指名派发受理（RFC §1.5/§1.6）：授权（驱动者/主人-manual）→
 // 运行态 → 成员在位且已绑线程 → 预算三计中 dispatch_round/墙钟事务内复核扣减 →
 // 意图持久落账（outbox：先于执行）→ 版本递增。同 request_id 重放命中回执原样
-// 返回，不重复扣减（N02）。
+// 返回，不重复扣减（N02）。幂等指纹含目标空间维度（payload 包装 spaceID）：
+// 同 ID 跨目标空间即 request_conflict（终审 M1）。
 func (s *Store) RecordDispatch(spaceID string, req DispatchRequest, subj Subject) (DispatchIntent, SpaceView, bool, error) {
 	now := s.now()
-	raw, dup, err := s.apply(req.RequestID, "dispatch", req, func(next *state) (any, error) {
+	payload := struct {
+		SpaceID string          `json:"space_id"`
+		Req     DispatchRequest `json:"req"`
+	}{spaceID, req}
+	raw, dup, err := s.apply(req.RequestID, "dispatch", payload, func(next *state) (any, error) {
 		sp, ok := next.Spaces[spaceID]
 		if !ok {
 			return nil, ErrNotFound
@@ -682,8 +707,18 @@ type MessageRequest struct {
 
 // RecordMessage 普通发言预算扣账（RFC §1.5）：消息计数独立于执行轮次；落账本身
 // 不触发任何执行（N01——消息与游标不唤醒成员）。终态空间拒收（时间线只读）。
+// 主体做非空/取值基校验（终审 S3）；「谁能向空间发言」的细粒度授权归 W04-02
+// messages 端点门（本模型层不承担），扣账只对已过门的有效主体记账。幂等指纹含
+// 目标空间维度（终审 M1，同 Control/RecordDispatch）。
 func (s *Store) RecordMessage(spaceID string, req MessageRequest, subj Subject) (MessageRecord, bool, error) {
-	raw, dup, err := s.apply(req.RequestID, "message", req, func(next *state) (any, error) {
+	if !subj.Valid() {
+		return MessageRecord{}, false, errf(ErrInvalid, "主体缺失（name/class 必填且取值合法；消息授权门归 W04-02 messages 端点）")
+	}
+	payload := struct {
+		SpaceID string         `json:"space_id"`
+		Req     MessageRequest `json:"req"`
+	}{spaceID, req}
+	raw, dup, err := s.apply(req.RequestID, "message", payload, func(next *state) (any, error) {
 		sp, ok := next.Spaces[spaceID]
 		if !ok {
 			return nil, ErrNotFound

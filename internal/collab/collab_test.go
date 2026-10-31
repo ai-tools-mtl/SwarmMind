@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -113,7 +114,7 @@ func mustRunning(t *testing.T, st *Store, extra ...func(*CreateRequest)) (string
 
 func TestStateMachineTransitionTable(t *testing.T) {
 	legal := map[Status][]Status{
-		StatusPendingConfig: {StatusReady, StatusAbandoned},
+		StatusPendingConfig: {StatusReady, StatusPendingLeader, StatusAbandoned}, // pending_leader 边=主人开放外部领取（终审 S1）
 		StatusPendingLeader: {StatusPendingConfig, StatusAbandoned},
 		StatusReady:         {StatusRunning, StatusCompleted, StatusAbandoned},
 		StatusRunning:       {StatusPaused, StatusBlocked, StatusNeedsReview, StatusCompleted, StatusAbandoned},
@@ -125,6 +126,7 @@ func TestStateMachineTransitionTable(t *testing.T) {
 	}
 	all := []Status{StatusPendingConfig, StatusPendingLeader, StatusReady, StatusRunning,
 		StatusPaused, StatusBlocked, StatusNeedsReview, StatusCompleted, StatusAbandoned}
+	legalPairs := 0
 	for _, from := range all {
 		for _, to := range all {
 			want := false
@@ -134,10 +136,16 @@ func TestStateMachineTransitionTable(t *testing.T) {
 					break
 				}
 			}
+			if want {
+				legalPairs++
+			}
 			if got := CanTransition(from, to); got != want {
 				t.Fatalf("CanTransition(%s,%s)=%v want %v", from, to, got, want)
 			}
 		}
+	}
+	if legalPairs != 26 { // 9×9=81 对全枚举；26 条合法边（含终审 S1 新增 pending_config→pending_leader 边）
+		t.Fatalf("合法边数应为 26, got %d", legalPairs)
 	}
 	// 表外路径经 Control 拒绝：pending_config 直接 pause。
 	st, _, _ := newTestStore(t)
@@ -154,6 +162,33 @@ func TestStateMachineTransitionTable(t *testing.T) {
 	_, _, err = st.Control(sp.ID, ControlRequest{RequestID: "s1", Action: ActStart, ExpectedVersion: 2}, owner)
 	if !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("终态 start 应拒绝, got %v", err)
+	}
+}
+
+// ---------- 终审 S1：takeover 状态变更经转换表（表外直赋消除） ----------
+
+func TestTakeoverOpenClaimTransitionGated(t *testing.T) {
+	st, _, _ := newTestStore(t)
+	// ready 态（非 pending_config）开放外部领取：illegal_transition（无双真相直赋）。
+	id, ver := mustRunning(t, st) // running
+	_, _, err := st.Control(id, ControlRequest{RequestID: "tk-run", Action: ActTakeover, ExpectedVersion: ver, ExpectedTerm: 1, TakeoverKind: LeaderExternal}, owner)
+	if !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("running 态开放领取应非法转换拒绝, got %v", err)
+	}
+	if sp := mustSpace(t, st, id); sp.Status == StatusPendingLeader {
+		t.Fatalf("running 态开放领取不得转 pending_leader（表外通道应封死）: %s", sp.Status)
+	} else if sp.Leader.Term == 0 {
+		t.Fatalf("非法转换应整体拒绝（任期不得清零）: %+v", sp.Leader)
+	}
+	// 合法边：pending_config → pending_leader（external 创建后领取 → 待配置 → 开放领取）。
+	ext, _, err := st.CreateSpace(CreateRequest{RequestID: "e1", Goal: "g", Mode: ModeExternal}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustControl(t, st, ext.ID, ControlRequest{RequestID: "c1", Action: ActTakeover, ExpectedVersion: 1, ExpectedTerm: 0, TakeoverKind: LeaderExternal}, steward)
+	mustControl(t, st, ext.ID, ControlRequest{RequestID: "o1", Action: ActTakeover, ExpectedVersion: 2, ExpectedTerm: 1, TakeoverKind: LeaderExternal}, owner)
+	if sp := mustSpace(t, st, ext.ID); sp.Status != StatusPendingLeader || sp.Leader.Term != 0 {
+		t.Fatalf("待配置开放领取应转待领取清任期: %+v", sp)
 	}
 }
 
@@ -839,5 +874,99 @@ func TestCorruptSnapshotRefused(t *testing.T) {
 	}
 	if perm := fi.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("快照权限应 0600, got %o", perm)
+	}
+}
+
+// ---------- 终审 M1：幂等指纹含目标空间维度（跨空间同 ID 冲突） ----------
+
+func TestCrossSpaceRequestIDConflict(t *testing.T) {
+	st, _, _ := newTestStore(t)
+	idA, verA := mustRunning(t, st)
+	idB, verB := mustRunning(t, st, func(r *CreateRequest) { r.Members = []Member{{Name: "bob", SessionID: "sess-bob"}} })
+
+	// 派发：A 空间 dup-probe 成功；B 空间同 ID 同体请求 → request_conflict，B 零副作用。
+	itA, _, dupA, err := st.RecordDispatch(idA, DispatchRequest{RequestID: "dup-probe", Member: "alice", Term: 1, ExpectedVersion: verA}, owner)
+	if err != nil || dupA {
+		t.Fatalf("A 首派: err=%v dup=%v", err, dupA)
+	}
+	if itA.SpaceID != idA {
+		t.Fatalf("A 意图归属不符: %+v", itA)
+	}
+	_, _, _, err = st.RecordDispatch(idB, DispatchRequest{RequestID: "dup-probe", Member: "bob", Term: 1, ExpectedVersion: verB}, owner)
+	if !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("跨空间同 ID 派发应 request_conflict, got %v", err)
+	}
+	bv := mustSpace(t, st, idB)
+	if len(st.Intents(idB)) != 0 || bv.Used.DispatchRounds != 0 || bv.Version != verB {
+		t.Fatalf("B 空间应零副作用: intents=%d used=%+v version=%d", len(st.Intents(idB)), bv.Used, bv.Version)
+	}
+	// A 的原始回执不受影响：同空间重放仍命中。
+	if _, _, dup, err := st.RecordDispatch(idA, DispatchRequest{RequestID: "dup-probe", Member: "alice", Term: 1, ExpectedVersion: verA}, owner); err != nil || !dup {
+		t.Fatalf("A 原重放应命中: dup=%v err=%v", dup, err)
+	}
+
+	// Control 同病同修：A pause 用 ctl-probe 成功；B 同 ID → request_conflict，B 仍 running。
+	mustControl(t, st, idA, ControlRequest{RequestID: "ctl-probe", Action: ActPause, ExpectedVersion: verA + 1}, owner)
+	_, _, err = st.Control(idB, ControlRequest{RequestID: "ctl-probe", Action: ActPause, ExpectedVersion: verB}, owner)
+	if !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("跨空间同 ID Control 应 request_conflict, got %v", err)
+	}
+	if got := mustSpace(t, st, idB).Status; got != StatusRunning {
+		t.Fatalf("B 空间不得被跨空间回执波及（现 %s）", got)
+	}
+
+	// RecordMessage 同维度：A 用 msg-probe 成功；B 同 ID → request_conflict，B 计数不动。
+	if _, dup, err := st.RecordMessage(idA, MessageRequest{RequestID: "msg-probe", ExpectedVersion: verA + 2}, owner); err != nil || dup {
+		t.Fatalf("A 消息: err=%v dup=%v", err, dup)
+	}
+	if _, _, err := st.RecordMessage(idB, MessageRequest{RequestID: "msg-probe", ExpectedVersion: verB}, owner); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("跨空间同 ID 消息应 request_conflict, got %v", err)
+	}
+	if got := mustSpace(t, st, idB).Used.Messages; got != 0 {
+		t.Fatalf("B 消息计数不得被波及: %d", got)
+	}
+}
+
+// ---------- 终审 S2：Control(dispatch) 显式拒绝且不留痕 ----------
+
+func TestControlDispatchRejectedNoReceipt(t *testing.T) {
+	st, _, _ := newTestStore(t)
+	id, ver := mustRunning(t, st)
+	// Control 受理 dispatch → invalid 指向 RecordDispatch。
+	_, _, err := st.Control(id, ControlRequest{RequestID: "cd-1", Action: ActDispatch, ExpectedVersion: ver, Term: 1}, owner)
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "RecordDispatch") {
+		t.Fatalf("Control(dispatch) 应 invalid 指向 RecordDispatch, got %v", err)
+	}
+	// 不落回执不占 ID：同 ID 立即可用于真实动作（pause）且成功。
+	mustControl(t, st, id, ControlRequest{RequestID: "cd-1", Action: ActPause, ExpectedVersion: ver}, owner)
+	// 同 ID 同文 pause 重放命中（证明回执登记的是 pause 而非残留 dispatch）。
+	if _, dup, err := st.Control(id, ControlRequest{RequestID: "cd-1", Action: ActPause, ExpectedVersion: ver}, owner); err != nil || !dup {
+		t.Fatalf("同 ID pause 重放应命中: dup=%v err=%v", dup, err)
+	}
+	if got := mustSpace(t, st, id).Status; got != StatusPaused {
+		t.Fatalf("dispatch 拒绝不得改状态: %s", got)
+	}
+}
+
+// ---------- 终审 S3：RecordMessage 主体基校验 ----------
+
+func TestRecordMessageSubjectValidated(t *testing.T) {
+	st, _, _ := newTestStore(t)
+	id, ver := mustRunning(t, st)
+	for _, bad := range []Subject{
+		{Name: "", Class: ClassOwner},
+		{Name: "x", Class: "hacker"},
+		{},
+	} {
+		if _, _, err := st.RecordMessage(id, MessageRequest{RequestID: "m-bad", ExpectedVersion: ver}, bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("非法主体 % +v 应拒, got %v", bad, err)
+		}
+	}
+	// 拒绝零副作用：版本与计数不动，且「m-bad」ID 未被占用（合法主体可复用）。
+	if v := mustSpace(t, st, id).Version; v != ver {
+		t.Fatalf("非法主体拒绝应零副作用: version=%d", v)
+	}
+	if _, dup, err := st.RecordMessage(id, MessageRequest{RequestID: "m-bad", ExpectedVersion: ver}, owner); err != nil || dup {
+		t.Fatalf("ID 未被污染，合法主体可登记: err=%v dup=%v", err, dup)
 	}
 }
