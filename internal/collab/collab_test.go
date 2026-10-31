@@ -970,3 +970,76 @@ func TestRecordMessageSubjectValidated(t *testing.T) {
 		t.Fatalf("ID 未被污染，合法主体可登记: err=%v dup=%v", err, dup)
 	}
 }
+
+// TestCrossSpaceSameBodyConflict（终审建议采纳：审查者 R1 写法）——M1 回归网加强版：
+// 三写路径（dispatch/control/message）跨空间**完全同体**请求（member/版本经填充对齐，
+// 仅 URL 目标不同）必须全部 request_conflict 且零副作用——旧内容指纹实现下此测试
+// 依然 PASS（各腿 payload 本就不同），故必须用同体形态才能钉住 M1 的 spaceID 维度。
+func TestCrossSpaceSameBodyConflict(t *testing.T) {
+	st, _, _ := newTestStore(t)
+	owner := Subject{Name: "owner", Class: ClassOwner}
+	running := func(t *testing.T, rid, sess string) (string, int64) {
+		t.Helper()
+		sp, _, err := st.CreateSpace(CreateRequest{RequestID: rid, Goal: "g", Mode: ModeManual,
+			Members: []Member{{Name: "alice", SessionID: sess}}}, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []ControlRequest{
+			{RequestID: "rdy-" + rid, Action: ActReady, ExpectedVersion: 1},
+			{RequestID: "st-" + rid, Action: ActStart, ExpectedVersion: 2},
+		} {
+			if _, _, err := st.Control(sp.ID, c, owner); err != nil {
+				t.Fatalf("%s %s: %v", rid, c.Action, err)
+			}
+		}
+		return sp.ID, 3
+	}
+	idA, vA := running(t, "A", "s-a")
+	idB, vB := running(t, "B", "s-b")
+	if vA != vB || vA != 3 {
+		t.Fatalf("前置：两空间同版本 3，得 %d/%d", vA, vB)
+	}
+	// 同体 dispatch（member/turn/term/version 全同，仅目标不同）。
+	req := DispatchRequest{RequestID: "dup-probe", Member: "alice", TurnSeq: 1, Term: 1, ExpectedVersion: vA}
+	itA, _, dupA, err := st.RecordDispatch(idA, req, owner)
+	if err != nil || dupA || itA.SpaceID != idA {
+		t.Fatalf("A 首派: err=%v dup=%v it=%+v", err, dupA, itA)
+	}
+	if _, viewB, dupB, errB := st.RecordDispatch(idB, req, owner); !errors.Is(errB, ErrRequestConflict) {
+		t.Fatalf("M1(dispatch) 未闭环: err=%v dup=%v view=%q", errB, dupB, viewB.Space.ID)
+	} else if viewB.Used.DispatchRounds != 0 || len(st.Intents(idB)) != 0 {
+		t.Fatalf("B 零副作用破坏: %+v intents=%d", viewB.Used, len(st.Intents(idB)))
+	}
+	if _, _, dup, err := st.RecordDispatch(idA, req, owner); err != nil || !dup {
+		t.Fatalf("A 原重放应命中: dup=%v err=%v", dup, err)
+	}
+	// 同体 control：两空间都对齐到 v4（A 派发后 v4；B 补一条消息到 v4）。
+	if _, _, err := st.RecordMessage(idB, MessageRequest{RequestID: "b-fill", ExpectedVersion: vB}, owner); err != nil {
+		t.Fatal(err)
+	}
+	creq := ControlRequest{RequestID: "dup-ctl", Action: ActPause, ExpectedVersion: 4, Note: "n"}
+	if _, _, err := st.Control(idA, creq, owner); err != nil {
+		t.Fatalf("A pause: %v", err)
+	}
+	if _, _, err := st.Control(idB, creq, owner); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("M1(control) 未闭环: %v", err)
+	}
+	if got := mustSpace(t, st, idB).Status; got != StatusRunning {
+		t.Fatalf("B 不得被波及: %s", got)
+	}
+	// 同体 message：两空间都对齐到 v5。
+	if _, _, err := st.RecordMessage(idA, MessageRequest{RequestID: "dup-msg", ExpectedVersion: 5}, owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.RecordMessage(idB, MessageRequest{RequestID: "dup-msg", ExpectedVersion: 5}, owner); !errors.Is(err, ErrRequestConflict) {
+		t.Fatalf("M1(message) 未闭环: %v", err)
+	}
+	if got := mustSpace(t, st, idB).Used.Messages; got != 1 {
+		t.Fatalf("B 消息计数应仍为 1（b-fill）: %d", got)
+	}
+	// 同空间同体重放契约保持。
+	if _, dup, err := st.Control(idA, creq, owner); err != nil || !dup {
+		t.Fatalf("同空间 control 重放应 dup: %v %v", dup, err)
+	}
+}
