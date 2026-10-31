@@ -212,6 +212,16 @@ td small{display:block;color:var(--ink-4);font-family:var(--mono);font-size:var(
  * 保列可读，页面不再被表撑宽；滚动容器构成后 sticky 表头会吸附在容器顶 +84px
  * 盖住数据行（.md-table 同坑，见上方 231-234 注），窄屏表头跟随滚动改 static。 */
 @media(max-width:680px){.table-wrap{overflow-x:auto}.table-wrap table{min-width:620px}.table-wrap th{position:static}}
+
+/* ---- 会话列表表格横向约束（W01-05 采证 P1/F1）：七列表格最小内容宽在 1024 视口
+ * 超卡片把文档撑宽（fullPage 宽 1073/1088>1024，采证 probe overflow1024 实证）。
+ * 套横向约束（680px 窄屏既有先例同款）：容器 overflow-x 滚动、表 min-width 保列
+ * 可读、表头退 static——滚动容器构成后页面级 sticky 表头不成立（同 680px 权衡）。
+ * 作用域限列表表格（#sess-list-zone）：详情页绑定/轮次表格不套 760min（窄表不虚
+ * 滚）；双端同文（web_drawer_sync 组件样式核对范围）。 ---- */
+#sess-list-zone .table-wrap{overflow-x:auto}
+#sess-list-zone .table-wrap table{min-width:760px}
+#sess-list-zone .table-wrap th{position:static}
 code,pre{font-family:var(--mono);font-size:var(--fs-table);line-height:1.7}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(0,0,0,.04);border:0;border-radius:var(--r-thumb);padding:15px}
 code{color:var(--ink-2)}

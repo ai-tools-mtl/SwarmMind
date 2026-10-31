@@ -1101,7 +1101,7 @@ function sessionListPageView() {
 /* ---------- P02 独立详情页 ---------- */
 function sessionDetailPageView() {
   return `<div class="page-head"><div><button type="button" class="link" data-act="sess-back">← 返回会话列表</button><h1>会话详情</h1><p class="muted">绑定与轮次账本留痕；在途轮次可逐轮取消（回执如实三态），答复与用量按轮留查。</p></div></div>
-  <section class="card sess-scope" id="sess-detail"><p class="muted" id="sess-detail-loading">正在加载会话详情…</p>${SESS_TURN_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section>`;
+  <section class="card sess-scope" id="sess-detail" tabindex="-1"><p class="muted" id="sess-detail-loading">正在加载会话详情…</p>${SESS_TURN_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section>`;
 }
 function sessionsPageView() {
   return S.sessId ? sessionDetailPageView() : sessionListPageView();
@@ -1204,7 +1204,10 @@ function openSessTurnDrawer(seq) {
   const tv = sp?.session ? nodeSessionTurns(sp.session).find(x => x.seq === seq) : null;
   if (!tv) { toast('没有该轮次的留痕'); return; }
   sp.sel = seq;
-  const back = document.activeElement && document.activeElement !== document.body ? document.activeElement : null;
+  /* 采证 P2/F2 修复（与 hub 同构）：行内「明细」按钮在随后的行选中态重绘中被替换
+   * （节点失连），返焦宿主改取详情页容器（tabindex=-1 可聚焦、不随分区重绘替换）
+   * ——Esc/遮罩关抽屉后焦点回详情页，键盘闭环不丢。 */
+  const back = document.getElementById('sess-detail');
   S.sessDrawer = { id: sp.id, turn: tv, zones: {}, seq: ++sessDrawerSeq, returnFocus: back };
   $('#layer').innerHTML = `<div class="overlay drawer-overlay"><section class="drawer sess-scope" id="sess-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">${SESS_TURN_DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section></div>`;
   layerInert(true);
@@ -1275,9 +1278,13 @@ let sessModalReturnFocus = null;
 const sessModalPaint = new WeakMap();   // modal 体槽位缓存（WeakMap 绑元素实例；关层重建后天然失效）
 function sessModalHtml() {
   const F = S.sess;
-  return `<div class="row"><h2 id="layer-title">${F.mode === 'continue' ? '继续会话' : '新建会话'}</h2>${button('×', 'close-sess-modal', 'close', '', 'aria-label="关闭弹层"')}</div><div id="sess-modal-body" class="sess-scope">${sessFormZoneHtml(F)}</div>`;
+  return `<div class="row"><h2 id="layer-title">${F.mode === 'continue' ? '继续会话' : '新建会话'}</h2>${button('×', 'close-sess-modal', 'close', '', 'aria-label="关闭弹层"')}</div><div id="sess-modal-body" class="sess-scope"><form id="sess-form">${sessFormZoneHtml(F)}</form></div>`;
 }
-function sessFormFullHtml() { return sessFormZoneHtml(S.sess); }
+/* sessFormFullHtml 采证 P3/F3 修复：恢复 <form id="sess-form"> 包裹（7bd09a3 重写时
+ * 丢失——hub modal 为 form 包裹而 node 裸 fieldset，双端表单结构漂移且 node 套件
+ * 按 #sess-form 锚点断言阻断）。提交走文档级 submit 委托（与 hub 同机制：主按钮
+ * type=submit 原生提交 → 委托 preventDefault + submitSess；Enter 键隐式提交同路）。 */
+function sessFormFullHtml() { return `<form id="sess-form">${sessFormZoneHtml(S.sess)}</form>`; }
 function openSessModal() {
   if (S.sessUnsupported) { toast('本机未装配会话内核'); return; }
   if (S.drawer) closeDrawer();   // 任务抽屉同族互斥
@@ -1379,9 +1386,9 @@ function sessFormZoneHtml(F) {
   </fieldset>
   <div id="sess-feedback" class="statusline" role="status">${sessStageView(F)}</div>
   <div class="actions">
-    ${F.stage === 'acked' ? button('再建一会话', 'sess-again', 'primary') : button(F.stage === 'submitting' ? '提交中… 请勿重复操作' : F.mode === 'continue' ? '发送这一轮' : '创建会话并发送首轮', 'sess-submit', 'primary', F.stage === 'submitting' ? 'disabled' : '')}
-    ${F.stage === 'unknown' ? button('同参重试', 'sess-retry', 'link') + button('放弃等待', 'sess-abandon', 'link') : ''}
-    ${F.mode === 'continue' && F.stage !== 'acked' ? button('改为新建会话', 'sess-switch-new', 'link') : ''}
+    ${F.stage === 'acked' ? button('再建一会话', 'sess-again', 'primary', 'type="button"') : `<button class="primary" type="submit" ${F.stage === 'submitting' ? 'disabled' : ''}>${F.stage === 'submitting' ? '提交中… 请勿重复操作' : F.mode === 'continue' ? '发送这一轮' : '创建会话并发送首轮'}</button>`}
+    ${F.stage === 'unknown' ? button('同参重试', 'sess-retry', 'link', 'type="button"') + button('放弃等待', 'sess-abandon', 'link', 'type="button"') : ''}
+    ${F.mode === 'continue' && F.stage !== 'acked' ? button('改为新建会话', 'sess-switch-new', 'link', 'type="button"') : ''}
   </div>
   <p class="footer-note">创建/投轮携前端生成的请求 ID：响应丢失后「同参重试」由服务端幂等兜底，不会重复建会话或重复投递。登记中（首轮未发布）会话在「会话」页立即可见。</p>`;
 }
@@ -4331,7 +4338,8 @@ document.addEventListener('click', e => {
         return;
       }
       /* ---------- 会话（W01-05）：列表/详情页/modal/取消/关闭动作 ---------- */
-      case 'sess-submit': submitSess(); return;
+      /* sess-submit 主按钮为原生 type=submit（无 data-act，与 hub 同构）：提交统一走
+       * 文档级 submit 委托（preventDefault + submitSess），Enter 隐式提交同路。 */
       case 'sess-retry': S.sess.stage = 'idle'; submitSess(S.sess.snap); return;   // 同参重试：先落 idle 过 submitSess 守卫，携提交参数快照重入（R1 必修4 + 同一请求 ID 幂等兜底）
       case 'sess-abandon': S.sess.stage = 'idle'; S.sess.message = ''; toast('已放弃等待 · 表单解锁'); syncSessModal(); return;
       /* sess-new 新建入口（页头/空态 CTA）：草稿保护——未受理的新建草稿原样带回
@@ -4485,6 +4493,11 @@ document.addEventListener('keydown', e => {
  * nfRepaint），名称与事件勾选不被冲掉（局部刷新纪律，与 hub 控制台同机制）；
  * 类型切走格式重置通用。消息格式切换同槽重绘，已输入地址与请求头经
  * nfSecFromDom 回填不丢（t20261026-notify-polish 恒定骨架）。 */
+/* 表单提交委托（与 hub 同机制）：会话新建/继续表单原生提交统一拦截——preventDefault
+ * 防页面重载，submitSess 承接（C 形状态机自带 submitting/unknown/acked 同入守卫）。 */
+document.addEventListener('submit', e => {
+  if (e.target.id === 'sess-form') { e.preventDefault(); submitSess(); }
+});
 document.addEventListener('change', e => {
   if (e.target.id === 'notify-also') { saveAlsoNotify(e.target); return; }
   if (e.target.id === 'sess-agent') { S.sess.agent = e.target.value; paintSessBindZoneNode(); return; }   // 目标切换只重写绑定摘要区（W01-05：适配器/权限只读声明随能力卡，输入 DOM 不受触碰）

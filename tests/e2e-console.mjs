@@ -552,7 +552,11 @@ async function hubSessFlow(browser) {
   record('S08', '失败轮次覆盖（坏工作目录可控 failed：详情页时间线徽标 sst-failed/答复区执行失败错误条）',
     cTerm === 'failed' && cBadge && cDetail.includes('执行失败'), `终态=${cTerm} badge=${cBadge} detail=${cDetail.slice(0, 30).replace(/\s+/g, ' ')}…`);
 
-  // S04 空轮次详情页（seedA；B/C 已终态、静置一轮轮询让列表落定，行节点稳定）
+  // S04 空轮次详情页（seedA；B/C 已终态、静置一轮轮询让列表落定，行节点稳定）。
+  // 采证工具缺陷 T1 修复：S08 结束停在 seedC 详情页（详情页无列表行，直接点行必
+  // 15s 超时崩出、S04 起五条未执行）——先回列表页再进行行级用例。
+  await page.goto(`${BASE}/#/sessions`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
   await p_sleep(5500);
   await page.click(`tr[data-sess="${seedA.id}"]`);
   await page.waitForSelector('#sess-detail', { timeout: 5000 });
@@ -839,7 +843,7 @@ async function nodeSessFlow(browser) {
   const [createResp, turnResp] = await Promise.all([
     page.waitForResponse(r => r.url().endsWith('/api/v1/sessions') && r.request().method() === 'POST'),
     page.waitForResponse(r => r.url().includes('/api/v1/sessions/') && r.url().includes('/turns') && r.request().method() === 'POST', { timeout: 30000 }).catch(() => null),
-    page.click('[data-act="sess-submit"]'),
+    page.click('#sess-form button[type="submit"]'),   // P3/F3 修复后 node 主按钮为原生 type=submit（与 hub 同构，提交走 form 委托）
   ]);
   const createBody = createResp ? await createResp.request().postDataJSON().catch(() => ({})) : {};
   const ackBody = turnResp ? await turnResp.json().catch(() => ({})) : {};

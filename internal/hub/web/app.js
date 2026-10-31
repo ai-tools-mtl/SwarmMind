@@ -4020,7 +4020,7 @@ function sessionListPage() {
  * 5s 同步，分区 diff 局部更新。 */
 function sessionDetailPage() {
   return `<div class="page-head"><div><button type="button" class="link" data-act="sess-back">← 返回会话列表</button><h1>会话详情</h1><p class="muted">绑定与轮次账本留痕；在途轮次可逐轮取消（回执如实三态），答复与用量按轮留查。</p></div></div>
-  <section class="card sess-scope" id="sess-detail"><p class="muted" id="sess-detail-loading">正在加载会话详情…</p>${SESS_TURN_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section>`;
+  <section class="card sess-scope" id="sess-detail" tabindex="-1"><p class="muted" id="sess-detail-loading">正在加载会话详情…</p>${SESS_TURN_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section>`;
 }
 function sessionsPage() {
   return S.sessId ? sessionDetailPage() : sessionListPage();
@@ -4127,6 +4127,11 @@ function openSessTurnDrawer(seq) {
   S.sessDrawer = { id: sp.id, turn: t, zones: {} };
   const layer = $('#layer');
   layerOpenBegin();
+  /* 采证 P2/F2 修复：layerOpenBegin 捕获的触发元素=行内「明细」按钮，而紧随其后的
+   * syncSessPageZones 行选中态重绘会整体替换时间线分区（按钮失连）——Esc 返焦走
+   * restoreLayerFocus 侧栏兜底落错位置。触发宿主改指详情页容器（tabindex=-1 可聚
+   * 焦，分区重绘不替换该节点），Esc 返焦回详情页，键盘闭环不丢。 */
+  layerCtx.trigger = $('#sess-detail');
   applyInert(true);
   layer.innerHTML = `<div class="overlay drawer-overlay" data-backdrop="true"><section class="drawer sess-scope" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1">${SESS_TURN_DRAWER_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section></div>`;
   syncSessTurnDrawerZones();
