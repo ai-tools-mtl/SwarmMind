@@ -1349,16 +1349,19 @@ function paintSessBindZoneNode() {
   if (zone.innerHTML === html) return;
   zone.innerHTML = html;
 }
-/* sessAgentOptions 会话表单目标选项（单级下拉，固定本机；声明 session_adapter 的
- * 能力可选，空值禁选并注明——对应后端 404/422 诚实降级，UI 禁选是第一道）。 */
+/* sessAgentOptions 会话表单目标选项（单级下拉，固定本机；采证 P7 收敛裁决①：与
+ * hub sessAgentOptions 同构——全部本机能力在列，未声明 session_adapter 者禁选并
+ * 注明「（未声明会话适配器）」，提示词双端同文；对应后端 404/422 诚实降级，UI 禁选
+ * 是第一道）。 */
 function sessAgentOptionsNode() {
-  const capable = S.catalog.filter(e => e.card.session_adapter);
   const opt = e => {
+    const ok = !!e.card.session_adapter;
     const v = e.node_id + '|' + e.card.name;
-    const tip = `${e.card.description || '（无描述）'} · 适配器 ${e.card.session_adapter}`;
-    return `<option value="${esc(v)}" ${S.sess.agent === v ? 'selected' : ''} title="${esc(tip)}">${esc(e.card.name)}</option>`;
+    const why = ok ? '' : '（未声明会话适配器）';
+    const tip = ok ? `${e.card.description || '（无描述）'} · 适配器 ${e.card.session_adapter}` : 'node.yaml 该能力未配置 session_adapter（变更须应用并重启），不能作为会话目标';
+    return `<option value="${esc(v)}" ${S.sess.agent === v ? 'selected' : ''} ${ok ? '' : 'disabled'} title="${esc(tip)}">${esc(e.card.name + why)}</option>`;
   };
-  return `<option value="" ${!S.sess.agent ? 'selected' : ''} disabled>选择智能体…</option>` + capable.map(opt).join('');
+  return `<option value="" ${!S.sess.agent ? 'selected' : ''} disabled>选择智能体…</option>` + S.catalog.map(opt).join('');
 }
 function sessBindZoneHtml() {
   const sel = S.catalog.find(e => e.node_id + '|' + e.card.name === S.sess.agent);

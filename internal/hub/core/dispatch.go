@@ -72,6 +72,9 @@ func (c *Core) dispatch(nodeID string) {
 				if cand.BlockedReason != "" {
 					return false // 依赖门控（P4.3）：未解除阻塞不投递，保留在队
 				}
+				if sessionCancelOp(cand) {
+					return true // 会话轮取消任务旁路 workdir 门控（W01-03 §6.2 hub 半边，采证 P6）：目标轮持同键锁，排队即自引用死锁
+				}
 				return workdirFree(st, cand) // workdir 互斥门控（P1.5）
 			})
 			if !ok {
@@ -115,7 +118,9 @@ func (c *Core) dispatch(nodeID string) {
 				nt.Lease = &ls
 			}
 			st.Tasks[nt.ID] = nt
-			acquireWorkdirLock(st, &nt) // 占用从 offered 起算（SPEC 4.10）
+			if !sessionCancelOp(nt) {
+				acquireWorkdirLock(st, &nt) // 占用从 offered 起算（SPEC 4.10）；取消任务不占同键锁（旁路对称：占锁即阻塞后续同键轮至取消收口）
+			}
 			offered = &nt
 			return nil
 		})

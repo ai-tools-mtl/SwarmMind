@@ -973,6 +973,10 @@ async function nodeSessFlow(browser) {
   // 输入焦点态）。两相位各经 localapi REST（主人旧面零变义兼容）建一个临时会话制
   // 造常规数据变化：相位A 抽屉开放、相位B 焦点在会话页搜索框，断言页面 DOM 节点
   // 身份/焦点/光标/滚动在数据变化期保持，会话列表照常跟进。
+  // T5 修复（与 hub T1 同族，采证三轮：SN09 尾态在详情页直点列表行 15s 超时崩出
+  // 致 SN03/SN04/SN06/SN07/SN10 未执行）——相位A 前回列表守卫。
+  await page.goto(`${BASE}/#/sessions`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
   const scratchSession = () => nodeApi('/api/v1/local/sessions', {
     method: 'POST',
     body: JSON.stringify({ agent: capName, cwd: '/tmp/agent-session/work', prompt: 'E2E 轮询豁免验证：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }),

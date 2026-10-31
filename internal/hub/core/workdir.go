@@ -12,6 +12,15 @@ import (
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
 
+// sessionCancelOp 报告任务是否为会话轮取消任务（W01-03 RFC §6.2 管理动作）：
+// 取消任务不参与 workdir 互斥的任何一面——目标轮自 offered 起持有同键锁至终态，
+// 取消任务若在 hub 派发门控排队等锁即「取消等被取消者自然结束」自引用死锁
+//（node 侧调度旁路的 hub 半边；第三轮采证 P6：6.4s/14-16s 被动等待实证——取消
+// 任务滞留信箱至目标轮自然完成后才投递，CancelTurn 先到保留落空）。
+func sessionCancelOp(t protocol.Task) bool {
+	return t.Session != nil && t.Session.Op == protocol.SessionTurnOpCancel
+}
+
 // workspaceOf 解析任务的 workspace 互斥键：目标 agent 注册卡上的 WorkspaceID
 // （node 上报派生键，hub 不感知路径）。卡缺失（注册表变更）或为空（旧版 node
 // 未上报）返回 ""——该任务不参与互斥，保持「无 workspace 上报即不受约束」的
@@ -41,6 +50,9 @@ func workdirFree(st *store.State, t protocol.Task) bool {
 // （排队超时的判定依据；被自己占用——回退保留锁的持有者——不算阻塞）。
 // workspace 不可解析视为不阻塞。
 func workdirBusyFor(st *store.State, t *protocol.Task) bool {
+	if sessionCancelOp(*t) {
+		return false // 取消任务不受互斥约束（排队超时清扫不得误判；见 sessionCancelOp）
+	}
 	ws := workspaceOf(st, *t)
 	if ws == "" {
 		return false
@@ -95,8 +107,8 @@ func (c *Core) rebuildWorkdirLocks() {
 			}
 		}
 		for _, t := range st.Tasks {
-			if t.Status.Terminal() || t.Status == protocol.StatusSubmitted {
-				continue
+			if t.Status.Terminal() || t.Status == protocol.StatusSubmitted || sessionCancelOp(t) {
+				continue // 取消任务不补占锁（同上：不参与互斥，重启自愈对称豁免）
 			}
 			if st.WorkdirLocks[t.TargetNode][workspaceOf(st, t)] != "" {
 				continue // 已持锁（同键持有者以表内为准，不覆盖）

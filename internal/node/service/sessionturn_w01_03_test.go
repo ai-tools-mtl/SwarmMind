@@ -7,6 +7,7 @@ package service
 // 真实模型/网络。
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -120,4 +121,53 @@ func TestW0103CancelTaskZeroSeqRejected(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("5s 内取消任务未落终态")
+}
+
+// dispatchOfferSessOp 以 hub 身份向节点下发 offer（sessOpFixture 版；与
+// sessionSvcFixture.dispatchOffer 同型——真实 offer 链形态）。
+func dispatchOfferSessOp(f *sessOpFixture, task protocol.Task) {
+	f.t.Helper()
+	payload, err := json.Marshal(task)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	env := &protocol.Envelope{Version: protocol.ProtocolVersion, Type: protocol.MsgTaskOffer,
+		MessageID: protocol.NewMessageID(), From: "hub", To: "n1", Payload: payload}
+	if err := f.ep.Send("n1", env); err != nil {
+		f.t.Fatalf("下发 offer: %v", err)
+	}
+}
+
+// TestW0103HubOfferTurnCancelWhileRunning P6 复现（第三轮采证：hub 下发取消对执行
+// 中轮不生效——node 侧被动等待至自然完成）：目标轮经真实 offer 链受理（handleOffer
+// BeginTurn → execute BindCancel），执行中投递取消任务。预期=触发执行取消、进程组
+// 终止、回执 executed/turn_cancelled_executed（进程组终止时刻断言：取消任务受理后
+// 3s 内落终态——被动等待形态为 ~SLEEP 剩余时长的 turn_already_finished）。
+func TestW0103HubOfferTurnCancelWhileRunning(t *testing.T) {
+	f := newSessOpFixture(t, sessOpOpt{envkv: map[string]string{"FAKE_SLEEP": "10"}})
+	now := protocol.NowUTC()
+	sid := protocol.NewSessionID()
+	target := protocol.Task{
+		ID: protocol.NewTaskID(), TraceID: protocol.NewTraceID(),
+		TargetNode: "n1", TargetAgent: "coder",
+		Input: protocol.TaskInput{Stdin: "P6 长轮"}, SubmittedBy: "admin",
+		Status: protocol.StatusSubmitted, CreatedAt: now, UpdatedAt: now,
+		ExpireAt: now.Add(protocol.TaskRetention),
+		Session: &protocol.SessionTurnRef{SessionID: sid, TurnSeq: 1, Op: protocol.SessionTurnOpCreate,
+			Cwd: f.cwd, PermissionMode: "workspace-write", Adapter: protocol.SessionAdapterCodex},
+	}
+	dispatchOfferSessOp(f, target)
+	f.waitRunLogLine("start", 1) // fake CLI 已 spawn（10s 长跑执行中）
+	time.Sleep(2 * time.Second)  // 采证同时序：启动 2s 后取消
+	task := execCancelTask(f, sid, 1)
+	t0 := time.Now()
+	res := waitCancelTaskFinished(f, task.ID)
+	elapsed := time.Since(t0)
+	if res.Status != protocol.ResultCancelled || !strings.HasPrefix(res.Error, "turn_cancelled_executed") {
+		t.Fatalf("P6: 执行中取消应 executed/turn_cancelled_executed，得 %+v（被动等待形态=failed/turn_already_finished）", res)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("P6: 取消收口过慢（疑似被动等待，未触发进程组终止）: %v", elapsed)
+	}
+	f.waitTurnFinished(sid, 1, protocol.ResultCancelled, 5*time.Second)
 }
