@@ -1024,6 +1024,11 @@ async function nodeSessFlow(browser) {
   await page.evaluate(() => {
     const inp = document.querySelector('#sess-query');
     if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }   // 清过滤恢复全量列表（滚动可达）
+  });
+  // 全量列表重绘落在下一个轮询节拍——scrollTo 前条件等待行就位（终审轮：空态 DOM 下
+  // scrollTo 被钳制、mark 后重绘致 scrollY 停在钳制值，r6/r7 两轮同值确定性为假）。
+  await page.waitForSelector('#sess-list-zone tr[data-sess]', { timeout: 15000 }).catch(() => { });
+  await page.evaluate(() => {
     window.scrollTo(0, 160);
     window.__markB = [document.querySelector('main h1'), document.querySelector('#sess-query')];
   });
