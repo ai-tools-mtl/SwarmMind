@@ -8,6 +8,10 @@
 //   - GET  /api/v1/spaces/{id}/dispatches/{request_id}  派发/意图查询（轮终投影）
 //   - POST /api/v1/spaces/{id}/messages        发言（零唤醒记账+消息账本）
 //   - GET  /api/v1/spaces/{id}/messages?since= 增量读（游标只读不唤醒，N01）
+//   - POST /api/v1/spaces/{id}/budget          预算 sugar（主人专属独立入口→Control set_budget）
+//   - POST /api/v1/spaces/{id}/policy          策略 sugar（主人专属独立入口→Control policy）
+//   - POST /api/v1/spaces/{id}/finalize        定版 sugar（主人专属独立入口→Control finalize）
+//   - POST /api/v1/spaces/{id}/archive         归档 sugar（主人专属独立入口→Control archive）
 //
 // 鉴权分层（W04-02 豁免⑯收窄兑现）：写面（创建/控制/派发/发言）authSpaceSubject
 // ——local_token=主人（恒通）；prime_token=共享编排主体「prime」（经 W02-01
@@ -15,6 +19,11 @@
 // 模型层（driver/orchestrate 形态；主人专属动作 set_budget/policy/finalize/archive
 // 对编排主体 403——豁免收窄后仍人工专属，MCP 工具面不受理）。读面（列表/详情/
 // 派发查询/消息读）authRead（持任一本机凭证即可，与 agent 会话查询面同界）。
+// 四个 sugar 端点（W04-03，任务书 REST 表「人工预算/授权策略/定版/归档」行的
+// 独立主人接口）走 authLocal（仅 local_token；prime_token 401——资源主权动作
+// 不经编排凭据入口，与逐动作授权「仅主人」行同界）。sugar 只做同族动作映射
+// （字段即 ControlRequest 对应字段），不新增任何旁路语义：状态机/版本/授权校验
+// 全部在 Control 单事务内执行。
 // 主体由服务端鉴权层解析后传入 collab，不采信请求自报（AGENTS 审计纪律）。
 //
 // 错误投影：collab Error.Code → HTTP（见 writeSpaceErr）；存储未装配 503
@@ -329,6 +338,81 @@ func (s *Server) handleSpaceMessagesGet(w http.ResponseWriter, r *http.Request) 
 		msgs = []collab.SpaceMessage{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "pruned_before_seq": pruned})
+}
+
+// spaceSugarRequest POST /api/v1/spaces/{id}/budget|policy|finalize|archive 请求体
+// （W04-03 sugar）。字段与 ControlRequest 对应动作参数一一对应（同族映射，无旁路
+// 语义）；request_id 缺省自动生成（同 create/dispatch/messages 口径——自动生成不
+// 承担重放回执，重试安全的调用方应显式携带）。expected_version 必填（读档乐观锁，
+// 与 control/dispatch/messages 同纪）。
+type spaceSugarRequest struct {
+	RequestID       string         `json:"request_id,omitempty"`
+	ExpectedVersion int64          `json:"expected_version"`
+	Budget          *collab.Budget `json:"budget,omitempty"`        // budget
+	Policy          *collab.Policy `json:"policy,omitempty"`        // policy（字段级合并）
+	FinalOutcome    string         `json:"final_outcome,omitempty"` // finalize: done|abandoned
+	Reason          string         `json:"reason,omitempty"`        // finalize(abandoned)/budget 原因
+}
+
+// spaceSugar 四个主人专属 sugar 端点的共用实现：映射 Control 同族动作（authLocal
+// 门已保证主体=主人 local_token；collab 模型层逐动作授权不变——仅主人行照常裁决）。
+func (s *Server) spaceSugar(w http.ResponseWriter, r *http.Request, act collab.Action) {
+	if !s.spaceReady(w) {
+		return
+	}
+	var req spaceSugarRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {expected_version, ...动作参数} JSON: "+err.Error())
+		return
+	}
+	if req.ExpectedVersion <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "expected_version 必填（读档乐观锁）")
+		return
+	}
+	requestID := strings.TrimSpace(req.RequestID)
+	if requestID == "" {
+		requestID = "sugar-" + string(act) + "-" + protocol.NewTraceID() // 自动生成（不承担重放回执）
+	}
+	res, dup, err := s.cfg.Collab.Control(r.PathValue("id"), collab.ControlRequest{
+		RequestID:       requestID,
+		Action:          act,
+		ExpectedVersion: req.ExpectedVersion,
+		Budget:          req.Budget,
+		Policy:          req.Policy,
+		FinalOutcome:    req.FinalOutcome,
+		Reason:          req.Reason,
+	}, spaceOwnerSubject())
+	if err != nil {
+		writeSpaceErr(w, err)
+		return
+	}
+	// 控制动作统一 200（语义回执在体：applied=是否实际变更——archive 幂等命中为
+	// false、dup=操作 ID 重放命中）。
+	writeJSON(w, http.StatusOK, map[string]any{"result": res, "dup": dup})
+}
+
+// handleSpaceBudget POST /api/v1/spaces/{id}/budget：预算调整（仅主人；记原因、
+// 不自动 resume——改预算不恢复运行，与 control set_budget 同语义）。
+func (s *Server) handleSpaceBudget(w http.ResponseWriter, r *http.Request) {
+	s.spaceSugar(w, r, collab.ActSetBudget)
+}
+
+// handleSpacePolicy POST /api/v1/spaces/{id}/policy：完成授权/领取约束变更（仅主人；
+// 待配置/暂停且无在途——策略版本随变更递增并审计）。
+func (s *Server) handleSpacePolicy(w http.ResponseWriter, r *http.Request) {
+	s.spaceSugar(w, r, collab.ActPolicy)
+}
+
+// handleSpaceFinalize POST /api/v1/spaces/{id}/finalize：定版（仅主人；done 仍过
+// 策略判据，abandoned 必填原因且无未收束执行）。
+func (s *Server) handleSpaceFinalize(w http.ResponseWriter, r *http.Request) {
+	s.spaceSugar(w, r, collab.ActFinalize)
+}
+
+// handleSpaceArchive POST /api/v1/spaces/{id}/archive：归档（仅主人；仅已完成/已放弃、
+// 无在途；幂等标记——重复归档零变更 applied=false）。
+func (s *Server) handleSpaceArchive(w http.ResponseWriter, r *http.Request) {
+	s.spaceSugar(w, r, collab.ActArchive)
 }
 
 // writeSpaceDispatchErr 派发面错误投影：collab 错误与 RemoteError（会话面派生

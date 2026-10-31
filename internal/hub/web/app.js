@@ -553,6 +553,54 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 }
 /* ===== 抽屉分区更新 shared block end ===== */
 
+/* ===== 空间词典 shared block begin（双端同步维护：本块在 node/hub 两端 app.js
+ * 逐字节一致，internal/node/localapi/web_spaces_sync_test.go 抽块比对锁一致性——
+ * 改本块必须两端同改同验。W04-03 P03/P04 协作空间：九态/调度方式/完成授权/意图
+ * /动作词/空态词典同源（SPEC 六.五 文案层单一出处；hub 端空间后端 W07 接线前为
+ * 如实壳，词典先行同文防漂移；徽标色阶复用 sst-* 既有语义色，零新增样式规则）。） ===== */
+const SPACE_STATES = {
+  pending_config: '待配置', pending_leader: '待管家领取', ready: '可运行（待启动）',
+  running: '运行中', paused: '已暂停', blocked: '受阻', needs_review: '待核对',
+  completed: '已完成', abandoned: '已放弃',
+};
+const SPACE_TERMINAL = new Set(['completed', 'abandoned']);
+const SPACE_MODES = { manual: '手动', builtin: '内置协作', external: '外部管家' };
+const SPACE_FINISH_AUTH = { human_only: '完成须主人定版', verified_write_review: '写审可自动完成' };
+const SPACE_INTENTS = { pending: '排队待投递', accepted: '执行中', converged: '已收束', cancelled: '已取消' };
+/* SPACE_ACTION_WORDS 控制动作标准词（操作区按钮与确认弹层唯一出处）。错误呈现
+ * 纪律：服务端 403/409/503 人话原因如实全量展示，不遮蔽不改写——授权拒绝与状态
+ * 拒绝都让操作者看到「为什么」（逐动作授权动态可用的另一半是失败原因可见）。 */
+const SPACE_ACTION_WORDS = {
+  ready: '标记就绪', start: '启动', pause: '暂停', resume: '恢复运行',
+  dispatch: '指名派发', configure_members: '配置成员', takeover: '接管',
+  renew: '续约', finish: '申请完成', finalize_done: '定版（完成）', finalize_abandoned: '放弃（定版）',
+  archive: '归档', budget: '调整预算', policy: '调整策略',
+};
+const SPACE_EMPTY_LIST = '还没有协作空间';
+const SPACE_EMPTY_LIST_HINT = '协作空间把目标、成员与执行收在一个地方：先写清目标与验收，再讨论策略与预算，显式启动后指名成员推进——普通发言只落账，绝不触发执行。';
+const SPACE_NO_MEMBERS_HINT = '空间还没有成员：配置成员并绑定原生会话后才能标记就绪、启动与派发（入口在详情页「配置成员」；external 空间待管家领取后同样先配成员）。';
+const SPACE_W05_TITLE = '问题 / 版本 / 测试证据';
+const SPACE_W05_NOTE = '本区由协作策略（W05）驱动：完成判据、问题清单与代码版本将在策略接线后在此展示；当前如实留空占位，不以讨论内容冒充判据。';
+const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';
+const SPACE_HUB_OFF_NOTE = '中心端空间能力由 W07 交付接线；本页为双端同构壳，当前不提供创建与操作入口，也不展示替代数据。本机空间请使用 node 控制台「协作空间」页。';
+const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];
+/* spaceWaitReason 等待原因合成（暂停原因+等待原因双源；P03 列表与 P04 调度条同源）。 */
+function spaceWaitReason(sp) {
+  const p = String(sp?.paused_reason || ''), w = String(sp?.wait_reason || '');
+  return p && w ? p + ' · ' + w : p + w;
+}
+/* spaceBadge 九态徽标（复用 sst-* 语义色阶：running 脉冲 / needs_review 热点警示
+ * / ready 进行色 / 终态与其余退灰——语义色四色预算内）。 */
+function spaceBadge(s) {
+  const k = String(s || '');
+  const cls = SPACE_TERMINAL.has(k) ? 'sst-closed'
+    : k === 'running' ? 'sst-running'
+    : k === 'needs_review' ? 'sst-unverified'
+    : k === 'ready' ? 'sst-open' : 'sst-pending';
+  return `<span class="badge ${cls}" title="${esc(k)}">${esc(SPACE_STATES[k] || k)}</span>`;
+}
+/* ===== 空间词典 shared block end ===== */
+
 /* ===== 通知表单与词典 shared block begin（双端同步维护：通知渠道编辑表单骨架、
  * 类型/消息格式词典与弹层头部 modalHead 双端逐字节同文，
  * internal/node/localapi/web_drawer_sync_test.go 抽块比对锁一致性——改本块必须
@@ -788,6 +836,7 @@ const S = {
   groupsFresh: { ok: null, at: 0 },   // 群列表加载态（A4 五态）：null=未拉过（加载中）；false=最近一次失败
   groupMsgCounts: {},          // group_id → 消息数（列表端点不返回，进群聊页时补拉计数）
   groupId: '',                 // hash 路由 #/groups/{id} 的群 ID；空为群列表视图
+  spaceId: '',                 // hash 路由 #/spaces/{id} 的空间 ID（W04-03 壳路由；空为空间列表视图）
   groupView: null,             // 群详情消息缓存 {id, lastSeq, msgs[]}；lastSeq 是增量拉取锚点
   groupsOff: false,            // hub 未接线群存储（端点 503）
   notifyChannels: [],          // 通知渠道列表（P4③ 控制台化；已脱敏形态）
@@ -1070,7 +1119,7 @@ async function pollTick() {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGE_IDS = ['overview', 'nodes', 'tasks', 'sessions', 'control', 'works', 'policy', 'tokens', 'groups'];
+const PAGE_IDS = ['overview', 'nodes', 'tasks', 'sessions', 'spaces', 'control', 'works', 'policy', 'tokens', 'groups'];
 function route() {
   const h = location.hash.replace(/^#\/?/, '');
   const [p, arg] = h.split('/');
@@ -1078,6 +1127,8 @@ function route() {
   if (p === 'tasks' && arg && STATES[arg]) { S.f = { ...blankFilters(), status: arg }; S.pages.tasks = 1; }
   S.page = PAGE_IDS.includes(p) ? p : 'overview';
   S.groupId = S.page === 'groups' && arg ? arg : '';
+  /* W04-03 P04：#/spaces/{id} 独立详情页路由（中心端后端 W07 接线前为如实壳）。 */
+  S.spaceId = S.page === 'spaces' && arg ? arg : '';
   /* W01-05 P02：#/sessions/{id} 独立详情页路由。换会话/退列表即换视图状态
    *（S.sessPage 按会话重建）；同会话重进保留分区缓存（零重建）。 */
   const prevSessId = S.sessId;
@@ -1177,7 +1228,7 @@ function updateSessionLeft() {
   }
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];
+  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];   // W04-03：协作空间独立入口（壳先行；中心端后端 W07 接线前如实不可用）
   const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1，见 pendingReviewCount 注）
   const navBump = bumpCls('navNr', nr);   // P2-01：每轮无条件求值记录（0 也记录），渲染才按 nr 条件挂 small——记录与条件渲染分离
   return `<div class="shell"><aside>
@@ -3340,6 +3391,26 @@ async function markAllInboxRead() {
 }
 
 /* ---------- 群聊（GROUP-RFC 六 MVP）：列表 + 详情时间线 ---------- */
+/* ---------- 协作空间（W04-03 P03/P04 壳：中心端后端 W07 接线前如实不可用） ----------
+ * 任务书双端形态表「壳先共享，未接后端不可假可用」：本页只提供双端同构壳——
+ * P03 列表字段序（目标/状态/策略/调度方式与负责人/阶段/等待原因/最近活动/操作）
+ * 与 P04 独立详情路由已就位，词表取「空间词典 shared block」（双端同文）；不提供
+ * 创建/操作入口（无假按钮）、不展示替代数据。本机空间操作请到 node 控制台。 */
+function spacesPage() {
+  return S.spaceId ? spaceDetailShellPage() : spaceListShellPage();
+}
+function spaceListShellPage() {
+  return head('协作空间', '多智能体协作空间：目标/验收、成员线程、调度与执行收在一处；中心端空间能力由 W07 交付接线。', '')
+    + `<section class="card">
+    <div class="notice warn spaced"><b>${esc(SPACE_HUB_OFF)}</b> · ${esc(SPACE_HUB_OFF_NOTE)}</div>
+    <div class="table-wrap"><table><thead><tr><th>目标</th><th>状态</th><th>策略</th><th>调度方式与负责人</th><th>阶段</th><th>等待原因</th><th>最近活动（UTC）</th><th>操作</th></tr></thead><tbody><tr><td colspan="8"><small class="muted">${esc(SPACE_HUB_OFF)}：列表待 W07 接线后按本机控制台同构展示。</small></td></tr></tbody></table></div>
+    <p class="footer-note">本页为双端同构壳（W04-03）：字段序/状态词/动作词与 node 控制台同源（空间词典 shared block 逐字节同文）；接线前不提供创建与操作入口、不展示替代数据。</p></section>`;
+}
+function spaceDetailShellPage() {
+  return `<div class="page-head"><div><button type="button" class="link" data-act="space-back">← 返回空间列表</button><h1>空间详情</h1><p class="muted">目标/验收、成员线程、调度条与讨论消息（中心端后端 W07 接线后可用）。</p></div></div>
+  <section class="card"><div class="notice warn spaced"><b>${esc(SPACE_HUB_OFF)}</b> · 空间详情（#/spaces/{id}）依赖中心端空间后端（W07）；独立详情路由与九分区骨架（head/goal/members/sched/msgs/compose/w05/events/actions）已按双端契约就位，当前不展示替代数据。</div>
+  <p class="footer-note">本机空间请使用 node 控制台「协作空间」页（本机成员完整独立操作）。</p></section>`;
+}
 function groupsPage() {
   return S.groupId ? groupDetailPage() : groupListPage();
 }
@@ -4704,6 +4775,8 @@ const ACT = {
   },
   /* ---------- 群聊动作（GROUP-RFC 六） ---------- */
   'go-groups': () => go('groups'),
+  /* ---------- 协作空间壳（W04-03；仅返回导航——后端 W07 接线前无操作入口） ---------- */
+  'space-back': () => go('spaces'),
   'group-open': b => go('groups/' + b.dataset.id),
   'group-new': () => groupCreateModal(),
   'group-create': async () => {
@@ -5032,7 +5105,7 @@ async function copyText(value, label) {
 }
 
 /* ---------- 事件绑定（委托） ---------- */
-const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, sessions: sessionsPage, control: controlPage, works: worksPage, policy: policyPage, tokens: tokensPage, groups: groupsPage };
+const PAGES = { overview: overviewPage, nodes: nodesPage, tasks: tasksPage, sessions: sessionsPage, spaces: spacesPage, control: controlPage, works: worksPage, policy: policyPage, tokens: tokensPage, groups: groupsPage };
 function bindEvents() {
   window.addEventListener('hashchange', route);
   document.addEventListener('click', e => {

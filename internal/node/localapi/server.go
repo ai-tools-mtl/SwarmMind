@@ -318,6 +318,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/spaces/{id}/dispatches/{request_id}", s.authRead(s.handleSpaceDispatchGet))      // 派发/意图查询（轮终投影）
 	mux.HandleFunc("POST /api/v1/spaces/{id}/messages", s.authSpaceSubject(s.handleSpaceMessagePost))            // 发言（零唤醒记账，N01）
 	mux.HandleFunc("GET /api/v1/spaces/{id}/messages", s.authRead(s.handleSpaceMessagesGet))                     // 增量读（since 游标只读）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/budget", s.authLocal(s.handleSpaceBudget))                          // 预算 sugar（W04-03：主人专属独立入口→Control set_budget）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/policy", s.authLocal(s.handleSpacePolicy))                          // 策略 sugar（W04-03：主人专属独立入口→Control policy）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/finalize", s.authLocal(s.handleSpaceFinalize))                      // 定版 sugar（W04-03：主人专属独立入口→Control finalize）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/archive", s.authLocal(s.handleSpaceArchive))                        // 归档 sugar（W04-03：主人专属独立入口→Control archive）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

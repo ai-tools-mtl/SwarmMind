@@ -127,6 +127,23 @@ main{padding:40px 44px 65px;max-width:1500px;width:100%;margin:auto}
 tr[data-turn]{cursor:pointer}
 tr[data-turn].on{background:var(--accent-bg)}
 .sess-prompt{white-space:pre-wrap;word-break:break-word}
+/* ---- 协作空间讨论消息区（W04-03 P04；与 hub 群聊消息区同文同值——SPEC 六.五
+ * 组件样式双端一致：node 空间页首次消费消息气泡形态，规则自 hub style.css 原样
+ * 同步，两端一致由双端同文规则承担）。 ---- */
+.msgbox{position:relative}
+.msgwrap{max-height:52vh;overflow:auto;border:1px solid var(--hairline);border-radius:var(--r-thumb);background:var(--hover);padding:14px;margin:12px 0 0}
+.msgline{list-style:none;padding:0;margin:0;display:grid;gap:10px}
+.msg{max-width:82%;padding:9px 13px;border-radius:var(--r-sheet);background:var(--surface);border:1px solid var(--hairline);font-size:13px;line-height:1.6}
+.msg-meta{font-size:11px;color:var(--ink-3);margin-bottom:2px}
+.msg-meta .link{font-size:11px;padding:0;margin-left:2px}
+.msg-body{white-space:pre-wrap;overflow-wrap:anywhere}
+.msg-user{margin-left:auto;background:var(--accent-bg);border-color:rgba(0,113,227,.15)}
+.msg-system{background:rgba(0,0,0,.04);border-color:transparent;color:var(--ink-3)}
+.sayline{display:flex;gap:10px;align-items:flex-end}
+.sayline textarea{margin-top:0;flex:1;min-height:52px}
+.sayline button{flex-shrink:0}
+@media(max-width:680px){.msg{max-width:94%}}
+tr[data-space]{cursor:pointer}
 @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
 .filters{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:19px}
 .filters button{display:inline-flex;align-items:center;gap:6px;height:auto;border:0;background:rgba(0,0,0,.05);border-radius:var(--r-pill);padding:6px 14px;font-size:12.5px;font-weight:500;color:var(--ink-2)}

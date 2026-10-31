@@ -84,9 +84,9 @@ func TestWebNavFilterStructure(t *testing.T) {
 	}
 	hubJSStr, hubCSSStr := string(hubJS), string(hubCSS)
 
-	// ---- 方案 B：导航词表（双端同概念同词、顺序定案；T3 起 hub 含「会话」导航 9 项） ----
+	// ---- 方案 B：导航词表（双端同概念同词、顺序定案；T3 起 hub 含「会话」导航，W04-03 起双端含「协作空间」10 项——权威锁随导航定案同步，W01-05 先例） ----
 	for _, want := range []string{
-		`const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];`,
+		`const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];`,
 		"head('任务',",
 		"head('派发',",
 		"下一步：查看任务 →",
@@ -95,8 +95,8 @@ func TestWebNavFilterStructure(t *testing.T) {
 			t.Errorf("hub app.js 应含 %q", want)
 		}
 	}
-	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['wizard', '连接']];`) {
-		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/服务/任务/会话/连接；W01-05 P01 会话独立主入口，任务页区块迁出）")
+	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];`) {
+		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/服务/任务/会话/协作空间/连接；W01-05 P01 会话独立主入口；W04-03 P03 协作空间独立主入口）")
 	}
 	for _, want := range []string{
 		"<h1>服务</h1>",

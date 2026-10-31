@@ -461,6 +461,54 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 }
 /* ===== 抽屉分区更新 shared block end ===== */
 
+/* ===== 空间词典 shared block begin（双端同步维护：本块在 node/hub 两端 app.js
+ * 逐字节一致，internal/node/localapi/web_spaces_sync_test.go 抽块比对锁一致性——
+ * 改本块必须两端同改同验。W04-03 P03/P04 协作空间：九态/调度方式/完成授权/意图
+ * /动作词/空态词典同源（SPEC 六.五 文案层单一出处；hub 端空间后端 W07 接线前为
+ * 如实壳，词典先行同文防漂移；徽标色阶复用 sst-* 既有语义色，零新增样式规则）。） ===== */
+const SPACE_STATES = {
+  pending_config: '待配置', pending_leader: '待管家领取', ready: '可运行（待启动）',
+  running: '运行中', paused: '已暂停', blocked: '受阻', needs_review: '待核对',
+  completed: '已完成', abandoned: '已放弃',
+};
+const SPACE_TERMINAL = new Set(['completed', 'abandoned']);
+const SPACE_MODES = { manual: '手动', builtin: '内置协作', external: '外部管家' };
+const SPACE_FINISH_AUTH = { human_only: '完成须主人定版', verified_write_review: '写审可自动完成' };
+const SPACE_INTENTS = { pending: '排队待投递', accepted: '执行中', converged: '已收束', cancelled: '已取消' };
+/* SPACE_ACTION_WORDS 控制动作标准词（操作区按钮与确认弹层唯一出处）。错误呈现
+ * 纪律：服务端 403/409/503 人话原因如实全量展示，不遮蔽不改写——授权拒绝与状态
+ * 拒绝都让操作者看到「为什么」（逐动作授权动态可用的另一半是失败原因可见）。 */
+const SPACE_ACTION_WORDS = {
+  ready: '标记就绪', start: '启动', pause: '暂停', resume: '恢复运行',
+  dispatch: '指名派发', configure_members: '配置成员', takeover: '接管',
+  renew: '续约', finish: '申请完成', finalize_done: '定版（完成）', finalize_abandoned: '放弃（定版）',
+  archive: '归档', budget: '调整预算', policy: '调整策略',
+};
+const SPACE_EMPTY_LIST = '还没有协作空间';
+const SPACE_EMPTY_LIST_HINT = '协作空间把目标、成员与执行收在一个地方：先写清目标与验收，再讨论策略与预算，显式启动后指名成员推进——普通发言只落账，绝不触发执行。';
+const SPACE_NO_MEMBERS_HINT = '空间还没有成员：配置成员并绑定原生会话后才能标记就绪、启动与派发（入口在详情页「配置成员」；external 空间待管家领取后同样先配成员）。';
+const SPACE_W05_TITLE = '问题 / 版本 / 测试证据';
+const SPACE_W05_NOTE = '本区由协作策略（W05）驱动：完成判据、问题清单与代码版本将在策略接线后在此展示；当前如实留空占位，不以讨论内容冒充判据。';
+const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';
+const SPACE_HUB_OFF_NOTE = '中心端空间能力由 W07 交付接线；本页为双端同构壳，当前不提供创建与操作入口，也不展示替代数据。本机空间请使用 node 控制台「协作空间」页。';
+const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];
+/* spaceWaitReason 等待原因合成（暂停原因+等待原因双源；P03 列表与 P04 调度条同源）。 */
+function spaceWaitReason(sp) {
+  const p = String(sp?.paused_reason || ''), w = String(sp?.wait_reason || '');
+  return p && w ? p + ' · ' + w : p + w;
+}
+/* spaceBadge 九态徽标（复用 sst-* 语义色阶：running 脉冲 / needs_review 热点警示
+ * / ready 进行色 / 终态与其余退灰——语义色四色预算内）。 */
+function spaceBadge(s) {
+  const k = String(s || '');
+  const cls = SPACE_TERMINAL.has(k) ? 'sst-closed'
+    : k === 'running' ? 'sst-running'
+    : k === 'needs_review' ? 'sst-unverified'
+    : k === 'ready' ? 'sst-open' : 'sst-pending';
+  return `<span class="badge ${cls}" title="${esc(k)}">${esc(SPACE_STATES[k] || k)}</span>`;
+}
+/* ===== 空间词典 shared block end ===== */
+
 /* ===== 通知表单与词典 shared block begin（双端同步维护：通知渠道编辑表单骨架、
  * 类型/消息格式词典与弹层头部 modalHead 双端逐字节同文，
  * internal/node/localapi/web_drawer_sync_test.go 抽块比对锁一致性——改本块必须
@@ -686,6 +734,16 @@ const S = {
   sessModal: false,        // 新建/继续会话居中 modal 在开（W01-05：表单迁入 modal，草稿跨开关保留）
   sess: freshSessForm(),   // 新建/继续表单状态机（C 形；与派单表单 f 同域）
   sessDrawer: null,        // 打开的轮次执行明细抽屉（W01-05：旧会话抽屉退役）{id, turn, zones, seq, returnFocus}
+  spaces: [],               // 协作空间列表（W04-03 P03；GET /api/v1/spaces）
+  spacesLoaded: false,      // 空间列表首载落定标记（五态口径同会话：false=加载中不冒充空列表）
+  spacesUnsupported: false, // 本机未装配空间存储（503 spaces_unavailable 诚实降级专态）
+  spacesError: '',          // 空间列表最近一次加载失败信息（空=正常）
+  spaceFilter: '',          // 空间列表筛选（''=全部活跃 / 'archived'=已归档）
+  spaceId: '',              // hash 路由 #/spaces/{id} 的空间 ID（W04-03 P04 独立详情页；空=列表主入口）
+  spacePage: null,          // 详情页视图状态 {id, space, zones, msgs, lastSeq, prunedSeq, msgReqId}（fetchSpacePage 驱动）
+  spaceModal: false,        // 空间弹层在开（W04-03：新建/派发/接管/定版/预算/策略/成员表共用槽；草稿跨开关保留）
+  sp: freshSpaceForm(),     // 新建空间表单状态机（草稿保护同 S.sess 口径）
+  spOps: null,              // 控制弹层状态机（freshSpaceOps(kind)；null=无弹层上下文）
   loadError: '',           // 最近一轮 loadAll 失败信息（A4 五态：失败不冒充空列表；成功即清）
 };
 /* 列表五态占位（FE-POLISH 轮2 A4，与 hub 同文案口径）：「加载中」「加载失败可重试」
@@ -714,6 +772,13 @@ function resetPrimeState() {
   if (S.sessDrawer) closeSessionDrawer();   // 执行明细抽屉同属会话边界：closeSessionDrawer 递增 sessDrawerSeq 使在途应答全部作废
   S.sessId = ''; S.sessPage = null;   // 详情页路由态随会话边界复位（hash 仍指详情时由 route 重挂）
   S.sessQuery = ''; S.sessFilter = '';
+  if (S.spaceModal) closeSpaceModal();   // 空间弹层同属会话边界（草稿留 S.sp/S.spOps，跨登录不恢复）
+  S.spaceId = ''; S.spacePage = null;   // 空间详情页路由态同口径复位
+  S.spaceFilter = '';
+  S.spaces = [];
+  S.spacesLoaded = false;
+  S.spacesUnsupported = false;
+  S.spacesError = '';
   S.primeDecl = { picking: false, busy: false, done: null };
   S.primeNew = '';
   S.primeNewWire = null;
@@ -1480,6 +1545,598 @@ function sessMigrateCard() {
   return `<section class="card spaced" id="sess-card"><div class="row"><h2>本机会话</h2></div>
   <div class="empty"><h2>本机会话已迁至独立「会话」页</h2><p class="muted">会话列表、新建/继续（居中表单）与详情查看现集中在侧栏「会话」导航页；任务页不再承载会话表单。</p>${button('前往会话页 →', '', 'primary', '', 'data-go="sessions"')}</div></section>`;
 }
+/* ---------- 协作空间（W04-03 P03/P04：列表主入口 + #/spaces/{id} 独立详情页） ----------
+ * P03「协作空间」独立导航页（沿 W01-05 会话页先例：独立页/PAGES 注册/权威锁同步）：
+ * 字段（PLAN §10.1 P03 行）：目标 / 状态 / 策略 / 调度方式与负责人 / 阶段 / 等待原因 /
+ * 最近活动；新建入口 + 归档筛选；空态解释讨论与写审、无成员引导（词典 shared block
+ * 同源）。503 spaces_unavailable 诚实降级专态（同会话 503 口径）。
+ * P04 #/spaces/{id}：目标/验收、成员与线程、调度条（主体/任期/租约/等待原因——直接
+ * 消费 PausedReason/WaitReason/在途数）、讨论消息区（since 增量读，游标只读不唤醒）、
+ * 阶段、问题/版本/结果占位（W05 接线后点亮）、操作区（按九态动态可用；授权/状态/
+ * 判据拒绝 403/409/503 人话如实展示）。分区 diff 复用「抽屉分区更新 shared block」
+ * 泛化 names（SPACE_ZONES）；发言草稿不进分区模板串（D22：busy 由 DOM 直更驱动，
+ * 分区模板零状态恒定——轮询永不重写输入区）。 */
+function freshSpaceForm() {
+  /* rows 成员行 {name, session}；预算三计数 0=不限；reqId 稳定请求 ID（重试复用）。 */
+  return { goal: '', acceptance: '', mode: 'manual', rows: [], bMsg: 0, bRound: 0, bWall: 0, stage: 'idle', message: '', ackId: '', reqId: '' };
+}
+const newSpaceRequestId = () => 'sp-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
+const spShortId = s => { const t = String(s || ''); return t.length > 18 ? t.slice(0, 18) + '…' : t; };
+const spaceGoalShort = (s, n = 48) => { const t = String(s || ''); return t.length > n ? t.slice(0, n) + '…' : t; };
+let spaceListSeq = 0;
+async function loadSpaces() {
+  const epochAtReq = S.sessionEpoch, seqAtReq = ++spaceListSeq;
+  const r = await api('GET', '/api/v1/spaces').catch(() => null);
+  if (S.sessionEpoch !== epochAtReq || seqAtReq !== spaceListSeq) return;   // 双守卫同会话口径
+  S.spacesLoaded = true;
+  if (!r) { S.spacesError = '空间列表暂时读不到（网络）'; return; }
+  if (r.code === 503) { S.spacesUnsupported = true; S.spaces = []; S.spacesError = ''; return; }
+  if (r.code !== 200 || !Array.isArray(r.data?.spaces)) { S.spacesError = '空间列表加载失败'; return; }
+  S.spacesUnsupported = false; S.spacesError = '';
+  S.spaces = r.data.spaces;
+}
+/* paintSpacesView 列表页三槽指纹门控局部写入（paintSessZoneById 同机制——按元素
+ * 实例缓存，空间页槽位与会话页槽位互不干扰）。 */
+function paintSpacesView() {
+  if (S.page !== 'spaces' || S.spaceId) return;
+  paintSessZoneById('space-chips-zone', S.spacesUnsupported ? '' : spaceChipsNode().join(''));
+  paintSessZoneById('space-list-zone', spaceListZone());
+  paintSessZoneById('space-foot-zone', spaceFootZone());
+}
+function spaceChipsNode() {
+  const nArch = S.spaces.filter(s => s.archived).length;
+  return [
+    `<button data-act="space-chip" data-chip="" class="${!S.spaceFilter ? 'on' : ''}">全部活跃 (${S.spaces.length - nArch})</button>`,
+    `<button data-act="space-chip" data-chip="archived" class="${S.spaceFilter === 'archived' ? 'on' : ''}${nArch ? '' : ' zero'}">已归档 (${nArch})</button>`,
+  ];
+}
+/* spaceLeaderCell P03「调度方式与负责人」列（与 P04 调度条同源词）。 */
+function spaceLeaderCell(sp) {
+  const l = sp.leader || {};
+  if (!l.term) return `${SPACE_MODES[sp.mode] || sp.mode || '—'} · 待领取（未建立任期）`;
+  return `${SPACE_MODES[sp.mode] || sp.mode || '—'} · ${l.principal || '—'} 任期 ${l.term}`;
+}
+function spaceBudgetCell(sp) {
+  const b = sp.budget || {}, u = sp.used || {};
+  const seg = (label, cap, used, unit) => cap > 0 ? `${label} ${used || 0}/${cap}${unit}` : `${label} 不限（已用 ${used || 0}${unit}）`;
+  return [seg('消息', b.max_messages, u.messages, '条'), seg('派发轮', b.max_dispatch_rounds, u.dispatch_rounds, '轮'), seg('墙钟', b.max_wall_seconds, u.wall_seconds, 's')].join(' · ');
+}
+function spaceLeaseCell(l) {
+  if (!l || !l.kind) return '—';
+  if (l.kind === 'manual') return 'manual 不设租约（主人本位）';
+  if (!l.lease_until) return '未授予（接管/续约后建立）';
+  const expired = new Date(l.lease_until).getTime() <= Date.now();
+  return `${fmtUTC(l.lease_until) || '—'}${expired ? '（已过期：不能续约复活，接管由主人显式确认）' : ''}`;
+}
+function spaceListZone() {
+  if (S.spacesUnsupported) return `<div class="empty"><h2>本机未装配协作空间</h2><p class="muted">空间协作存储未装配（本机未启用 spaces）。升级或装配后，这里提供建空间、讨论与显式派发。</p></div>`;
+  if (!S.spacesLoaded) return listLoadingBox('协作空间');
+  if (S.spacesError && !S.spaces.length) return `<div class="empty"><h2>空间列表加载失败</h2><p class="muted">最近一次读取没有成功（本机 API 不可达或应答异常），不是没有数据。可点重试，轮询也会自动恢复。</p>${button('重试', 'space-reload')}</div>`;
+  const list = S.spaces.filter(s => S.spaceFilter === 'archived' ? s.archived : !s.archived);
+  if (!list.length) return (S.spacesError ? listStaleBar('space-reload', '空间列表') : '')
+    + `<div class="empty"><h2>${S.spaces.length ? '没有符合筛选的空间' : SPACE_EMPTY_LIST}</h2>${S.spaces.length ? button('清除筛选', 'space-clear-filter')
+      : `<p class="muted">${esc(SPACE_EMPTY_LIST_HINT)}</p><p class="muted">${esc(SPACE_NO_MEMBERS_HINT)}</p>${button('新建空间', 'space-new', 'primary')}`}</div>`;
+  return (S.spacesError ? listStaleBar('space-reload', '空间列表') : '')
+    + `<div class="table-wrap"><table><thead><tr><th>目标</th><th>状态</th><th>策略</th><th>调度方式与负责人</th><th>阶段</th><th>等待原因</th><th>最近活动（UTC）</th><th>操作</th></tr></thead><tbody>
+  ${list.map(sp => `<tr data-space="${esc(sp.id)}" tabindex="0" aria-label="查看空间 ${esc(sp.id)}">
+    <td class="task-title"><strong>${esc(spaceGoalShort(sp.goal))}</strong><small class="task-sum">${spShortId(sp.id)}</small></td>
+    <td>${spaceBadge(sp.status)}</td>
+    <td><small>${esc(SPACE_FINISH_AUTH[sp.policy?.finish_auth] || sp.policy?.finish_auth || '—')}</small></td>
+    <td><small>${esc(spaceLeaderCell(sp))}</small></td>
+    <td><small>${sp.phase ? esc(sp.phase) : '—'}</small></td>
+    <td><small>${spaceWaitReason(sp) ? esc(spaceWaitReason(sp)) : '—'}</small></td>
+    <td><small>${esc(fmtUTC(sp.updated_at) || '—')}</small></td>
+    <td class="table-action">${button('打开 →', 'space-open:' + esc(sp.id), 'link')}</td>
+  </tr>`).join('')}</tbody></table></div>`;
+}
+function spaceFootZone() {
+  return `${S.spaces.length} 个空间（活跃 ${S.spaces.length - S.spaces.filter(s => s.archived).length} · 已归档 ${S.spaces.filter(s => s.archived).length}） · 时间为 UTC · 空间归档只做列表收纳，不删材料、不关原生线程。`;
+}
+function spacesPageView() {
+  return S.spaceId ? spaceDetailPageView() : spaceListPageView();
+}
+function spaceListPageView() {
+  return `<div class="page-head"><div><h1>协作空间</h1><p class="muted">多智能体协作空间：目标/验收、成员线程、调度与执行收在一处；普通发言零唤醒，执行只经显式指名派发。</p></div><div class="actions">${S.spacesUnsupported ? '' : button('新建空间', 'space-new', 'primary')}</div></div>
+  <section class="card sess-scope">
+  <div class="filters spaced" id="space-chips-zone">${S.spacesUnsupported ? '' : spaceChipsNode().join('')}</div>
+  <div id="space-list-zone">${spaceListZone()}</div>
+  <p class="footer-note" id="space-foot-zone">${spaceFootZone()}</p></section>`;
+}
+/* ---------- P04 独立详情页（九分区壳，fetchSpacePage 每 5s 同步） ---------- */
+function spaceDetailPageView() {
+  return `<div class="page-head"><div><button type="button" class="link" data-act="space-back">← 返回空间列表</button><h1>空间详情</h1><p class="muted">目标/验收、成员线程、调度条与讨论消息；执行只经显式指名派发，操作按九态与逐动作授权动态可用。</p></div></div>
+  <section class="card sess-scope" id="space-detail" tabindex="-1"><p class="muted" id="space-detail-loading">正在加载空间详情…</p>${SPACE_ZONES.map(z => `<div data-zone="${z}"></div>`).join('')}</section>`;
+}
+function currentSpace() {
+  return S.spacePage && S.spacePage.id === S.spaceId ? S.spacePage.space : null;
+}
+async function fetchSpacePage() {
+  const id = S.spaceId;
+  if (!id || S.page !== 'spaces' || !S.authed) return;
+  const [sr, mr] = await Promise.all([
+    api('GET', '/api/v1/spaces/' + encodeURIComponent(id)).catch(() => null),
+    api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/messages?since=' + (S.spacePage?.lastSeq || 0)).catch(() => null),
+  ]);
+  if (!S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;   // 换空间/关页：旧应答作废
+  if (sr && sr.code === 404) { toast('空间不存在'); location.hash = '#/spaces'; return; }
+  if (!sr || sr.code !== 200 || !sr.data?.space) return;
+  if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0 };
+  S.spacePage.space = sr.data.space;
+  /* 消息增量并入（since 游标只读不唤醒；滚动裁剪窗口经 pruned_before_seq 如实标注）。 */
+  if (mr && mr.code === 200 && Array.isArray(mr.data.messages)) {
+    const pruned = mr.data.pruned_before_seq || 0;
+    if (pruned > (S.spacePage.prunedSeq || 0)) S.spacePage.prunedSeq = pruned;
+    for (const m of mr.data.messages) {
+      if (m.seq <= S.spacePage.lastSeq) continue;
+      S.spacePage.msgs.push(m);
+      S.spacePage.lastSeq = m.seq;
+    }
+  }
+  $('#space-detail-loading')?.remove();
+  syncSpacePageZones();
+}
+function syncSpacePageZones() {
+  const root = document.getElementById('space-detail');
+  if (root && S.spacePage?.id === S.spaceId && S.spacePage.space) {
+    /* DOM 身份对账（与会话详情页同款）：整页 render 重建 #app 后 zones 缓存仍命中
+     * 会全部分区跳写→白页；元素实例换了即清缓存全量重写。 */
+    if (S.spacePage.el !== root) { S.spacePage.el = root; S.spacePage.zones = {}; }
+    drawerZonesApply(root, spacePageZones(S.spacePage.space), S.spacePage.zones, SPACE_ZONES);
+  }
+}
+function spaceMsgHtml(m) {
+  const who = m.member ? esc(m.member) : '主人';
+  return `<li class="msg msg-user" data-seq="${m.seq}"><div class="msg-meta"><b>${who}</b> · ${esc(m.by || '')} · ${esc(fmtUTC(m.created_at) || '')}</div><div class="msg-body">${esc(m.text)}</div></li>`;
+}
+function spacePageZones(sp) {
+  const pg = S.spacePage || {};
+  const terminal = SPACE_TERMINAL.has(sp.status);
+  const leader = sp.leader || {};
+  const wait = spaceWaitReason(sp);
+  const members = sp.members || [];
+  return {
+    head: `<div class="row"><h2>${esc(spaceGoalShort(sp.goal, 32))} ${spaceBadge(sp.status)}</h2><small class="muted">${esc(sp.id)}</small></div>`,
+    goal: `<h3>目标与验收</h3>
+    <div class="table-wrap"><table><tbody>
+    <tr><td>目标</td><td>${esc(sp.goal)}</td></tr>
+    ${sp.acceptance ? `<tr><td>验收标准</td><td>${esc(sp.acceptance)}</td></tr>` : ''}
+    <tr><td>阶段</td><td><small>${sp.phase ? esc(sp.phase) : '—（阶段由协作策略驱动，W05 接线后展示）'}</small></td></tr>
+    <tr><td>策略</td><td><small>${esc(SPACE_FINISH_AUTH[sp.policy?.finish_auth] || '—')} · 策略版本 ${sp.policy?.policy_version ?? '—'}${(sp.policy?.claim_principals || []).length ? ' · 领取约束：' + esc(sp.policy.claim_principals.join('、')) : ''}</small></td></tr>
+    <tr><td>预算与用量</td><td><small>${spaceBudgetCell(sp)}</small></td></tr>
+    <tr><td>创建</td><td><small>${esc(fmtUTC(sp.created_at) || '—')}</small></td></tr>
+    ${sp.final_outcome ? `<tr><td>定版</td><td><small>${sp.final_outcome === 'done' ? '已完成' : '已放弃'} · ${esc(sp.final_reason || '—')} · ${esc(sp.final_by || '')}</small></td></tr>` : ''}
+    ${sp.archived ? `<tr><td>归档</td><td><small>${esc(fmtUTC(sp.archived_at) || '')} · 列表收纳（材料与原生线程保留）</small></td></tr>` : ''}
+    </tbody></table></div>`,
+    members: `<h3>成员与线程</h3>${members.length
+    ? `<div class="table-wrap"><table><thead><tr><th>成员</th><th>职责</th><th>工作区</th><th>原生会话</th><th>绑定（UTC）</th></tr></thead><tbody>
+    ${members.map(m => `<tr><td><strong>${esc(m.name)}</strong></td><td><small>${esc(m.role || '—')}</small></td><td><small title="${esc(m.workspace || '')}">${esc(m.workspace || '—')}</small></td><td>${m.session_id ? sessShortId(m.session_id) : '<span class="muted">未绑定</span>'}</td><td><small>${esc(fmtUTC(m.bound_at) || '—')}</small></td></tr>`).join('')}</tbody></table></div>`
+    : `<p class="muted">${esc(SPACE_NO_MEMBERS_HINT)}</p>`}
+    <p class="footer-note">一成员一原生线程；在途成员不可移除或换绑（先收束或核对）。成员变更仅在待配置/暂停态开放。</p>`,
+    sched: `<h3>调度条</h3>
+    <div class="table-wrap"><table><tbody>
+    <tr><td>调度方式</td><td><small>${esc(SPACE_MODES[sp.mode] || sp.mode || '—')}</small></td></tr>
+    <tr><td>当前执行者</td><td><small>${leader.term ? `${esc(SPACE_MODES[leader.kind] || leader.kind)} / ${esc(leader.principal || '—')} · 任期 ${leader.term}` : '待领取（未建立任期）'}</small></td></tr>
+    <tr><td>租约</td><td><small>${esc(spaceLeaseCell(leader))}</small></td></tr>
+    <tr><td>在途执行</td><td><small>${(sp.in_flight || 0) ? `<b>${sp.in_flight}</b> 个在途/排队意图` : '无'}</small></td></tr>
+    <tr><td>等待原因</td><td><small>${wait ? esc(wait) : '—'}</small></td></tr>
+    </tbody></table></div>
+    <p class="footer-note">租约由服务端时钟裁决（本页按本机钟呈现仅供预判）；过期不能续约复活，接管由主人显式确认。刷新/退出不更换负责人。</p>`,
+    msgs: `<h3>讨论消息${(pg.msgs || []).length ? `（${pg.msgs.length}）` : ''}</h3>${(pg.msgs || []).length
+    ? `<div class="msgbox"><ol class="msgline">${pg.msgs.map(spaceMsgHtml).join('')}</ol></div>${pg.prunedSeq ? `<p class="footer-note">更早消息已滚动裁剪（窗口起点 seq ${pg.prunedSeq}）；since 游标只对窗口内消息有效。</p>` : ''}`
+    : `<p class="muted">还没有发言：写下第一条消息开始讨论。普通发言只落账，绝不触发执行。</p>`}`,
+    /* compose 分区模板零状态（D22）：草稿只存 DOM（输入镜像不重绘），轮询永不重写
+     * 本分区；busy 由 spaceSend 直更按钮 disabled（不进模板串）。 */
+    compose: terminal
+    ? `<h3 class="spaced">发言</h3><p class="muted">空间已终态：时间线只读，不能再发言。</p>`
+    : `<h3 class="spaced">发言（主人）</h3>
+    <div class="sayline spaced"><textarea id="space-say" rows="2" placeholder="以主人身份发言 · 只落账不触发任何执行（要成员执行请用「指名派发」）"></textarea>${button('发送', 'space-send', 'primary', 'type="button"')}</div>
+    <p class="footer-note">普通发言零唤醒（N01）；发言归属主人。编排主体不能冒充主人——代成员发言经 API member 字段。</p>`,
+    w05: `<h3>${esc(SPACE_W05_TITLE)}</h3><p class="muted">${esc(SPACE_W05_NOTE)}</p>`,
+    events: `<h3 class="spaced">执行与审计事件</h3>${(sp.events || []).length
+    ? `<div class="table-wrap"><table><thead><tr><th>时间（UTC）</th><th>事件</th><th>主体</th><th>说明</th></tr></thead><tbody>
+    ${(sp.events || []).slice().reverse().slice(0, 50).map(ev => `<tr><td><small>${esc(fmtUTC(ev.at) || '—')}</small></td><td><small><code>${esc(ev.kind)}</code></small></td><td><small>${esc(ev.actor || '—')}</small></td><td><small>${esc(ev.note || '')}</small></td></tr>`).join('')}</tbody></table></div>
+    <p class="footer-note">事件滚动保留最新 200 条，此处最新在前（最多 50 行）；主体为服务端已验证调用主体，非请求自报。</p>`
+    : '<p class="muted">暂无事件。</p>'}`,
+    actions: spaceActionsZone(sp),
+  };
+}
+/* spaceActionsZone 操作区（按九态动态可用）：状态不允许的动作不出现（illegal_transition
+ * 前置收敛为不渲染）；授权/判据类拒绝（403/409/503）保留入口——点了如实看到原因。
+ * 主人管理行：定版（完成/放弃）、预算、策略（sugar 端点，主人 local 恒可点）。 */
+function spaceActionsZone(sp) {
+  const st = sp.status;
+  const members = sp.members || [];
+  const leader = sp.leader || {};
+  if (SPACE_TERMINAL.has(st)) {
+    return `<h3 class="spaced">动作</h3><div class="actions spaced">
+    ${sp.archived ? '<span class="muted">已归档：记录仅可查看（材料与原生线程保留）。</span>' : button(SPACE_ACTION_WORDS.archive, 'space-act:archive', '', 'type="button"')}
+    </div><p class="footer-note">终态空间状态机不再转换；定版结论见上方「定版」行。</p>`;
+  }
+  const main = [];
+  if (st === 'pending_config' && members.length) main.push('ready');
+  if (st === 'ready') main.push('start');
+  if (st === 'running') main.push('pause');
+  if (st === 'paused' || st === 'blocked' || st === 'needs_review') main.push('resume');
+  if (st === 'running' && members.some(m => m.session_id)) main.push('dispatch');
+  if (st === 'pending_config' || st === 'paused') main.push('configure_members');
+  main.push('takeover');
+  if (leader.kind && leader.kind !== 'manual' && leader.term) main.push('renew');
+  const owner = [];
+  if (['ready', 'running', 'paused', 'blocked', 'needs_review'].includes(st)) owner.push('finalize_done');
+  owner.push('finalize_abandoned', 'budget', 'policy');
+  const btn = act => button(SPACE_ACTION_WORDS[act], 'space-act:' + act, act === 'start' || act === 'resume' ? 'primary' : act === 'finalize_abandoned' ? 'danger' : '', 'type="button"');
+  return `<h3 class="spaced">动作</h3>
+  <div class="actions spaced">${main.map(btn).join('')}</div>
+  <h3 class="spaced">主人管理</h3>
+  <div class="actions spaced">${owner.map(btn).join('')}</div>
+  <p class="footer-note">操作按九态与逐动作授权动态可用：状态不允许的动作不出现；授权/判据拒绝（403/409/503）原因如实完整展示。完成类动作须经协作策略判据（判据未装配或未满足均如实拒绝）。</p>`;
+}
+/* spaceActRefresh 写动作后统一刷新：列表槽位 + 详情分区（若在）。 */
+function spaceActRefresh(id) {
+  loadSpaces().then(paintSpacesView).catch(() => { });
+  if (S.spaceId === id && S.page === 'spaces') fetchSpacePage().catch(() => { });
+}
+/* spaceControlPost 控制动作统一提交（request_id 前端生成；verNow 取详情页最新版本，
+ * 确认弹层重试时用重试时刻版本，避免陈旧版本二次 409）。 */
+async function spaceControlPost(id, body, verNow) {
+  return api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`,
+    { request_id: newSpaceRequestId(), expected_version: verNow(), ...body }).catch(() => null);
+}
+/* spaceAct 直行动作（无表单）：确认弹层→POST control→如实回执；resume 在途确认门
+ * （409 execution_in_flight→携 confirm:true 的显式确认重试）。 */
+function spaceAct(sp, act) {
+  const id = sp.id;
+  const verNow = () => (S.spacePage && S.spacePage.id === id && S.spacePage.space ? S.spacePage.space.version : sp.version);
+  const after = () => spaceActRefresh(id);
+  const run = async (body, okWord) => {
+    const r = await spaceControlPost(id, body, verNow);
+    if (r && r.code === 200) {
+      toast(r.data?.dup ? okWord + '（同请求 ID 幂等命中，未重复变更）' : okWord);
+      after();
+    } else toast((okWord) + '被拒绝：' + (r ? errLine(r.data) : '网络异常（结果未知，请刷新后核对当前状态，勿盲目重试）'));
+    return r;
+  };
+  switch (act) {
+    case 'ready': confirmModal('标记就绪 · ' + spShortId(id), '配置就绪后可显式启动（成员须齐）。', '确认就绪', () => run({ action: 'ready' }, '已标记就绪')); break;
+    case 'start': confirmModal('启动空间 · ' + spShortId(id), '显式启动后进入运行态：派发由当前负责人执行；普通发言仍零唤醒。', '确认启动', () => run({ action: 'start' }, '已启动')); break;
+    case 'pause': confirmModal('暂停空间 · ' + spShortId(id), '暂停只阻止新增派发；在途执行照常收束落账，不取消、不换任期。', '确认暂停', () => run({ action: 'pause' }, '已暂停')); break;
+    case 'renew': run({ action: 'renew' }, '租约已续'); break;
+    case 'archive': confirmModal('归档空间 · ' + spShortId(id), '归档把空间从活跃列表收纳（「已归档」筛选可查看）；不删除材料、不关闭原生线程。仅已完成/已放弃空间可归档。', '确认归档', () => run({ action: 'archive' }, '已归档')); break;
+    case 'finish': confirmModal('申请完成 · ' + spShortId(id), '完成须通过协作策略判据：判据未装配或未满足都会被如实拒绝（503/409 原因完整展示）；完成授权默认 human_only 时等待主人定版。', '提交完成请求', () => run({ action: 'finish' }, '完成请求已提交')); break;
+    case 'resume': {
+      const tryResume = async confirm => {
+        const r = await spaceControlPost(id, confirm ? { action: 'resume', confirm: true } : { action: 'resume' }, verNow);
+        if (r && r.code === 200) {
+          toast(r.data?.dup ? '已恢复运行（同请求 ID 幂等命中）' : '已恢复运行');
+          after();
+        } else if (r && r.code === 409 && r.data?.error === 'execution_in_flight' && !confirm) {
+          confirmModal('恢复运行 · 在途未清 · ' + spShortId(id), esc(r.data?.message || '空间存在在途/排队执行意图。') + '<br><br>继续恢复将按现有队列依次派发排队意图；也可先等待在途收束。', '确认恢复（在途未清）', () => { tryResume(true); });
+        } else toast('恢复被拒绝：' + (r ? errLine(r.data) : '网络异常（结果未知，请刷新后核对当前状态）'));
+      };
+      tryResume(false);
+      break;
+    }
+    case 'finalize_done': openSpaceModal('final', 'done'); break;   // 定版弹层（outcome 预选）
+    case 'finalize_abandoned': openSpaceModal('final', 'abandoned'); break;
+    default: openSpaceModal(act === 'configure_members' ? 'members' : act);   // dispatch/takeover/budget/policy/members→表单弹层
+  }
+}
+/* spaceSend 详情页发言（主人）：compose 分区模板零状态——busy 直更按钮，成功直清
+ * 输入框，分区模板自始至终不被输入触碰（D22）。 */
+async function spaceSend() {
+  const sp = currentSpace();
+  if (!sp || SPACE_TERMINAL.has(sp.status)) return;
+  const ta = $('#space-say');
+  const text = (ta?.value || '').trim();
+  if (!text) { toast('先写消息正文'); return; }
+  const btn = document.querySelector('[data-act="space-send"]');
+  if (btn) { btn.disabled = true; btn.textContent = '发送中…'; }
+  const reqId = S.spacePage.msgReqId || newSpaceRequestId();
+  S.spacePage.msgReqId = reqId;
+  const r = await api('POST', `/api/v1/spaces/${encodeURIComponent(sp.id)}/messages`, { text, expected_version: sp.version, request_id: reqId }).catch(() => null);
+  if (btn) { btn.disabled = false; btn.textContent = '发送'; }
+  if (r && (r.code === 200 || r.code === 201)) {
+    if (ta) ta.value = '';
+    S.spacePage.msgReqId = '';
+    toast(r.code === 200 ? '发言回执（同请求 ID 幂等命中，未重复落账）' : '已发言（只落账，零唤醒）');
+    spaceActRefresh(sp.id);
+  } else {
+    toast('发言被拒绝：' + (r ? errLine(r.data) : '网络异常（是否落账不确定，请刷新核对消息区，勿盲目重试）'));
+    if (ta) { ta.value = text; ta.focus(); }
+  }
+}
+/* ---------- 空间弹层族（居中 modal，沿会话 modal 先例；草稿跨开关保留） ----------
+ * kind：new 新建 / dispatch 指名派发 / takeover 接管 / final 定版 / budget 预算 /
+ * policy 策略 / members 成员表。表单镜像经 data-sp / data-mrow 直写状态不重绘
+ * （保输入焦点）；syncSpaceModal 只在阶段迁移时 diff 重绘（WeakMap 缓存）。 */
+let spaceModalReturnFocus = null;
+const spaceModalPaint = new WeakMap();
+function freshSpaceOps(kind) {
+  return { kind, stage: 'idle', message: '', member: '', note: '', tk: 'manual', lease: 0, outcome: 'done', reason: '', bMsg: 0, bRound: 0, bWall: 0, bReason: '', pAuth: 'human_only', pClaim: '', rows: [], reqId: '' };
+}
+function spaceOpsTitle(kind) {
+  return { new: '新建协作空间', dispatch: SPACE_ACTION_WORDS.dispatch, takeover: SPACE_ACTION_WORDS.takeover, final: '定版', budget: SPACE_ACTION_WORDS.budget, policy: SPACE_ACTION_WORDS.policy, members: SPACE_ACTION_WORDS.configure_members }[kind] || '空间操作';
+}
+function openSpaceModal(kind, preset) {
+  if (kind !== 'new' && !currentSpace()) { toast('空间信息不可得'); return; }
+  if (kind === 'members') {
+    const sp = currentSpace();
+    S.spOps = freshSpaceOps(kind);
+    S.spOps.rows = (sp.members || []).map(m => ({ name: m.name, session: m.session_id || '' }));
+  } else {
+    S.spOps = freshSpaceOps(kind);
+    if (kind === 'final') S.spOps.outcome = preset === 'abandoned' ? 'abandoned' : 'done';
+    if (kind === 'budget') {
+      const b = currentSpace()?.budget || {};
+      S.spOps.bMsg = b.max_messages || 0; S.spOps.bRound = b.max_dispatch_rounds || 0; S.spOps.bWall = b.max_wall_seconds || 0;
+    }
+    if (kind === 'policy') {
+      const p = currentSpace()?.policy || {};
+      S.spOps.pAuth = p.finish_auth || 'human_only';
+      S.spOps.pClaim = (p.claim_principals || []).join(', ');
+    }
+  }
+  if (S.drawer) closeDrawer();   // 任务抽屉同族互斥
+  if (S.sessDrawer) closeSessionDrawer();
+  const a = document.activeElement;
+  spaceModalReturnFocus = a && a !== document.body ? a : null;
+  S.spaceModal = true;
+  $('#layer').innerHTML = `<div class="overlay"><section class="modal" id="space-modal" role="dialog" aria-modal="true" aria-labelledby="layer-title" tabindex="-1"><div class="row"><h2 id="layer-title">${esc(spaceOpsTitle(kind))}</h2>${button('×', 'close-space-modal', 'close', '', 'aria-label="关闭弹层"')}</div><div id="space-modal-body" class="sess-scope">${spaceModalFormHtml()}</div></section></div>`;
+  layerInert(true);
+  $('#space-modal').focus();
+  playDrawerOpen();
+  $('#space-modal').addEventListener('click', spaceModalMaskClose);
+  spaceModalPaint.set($('#space-modal-body'), spaceModalFormHtml());
+  requestAnimationFrame(() => $('#space-modal-body')?.querySelector('input,select,textarea')?.focus());
+}
+function spaceModalMaskClose(e) {
+  if (!S.spaceModal) return;
+  if (e.target.classList.contains('overlay')) closeSpaceModal();
+}
+function closeSpaceModal() {
+  S.spaceModal = false;
+  if (!$('#space-modal')) return;
+  layerInert(false);
+  $('#layer').innerHTML = '';
+  const back = spaceModalReturnFocus;
+  spaceModalReturnFocus = null;
+  if (back && back.isConnected) back.focus();
+  else {
+    const tab = document.querySelector('aside nav button.active') || document.querySelector('aside nav button');
+    if (tab) tab.focus();
+  }
+}
+function syncSpaceModal() {
+  if (!S.spaceModal) return;
+  const body = document.getElementById('space-modal-body');
+  if (!body) return;
+  const html = spaceModalFormHtml();
+  if (spaceModalPaint.get(body) === html) return;
+  spaceModalPaint.set(body, html);
+  body.innerHTML = html;
+}
+/* spaceRowsBox 成员行容器解析：新建表单行存 S.sp.rows；成员表弹层行存 S.spOps.rows。 */
+function spaceRowsBox() { return S.spOps?.kind === 'members' ? S.spOps : S.sp; }
+function spaceMemberRowHtml(m, i, locked) {
+  const opts = [`<option value="" ${!m.session ? 'selected' : ''}>（暂不绑定线程）</option>`]
+    .concat((S.sessions || []).map(s => `<option value="${esc(s.id)}" ${m.session === s.id ? 'selected' : ''}>${esc(s.agent_name)} · ${esc(spShortId(s.id))}</option>`)).join('');
+  return `<div class="row" style="gap:8px;margin-bottom:6px">
+  <input placeholder="成员名（必填）" data-mrow="${i}" data-mfield="name" value="${esc(m.name || '')}" style="flex:1;min-width:120px" ${locked ? 'disabled' : ''}>
+  <select data-mrow="${i}" data-mfield="session" style="flex:1;min-width:180px" ${locked ? 'disabled' : ''}>${opts}</select>
+  ${button('移除', 'sp-row-del:' + i, 'link', 'type="button"')}</div>`;
+}
+function spaceModalFormHtml() {
+  const kind = S.spOps?.kind || 'new';
+  if (kind === 'new') return spaceNewFormHtml();
+  if (kind === 'dispatch') return spaceDispatchFormHtml();
+  if (kind === 'takeover') return spaceTakeoverFormHtml();
+  if (kind === 'final') return spaceFinalFormHtml();
+  if (kind === 'budget') return spaceBudgetFormHtml();
+  if (kind === 'policy') return spacePolicyFormHtml();
+  return spaceMembersFormHtml();
+}
+function spaceOpsFeedback(O) {
+  if (O.stage === 'failed') return `<div class="notice warn"><b>提交被拒绝</b>：${esc(O.message || '请修正后重试。')}</div>`;
+  if (O.stage === 'busy') return '<span class="muted">正在提交…</span>';
+  return '<span class="muted">就绪。</span>';
+}
+function spaceNewFormHtml() {
+  const F = S.sp;
+  const locked = F.stage === 'submitting';
+  const rows = (F.rows || []).map((m, i) => spaceMemberRowHtml(m, i, locked)).join('');
+  return `<fieldset ${locked ? 'disabled' : ''}>
+  <label class="spaced">目标（必填）<textarea data-sp="goal" rows="2" placeholder="要把什么做到什么程度">${esc(F.goal)}</textarea></label>
+  <label class="spaced">验收标准（可选 · 完成判据的素材）<textarea data-sp="acceptance" rows="2" placeholder="怎样算完成">${esc(F.acceptance)}</textarea></label>
+  <label class="spaced">调度方式<select data-sp="mode">
+    <option value="manual" ${F.mode === 'manual' ? 'selected' : ''}>manual · 手动——你指定执行者与任务（创建即持首任任期）</option>
+    <option value="builtin" ${F.mode === 'builtin' ? 'selected' : ''}>builtin · 内置协作——明确流程规则由内置服务驱动（授予租约）</option>
+    <option value="external" ${F.mode === 'external' ? 'selected' : ''}>external · 外部管家——创建待领取空间，由持编排凭据的管家领取（成员可空）</option>
+  </select></label>
+  <div class="spaced"><b>成员（可选 · 一成员一原生会话线程）</b><div>${rows || '<p class="muted small">暂不添加成员：manual 空间可创建后经详情页「配置成员」补齐；external 空间按 AC14 顺序由管家领取后配置。</p>'}</div>
+  <div class="actions">${button('＋ 加一名成员', 'sp-row-add', 'link', 'type="button"')}</div></div>
+  <div class="spaced"><b>预算（可选 · 0=不限）</b>
+  <div class="form-grid">
+  <label>消息条数上限<input type="number" min="0" data-sp="bMsg" value="${F.bMsg || 0}"></label>
+  <label>派发轮次上限<input type="number" min="0" data-sp="bRound" value="${F.bRound || 0}"></label>
+  <label>墙钟秒上限<input type="number" min="0" data-sp="bWall" value="${F.bWall || 0}"></label>
+  </div></div>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(F)}</div>
+  <div class="actions">${button(F.stage === 'submitting' ? '提交中… 请勿重复操作' : '创建空间', 'sp-submit', 'primary', 'type="button"', F.stage === 'submitting' ? 'disabled' : '')}</div>
+  <p class="footer-note">创建携前端生成的请求 ID：响应丢失后重试由服务端幂等兜底（同键同文返回原空间）。预算三计数分离：消息条数 ≠ 执行轮次 ≠ 墙钟，各自判耗尽。</p>`;
+}
+function spaceDispatchFormHtml() {
+  const O = S.spOps;
+  const members = (currentSpace()?.members || []).filter(m => m.session_id);
+  if (!members.length) return `<div class="empty"><h2>没有可派发的成员</h2><p class="muted">派发要求成员已绑定原生会话线程：先「配置成员」完成绑定，标记就绪并启动空间后再派发。</p></div>${button('关闭', 'close-space-modal', 'link', 'type="button"')}`;
+  const opts = [`<option value="" ${!O.member ? 'selected' : ''} disabled>选择成员…</option>`]
+    .concat(members.map(m => `<option value="${esc(m.name)}" ${O.member === m.name ? 'selected' : ''}>${esc(m.name)}（线程 ${esc(spShortId(m.session_id))}）</option>`)).join('');
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <label class="spaced">指名成员<select data-sp="member">${opts}</select></label>
+  <label class="spaced">派发说明（可选 · 成员本轮任务输入）<textarea data-sp="note" rows="3" placeholder="这一棒做什么">${esc(O.note)}</textarea></label>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '受理中…' : SPACE_ACTION_WORDS.dispatch, 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">派发受理为 202 异步：意图先持久（预算同事务扣减），串行调度投递既有会话链；结果落账不自动推进下一棒。同请求 ID 重放零重复执行零重复扣。</p>`;
+}
+function spaceTakeoverFormHtml() {
+  const O = S.spOps;
+  const l = currentSpace()?.leader || {};
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <p class="muted small">当前任期：${l.term ? `${esc(SPACE_MODES[l.kind] || l.kind)} / ${esc(l.principal || '—')} · 任期 ${l.term}` : '未建立（待领取）'}。接管按预期任期原子 CAS：同刻两方接管只一方成功，失败方得到精确任期冲突（term_conflict）。</p>
+  <label class="spaced">接管为<select data-sp="tk">
+    <option value="manual" ${O.tk === 'manual' ? 'selected' : ''}>manual · 你亲自驱动（不设租约）</option>
+    <option value="builtin" ${O.tk === 'builtin' ? 'selected' : ''}>builtin · 交给内置协作服务（授予租约）</option>
+    <option value="external" ${O.tk === 'external' ? 'selected' : ''}>external · 开放外部领取（清空任期转待领取；仅待配置空间可开放）</option>
+  </select></label>
+  <label class="spaced">租约时长（秒 · 0=默认 5 分钟；manual 忽略；上限 86400）<input type="number" min="0" data-sp="lease" value="${O.lease || 0}"></label>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '受理中…' : SPACE_ACTION_WORDS.takeover, 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">旧任期动作在接管后一律拒绝（term fencing）；编排主体只能领取「待领取」空间（四条件核对），不能顶替有效任期。</p>`;
+}
+function spaceFinalFormHtml() {
+  const O = S.spOps;
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <label class="spaced" style="display:block"><input type="radio" name="sp-final" data-sp="outcome" data-spval="done" value="done" ${O.outcome === 'done' ? 'checked' : ''}> ${esc(SPACE_ACTION_WORDS.finalize_done)}——须通过协作策略判据（判据未装配或未满足均如实拒绝）</label>
+  <label class="spaced" style="display:block"><input type="radio" name="sp-final" data-sp="outcome" data-spval="abandoned" value="abandoned" ${O.outcome === 'abandoned' ? 'checked' : ''}> ${esc(SPACE_ACTION_WORDS.finalize_abandoned)}——必填原因；要求无未收束执行（不假清零任务）</label>
+  <label class="spaced">放弃原因（outcome=abandoned 必填）<textarea data-sp="reason" rows="2" placeholder="为什么放弃">${esc(O.reason)}</textarea></label>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '受理中…' : '提交定版', 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">定版仅主人可操作；讨论与候选不自动定版。归档在定版之后另行执行（仅终态可归档）。</p>`;
+}
+function spaceBudgetFormHtml() {
+  const O = S.spOps;
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <div class="form-grid">
+  <label>消息条数上限（0=不限）<input type="number" min="0" data-sp="bMsg" value="${O.bMsg || 0}"></label>
+  <label>派发轮次上限（0=不限）<input type="number" min="0" data-sp="bRound" value="${O.bRound || 0}"></label>
+  <label>墙钟秒上限（0=不限）<input type="number" min="0" data-sp="bWall" value="${O.bWall || 0}"></label>
+  </div>
+  <label class="spaced">调整原因（审计留档）<input data-sp="bReason" value="${esc(O.bReason)}" placeholder="为什么调整"></label>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '受理中…' : SPACE_ACTION_WORDS.budget, 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">仅主人可调整；改预算不自动恢复运行。负值非法。</p>`;
+}
+function spacePolicyFormHtml() {
+  const O = S.spOps;
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <label class="spaced">完成授权<select data-sp="pAuth">
+    <option value="human_only" ${O.pAuth === 'human_only' ? 'selected' : ''}>human_only · 完成须主人定版（默认）</option>
+    <option value="verified_write_review" ${O.pAuth === 'verified_write_review' ? 'selected' : ''}>verified_write_review · 写审判据通过后当前驱动者可申请完成</option>
+  </select></label>
+  <label class="spaced">领取约束（逗号分隔主体名 · 空=任意持编排凭据主体可领取）<input data-sp="pClaim" value="${esc(O.pClaim)}" placeholder="例如：prime"></label>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '受理中…' : SPACE_ACTION_WORDS.policy, 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">仅主人可变更；仅待配置/暂停且无在途时开放（否则 409 如实展示）。策略版本随变更递增并审计；开启 verified_write_review 不等于完成——判据仍由策略裁决。</p>`;
+}
+function spaceMembersFormHtml() {
+  const O = S.spOps;
+  const rows = (O.rows || []).map((m, i) => spaceMemberRowHtml(m, i, O.stage === 'busy')).join('');
+  return `<fieldset ${O.stage === 'busy' ? 'disabled' : ''}>
+  <p class="muted small">全量替换成员表：在途成员不可移除或换绑（先收束或核对）；会话线程全局唯一归属——已被其他空间绑定的会话会被拒绝。仅待配置/暂停态可变更（否则 409 如实展示）。</p>
+  <div>${rows || '<p class="muted">还没有成员行。</p>'}</div>
+  <div class="actions">${button('＋ 加一名成员', 'sp-row-add', 'link', 'type="button"')}</div>
+  </fieldset>
+  <div class="statusline" role="status">${spaceOpsFeedback(O)}</div>
+  <div class="actions">${button(O.stage === 'busy' ? '保存中…' : '保存成员表', 'sp-ops-submit', 'primary', 'type="button"', O.stage === 'busy' ? 'disabled' : '')}</div>
+  <p class="footer-note">成员就位后回详情页「标记就绪」→「启动」，再「指名派发」。会话下拉来自本机 agent 会话面；也可先不绑定线程（派发前须绑定）。</p>`;
+}
+/* submitSpaceOps 弹层提交（按 kind 分派端点；DOM 直读收口——镜像兜底）；版本取
+ * 提交时刻详情页最新值。 */
+async function submitSpaceOps() {
+  const O = S.spOps, sp = currentSpace();
+  if (!O || !sp || O.stage === 'busy') return;
+  const id = sp.id;
+  const reqId = O.reqId || newSpaceRequestId();
+  O.reqId = reqId;
+  O.stage = 'busy'; O.message = '';
+  syncSpaceModal();
+  const ver = sp.version;
+  try {
+    let r = null, ok = '';
+    if (O.kind === 'dispatch') {
+      if (!O.member) { O.stage = 'failed'; O.message = '请选择成员'; syncSpaceModal(); return; }
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/dispatches`, { member: O.member, note: O.note, expected_version: ver, request_id: reqId });
+      ok = r.code === 200 ? '派发回执（同请求 ID 幂等命中，未重复扣预算）' : '派发已受理：意图持久化后由串行调度投递（结果落账不自动推进）';
+    } else if (O.kind === 'takeover') {
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`, { request_id: reqId, action: 'takeover', expected_version: ver, expected_term: sp.leader?.term || 0, takeover_kind: O.tk, lease_seconds: +O.lease || 0 });
+      ok = O.tk === 'external' ? '已开放外部领取（旧任期失效，空间转待领取）' : '接管成功（新任期生效）';
+    } else if (O.kind === 'final') {
+      if (O.outcome === 'abandoned' && !O.reason.trim()) { O.stage = 'failed'; O.message = '放弃定版必须填写原因'; syncSpaceModal(); return; }
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/finalize`, { request_id: reqId, expected_version: ver, final_outcome: O.outcome, reason: O.reason });
+      ok = O.outcome === 'done' ? '已定版（完成）' : '已定版（放弃）';
+    } else if (O.kind === 'budget') {
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/budget`, { request_id: reqId, expected_version: ver, budget: { max_messages: +O.bMsg || 0, max_dispatch_rounds: +O.bRound || 0, max_wall_seconds: +O.bWall || 0 }, reason: O.bReason });
+      ok = '预算已调整（不自动恢复运行）';
+    } else if (O.kind === 'policy') {
+      const claim = O.pClaim.split(',').map(x => x.trim()).filter(Boolean);
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/policy`, { request_id: reqId, expected_version: ver, policy: claim.length ? { finish_auth: O.pAuth, claim_principals: claim } : { finish_auth: O.pAuth } });
+      ok = '策略已调整（策略版本递增并审计）';
+    } else if (O.kind === 'members') {
+      const members = (O.rows || []).filter(m => m.name && m.name.trim()).map(m => m.session ? { name: m.name.trim(), session_id: m.session } : { name: m.name.trim() });
+      r = await api('POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`, { request_id: reqId, action: 'configure_members', expected_version: ver, members });
+      ok = `成员表已保存（现 ${members.length} 名）`;
+    }
+    if (r && (r.code === 200 || r.code === 201 || r.code === 202)) {
+      closeSpaceModal();
+      toast(ok);
+      spaceActRefresh(id);
+    } else {
+      O.stage = 'failed';
+      O.message = r ? (r.data?.message || errLine(r.data)) : '网络异常：提交是否生效不确定，请刷新核对空间状态后重试';
+      syncSpaceModal();
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    O.stage = 'failed';
+    O.message = '网络层失败，提交是否生效不确定。';
+    syncSpaceModal();
+  }
+}
+async function submitSpaceNew() {
+  const F = S.sp;
+  if (F.stage === 'submitting') return;
+  if (!F.goal.trim()) { F.stage = 'failed'; F.message = '目标必填'; syncSpaceModal(); return; }
+  F.stage = 'submitting'; F.message = '';
+  syncSpaceModal();
+  const reqId = F.reqId || newSpaceRequestId();
+  F.reqId = reqId;
+  const members = (F.rows || []).filter(m => m.name && m.name.trim()).map(m => m.session ? { name: m.name.trim(), session_id: m.session } : { name: m.name.trim() });
+  const body = {
+    goal: F.goal, request_id: reqId, mode: F.mode,
+    budget: { max_messages: +F.bMsg || 0, max_dispatch_rounds: +F.bRound || 0, max_wall_seconds: +F.bWall || 0 },
+  };
+  if (F.acceptance.trim()) body.acceptance = F.acceptance;
+  if (members.length) body.members = members;
+  try {
+    const r = await api('POST', '/api/v1/spaces', body);
+    if (r && (r.code === 201 || r.code === 200)) {
+      const spId = r.data?.space?.id || '';
+      F.stage = 'idle'; F.ackId = spId;
+      closeSpaceModal();
+      toast(r.code === 200 ? '空间已就绪（同请求 ID 幂等命中，返回原空间）' : '空间已创建');
+      S.sp = freshSpaceForm();
+      loadSpaces().then(paintSpacesView).catch(() => { });
+      if (spId) goSpace(spId);
+    } else {
+      F.stage = 'failed';
+      F.message = r ? (r.data?.message || errLine(r.data)) : '网络异常：创建是否生效不确定，请刷新空间列表核对后再试';
+      syncSpaceModal();
+    }
+  } catch (e) {
+    if (e.unauthorized) return;
+    F.stage = 'failed';
+    F.message = '网络层失败，创建是否生效不确定。';
+    syncSpaceModal();
+  }
+}
+function goSpace(id) {
+  location.hash = '#/spaces/' + encodeURIComponent(id);
+}
 async function pollTick() {
   if (!S.authed || document.visibilityState !== 'visible') return;
   const wasStale = !!S.loadError;   // P1-03：新鲜度基线（失败→恢复转移判据）
@@ -1508,6 +2165,15 @@ async function pollTick() {
           try { await fetchSessionPage(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 详情刷新异常（单轮跳过，下轮重试）:', e2); }
           try { syncSessTurnDrawerFromPage(); } catch (e2) { console.error('[会话页] 明细抽屉同步异常（单轮跳过，下轮重试）:', e2); }
         }
+      } else if (S.page === 'spaces') {
+        /* 空间页（W04-03 P03/P04）：同会话页口径——槽位局部更新 + 详情分区 diff；
+         * 发言输入区分区模板零状态（D22），轮询零触碰。弹层在 #layer（render 不触
+         * 及），发言草稿随分区零重写保持。逐段自捕获同会话页。 */
+        paintConnChip();
+        try { paintSpacesView(); } catch (e2) { if (e2?.unauthorized) return; console.error('[空间页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
+        if (S.spaceId) {
+          try { await fetchSpacePage(); } catch (e2) { if (e2?.unauthorized) return; console.error('[空间页] 详情刷新异常（单轮跳过，下轮重试）:', e2); }
+        }
       } else if (S.page === 'tasks' && (wasStale || S.sessModal)) {
         paintConnChip(); paintTasksCard();
       } else {
@@ -1523,7 +2189,13 @@ async function pollTick() {
        * try/catch——渲染异常不再吞掉同轮已到数据（先 loadSessions 后渲染，异常只跳
        * 当段），下一轮照常；401 仍上抛回令牌门。 */
       try { await loadSessions(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 列表加载异常（单轮跳过，下轮重试）:', e2); }
-      try { paintSessionsView(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
+      try { paintSessionsView(); } catch (e2) { console.error('[会话页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
+    }
+    if (S.page === 'spaces') {
+      /* 空间列表随轮询（同会话列表口径：503 专态独立；槽位局部更新——发言输入区
+       * 零状态模板不被触碰）。逐段自捕获同会话页。 */
+      try { await loadSpaces(); } catch (e2) { if (e2?.unauthorized) return; console.error('[空间页] 列表加载异常（单轮跳过，下轮重试）:', e2); }
+      try { paintSpacesView(); } catch (e2) { console.error('[空间页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
     }
   } catch (e) {
     /* 401 已由 api() 处理；其余落失败态（A4 五态：列表区分「失败可重试」与
@@ -1615,7 +2287,7 @@ function gateError(title, bodyHtml) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['wizard', '连接']];   // W01-05 P01：会话独立主入口（由任务页区块迁出）
+const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];   // W01-05 P01：会话独立主入口（由任务页区块迁出）；W04-03 P03：协作空间独立主入口
 // setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
 const SETUP_PAGES = [['wizard', '连接向导'], ['overview', '本机环境']];
 function route() {
@@ -1635,6 +2307,13 @@ function route() {
   if (S.sessId && S.sessId !== prevSessId) S.sessPage = { id: S.sessId, session: null, zones: {}, sel: null };
   if (!S.sessId) S.sessPage = null;
   if ($('#sess-modal')) closeSessModal();
+  /* W04-03 P04：#/spaces/{id} 独立详情页路由（同会话详情页口径：换空间/退列表即换
+   * 视图状态；弹层随任意路由变更关闭——草稿留 S.sp/S.spOps）。 */
+  const prevSpaceId = S.spaceId;
+  S.spaceId = S.page === 'spaces' && arg ? arg : '';
+  if (S.spaceId && S.spaceId !== prevSpaceId) S.spacePage = { id: S.spaceId, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, msgReqId: '' };
+  if (!S.spaceId) S.spacePage = null;
+  if ($('#space-modal')) closeSpaceModal();
   /* W03-04 P07：换路由即关 MCP 配置弹层与诊断抽屉（草稿/预览属页面会话，重开即
    * 从最近表单快照出发；在途应答凭 mcpBoardSeq/会话代次丢弃）。 */
   if (mcpModal && ph !== 'mcp') closeMcpModal(false);
@@ -1665,6 +2344,15 @@ function route() {
     if (S.sessId) {
       syncSessPageZones();   // 已有快照即绘（分区缓存随 DOM 身份对账失效重写）
       fetchSessionPage();
+    }
+  }
+  // W04-03 P03/P04：空间独立页（列表主入口/详情页）；进页拉一次（轮询随 pollTick
+  // 保持新鲜；503 专态如实降级）。详情页即取（fetchSpacePage 守卫换空间/关页）。
+  if (S.page === 'spaces' && S.authed) {
+    loadSpaces().then(paintSpacesView).catch(() => { });
+    if (S.spaceId) {
+      syncSpacePageZones();   // 已有快照即绘（分区缓存随 DOM 身份对账失效重写）
+      fetchSpacePage();
     }
   }
 }
@@ -1736,6 +2424,7 @@ function pageView() {
   if (S.page === 'services') return servicesPage();
   if (S.page === 'tasks') return tasksPage();
   if (S.page === 'sessions') return sessionsPageView();
+  if (S.page === 'spaces') return spacesPageView();   // W04-03 P03/P04：列表主入口 + #/spaces/{id} 详情页
   if (S.page === 'mcp') return mcpPage();   // W03-04 P07：MCP 接入子页（六分区）
   return overviewPage();
 }
@@ -4291,6 +4980,7 @@ document.addEventListener('click', e => {
         else if ($('#confirm-modal')) closeConfirm();
         else if ($('#copy-modal')) closeCopyModal();
         else if ($('#sess-modal')) closeSessModal();   // 会话表单 modal（W01-05；Esc/×=关闭不弃草稿）
+        else if ($('#space-modal')) closeSpaceModal();   // 空间弹层（W04-03；Esc/×=关闭不弃草稿）
         return;
       case 'copy-modal-close': closeCopyModal(); return;
       case 'notify-toggle': toggleNotifyChannel(arg, btn); return;
@@ -4415,11 +5105,52 @@ document.addEventListener('click', e => {
         });
         return;
       }
+      /* ---------- 协作空间（W04-03 P03/P04）：列表/详情/弹层/动作 ---------- */
+      case 'space-new':
+        if (S.sp.stage === 'submitting') { toast('上一笔创建仍在提交，请稍候'); return; }
+        if (S.spacesUnsupported) { toast('本机未装配协作空间'); return; }
+        openSpaceModal('new');
+        return;
+      case 'sp-submit': submitSpaceNew(); return;
+      case 'sp-ops-submit': submitSpaceOps(); return;
+      case 'close-space-modal': closeSpaceModal(); return;
+      case 'space-reload': loadSpaces().then(paintSpacesView).catch(() => { }); return;
+      case 'space-chip': {
+        const c = btn.dataset.chip || '';
+        S.spaceFilter = c !== '' && S.spaceFilter === c ? '' : c;   // 选中/再点复位（与会话 chips 同语义）
+        paintSpacesView();
+        return;
+      }
+      case 'space-clear-filter': S.spaceFilter = ''; paintSpacesView(); toast('已清除筛选'); return;
+      case 'space-back': location.hash = '#/spaces'; return;
+      case 'space-open': goSpace(arg); return;
+      case 'space-send': spaceSend(); return;
+      case 'space-act': {
+        const sp = currentSpace();
+        if (!sp) { toast('空间信息不可得'); return; }
+        spaceAct(sp, arg);
+        return;
+      }
+      case 'sp-row-add': {
+        const box = spaceRowsBox();
+        box.rows.push({ name: '', session: '' });
+        syncSpaceModal();
+        requestAnimationFrame(() => document.querySelector('#space-modal-body [data-mrow="' + (box.rows.length - 1) + '"][data-mfield="name"]')?.focus());
+        return;
+      }
+      case 'sp-row-del': {
+        const box = spaceRowsBox();
+        const di = parseInt(arg, 10);
+        if (!Number.isNaN(di) && box.rows[di]) { box.rows.splice(di, 1); syncSpaceModal(); }
+        return;
+      }
     }
   }
   if (tr && !e.target.closest('button')) openDrawer(tr.dataset.task);
   const trs = e.target.closest('tr[data-sess]');
   if (trs && !e.target.closest('button')) goSessionDetail(trs.dataset.sess);   // W01-05：行点击进独立详情页（旧 700px 会话抽屉退役）
+  const trsp = e.target.closest('tr[data-space]');
+  if (trsp && !e.target.closest('button')) goSpace(trsp.dataset.space);   // W04-03：行点击进空间详情页
   const trt = e.target.closest('tr[data-turn]');
   if (trt && S.page === 'sessions' && S.sessId && !e.target.closest('button')) { S.sessPage.sel = parseInt(trt.dataset.turn, 10); syncSessPageZones(); }   // 轮次时间线行：选中→页内答复分区
 });
@@ -4431,6 +5162,21 @@ document.addEventListener('input', e => {
   if (e.target.id === 'sess-cwd') S.sess.cwd = e.target.value;   // 草稿镜像（modal；输入不重绘）
   if (e.target.id === 'sess-prompt') S.sess.prompt = e.target.value;
   if (e.target.id === 'sess-query') { S.sessQuery = e.target.value; paintSessionsView(); }   // P01 搜索：镜像 + 列表/chips 槽位局部刷新（输入框自身不受触碰）
+  /* 空间弹层表单镜像（W04-03）：data-sp 直写状态不重绘（保输入焦点）；成员行
+   * data-mrow 同口径。输入不触发 syncSpaceModal——弹层只在阶段迁移时 diff 重绘。 */
+  const sk = e.target.dataset?.sp;
+  if (sk && S.spaceModal) {
+    const box = S.spOps?.kind === 'new' ? S.sp : S.spOps;
+    if (box) box[sk] = e.target.type === 'number' ? (+e.target.value || 0) : e.target.value;
+    return;
+  }
+  const mrow = e.target.dataset?.mrow;
+  if (mrow !== undefined && mrow !== '' && S.spaceModal) {
+    const box = spaceRowsBox();
+    const row = box?.rows?.[+mrow];
+    if (row) row[e.target.dataset.mfield] = e.target.value;
+    return;
+  }
   // 发现候选表单（data-disc）：直写 disc.form 不重绘（保输入焦点），探测时统一提交
   const dk = e.target.dataset?.disc;
   if (dk && disc) { disc.form[dk] = e.target.value; return; }
@@ -4476,6 +5222,7 @@ document.addEventListener('keydown', e => {
     if ($('#copy-modal')) { e.preventDefault(); closeCopyModal(); return; }
     if (cfgEdit) { e.preventDefault(); closeCfgDrawer(true); return; }
     if ($('#sess-modal')) { e.preventDefault(); closeSessModal(); return; }
+    if ($('#space-modal')) { e.preventDefault(); closeSpaceModal(); return; }   // 空间弹层（W04-03；Esc=关闭不弃草稿）
     if (S.drawer) { e.preventDefault(); closeDrawer(); return; }
     if (S.sessDrawer) { e.preventDefault(); closeSessionDrawer(); return; }
     return;
@@ -4504,6 +5251,9 @@ document.addEventListener('keydown', e => {
   /* 会话行/轮次行键盘可达（A1-10 同款）：Enter/Space 等价点击。 */
   const trse = e.target.closest?.('tr[data-sess]');
   if (trse && e.target === trse && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); goSessionDetail(trse.dataset.sess); }
+  /* 空间行键盘可达（A1-10 同款）：Enter/Space 等价点击。 */
+  const trspk = e.target.closest?.('tr[data-space]');
+  if (trspk && e.target === trspk && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); goSpace(trspk.dataset.space); }
   const trtu = e.target.closest?.('tr[data-turn]');
   if (trtu && e.target === trtu && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); if (S.page === 'sessions' && S.sessId && S.sessPage) { S.sessPage.sel = parseInt(trtu.dataset.turn, 10); syncSessPageZones(); } }
 });
@@ -4517,6 +5267,21 @@ document.addEventListener('submit', e => {
   if (e.target.id === 'sess-form') { e.preventDefault(); submitSess(); }
 });
 document.addEventListener('change', e => {
+  /* 空间弹层 select/radio 镜像（W04-03）：input 事件不覆盖 select/radio 的所有浏览器
+   * 行为，change 同步镜像（直写状态不重绘，保焦点）。 */
+  const skc = e.target.dataset?.sp;
+  if (skc && S.spaceModal) {
+    const box = S.spOps?.kind === 'new' ? S.sp : S.spOps;
+    if (box) box[skc] = e.target.type === 'number' ? (+e.target.value || 0) : e.target.value;
+    return;
+  }
+  const mrowc = e.target.dataset?.mrow;
+  if (mrowc !== undefined && mrowc !== '' && S.spaceModal) {
+    const box = spaceRowsBox();
+    const row = box?.rows?.[+mrowc];
+    if (row) row[e.target.dataset.mfield] = e.target.value;
+    return;
+  }
   if (e.target.id === 'notify-also') { saveAlsoNotify(e.target); return; }
   if (e.target.id === 'sess-agent') { S.sess.agent = e.target.value; paintSessBindZoneNode(); return; }   // 目标切换只重写绑定摘要区（W01-05：适配器/权限只读声明随能力卡，输入 DOM 不受触碰）
   if (e.target.id === 'nf-type') {
