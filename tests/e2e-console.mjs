@@ -1003,6 +1003,10 @@ async function nodeSessFlow(browser) {
   await page.keyboard.press('Escape');   // 关抽屉
   await p_sleep(500);
   // 相位B：焦点在会话页搜索框（输入 + 光标定位 + 页面滚动）
+  // T5b（终审轮工具缺陷，与相位A 同族）：相位A 抽验后停在详情页（scratch 会话入列
+  // 等待跨首轮完成），此处必须先回列表再点搜索框——直点 #sess-query 会 15s 超时崩出。
+  await page.goto(BASE + '/#/sessions');
+  await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
   await page.click('#sess-query');
   await page.fill('#sess-query', 'E2E 豁免锚');
   await page.evaluate(() => {
