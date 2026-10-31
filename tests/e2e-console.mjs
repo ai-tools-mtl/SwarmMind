@@ -605,7 +605,15 @@ async function hubSessFlow(browser) {
   const cifOk = cifToast.includes('在途') && cifToast.includes('取消');
   walkLog(`S13 在途关闭拒绝：toast=${cifToast.slice(0, 40)}`);
   record('S13a', '在途关闭拒绝（投轮后立即关闭 → close_in_flight 409 人话指向取消/等待，关闭未生效）', cifOk, `toast=${cifToast.slice(0, 50)}`);
-  await page.click('#layer .modal [data-act="close"]');   // 再想想：摘确认层（取消关闭）
+  /* T3 修复：S13a 无论判定如何，先按实际层状态处置再继续——确认层仍在（在途拒绝
+   * 路径，正常态）→「再想想」摘层；若关闭意外成立（层已被 closeLayer 摘除——首轮
+   * 在 50ms 内完成的最快时序），后续取消段按无取消钮现状如实收敛，不再因固定
+   * 「再想想」点击落空而 waitForSelector 超时崩出（单用例失败不得终止整个套件，
+   * S13b/S06/S09 才能产出官方记录）。 */
+  if (await page.locator('#layer .modal').count()) {
+    await page.click('#layer .modal [data-act="close"]').catch(() => { });   // 再想想：摘确认层（取消关闭）
+    await page.waitForSelector('#layer .modal', { state: 'detached', timeout: 5000 }).catch(() => { });
+  }
   await p_sleep(500);
   // 详情页刷新（refreshSessionsAfterWrite 已触发；等在途轮行与取消按钮出现）
   await page.waitForSelector('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]', { timeout: 20000 }).catch(() => { });
@@ -675,7 +683,7 @@ async function hubSessFlow(browser) {
   await page.click('#sess-detail [data-act="sess-close"]');
   await page.waitForSelector('#layer .modal [data-act="sess-close-confirm"]', { timeout: 5000 });
   await page.click('[data-act="sess-close-confirm"]');
-  await page.waitForSelector('#layer .modal', { state: 'detached', timeout: 8000 });
+  await page.waitForSelector('#layer .modal', { state: 'detached', timeout: 8000 }).catch(() => { });   // T3 同族：会话此前已被关闭（幂等 dup 层即摘）不崩出
   let closedHead = false;
   for (let i = 0; i < 8 && !closedHead; i++) {
     await p_sleep(1200);
@@ -753,6 +761,9 @@ async function nodeSessFlow(browser) {
   const migTxt = await page.textContent('#sess-card');
   await page.click('#sess-card [data-go="sessions"]');
   await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
+  /* T4 修复：#sess-list-zone 壳节点随路由 render 即在，表格/chips 由 loadSessions
+   * 异步填充——固定短等待读 heads 存在竞态。改条件等待：列表表头或空态任一就位。 */
+  await page.waitForSelector('#sess-list-zone thead th, #sess-list-zone .empty', { timeout: 15000 });
   const heads = await page.evaluate(() => [...document.querySelectorAll('#sess-list-zone thead th')].map(th => th.textContent.trim()));
   const headsOk = JSON.stringify(heads) === JSON.stringify(['标题', 'agent', '机器', '工作区', '状态', '最近活动（UTC）', '操作']);
 
@@ -802,6 +813,8 @@ async function nodeSessFlow(browser) {
 
   // SN08b 状态筛选 chips（终审必修3）：「全部」chip 恒在（与 hub 同构）+ 登记 chip
   // 选中过滤/再点复位（点同值回全部）。
+  /* T4 修复：chips 行随 loadSessions 异步填充——先条件等待「全部」chip 就位再计数/点击。 */
+  await page.waitForSelector('#sess-chips-zone [data-act="sess-chip"][data-chip=""]', { timeout: 15000 }).catch(() => { });
   const allChip = await page.locator('#sess-chips-zone [data-act="sess-chip"][data-chip=""]').count();
   let chipToggleOk = false, chipNote = `全部chip=${allChip}`;
   if (allChip) {
@@ -845,10 +858,14 @@ async function nodeSessFlow(browser) {
     page.waitForResponse(r => r.url().includes('/api/v1/sessions/') && r.url().includes('/turns') && r.request().method() === 'POST', { timeout: 30000 }).catch(() => null),
     page.click('#sess-form button[type="submit"]'),   // P3/F3 修复后 node 主按钮为原生 type=submit（与 hub 同构，提交走 form 委托）
   ]);
-  const createBody = createResp ? await createResp.request().postDataJSON().catch(() => ({})) : {};
+  /* T2 修复：Request.postDataJSON() 为同步 API（Playwright 1.64 文档口径）——此前
+   * 当 Promise 链 .catch()，返回对象无 catch 即 TypeError。改同步取值 + try/catch。 */
+  let createBody = {};
+  if (createResp) { try { createBody = createResp.request().postDataJSON() || {}; } catch { } }
   const ackBody = turnResp ? await turnResp.json().catch(() => ({})) : {};
   const sidFinal = ackBody?.turn?.session_id || '';
   const reqIdSent = typeof createBody?.request_id === 'string' && createBody.request_id.startsWith('web-');
+  await page.waitForSelector('#sess-modal .notice.ok', { timeout: 15000 }).catch(() => { });   // T4：受理回执随 C 形状态机 modal 重绘异步就位，条件等待替代固定时序
   const ackTxt = await page.textContent('#sess-modal .notice.ok').catch(() => '');
   let rowPending = false, rowPublished = false;
   if (sidFinal) {

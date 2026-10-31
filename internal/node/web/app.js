@@ -874,6 +874,9 @@ function freshSessForm() {
 /* newSessRequestId 前端请求 ID（W01-05 交付三：UUID 形态；crypto 不可得回落时间+
  * 随机——唯一性由调用方「提交时生成、重试复用」纪律保证）。 */
 const newSessRequestId = () => 'web-' + (globalThis.crypto?.randomUUID?.() || Date.now() + '-' + Math.random().toString(36).slice(2));
+/* sessIdShort 平台会话 ID 短形式（受理回执/取消/关闭确认标题；与 hub 同式。P5 同类
+ * 审计补漏：7bd09a3 去重时两端定义俱失而调用残留——回执渲染即 ReferenceError）。 */
+const sessIdShort = s => { const t = String(s || ''); return t.length > 14 ? t.slice(0, 14) + '…' : t; };
 /* loadSessions 会话列表加载（agent 会话面，内核快照 ∪ pending 投影）：登录代次+
  * 请求序号双守卫先行（R1 必修5 口径保持）；503 session_unsupported 诚实降级专态。 */
 let sessListSeq = 0;   // 会话列表请求序号：新请求发出即作废更早在途应答
@@ -1036,7 +1039,10 @@ function paintSessZoneById(id, html) {
  * 三槽指纹门控局部写入，搜索输入 DOM 不受触碰。 */
 function paintSessionsView() {
   if (S.page !== 'sessions' || S.sessId) return;   // 详情页无列表槽位（详情分区走 fetchSessionPage）
-  paintSessZoneById('sess-chips-zone', sessChipsZone());
+  /* 采证 P5 根因修复：本函数曾调用不存在的 sessChipsZone（登记中 chip 词冲突处理时
+   * 该函数实名 sessChipsNode）——每轮 pollTick ReferenceError 逃逸外层 catch（置
+   * loadError 陈旧条）且同轮 loadSessions 尾部重绘永不执行，列表/chips/页脚全冻结。 */
+  paintSessZoneById('sess-chips-zone', sessChipsNode().join(''));
   paintSessZoneById('sess-list-zone', sessListZone());
   paintSessZoneById('sess-foot-zone', sessFootZone());
 }
@@ -1489,9 +1495,16 @@ async function pollTick() {
       if (S.page === 'sessions') {
         /* 会话页（W01-05 P01/P02）：槽位局部更新（chips/列表/页脚 + 详情分区），
          * 整页 render 会冲掉搜索输入焦点与 #app 下页面 DOM（D22 局部刷新铁律）。
-         * 会话表单在 #layer modal（render 不触及），轮询零干扰。 */
-        paintConnChip(); paintSessionsView();
-        if (S.sessId) { try { await fetchSessionPage(); } catch (e2) { if (e2?.unauthorized) return; } syncSessTurnDrawerFromPage(); }
+         * 会话表单在 #layer modal（render 不触及），轮询零干扰。
+         * P5 ②加固：会话子链逐段自捕获——单段渲染/同步异常 console 留痕、当轮跳过，
+         * 不逃逸外层 catch（外层会置 loadError 在任务页挂陈旧条且冻结会话槽位轮询），
+         * 下一轮照常；401 仍上抛回令牌门。 */
+        paintConnChip();
+        try { paintSessionsView(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
+        if (S.sessId) {
+          try { await fetchSessionPage(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 详情刷新异常（单轮跳过，下轮重试）:', e2); }
+          try { syncSessTurnDrawerFromPage(); } catch (e2) { console.error('[会话页] 明细抽屉同步异常（单轮跳过，下轮重试）:', e2); }
+        }
       } else if (S.page === 'tasks' && (wasStale || S.sessModal)) {
         paintConnChip(); paintTasksCard();
       } else {
@@ -1503,9 +1516,11 @@ async function pollTick() {
     }
     if (S.page === 'sessions') {
       /* 会话列表随轮询（独立于 loadAll：503 专态不拖垮会话页数据链）；paintSessionsView
-       * 只重写槽位，搜索输入与 #layer modal 不受触碰。 */
-      try { await loadSessions(); } catch (e2) { if (e2?.unauthorized) return; }
-      paintSessionsView();
+       * 只重写槽位，搜索输入与 #layer modal 不受触碰。P5 ②加固：加载与渲染各自独立
+       * try/catch——渲染异常不再吞掉同轮已到数据（先 loadSessions 后渲染，异常只跳
+       * 当段），下一轮照常；401 仍上抛回令牌门。 */
+      try { await loadSessions(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 列表加载异常（单轮跳过，下轮重试）:', e2); }
+      try { paintSessionsView(); } catch (e2) { if (e2?.unauthorized) return; console.error('[会话页] 列表渲染异常（单轮跳过，下轮重试）:', e2); }
     }
   } catch (e) {
     /* 401 已由 api() 处理；其余落失败态（A4 五态：列表区分「失败可重试」与
