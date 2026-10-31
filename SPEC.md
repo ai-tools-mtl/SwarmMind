@@ -777,6 +777,10 @@ node 提供回环 API（默认 `127.0.0.1:8445`），当前 `POST /api/v1/tasks`
    - `POST /api/v1/local/mcp/verify/v2`（服务端视角鉴权探测）：探测以服务端持有的共享凭据明文为入参（内存瞬间使用即弃）——agent 面不得携带/触发凭据使用（豁免③⑪同源口径）；
    - `POST /api/v1/local/mcp/verify/confirm`（用户确认登记）：**用户确认的主体是人**——agent 自登记即冒认外部宿主回执（首版无自动回执通道，此为唯一外部点亮路径，绝不向 agent 开放）；
    - `POST /api/v1/local/mcp/verify/config-version`（配置版本锚更新）：重锚使既有验证结果批量失效/点亮，属验证板状态主权动作，与⑭ apply/revert 的宿主配置写面配套（apply/revert 后锚更新由页面驱动）。
+   ⑯ `/api/v1/spaces*` W04-01 主人面端点组（协作空间 REST 最小面：`POST /api/v1/spaces` 创建、`GET /api/v1/spaces` 列表、`GET /api/v1/spaces/{id}` 详情、`POST /api/v1/spaces/{id}/control` 控制骨架，W04-01，2026-11-01；RFC docs/tasks/v3/W04-01-rfc.md §六）：本机主人专属（仅 local_token 可调，authLocal 门，prime_token 一律 401）——W04-01 交付范围裁到「模型+存储+主人面最小面」（internal/collab 模型/状态机/任期 CAS/租约/预算三分离/逐动作授权 + spaces.json 原子快照），空间成员线程尚未有派发/消息面（W04-02），编排凭据主体对空间无可用的合法动作，暴露 agent 面只会得到恒错工具；且空间生命周期控制（放弃定版/归档/成员改组）与豁免⑩本机会话关闭同源的终局干预语义，归主人。逐端点依据：
+   - `POST /api/v1/spaces`（创建）：建空间=本机协作资源配置（成员线程绑定、预算、完成授权初值），与豁免④「写 agents 表=执行权」同级的本机主权面；编排主体创建 external 待领取空间的入口随 W04-02 dispatch/messages 同批开线（届时走 authOrchestrate 门 + 逐动作授权表，模型层已实现）；
+   - `GET /api/v1/spaces`、`GET /api/v1/spaces/{id}`（列表/详情）：只读但同属主人管理面组（成员原生会话绑定、工作区路径等本机事实不对 agent 面开放；MCP 空间查询工具随 W04-03 与 swarmmind_space_* 全组同批）；
+   - `POST /api/v1/spaces/{id}/control`（控制骨架：pause/resume/ready/start/configure_members/set_budget/policy/takeover/renew/finish/finalize/archive）：控制动作含 set_budget/policy/finalize/archive 人工专属面（任务书逐动作表「仅主人」行），control 端点在本批主体恒为 owner；driver/orchestrate 形态的控制入口随 W04-02/W04-03 开线时按同步规则交付 MCP 工具（swarmmind_space_create/list/status/dispatch/control），届时本豁免范围收窄到 budget/policy/finalize/archive 人工专属动作（任务书既定豁免意图）。
    除本条显式豁免外，新管理面 REST 能力仍须同步 MCP 工具。
 4. 工具命名固定前缀 `swarmmind_`；描述面向 agent 写「能做什么」，不写实现细节。
 5. MCP 破坏性变更需在 SPEC 本节记录版本（protocolVersion 跟随 MCP 规范日期）。

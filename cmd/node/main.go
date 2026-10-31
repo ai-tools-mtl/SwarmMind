@@ -28,6 +28,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/conn"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/localapi"
@@ -301,6 +302,17 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("装配会话操作服务失败: %w", err)
 	}
 
+	// 空间协作存储装配（W04-01，docs/tasks/v3/W04-01-rfc.md §二）：data_dir/
+	// spaces.json 原子快照（0600，temp+rename+fsync）。损坏/版本未知拒绝启动
+	//（同 W02-01 mcp_access 口径：空间状态是协作事实唯一真相，宁拒启不瞎门）。
+	// 策略接口（Hooks）W05-01 装配期注入；本批 nil = 完成类动作诚实拒绝
+	//（finish_policy_unavailable），W04 只开放主人 finalize→abandoned。
+	spacesStore, err := collab.Open(cfg.DataDir, collab.Options{Log: log.Default()})
+	if err != nil {
+		return fmt.Errorf("初始化空间协作存储失败: %w", err)
+	}
+	defer spacesStore.Close()
+
 	// 外连客户端仅组网态装配（方案 3.1：setup/standalone 不连 hub）。service
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧
 	// 一律 transport.ErrNoEndpoint（service 按良性静默），历史 hub 条目的迟到重发
@@ -477,7 +489,8 @@ func run(cfgPath, dataDirOverride string) error {
 		LocalToken: localToken,
 		PrimeToken: primeTok,
 		PrimeAgent: cfg.PrimeAgent,
-		McpAccess:  mcpAccess, // 编排授权开关（W02-01：prime_token 门控真相源）
+		McpAccess:  mcpAccess,   // 编排授权开关（W02-01：prime_token 门控真相源）
+		Collab:     spacesStore, // 空间协作存储（W04-01，主人面 REST；六.六豁免⑯）
 		// declare 钦定端点（方案 3.2.1 网页化）：写启动时 --config 原路径 +
 		// 回填本机监听（应答 mcp_config 的 SWARM_NODE_URL 数据源）。
 		DeclareConfigPath: cfgPath,

@@ -32,6 +32,7 @@ import (
 
 	nodeweb "github.com/mtl802/swarmmind/internal/node/web"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/notify"
@@ -82,6 +83,10 @@ type Config struct {
 	// mcpaccess.go；prime_token 编排请求需显式 enabled，local_token 恒放行）。
 	// nil = 内存缺省禁用（显式 enabled 是唯一启用态；门按禁用判定，PUT 端点 503）。
 	McpAccess *McpAccess
+	// Collab 空间协作存储（W04-01，internal/collab；spaces REST 最小面的数据面，
+	// 主人面 authLocal——六.六豁免⑯，MCP 工具随 W04-03 完整面同批）。nil =
+	// spaces 端点组 503 降级（spaces_unavailable）。
+	Collab *collab.Store
 	// DeclareConfigPath node.yaml 路径（declare 钦定 round-trip 写盘目标，与
 	// ConfigOps/SetupOps 同纪律写启动时 --config 原路径；空 = declare 端点 503）。
 	DeclareConfigPath string
@@ -305,6 +310,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local/sessions", s.authLocal(s.handleLocalSessionList))              // 列表（内核快照）
 	mux.HandleFunc("GET /api/v1/local/sessions/{id}", s.authLocal(s.handleLocalSessionGet))          // 详情（含轮次留痕）
 	mux.HandleFunc("POST /api/v1/local/sessions/{id}/close", s.authLocal(s.handleLocalSessionClose)) // 关闭（幂等）
+	mux.HandleFunc("POST /api/v1/spaces", s.authLocal(s.handleSpaceCreate))                          // 空间创建（W04-01，主人面·六.六豁免⑯）
+	mux.HandleFunc("GET /api/v1/spaces", s.authLocal(s.handleSpaceList))                             // 列表
+	mux.HandleFunc("GET /api/v1/spaces/{id}", s.authLocal(s.handleSpaceGet))                         // 详情
+	mux.HandleFunc("POST /api/v1/spaces/{id}/control", s.authLocal(s.handleSpaceControl))            // 控制骨架（逐动作授权表）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)
