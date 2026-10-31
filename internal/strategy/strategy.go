@@ -126,8 +126,9 @@ type SpaceLoop struct {
 	Issues       []Issue             `json:"issues,omitempty"`
 	CleanReviews []CleanReviewRecord `json:"clean_reviews,omitempty"` // 空间级复审零发现锚（建议3）
 	Dispute      *DisputeRecord      `json:"dispute,omitempty"`
-	// LastReviewedHash / LastReviewedAt 最近一次复审针对的版本与时刻（版本匹配
-	// 判定锚：代码改变使旧 review 失效；零发现复审同样推进本锚）。
+	// LastReviewedHash / LastReviewedAt 最近一次审查针对的版本与时刻（版本匹配
+	// 判定锚：代码改变使旧 review 失效；初审登记首条问题时锚定发现版本，复审/
+	// 零发现复审随后推进本锚——锚只被审查事实推进，问题重报不回拨）。
 	LastReviewedHash string    `json:"last_reviewed_hash,omitempty"`
 	LastReviewedAt   time.Time `json:"last_reviewed_at,omitempty"`
 	// PausedFrom 暂停前的循环阶段（恢复目标校验；SetPhase 进 paused 记、出 paused 清）。
@@ -187,30 +188,8 @@ func (e *Engine) appendTrail(lp *SpaceLoop, kind TrailKind, note string) {
 	}
 }
 
-// SetPhase 循环阶段变更校验与记录（W05-03 写 collab.Space.Phase 前调用）：非法
-// 转换拒绝（表外路径一律不存在）；暂停恢复恒须回到暂停前记录的阶段。校验通过
-// 后留痕，调用方再把 Space.Phase 落账 collab（事务由 collab 承担）。
-func (e *Engine) SetPhase(spaceID string, from, to Phase) error {
-	if !from.Valid() {
-		return errf(ErrInvalid, "来源阶段非法 %q", string(from))
-	}
-	if !CanAdvancePhase(from, to) {
-		return errf(ErrInvalid, "非法阶段转换 %s → %s（表外路径）", string(from), string(to))
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	lp := e.loop(spaceID, true)
-	if from == PhasePaused && to != PhaseCompleted && to != lp.PausedFrom {
-		return errf(ErrInvalid, "暂停恢复须回到暂停前阶段 %s，得 %s", string(lp.PausedFrom), string(to))
-	}
-	if to == PhasePaused {
-		lp.PausedFrom = from
-	} else {
-		lp.PausedFrom = ""
-	}
-	e.appendTrail(lp, TrailPhaseChanged, fmt.Sprintf("%s → %s", string(from), string(to)))
-	return nil
-}
+// SetPhase 循环阶段变更校验与记录：实现收敛至 writereview.go（W05-03 分离边界
+// ——判定体 ValidatePhaseTransition 单一真相，本文件不再重复）。
 
 // Snapshot 循环事实快照（深拷贝出包；W05-02/03 展示/对账读面）。
 func (e *Engine) Snapshot(spaceID string) (SpaceLoop, bool) {
@@ -553,7 +532,9 @@ func (e *Engine) ValidateCandidate(space collab.SpaceView, candidate collab.Cand
 //   - review 无阻塞问题 → 不推进：审查通过 ≠ 完成，完成判定归 finish/finalize
 //     判据核对（PLAN §6 硬规）；
 //   - rework → rereview：修复后新版本（当前版本 hash ≠ 最近复审版本）；
-//   - rereview → rework：复审发现未解阻塞问题；无 → 不推进（等待完成判据）；
+//   - rereview：修复声明待复审（pendingFix）先判等待——进入复审时遗留问题尚未
+//     复审是预期态；复审轮已发生（无待复核声明）仍有未解阻塞问题 → rework；
+//     无 → 不推进（等待完成判据）；
 //   - paused/completed/未初始化 → 不推进。
 func (e *Engine) DecidePhaseAdvance(space collab.SpaceView) collab.PhaseDecision {
 	phase, ok := ParsePhase(space.Phase)
@@ -588,13 +569,25 @@ func (e *Engine) DecidePhaseAdvance(space collab.SpaceView) collab.PhaseDecision
 		if current == "" {
 			return collab.PhaseDecision{Advance: false, Reason: "返工中：尚无登记版本"}
 		}
-		if lp != nil && lp.LastReviewedHash == current {
+		if lp == nil || lp.LastReviewedHash == "" {
+			// 空锚防御（W05-03 全链驱动补定）：无被审版本即无「修复后」可比——
+			// 恢复的旧快照/异常态不零进度循环推进，等待审查登记或人工核对。
+			return collab.PhaseDecision{Advance: false,
+				Reason: "返工中：尚无被审版本锚（审查结论未登记）：等待审查登记或人工核对"}
+		}
+		if lp.LastReviewedHash == current {
 			return collab.PhaseDecision{Advance: false,
 				Reason: fmt.Sprintf("返工中：当前版本 %s… 已复审过，尚无修复后新版本", tail(current, 12))}
 		}
 		return collab.PhaseDecision{Advance: true, NextPhase: string(PhaseRereview),
 			Reason: fmt.Sprintf("修复后新版本 %s… 已登记：进入复审", tail(current, 12))}
 	case PhaseRereview:
+		if pendingFix(lp) {
+			// 复审中（W05-03 全链驱动补定）：修复声明待复审——进入复审时遗留问题
+			// 尚未复审是预期态，等登记结论再判定（否则入口即零进度循环回返工）。
+			return collab.PhaseDecision{Advance: false,
+				Reason: "复审中：修复声明待复审（登记复审结论后判定）"}
+		}
 		if blocking := blockingIssues(lp, current); len(blocking) > 0 {
 			return collab.PhaseDecision{Advance: true, NextPhase: string(PhaseRework),
 				Reason: fmt.Sprintf("复审发现未解阻塞问题 %d 条：%s", len(blocking), strings.Join(blocking, "，"))}
@@ -632,4 +625,20 @@ func blockingIssues(lp *SpaceLoop, current string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// pendingFix 存在待复核的修复声明（Result 空 = 已声明修复、复审结论未回填）；
+// 调用方持锁。复审阶段的「等待复审轮」判定锚。
+func pendingFix(lp *SpaceLoop) bool {
+	if lp == nil {
+		return false
+	}
+	for i := range lp.Issues {
+		for j := range lp.Issues[i].Fixes {
+			if lp.Issues[i].Fixes[j].Result == "" {
+				return true
+			}
+		}
+	}
+	return false
 }

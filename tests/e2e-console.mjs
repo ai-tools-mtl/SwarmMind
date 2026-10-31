@@ -9,6 +9,12 @@
 //   node 模式：    E2E_BASE=http://127.0.0.1:8445 local_token=<本机管理令牌> node tests/e2e-console.mjs
 //   会话套件：     E2E_SUITE=sessions E2E_BASE=http://127.0.0.1:8444 node tests/e2e-console.mjs
 //   会话套件 node 端：E2E_SUITE=sessions E2E_BASE=http://127.0.0.1:8445 local_token=<本机管理令牌> node tests/e2e-console.mjs
+//   空间套件 node 端（W04-03）：E2E_SUITE=spaces E2E_BASE=http://127.0.0.1:8445 local_token=<本机管理令牌> node tests/e2e-console.mjs
+//     ——建空间→发消息→（环境有会话能力时）配置成员/就绪/启动/指名派发→轮终推进→
+//     暂停/恢复→放弃定版→归档→归档筛选全链 DOM 判据（SP01-SP08）；执行链依赖本机
+//     已配置声明 session_adapter 的能力与执行器，缺能力如实 SKIP。hub 模式
+//     （E2E_SUITE=spaces 不带 local_token）跑 SPH01-SPH03 中心端壳判据（W07 接线前
+//     如实不可用：未接线声明/八列字段序/零假入口）。
 //   hub 模式（默认）：E2E_BASE 指向 hub 管理面，账户密码登录，跑 E01-E20 系列。
 //   node 模式（终审必修4）：E2E_BASE 指向 node local API 且设置 local_token 环境变量
 //     （本机管理令牌，令牌门登录）→ 跑 N01-N03/E-NAV3/E-N1~N3 系列：来源筛选行恒在、
@@ -177,8 +183,8 @@ async function nodeFlow(browser) {
   }
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 }); // 登录终态信号（避开启动轮询重绘）
 
-  // node 导航词表（TASK-nav-filter B；W01-05 起含独立「会话」入口：总览/服务/任务/会话/连接）
-  const NODE_NAV = ['总览', '服务', '任务', '会话', '连接'];
+  // node 导航词表（TASK-nav-filter B；W01-05 起含独立「会话」入口；W04-03 起含「协作空间」：总览/服务/任务/会话/协作空间/连接）
+  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
   const nodeNav = (await page.locator('aside nav button').allTextContents())
     .map(s => s.replace(/^0\d/, '').trim());
   record('E-NAV3', 'node 导航词表：4 项名称与顺序', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
@@ -751,11 +757,11 @@ async function nodeSessFlow(browser) {
   }
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 });
 
-  // SN08 独立入口迁移（W01-05 P01）：导航词表 5 项含「会话」→ 任务页迁移卡（旧区块
-  // 位置留链接）→ 前往会话页 → 七列同构列序。
-  const NODE_NAV = ['总览', '服务', '任务', '会话', '连接'];
+  // SN08 独立入口迁移（W01-05 P01）：导航词表 6 项含「会话」「协作空间」（W04-03）→
+  // 任务页迁移卡（旧区块位置留链接）→ 前往会话页 → 七列同构列序。
+  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
   const nodeNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').trim());
-  record('SN08a', 'node 导航词表：5 项名称与顺序（含独立「会话」入口）', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
+  record('SN08a', 'node 导航词表：6 项名称与顺序（含独立「会话」「协作空间」入口）', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
   await page.click('aside nav button[data-go="tasks"]');
   await page.waitForSelector('#sess-card', { timeout: 15000 });
   const migTxt = await page.textContent('#sess-card');
@@ -1290,18 +1296,269 @@ async function nodeSessFlow(browser) {
   summarize();
 }
 
+// ---------- node 协作空间套件（W04-03）：SP01-SP08 全链 DOM 判据 ----------
+// 链路：建空间（REST 种子 + UI 新建 modal）→ 发消息（零唤醒判据：发言落账而九态
+// 不动）→（环境有会话能力时）配置成员→就绪→启动→指名派发→轮终推进→暂停/恢复→
+// 放弃定版→归档→归档筛选。受控数据绑定创建回执的唯一 space ID；执行链（派发/轮
+// 终/暂停恢复）依赖本机已配置声明 session_adapter 的能力与其执行器——环境缺能力
+// 时如实 SKIP 不冒充 PASS。本地安全门沿用（assertLocalBase 对全部套件生效，本套
+// 件经 node 模式 local_token 门登录）。本批不实跑：采证归独立会话。
+async function nodeSpaceFlow(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  globalThis.__page = page;
+  page.setDefaultTimeout(15000);
+  console.log(`node 协作空间套件：${BASE}（令牌门登录，local_token 经环境变量传入）`);
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  if (await page.locator('#gate-token').count()) {
+    await page.fill('#gate-token', NODE_TOKEN);
+    await page.click('[data-act="gate-enter"]');
+  }
+  await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 });
+
+  // SP01 导航与列表主入口：导航词表 6 项含协作空间；列表页五态槽位在位。
+  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
+  const nodeNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').trim());
+  await page.click('aside nav button[data-go="spaces"]');
+  await page.waitForSelector('#space-list-zone', { timeout: 15000 });
+  await page.waitForSelector('#space-list-zone thead th, #space-list-zone .empty', { timeout: 15000 });
+  const listHeads = await page.evaluate(() => [...document.querySelectorAll('#space-list-zone thead th')].map(th => th.textContent.trim()));
+  const headsOk = JSON.stringify(listHeads) === JSON.stringify(['目标', '状态', '策略', '调度方式与负责人', '阶段', '等待原因', '最近活动（UTC）', '操作']);
+  record('SP01', '空间列表主入口（导航 6 项含协作空间/八列同构列序/归档筛选 chips 在位）',
+    JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV) && headsOk
+    && !!(await page.locator('#space-chips-zone [data-act="space-chip"][data-chip="archived"]').count()),
+    `导航=${nodeNav.join('/')} 列序=${listHeads.join('|')}`);
+
+  // REST 种子 manual 空间（成员空——无成员引导判据用）。
+  const stamp = Date.now();
+  const seed = await nodeApi('/api/v1/spaces', {
+    method: 'POST',
+    body: JSON.stringify({ request_id: 'sp-e2e-seed-' + stamp, goal: 'E2E 协作空间全链 ' + stamp, acceptance: '全链 DOM 判据全绿', mode: 'manual' }),
+  });
+  if (seed.code !== 201 || !seed.body?.space?.id) {
+    record('SP02', 'REST 种子空间与列表行渲染', false, `种子失败：${seed.code}`);
+    flushWalk('spaces');
+    summarize();
+    return;
+  }
+  const sid = seed.body.space.id;
+  await page.waitForFunction(id => !!document.querySelector(`tr[data-space="${id}"]`), sid, { timeout: 20000 });
+  const rowTxt = await page.evaluate(id => document.querySelector(`tr[data-space="${id}"]`)?.textContent || '', sid);
+  record('SP02', 'REST 种子空间与列表行渲染（待配置徽标/完成授权词/调度方式与负责人·任期 1）',
+    rowTxt.includes('待配置') && rowTxt.includes('完成须主人定版') && rowTxt.includes('手动') && rowTxt.includes('任期 1'),
+    rowTxt.slice(0, 80));
+  await shot(page, 'node-spaces-list');
+
+  // SP03 详情页（#/spaces/{id} 独立页）：九分区壳 + 调度条 + 无成员引导 + 动作区动态。
+  await page.click(`tr[data-space="${sid}"]`);
+  await page.waitForSelector('#space-detail', { timeout: 10000 });
+  await page.waitForFunction(() => !document.getElementById('space-detail-loading'), null, { timeout: 10000 });
+  await page.waitForSelector('#space-detail [data-zone="sched"] table', { timeout: 15000 });
+  const headTxt = await page.textContent('#space-detail [data-zone="head"]');
+  const schedTxt = await page.textContent('#space-detail [data-zone="sched"]');
+  const memTxt = await page.textContent('#space-detail [data-zone="members"]');
+  const actTxt = await page.textContent('#space-detail [data-zone="actions"]');
+  record('SP03', '空间详情页九分区（待配置徽标/调度条任期 1·租约行/无成员引导/动作区动态·主人管理行恒在）',
+    headTxt.includes('待配置') && schedTxt.includes('任期 1') && schedTxt.includes('租约')
+    && memTxt.includes('空间还没有成员') && actTxt.includes('主人管理') && actTxt.includes('接管')
+    && !(await page.locator('[data-act="space-act:ready"]').count()),
+    `head=${headTxt.includes('待配置')} sched任期=${schedTxt.includes('任期 1')} 无成员引导=${memTxt.includes('空间还没有成员')}`);
+
+  // SP04 发言零唤醒（N01 的 DOM 判据）：发言落账（消息行出现）而九态徽标不动。
+  await page.fill('#space-say', 'E2E 讨论消息 ' + stamp);
+  await page.click('[data-act="space-send"]');
+  await page.waitForFunction(s => document.querySelector('#space-detail [data-zone="msgs"]')?.textContent.includes(s), 'E2E 讨论消息 ' + stamp, { timeout: 20000 });
+  const msgsTxt = await page.textContent('#space-detail [data-zone="msgs"]');
+  const stillPendingCfg = (await page.textContent('#space-detail [data-zone="head"]')).includes('待配置');
+  record('SP04', '讨论消息零唤醒（消息行落账/主人归属/九态保持待配置不触发执行）',
+    msgsTxt.includes('E2E 讨论消息 ' + stamp) && msgsTxt.includes('主人') && stillPendingCfg,
+    `消息行=${msgsTxt.includes('E2E 讨论消息 ' + stamp)} 九态未动=${stillPendingCfg}`);
+
+  // SP05 UI 新建 modal 全链（居中 modal/字段/创建→跳详情）。
+  await page.click('.page-head [data-act="space-new"]');
+  await page.waitForSelector('#space-modal', { timeout: 5000 });
+  await page.fill('#space-modal [data-sp="goal"]', 'E2E UI 新建空间 ' + stamp);
+  await page.fill('#space-modal [data-sp="acceptance"]', 'modal 创建即达详情');
+  await page.click('[data-act="sp-submit"]');
+  await page.waitForSelector('#space-detail', { timeout: 15000 });
+  await page.waitForFunction(s => document.querySelector('#space-detail [data-zone="goal"]')?.textContent.includes(s), 'E2E UI 新建空间 ' + stamp, { timeout: 20000 });
+  const newGoalOk = (await page.textContent('#space-detail [data-zone="goal"]')).includes('E2E UI 新建空间 ' + stamp);
+  record('SP05', '新建空间居中 modal 全链（字段填写/创建受理/自动进入详情页）', newGoalOk, `详情目标行=${newGoalOk}`);
+  await page.click('[data-act="space-back"]');   // 返回列表（hash 路由返回入口，非浏览器 history——详情页间无列表中间态）
+  await page.waitForSelector(`tr[data-space="${sid}"]`, { timeout: 15000 });
+  await page.click(`tr[data-space="${sid}"]`);
+  await page.waitForSelector('#space-detail', { timeout: 10000 });
+  await page.waitForFunction(() => !document.getElementById('space-detail-loading'), null, { timeout: 10000 });
+
+  // SP06 预算 sugar 经 UI（主人管理）：调整 max_messages=5 → 预算行呈现 0/5。
+  await page.click('[data-act="space-act:budget"]');
+  await page.waitForSelector('#space-modal', { timeout: 5000 });
+  await page.fill('#space-modal [data-sp="bMsg"]', '5');
+  await page.fill('#space-modal [data-sp="bReason"]', 'E2E 预算判据');
+  await page.click('[data-act="sp-ops-submit"]');
+  await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="goal"]')?.textContent.includes('消息 0/5'), null, { timeout: 20000 });
+  record('SP06', '预算调整（sugar 端点经 UI：上限落档/用量口径 0/5 呈现）', true);
+
+  // SP07 执行链（环境门）：无声明 session_adapter 的能力 → 全组如实 SKIP。
+  const ag = await nodeApi('/api/v1/agents');
+  const cap = (ag.body?.local || []).find(e => e.card?.session_adapter);
+  if (!cap) {
+    record('SP07', '执行链（配置成员→就绪→启动→指名派发→轮终推进→暂停/恢复）', false, '本机无声明 session_adapter 的能力——执行链未验收，环境缺能力', true);
+  } else {
+    const sess = await nodeApi('/api/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ agent: cap.card.name, cwd: '/tmp/agent-session/work', request_id: 'sp-e2e-sess-' + stamp }),
+    });
+    if (sess.code !== 201 || !sess.body?.session?.id) {
+      record('SP07', '执行链（配置成员→就绪→启动→指名派发→轮终推进→暂停/恢复）', false, `会话创建失败：${sess.code}`, true);
+    } else {
+      const sessionId = sess.body.session.id;
+      await page.click('[data-act="space-act:configure_members"]');
+      await page.waitForSelector('#space-modal', { timeout: 5000 });
+      await page.click('[data-act="sp-row-add"]');
+      await page.fill('#space-modal [data-mrow="0"][data-mfield="name"]', 'coder');
+      await page.selectOption('#space-modal [data-mrow="0"][data-mfield="session"]', sessionId);
+      await page.click('[data-act="sp-ops-submit"]');
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="members"]')?.textContent.includes('coder'), null, { timeout: 20000 });
+      await page.click('[data-act="space-act:ready"]');
+      await page.waitForSelector('#confirm-modal', { timeout: 5000 });
+      await page.click('#confirm-modal [data-act="confirm-ok"]');
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="head"]')?.textContent.includes('可运行'), null, { timeout: 20000 });
+      await page.click('[data-act="space-act:start"]');
+      await page.waitForSelector('#confirm-modal', { timeout: 5000 });
+      await page.click('#confirm-modal [data-act="confirm-ok"]');
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="head"]')?.textContent.includes('运行中'), null, { timeout: 20000 });
+      await page.click('[data-act="space-act:dispatch"]');
+      await page.waitForSelector('#space-modal [data-sp="member"]', { timeout: 5000 });
+      await page.selectOption('#space-modal [data-sp="member"]', 'coder');
+      await page.fill('#space-modal [data-sp="note"]', 'E2E 指名一棒');
+      await page.click('[data-act="sp-ops-submit"]');
+      // 轮终推进：轮询派发/意图查询直至收敛（fake CLI 环境秒级；真实执行器环境给足窗口）。
+      const rid = `disp-${sid}`;   // 语义占位：实际 request_id 由 UI 生成——以意图查询面为准（轮询详情在途数归零+事件收敛行）
+      void rid;
+      const t0 = Date.now();
+      let converged = false;
+      while (Date.now() - t0 < 240000) {
+        const sv = await nodeApi(`/api/v1/spaces/${sid}`);
+        const events = sv.body?.space?.events || [];
+        if (events.some(e => e.kind === 'intent_converged')) { converged = true; break; }
+        await p_sleep(3000);
+      }
+      const inflightZero = ((await nodeApi(`/api/v1/spaces/${sid}`)).body?.space?.in_flight || 0) === 0;
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="sched"]')?.textContent.includes('在途执行'), null, { timeout: 15000 });
+      await page.click('[data-act="space-act:pause"]');
+      await page.waitForSelector('#confirm-modal', { timeout: 5000 });
+      await page.click('#confirm-modal [data-act="confirm-ok"]');
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="head"]')?.textContent.includes('已暂停'), null, { timeout: 20000 });
+      const pausedBadge = (await page.textContent('#space-detail [data-zone="head"]')).includes('已暂停');
+      await page.click('[data-act="space-act:resume"]');
+      await page.waitForSelector('#confirm-modal', { timeout: 5000 }).catch(() => { });
+      if (await page.locator('#confirm-modal [data-act="confirm-ok"]').count()) await page.click('#confirm-modal [data-act="confirm-ok"]');
+      await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="head"]')?.textContent.includes('运行中'), null, { timeout: 20000 });
+      record('SP07', '执行链（配置成员/就绪/启动/指名派发受理/轮终推进收敛/暂停徽标+等待原因/恢复运行）',
+        converged && inflightZero && pausedBadge, `收敛=${converged} 在途清零=${inflightZero} 暂停徽标=${pausedBadge}`);
+      await shot(page, 'node-spaces-running');
+    }
+  }
+
+  // SP08 完成关闭链（放弃定版 → 归档 → 归档筛选）：终态前等在途清零。
+  const t1 = Date.now();
+  while (Date.now() - t1 < 120000 && ((await nodeApi(`/api/v1/spaces/${sid}`)).body?.space?.in_flight || 0) > 0) await p_sleep(3000);
+  await page.click('[data-act="space-act:finalize_abandoned"]');
+  await page.waitForSelector('#space-modal', { timeout: 5000 });
+  await page.check('#space-modal [data-sp="outcome"][value="abandoned"]');
+  await page.fill('#space-modal [data-sp="reason"]', 'E2E 全链收束（放弃定版判据）');
+  await page.click('[data-act="sp-ops-submit"]');
+  await page.waitForFunction(() => document.querySelector('#space-detail [data-zone="head"]')?.textContent.includes('已放弃'), null, { timeout: 20000 });
+  const abandonedOk = (await page.textContent('#space-detail [data-zone="goal"]')).includes('E2E 全链收束');
+  await page.click('[data-act="space-act:archive"]');
+  await page.waitForSelector('#confirm-modal', { timeout: 5000 });
+  await page.click('#confirm-modal [data-act="confirm-ok"]');
+  await page.waitForFunction(() => !!document.querySelector('#space-detail [data-zone="actions"] .muted'), null, { timeout: 20000 });
+  await page.click('[data-act="space-back"]');
+  await page.waitForSelector('#space-chips-zone [data-act="space-chip"][data-chip="archived"]', { timeout: 15000 });
+  await page.click('#space-chips-zone [data-act="space-chip"][data-chip="archived"]');
+  await page.waitForFunction(id => !!document.querySelector(`tr[data-space="${id}"]`), sid, { timeout: 20000 });
+  const archRow = await page.evaluate(id => document.querySelector(`tr[data-space="${id}"]`)?.textContent || '', sid);
+  record('SP08', '完成关闭链（放弃定版原因留档/归档确认/归档筛选行在位·已放弃徽标）',
+    abandonedOk && archRow.includes('已放弃'), `定版原因=${abandonedOk} 归档行=${archRow.includes('已放弃')}`);
+  await shot(page, 'node-spaces-archived');
+  flushWalk('spaces');
+  summarize();
+}
+
+// ---------- hub 协作空间壳套件（W04-03）：SPH01-SPH03 ----------
+// 判据：中心端后端 W07 接线前，壳如实不可用——未接线声明可见、无创建/操作假入口、
+// P03 字段序表头在位、P04 独立路由返回导航在位。本批不实跑：采证归独立会话。
+async function hubSpaceShellFlow(browser) {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, ignoreHTTPSErrors: true });
+  globalThis.__page = page;
+  page.setDefaultTimeout(15000);
+  console.log(`hub 协作空间壳套件：${BASE}`);
+  await page.goto(BASE, { waitUntil: 'networkidle' });
+  let initialized = false;
+  try {
+    const r = await page.request.get(`${BASE}/api/v1/auth/account`);
+    initialized = (await r.json()).initialized === true;
+  } catch { }
+  if (!initialized) {
+    await page.fill('#su-user', USER);
+    await page.fill('#su-pass', PASS);
+    await page.fill('#su-pass2', PASS);
+    await page.click('#setup-form button[type=submit]');
+  } else {
+    await page.fill('#login-user', USER);
+    await page.fill('#login-pass', PASS);
+    await page.click('#pw-login-form button[type=submit]');
+  }
+  await page.waitForSelector('aside nav', { timeout: 15000 });
+
+  // SPH01 导航词表 10 项（协作空间第 5 位）。
+  const HUB_NAV = ['总览', '机器', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];
+  const hubNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').replace(/\s*\(\d+\)$/, '').trim());
+  record('SPH01', 'hub 导航词表：10 项含协作空间（第 5 位，与 node 同概念同词）', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));
+
+  // SPH02 空间页壳如实不可用：未接线声明 + P03 八列字段序 + 零假入口。
+  await page.click('aside nav button[data-page="spaces"]');
+  await page.waitForSelector('#main .notice.warn', { timeout: 15000 });
+  const shellTxt = await page.textContent('#main');
+  const heads = await page.evaluate(() => [...document.querySelectorAll('#main thead th')].map(th => th.textContent.trim()));
+  const noFake = (await page.locator('[data-act="space-new"], [data-act="space-send"], [data-act^="space-act:"]').count()) === 0;
+  record('SPH02', '空间页壳如实不可用（未接线声明可见/八列字段序与 node 同构/零创建·操作假入口）',
+    shellTxt.includes('中心端协作空间后端未接线') && noFake
+    && JSON.stringify(heads) === JSON.stringify(['目标', '状态', '策略', '调度方式与负责人', '阶段', '等待原因', '最近活动（UTC）', '操作']),
+    `声明=${shellTxt.includes('中心端协作空间后端未接线')} 假入口=${!noFake} 列序=${heads.join('|')}`);
+  await shot(page, 'hub-spaces-shell');
+
+  // SPH03 独立详情路由壳：返回导航在位 + 未接线声明（不展示替代数据）。
+  await page.goto(`${BASE}/#/spaces/sp-e2e-shell`, { waitUntil: 'networkidle' });
+  await page.waitForSelector('[data-act="space-back"]', { timeout: 15000 });
+  const detailTxt = await page.textContent('#main');
+  record('SPH03', '空间详情路由壳（返回导航在位/未接线声明如实/W07 后点亮）',
+    detailTxt.includes('← 返回空间列表') && detailTxt.includes('中心端协作空间后端未接线'), '');
+  await page.click('[data-act="space-back"]');
+  await page.waitForSelector('#main .notice.warn', { timeout: 15000 });
+  flushWalk('hub-spaces');
+  summarize();
+}
+
 async function main() {
   BASE = assertLocalBase(SUITE);   // v3 安全门：全部套件先过 E2E_BASE 本地目标门——浏览器启动与任何 fetch 之前拦截
   const browser = await chromium.launch();
   if (NODE_MODE) {
     if (SUITE === 'sessions') await nodeSessFlow(browser);   // 套件内自调 summarize
+    else if (SUITE === 'spaces') await nodeSpaceFlow(browser);   // 套件内自调 summarize（W04-03 协作空间全链）
     else await nodeFlow(browser);
     await browser.close();
-    if (SUITE !== 'sessions') summarize();
+    if (SUITE !== 'sessions' && SUITE !== 'spaces') summarize();
     return;
   }
   if (SUITE === 'sessions') {
     await hubSessFlow(browser);   // 套件内自调 summarize
+    await browser.close();
+    return;
+  }
+  if (SUITE === 'spaces') {
+    await hubSpaceShellFlow(browser);   // 套件内自调 summarize（W04-03 中心端壳判据）
     await browser.close();
     return;
   }
@@ -1339,10 +1596,10 @@ async function main() {
   // TC-E-NAV 导航统一（TASK-nav-filter B）：aside 内定位一律用结构化选择器
   //（aside nav button[data-page=…]），词表逐项断言（:has-text("任务") 会宽泛命中，
   // codex 必须修项）；aria-current 指向当前页。
-  const HUB_NAV = ['总览', '机器', '任务', '会话', '派发', '工作单', '群聊', '策略容量', '设置'];
+  const HUB_NAV = ['总览', '机器', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];
   const hubNav = (await page.locator('aside nav button').allTextContents())
     .map(s => s.replace(/^0\d/, '').replace(/\s*\(\d+\)$/, '').trim());
-  record('E-NAV', 'hub 导航词表：9 项名称与顺序（T3 起「会话」顺延第 4 位）', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));
+  record('E-NAV', 'hub 导航词表：10 项名称与顺序（T3 起「会话」顺延第 4 位；W04-03 起「协作空间」第 5 位）', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));
   const curNav = ((await page.locator('aside nav button[aria-current="page"]').textContent()) || '').replace(/^0\d/, '').trim();
   record('E-NAV2', 'hub 导航 aria-current 指向当前页（总览）', curNav === '总览', curNav);
 

@@ -54,6 +54,9 @@ const (
 	MaxMessageText = 16 << 10
 	// MaxBodyNote 控制备注/原因字段上限（字节），防快照膨胀。
 	MaxNoteBytes = 4 << 10
+	// MaxPhaseValueBytes set_phase 目标阶段值上限（字节；策略域阶段词形如
+	// drafting/frozen 均远小于此——防快照垃圾值，W05-03 最小追加）。
+	MaxPhaseValueBytes = 32
 )
 
 // 错误码（哨兵变量见下；HTTP 投影：localapi spaces.go）。

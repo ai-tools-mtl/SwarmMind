@@ -186,6 +186,11 @@ type ControlRequest struct {
 	FinalOutcome string     `json:"final_outcome,omitempty"` // finalize: done|abandoned
 	Reason       string     `json:"reason,omitempty"`        // finalize(abandoned)/set_budget 原因
 	Note         string     `json:"note,omitempty"`          // 暂停原因/备注（审计）
+	// Phase set_phase 目标阶段（W05-03 最小追加；omitempty 保证旧请求序列化形态
+	// 与幂等指纹不变，跨版本重放兼容）。本包对 Phase 只存不解释（W04-01 RFC §1.1
+	// 不透明值契约）：转换合法性判定在 strategy.Engine（ValidatePhaseTransition/
+	// SetPhase），本动作只承担经策略判定后的落账。
+	Phase string `json:"phase,omitempty"`
 	// Confirm 显式确认（W04-02 恢复保护：存在在途/排队意图时 resume 须 confirm=true
 	// ——判定在端点层（localapi），模型层不消费本字段；omitempty 保证旧请求序列化
 	// 形态与幂等指纹不变）。
@@ -239,6 +244,8 @@ func (s *Store) Control(spaceID string, req ControlRequest, subj Subject) (Contr
 			applied, note, err = controlPause(sp, req, now)
 		case ActResume:
 			applied, note, err = controlResume(sp, req, now)
+		case ActSetPhase:
+			applied, note, err = controlSetPhase(sp, req)
 		case ActReady:
 			applied, note, err = controlReady(sp, req, now)
 		case ActStart:
@@ -301,6 +308,44 @@ func controlResume(sp *Space, req ControlRequest, now time.Time) (bool, string, 
 	sp.PausedReason = ""
 	sp.Used.RunningSince = now
 	return true, "恢复运行（继续由当前负责人驱动）", nil
+}
+
+// controlSetPhase 循环阶段落账（W05-03；策略判定与状态落账分离边界定案）：
+// 转换合法性判定在 strategy.Engine（阶段机赋义归 W05-01——CanAdvancePhase 转换
+// 表 + 暂停恢复目标校验），装配层须先经 strategy 判定通过再调本动作落账；本包对
+// Phase 只存不解释（W04-01 RFC §1.1 不透明值契约），仅做值基校验（非空、长度、
+// 小写字符集——防快照垃圾值，不作语义解释）与运行面状态门槛（循环阶段跟踪属
+// 运行面：running/paused/blocked/needs_review 可落；待配置/待领取尚未成环、终态
+// 时间线只读）。同值重复落账幂等零变更（applied=false，同 archive 先例）。
+func controlSetPhase(sp *Space, req ControlRequest) (bool, string, error) {
+	switch sp.Status {
+	case StatusRunning, StatusPaused, StatusBlocked, StatusNeedsReview:
+	default:
+		return false, "", errf(ErrIllegalTransition,
+			"set_phase：状态 %s 不可落阶段（循环阶段跟踪属运行面；终态时间线只读）", sp.Status)
+	}
+	p := strings.TrimSpace(req.Phase)
+	if p == "" {
+		return false, "", errf(ErrInvalid, "phase 必填（须为 strategy 判定的目标阶段）")
+	}
+	if len(p) > MaxPhaseValueBytes {
+		return false, "", errf(ErrInvalid, "phase 长度 %d 超上限 %d", len(p), MaxPhaseValueBytes)
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false, "", errf(ErrInvalid, "phase 含非法字符 %q（仅小写字母/数字/下划线）", string(c))
+		}
+	}
+	if sp.Phase == p {
+		return false, "", nil // 幂等零变更：阶段已在目标值
+	}
+	prev := sp.Phase
+	if prev == "" {
+		prev = "<未初始化>"
+	}
+	sp.Phase = p
+	return true, fmt.Sprintf("循环阶段 %s → %s（经策略判定落账）", prev, p), nil
 }
 
 // controlReady 就绪标记：pending_config → ready（成员须齐——可运行以成员在位

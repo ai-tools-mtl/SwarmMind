@@ -493,8 +493,16 @@ func (e *Engine) RecordIssue(spaceID string, in IssueInput) (Issue, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	lp := e.loop(spaceID, true)
-	id := issueID(in.Reviewer, strings.TrimSpace(in.File), in.Line, in.Title)
 	now := e.now()
+	// 初审锚（W05-03 全链驱动补定）：首条问题登记锚定其发现版本——初审也是审
+	// 查，「最近审查锚」自初审起在位（返工→复审推进以「修复后新版本 ≠ 被审版
+	// 本」为据，空锚会使首轮返工零进度循环推进）。已有锚不动：锚只被更新的审查
+	// 事实（复审/零发现复审）推进，问题重报不回拨锚。
+	if lp.LastReviewedHash == "" {
+		lp.LastReviewedHash = in.FoundInHash
+		lp.LastReviewedAt = now
+	}
+	id := issueID(in.Reviewer, strings.TrimSpace(in.File), in.Line, in.Title)
 	for i := range lp.Issues {
 		if lp.Issues[i].ID == id {
 			// 重开投影判定先于序号推进（用推进前状态分留痕种类）。

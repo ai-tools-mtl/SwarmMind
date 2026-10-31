@@ -38,6 +38,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
 	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
+	"github.com/mtl802/swarmmind/internal/strategy"
 	"github.com/mtl802/swarmmind/internal/transport"
 )
 
@@ -302,12 +303,23 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("装配会话操作服务失败: %w", err)
 	}
 
+	// 策略引擎装配（W05-02/03）：写审循环/有限讨论策略判定器——collab.
+	// StrategyHooks 三方法（完成判据/候选校验/阶段推进判定）自此真实接线（W04-01
+	// 交接面兑现）。spaces 完成/阶段推进走真实判据；W04-01 起 hooks 未装配的拒绝
+	// 路径（finish_policy_unavailable）降为引擎构造失败的备路径（构造只校验配置
+	// 阈值，默认配置恒成功）。循环事实（候选/版本/问题/证据）存引擎内存，进程重
+	// 启经 Engine.RestoreLoop 恢复（快照持久化与启动恢复接线归 W04-03，见 W05 交
+	// 接面）；重启后循环事实缺席时完成判据如实拒绝（缺口清单指路），宁拒不猜。
+	stratEngine, err := strategy.NewEngine(strategy.DefaultConfig())
+	if err != nil {
+		return fmt.Errorf("初始化空间策略引擎失败: %w", err)
+	}
+
 	// 空间协作存储装配（W04-01，docs/tasks/v3/W04-01-rfc.md §二）：data_dir/
 	// spaces.json 原子快照（0600，temp+rename+fsync）。损坏/版本未知拒绝启动
 	//（同 W02-01 mcp_access 口径：空间状态是协作事实唯一真相，宁拒启不瞎门）。
-	// 策略接口（Hooks）W05-01 装配期注入；本批 nil = 完成类动作诚实拒绝
-	//（finish_policy_unavailable），W04 只开放主人 finalize→abandoned。
-	spacesStore, err := collab.Open(cfg.DataDir, collab.Options{Log: log.Default()})
+	// 策略接口（Hooks）装配期注入策略引擎（W05-02/03；Open 后不可换）。
+	spacesStore, err := collab.Open(cfg.DataDir, collab.Options{Log: log.Default(), Hooks: stratEngine})
 	if err != nil {
 		return fmt.Errorf("初始化空间协作存储失败: %w", err)
 	}

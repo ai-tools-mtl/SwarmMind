@@ -61,13 +61,17 @@ const (
 	ActFinish           Action = "finish"
 	ActFinalize         Action = "finalize"
 	ActArchive          Action = "archive"
+	// ActSetPhase 循环阶段落账（W05-03 最小追加）：经策略判定后由装配层调用写
+	// Space.Phase——策略判定与状态落账分离（判定在 strategy，落账在 collab）。
+	ActSetPhase Action = "set_phase"
 )
 
 // Valid 取值校验。
 func (a Action) Valid() bool {
 	switch a {
 	case ActPause, ActResume, ActReady, ActStart, ActDispatch, ActConfigureMembers,
-		ActSetBudget, ActPolicy, ActTakeover, ActRenew, ActFinish, ActFinalize, ActArchive:
+		ActSetBudget, ActPolicy, ActTakeover, ActRenew, ActFinish, ActFinalize, ActArchive,
+		ActSetPhase:
 		return true
 	}
 	return false
@@ -115,8 +119,10 @@ func Authorize(act Action, sp *Space, subj Subject, term uint64, now time.Time) 
 		if isOwner || driver {
 			return nil
 		}
-	case ActResume, ActStart, ActDispatch:
+	case ActResume, ActStart, ActDispatch, ActSetPhase:
 		// 当前驱动者；主人在 manual 模式或完成显式接管（成为驱动者）后。
+		// set_phase 与 resume/start 同族（驱动者推进循环阶段；策略转换合法性
+		// 判定归 strategy，本表只定「谁可驱动阶段」）。
 		if driver {
 			return nil
 		}
