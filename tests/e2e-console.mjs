@@ -1029,14 +1029,19 @@ async function nodeSessFlow(browser) {
     const inp = document.querySelector('#sess-query');
     if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }   // 清过滤恢复全量列表
   });
-  // 绘制已恢复（blur）——行就位条件等待，scrollTo 不再被空态钳制。
+  // 绘制已恢复（blur）——行就位条件等待。
   await page.waitForSelector('#sess-list-zone tr[data-sess]', { timeout: 15000 }).catch(() => { });
+  const scratchB = await scratchSession();
+  const sidB = scratchB?.body?.turn?.session_id || '';
+  const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①——blur 后列表面可见）
+  const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
+  // 滚动标记取在行全部落定之后（r9 教训：装载窗内行插入会使绝对 scrollY 漂移超容
+  // 差——行登记先于轮终态，双行落定后高度即稳定；badge 翻转仅换类不改高）。
   await page.evaluate(() => {
     window.scrollTo(0, 160);
     window.__markB = [document.querySelector('main h1'), document.querySelector('#sess-query')];
   });
-  const scratchB = await scratchSession();
-  const sidB = scratchB?.body?.turn?.session_id || '';
+  await p_sleep(1500);   // 跨一个轮询节拍：确认滚动位置不被轮询重置（scrollKept 被测语义）
   const phaseB = await page.evaluate(() => {
     const now = [document.querySelector('main h1'), document.querySelector('#sess-query')];
     return {
@@ -1044,8 +1049,6 @@ async function nodeSessFlow(browser) {
       scrollKept: Math.abs(window.scrollY - 160) < 40,
     };
   });
-  const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①——blur 后列表面可见）
-  const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
   let closedA = false, closedB = false;
   if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
   if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
