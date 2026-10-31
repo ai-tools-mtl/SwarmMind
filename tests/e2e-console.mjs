@@ -1011,10 +1011,19 @@ async function nodeSessFlow(browser) {
   await page.waitForSelector('#sess-list-zone', { timeout: 10000 });
   await page.click('#sess-query');
   await page.fill('#sess-query', 'E2E 豁免锚');
-  await page.evaluate(() => {
+  // 收口1：焦点/光标断言先行取毕——过滤词使列表空态、页面高度不足以支撑
+  // scrollTo(0,160)（滚动被浏览器钳制，标记点不可达）。先取断言，再清过滤恢复
+  // 全量列表，之后 scrollTo+markB。滚动保持语义不变：断言轮询期间滚动位置不被
+  // 重置，与滚动落点高低无关。
+  const phaseBFocus = await page.evaluate(() => {
     const inp = document.querySelector('#sess-query');
     inp.focus();
     inp.setSelectionRange(3, 3);
+    return { focusKept: document.activeElement === inp, caretKept: inp.selectionStart === 3 };
+  });
+  await page.evaluate(() => {
+    const inp = document.querySelector('#sess-query');
+    if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }   // 清过滤恢复全量列表（滚动可达）
     window.scrollTo(0, 160);
     window.__markB = [document.querySelector('main h1'), document.querySelector('#sess-query')];
   });
@@ -1026,27 +1035,20 @@ async function nodeSessFlow(browser) {
     return {
       identityKept: window.__markB.every((el, i) => el && el === now[i]),
       focusKept: document.activeElement === inp,
-      caretKept: inp?.selectionStart === 3,
       scrollKept: Math.abs(window.scrollY - 160) < 40,
     };
-  });
-  // 清搜索过滤（焦点/光标断言已取毕）：过滤词不匹配任何会话，不清除则行永不出
-  // 现、rowInList 不可满足（焦点态构造与行到达断言解耦）。
-  await page.evaluate(() => {
-    const inp = document.querySelector('#sess-query');
-    if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input', { bubbles: true })); }
   });
   const inListA = sidA ? await rowInList(sidA, 300000) : false;   // 相位A 豁免窗装载到达（不截断实证①）
   const inListB = sidB ? await rowInList(sidB, 300000) : false;   // 相位B 窗装载到达（不截断实证②）
   let closedA = false, closedB = false;
   if (inListA) { await closeScratch(sidA); closedA = await badgeFlip(sidA, 'sst-closed', 30000); }
   if (inListB) { await closeScratch(sidB); closedB = await badgeFlip(sidB, 'sst-closed', 30000); }
-  walkLog(`SN07 轮询豁免走查（T5c 重写）：相位A 详情页+抽屉开放 DOM 身份=${phaseA.identityKept} 抽屉保持=${phaseA.drawerKept} scratchA ${sidA || '（创建失败）'}；相位B 列表 DOM=${phaseB.identityKept} 焦点=${phaseB.focusKept} 光标=${phaseB.caretKept} 滚动=${phaseB.scrollKept} scratchB ${sidB || '（创建失败）'}；豁免窗装载不截断 到达A=${inListA} 到达B=${inListB} 关闭翻转 A=${closedA} B=${closedB}（rowInList 等待跨首轮完成上限 300s，等待发生在回列表后的列表面——豁免只暂停绘制不截断加载）`);
-  record('SN07', '会话页轮询豁免（T5c 重写）：相位A 详情页+执行明细抽屉开放——豁免期页面/抽屉 DOM 身份保持不重建；相位B 回列表——搜索框焦点/光标/滚动保持；豁免窗内数据装载不截断——两窗 scratch 会话数据回列表后到达（rowInList）且关闭徽标翻转在列表面可见',
+  walkLog(`SN07 轮询豁免走查（T5c 重写+收口1 次序）：相位A 详情页+抽屉开放 DOM 身份=${phaseA.identityKept} 抽屉保持=${phaseA.drawerKept} scratchA ${sidA || '（创建失败）'}；相位B 列表 DOM=${phaseB.identityKept} 焦点 取毕=${phaseBFocus.focusKept}/终验=${phaseB.focusKept} 光标 取毕=${phaseBFocus.caretKept} 滚动=${phaseB.scrollKept} scratchB ${sidB || '（创建失败）'}；豁免窗装载不截断 到达A=${inListA} 到达B=${inListB} 关闭翻转 A=${closedA} B=${closedB}（rowInList 等待跨首轮完成上限 300s，等待发生在回列表后的列表面——豁免只暂停绘制不截断加载）`);
+  record('SN07', '会话页轮询豁免（T5c 重写+收口1 次序）：相位A 详情页+执行明细抽屉开放——豁免期页面/抽屉 DOM 身份保持不重建；相位B 回列表——搜索框焦点/光标保持（先取毕）+全量列表滚动标记点保持（轮询期不重置）；豁免窗内数据装载不截断——两窗 scratch 会话数据回列表后到达（rowInList）且关闭徽标翻转在列表面可见',
     phaseA.identityKept && phaseA.drawerKept
-    && phaseB.identityKept && phaseB.focusKept && phaseB.caretKept && phaseB.scrollKept
+    && phaseB.identityKept && phaseBFocus.focusKept && phaseBFocus.caretKept && phaseB.focusKept && phaseB.scrollKept
     && inListA && inListB && closedA && closedB,
-    `A=${JSON.stringify(phaseA)}；B=${JSON.stringify(phaseB)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
+    `A=${JSON.stringify(phaseA)}；B=${JSON.stringify(phaseB)} 焦点光标取毕=${JSON.stringify(phaseBFocus)}；到达 A=${inListA} B=${inListB} 关闭翻转 A=${closedA} B=${closedB}`, false, 'DEEP');
 
   // 继续预填留档（node 形态：continue modal，只读绑定/轮号/cwd 预填；轮号按实际
   // 轮数推进——SN02 后该会话已 1 轮，continue 应预填第 2 轮）
@@ -1118,9 +1120,12 @@ async function nodeSessFlow(browser) {
     `sid=${fId || '（创建失败）'} 轮1=${fTerm1 || 'timeout'} 轮2=${fTerm2 || 'timeout'} badge=${badBadge} detail=${badDetail}`);
 
   // SN10 + SN03：在途关闭拒绝 + 取消三态 + 关闭确认深层态（专用会话；W01-03 语义）。
-  // REST 建 agent 面会话 → 投首轮（202）→ UI 立即关闭 → 409 close_in_flight 人话；
-  // 确认层几何/inert/Esc 返焦深层断言（SN03）；取消入口 → 回执三态诚实 toast；终态
-  // 后再次关闭成立 → 详情页头部与列表双刷新已关闭（SN03 收尾断言并入）。
+  // 收口2（第六轮采证）：改投非首轮后取消——首轮取消的可见性缺口（首轮被取消永不
+  // 完成 → 会话停留 pending → 列表行自始不出现 → 收尾「已关闭」断言属 P4 已登记
+  // 项），本用例改测在途取消+关闭语义本身：建会话 → 首轮正常完成（会话发布，列表
+  // 行存在）→ 投第二轮 → UI 立即关闭 → 409 close_in_flight 人话；确认层几何/inert/
+  // Esc 返焦深层断言（SN03）；取消第二轮 → 回执三态诚实 toast；终态后再次关闭成立
+  // → 详情页头部与列表双刷新已关闭（SN03 收尾断言并入）。
   const s3Seed = await nodeApi('/api/v1/sessions', {
     method: 'POST',
     body: JSON.stringify({ agent: capName, cwd: '/tmp/agent-session/work', request_id: 'web-e2e-close-' + Date.now() }),
@@ -1128,6 +1133,18 @@ async function nodeSessFlow(browser) {
   const s3Id = s3Seed.body?.session?.id || '';
   let sn10ok = false, sn3ok = false, sn10Note = '创建失败';
   if (s3Id) {
+    // 首轮正常完成（发布门：首轮完成才会话可见于列表；300s 上限同 SN02/SN04 口径）
+    await nodeApi(`/api/v1/sessions/${encodeURIComponent(s3Id)}/turns`, { method: 'POST', body: JSON.stringify({ prompt: 'E2E 关闭覆盖第 1 步：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }) });
+    const pubDeadline = Date.now() + 300000;
+    let published = false;
+    while (Date.now() < pubDeadline) {
+      const d = await nodeApi('/api/v1/sessions/' + encodeURIComponent(s3Id));
+      const sess = d.body?.session || {};
+      if (!sess.pending && (sess.turns || [])[0]?.status) { published = true; break; }
+      await p_sleep(3000);
+    }
+    if (!published) sn10Note = '首轮 300s 未完成（环境）';
+    // 投第二轮（在途）：随后 UI 立即关闭 → CloseGuard 409
     await nodeApi(`/api/v1/sessions/${encodeURIComponent(s3Id)}/turns`, { method: 'POST', body: JSON.stringify({ prompt: 'E2E 在途关闭覆盖：请只回复 OK 两个字母，不要读取文件，不要执行任何命令。' }) });
     await page.goto(`${BASE}/#/sessions/${encodeURIComponent(s3Id)}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#sess-detail', { timeout: 10000 });
@@ -1170,10 +1187,10 @@ async function nodeSessFlow(browser) {
     walkLog(`SN10/SN03 走查：在途关闭拒绝 toast=${cifToast.slice(0, 40)} 确认层 deep=${JSON.stringify(confirmDeep)} trap=${cTrapOk} esc=${JSON.stringify(escConfirm)}`);
     record('SN03', '关闭确认深层态（叠加层下详情页原位保留/层可见+覆盖关系+背景 inert+焦点陷阱实键/Esc 只摘确认层返焦关闭钮）', sn3ok,
       `deep=${JSON.stringify(confirmDeep)} trap=${cTrapOk} esc=${JSON.stringify(escConfirm)}`, false, 'DEEP');
-    record('SN10a', '在途关闭拒绝（投轮后立即关闭 → close_in_flight 409 人话指向取消/等待，关闭未生效）', cifOk, `toast=${cifToast.slice(0, 50)}`);
-    // 取消入口（受理轮经账本扫描出现在时间线；等取消按钮就位）
-    await page.waitForSelector('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]', { timeout: 30000 }).catch(() => { });
-    const cBtn = page.locator('#sess-detail tr[data-turn="1"] [data-act="sess-turn-cancel"]');
+    record('SN10a', '在途关闭拒绝（第二轮投递后立即关闭 → close_in_flight 409 人话指向取消/等待，关闭未生效）', cifOk, `toast=${cifToast.slice(0, 50)} 首轮发布=${sn10Note === '创建失败' ? '（未达）' : 'true'}`);
+    // 取消入口（第二轮受理轮经账本扫描出现在时间线；等取消按钮就位）
+    await page.waitForSelector('#sess-detail tr[data-turn="2"] [data-act="sess-turn-cancel"]', { timeout: 30000 }).catch(() => { });
+    const cBtn = page.locator('#sess-detail tr[data-turn="2"] [data-act="sess-turn-cancel"]');
     let cancelToast = '', cancelClicked = false;
     if (await cBtn.count()) {
       await cBtn.click();
@@ -1197,7 +1214,7 @@ async function nodeSessFlow(browser) {
     for (let i = 0; i < 120 && !rowForm; i++) {
       await p_sleep(2000);
       rowForm = await page.evaluate(() => {
-        const td = document.querySelector('#sess-detail tr[data-turn="1"] td:nth-child(2)');
+        const td = document.querySelector('#sess-detail tr[data-turn="2"] td:nth-child(2)');
         if (!td) return '';
         const b = td.querySelector('.badge');
         if (!b) return '';
@@ -1232,7 +1249,7 @@ async function nodeSessFlow(browser) {
       listClosed = await page.evaluate(id => document.querySelector(`tr[data-sess="${id}"]`)?.textContent.includes('已关闭'), s3Id);
     }
     sn10ok = cifOk && cancelClicked && (cancelAccepted ? (rowForm === 'cancelled' || rowForm === 'unknown') : (cancelRejected && (rowForm === 'natural' || rowForm === 'cancelled'))) && closedOk && headClosed && listClosed;
-    sn10Note = `取消入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 接受=${cancelAccepted} 轮行形态=${rowForm || '（未落定）'} 关闭=${closedOk}/${headClosed}/${listClosed}`;
+    sn10Note = `首轮发布=${published} 取消入口=${cancelClicked} toast=${cancelToast.slice(0, 40)} 接受=${cancelAccepted} 轮行形态=${rowForm || '（未落定）'} 关闭=${closedOk}/${headClosed}/${listClosed}`;
   }
   walkLog(`SN10 取消三态+关闭走查：${sn10Note}`);
   record('SN10', '在途关闭拒绝+取消三态+关闭收尾（取消入口/回执 toast 为 queued/executed/unknown/202 异步/409 先到保留之一；轮行终态徽标如实；关闭最终成立且头部+列表双刷新）', sn10ok, sn10Note, false, 'DEEP');
