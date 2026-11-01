@@ -1763,7 +1763,10 @@ function spaceActionsZone(sp) {
   if (leader.kind && leader.kind !== 'manual' && leader.term) main.push('renew');
   const owner = [];
   if (['ready', 'running', 'paused', 'blocked', 'needs_review'].includes(st)) owner.push('finalize_done');
-  owner.push('finalize_abandoned', 'budget', 'policy');
+  owner.push('finalize_abandoned', 'budget');
+  // policy 仅 pending_config/paused 可改（collab controlPolicy 前置：其余态 409
+  // illegal_transition——终审建议①：按自订纪律「状态不允许的动作不出现」收窄渲染）。
+  if (['pending_config', 'paused'].includes(st)) owner.push('policy');
   const btn = act => button(SPACE_ACTION_WORDS[act], 'space-act:' + act, act === 'start' || act === 'resume' ? 'primary' : act === 'finalize_abandoned' ? 'danger' : '', 'type="button"');
   return `<h3 class="spaced">动作</h3>
   <div class="actions spaced">${main.map(btn).join('')}</div>
