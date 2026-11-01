@@ -323,6 +323,57 @@ func TestW0503ReworkLoopStillOpen(t *testing.T) {
 	}
 }
 
+// TestW0503AnchorsRequireRegisteredRevision 终审建议1：问题登记/复审/零发现复审
+// 的版本锚定须为「本空间已登记版本」（对照 RecordEvidence ErrRevisionNotFound 先
+// 例）——未登记 hash 拒绝、零副作用（初审锚不被陈旧 hash 污染、锚推进不发生）、
+// 跨空间已登记 hash 不冒认。
+func TestW0503AnchorsRequireRegisteredRevision(t *testing.T) {
+	eng, st, clk, id := wiredWriteReview(t)
+	_ = clk
+	ghost := mkhash("ghost") // 合法 hex、未登记
+	// 问题登记：未登记发现版本拒绝，且初审锚不被初始化（零副作用）。
+	if _, err := eng.RecordIssue(id, IssueInput{
+		Reviewer: "bob", Severity: SeverityMust, File: "x.go", Line: 1,
+		Title: "幽灵版本问题", FoundInHash: ghost, FoundInRound: 1,
+	}); !errors.Is(err, ErrRevisionNotFound) {
+		t.Fatalf("未登记发现版本应拒绝：%v", err)
+	}
+	if snap, ok := eng.Snapshot(id); ok && snap.LastReviewedHash != "" {
+		t.Fatalf("拒绝路径不得初始化初审锚：%q", snap.LastReviewedHash)
+	}
+	// 正常链：登记 v1 → 问题锚定 v1（初审锚=v1）→ 复审对未登记版本拒绝（锚不动）。
+	v1 := mustRegisterRevision(t, eng, id, "v1", 1)
+	issID := mustIssue(t, eng, id, v1, SeverityMust)
+	if err := eng.ClaimFix(id, issID, v1, 1, "修复"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.RecordReReview(id, issID, ReReviewInput{Reviewer: "bob", AgainstHash: ghost, Result: ReReviewConfirmed}); !errors.Is(err, ErrRevisionNotFound) {
+		t.Fatalf("复审对未登记版本应拒绝：%v", err)
+	}
+	snap, _ := eng.Snapshot(id)
+	if snap.LastReviewedHash != v1 {
+		t.Fatalf("拒绝路径锚不得推进：%q", snap.LastReviewedHash)
+	}
+	// 零发现复审对未登记版本拒绝（锚不动）；已登记版本放行。
+	if err := eng.RecordCleanReview(id, "bob", ghost, "零发现"); !errors.Is(err, ErrRevisionNotFound) {
+		t.Fatalf("零发现复审对未登记版本应拒绝：%v", err)
+	}
+	if snap, _ := eng.Snapshot(id); len(snap.CleanReviews) != 0 || snap.LastReviewedHash != v1 {
+		t.Fatalf("拒绝路径零发现记录/锚不符：%+v", snap.LastReviewedHash)
+	}
+	if err := eng.RecordCleanReview(id, "bob", v1, "零发现"); err != nil {
+		t.Fatalf("已登记版本零发现复审应放行：%v", err)
+	}
+	// 跨空间不冒认：hash 在本空间已登记、他空间未登记——他空间记录拒绝。
+	if _, err := eng.RecordIssue("sp-other-space", IssueInput{
+		Reviewer: "bob", Severity: SeverityInfo, File: "y.go", Line: 2,
+		Title: "他空间问题", FoundInHash: v1, FoundInRound: 1,
+	}); !errors.Is(err, ErrRevisionNotFound) {
+		t.Fatalf("他空间未登记版本应拒绝：%v", err)
+	}
+	_ = st
+}
+
 // TestW0503SeparationBoundary 分离边界：非法转换在 strategy 拒绝（落账前预检拦
 // 截——collab 不被调用）；collab 侧对值只做基校验不解释语义（本包把守转换表，
 // collab 把守授权/版本/状态——边界即「判定在 strategy、落账在 collab」）。

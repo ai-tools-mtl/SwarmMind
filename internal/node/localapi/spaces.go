@@ -150,6 +150,7 @@ func (s *Server) handleSpaceGet(w http.ResponseWriter, r *http.Request) {
 // expected_version 必填（乐观锁；takeover 另有 expected_term CAS，term 裁决先于
 // 版本复核）。恢复保护（W04-02）：存在在途/排队意图时 resume 须携 confirm=true
 // 显式确认（无在途直通）——「人工介入后不自动续跑」的放行由人显式给出。
+// set_phase 端点面显式拒绝（W05-03 终审必修2，见函数体内门注记）。
 func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj collab.Subject) {
 	if !s.spaceReady(w) {
 		return
@@ -157,6 +158,19 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 	var req collab.ControlRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 ControlRequest JSON: "+err.Error())
+		return
+	}
+	// set_phase 门（W05-03 终审必修2）：阶段转换合法性判定在 strategy.Engine
+	//（ValidatePhaseTransition/SetPhase——18 边转换表 + 暂停恢复约束），模型层
+	// Store.Control(ActSetPhase) 只做值基校验——本端点直通模型层会让 REST 可落
+	// 任意合法词形（含 drafting→completed 表外边、paused 恢复约束旁路）。装配层
+	// 接线（W05-04：端点先经 strategy 预检后放行）前一律 501 拒绝，先于一切校验
+	// 与事务——零副作用、不落回执、不占 request_id（同 request_id 改投其他动作
+	// 照常受理）；模型层动作保留（进程内装配序列经 Store.Control 使用，不受本门
+	// 影响；MCP swarmmind_space_control 动作词表本就不含 set_phase，不受影响）。
+	if req.Action == collab.ActSetPhase {
+		writeErr(w, http.StatusNotImplemented, "set_phase_not_wired",
+			"set_phase 须经策略判定面（strategy.ValidatePhaseTransition 预检）后由装配层落账：REST 直调在接线批次（W05-04）开放前一律拒绝；循环阶段当前由内置驱动序列维护，无需手工设置")
 		return
 	}
 	id := r.PathValue("id")

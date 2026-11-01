@@ -494,6 +494,12 @@ func (e *Engine) RecordIssue(spaceID string, in IssueInput) (Issue, error) {
 	defer e.mu.Unlock()
 	lp := e.loop(spaceID, true)
 	now := e.now()
+	// 发现版本须为已登记版本（W05-03 终审建议1，对照 RecordEvidence 锚定校验
+	// 先例）：问题登记锚定发现版本并承担初审锚初始化——未登记/陈旧 hash 拒绝，
+	// 封「初审锚指向不存在版本」的返工零进度乒乓形态。
+	if e.revisionByHashLocked(lp, in.FoundInHash) == nil {
+		return Issue{}, revErrf(ErrRevisionNotFound, "发现版本 %s… 未登记（问题须锚定本空间已登记版本）", tail(in.FoundInHash, 12))
+	}
 	// 初审锚（W05-03 全链驱动补定）：首条问题登记锚定其发现版本——初审也是审
 	// 查，「最近审查锚」自初审起在位（返工→复审推进以「修复后新版本 ≠ 被审版
 	// 本」为据，空锚会使首轮返工零进度循环推进）。已有锚不动：锚只被更新的审查
@@ -593,6 +599,11 @@ func (e *Engine) RecordReReview(spaceID, issueID string, in ReReviewInput) error
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	lp := e.loop(spaceID, true)
+	// 复审版本须为已登记版本（W05-03 终审建议1，对照 RecordEvidence 先例）：
+	// 复审结论与最近审查锚只对真实版本推进。
+	if e.revisionByHashLocked(lp, in.AgainstHash) == nil {
+		return revErrf(ErrRevisionNotFound, "复审版本 %s… 未登记（复审须锚定本空间已登记版本）", tail(in.AgainstHash, 12))
+	}
 	is := e.issueLocked(lp, issueID)
 	if is == nil {
 		return ErrIssueNotFound
@@ -639,6 +650,11 @@ func (e *Engine) RecordCleanReview(spaceID, reviewer, againstHash, note string) 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	lp := e.loop(spaceID, true)
+	// 复审版本须为已登记版本（W05-03 终审建议1，对照 RecordEvidence 先例）：
+	// 零发现复审锚同样只对真实版本推进。
+	if e.revisionByHashLocked(lp, againstHash) == nil {
+		return revErrf(ErrRevisionNotFound, "复审版本 %s… 未登记（复审须锚定本空间已登记版本）", tail(againstHash, 12))
+	}
 	now := e.now()
 	lp.CleanReviews = append(lp.CleanReviews, CleanReviewRecord{
 		At: now, Reviewer: strings.TrimSpace(reviewer), AgainstHash: againstHash, Note: note,
