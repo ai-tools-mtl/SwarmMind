@@ -1,0 +1,2 @@
+{"body":{"member": "disc-b", "request_id": "stageb-ac12-b-disp3", "expected_version": 5, "note": "预算已耗尽（1/1 已用）应 409 budget_exhausted"},"ts":"2026-11-02T05:51:52Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-75e7c3210aa0681b755ec906f1e7331a/dispatches","http_status":"409","response":{"error": "budget_exhausted", "message": "预算已用尽: dispatch_round 已达上限 1"}
+}

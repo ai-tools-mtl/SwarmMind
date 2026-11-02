@@ -1,0 +1,2 @@
+{"body":{"kind": "arbitrary_shell", "member": "disc-a", "body": "x"},"ts":"2026-11-02T05:49:18Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-0ed7733835d997bab5c38218d43daf8f/records","http_status":"400","response":{"error": "invalid_request", "message": "kind 须为 candidate|review|issue|evidence（记录四族；数据写入只是事实登记，不等于执行——执行仍须 space dispatch）, 得 \"arbitrary_shell\""}
+}

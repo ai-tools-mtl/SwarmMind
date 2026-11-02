@@ -1,0 +1,2 @@
+{"body":{"expected_version": 5, "final_outcome": "abandoned", "reason": "在途时应拒绝"},"ts":"2026-11-02T06:12:36Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-c04c022e8bff2979529d8f8bf255699c/finalize","http_status":"409","response":{"error": "execution_in_flight", "message": "空间存在未收束执行（先等待收束或核对）"}
+}

@@ -1,0 +1,2 @@
+{"body":{"prompt": "ac17b init", "request_id": "stageb-ac17-t2"},"ts":"2026-11-02T06:10:28Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-e7718ecd922d8bd075fb5cdeb93ad73b/turns","http_status":"202","response":{"turn": {"session_id": "s-e7718ecd922d8bd075fb5cdeb93ad73b", "turn_seq": 1, "op": "create", "task_id": "t-44a90b9a66d3d710b5502d1fd24148fc", "trace_id": "04d688d0bf4f6b5008b7b81f766c21b8"}}
+}

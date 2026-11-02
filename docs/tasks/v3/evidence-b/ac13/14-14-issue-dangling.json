@@ -1,0 +1,2 @@
+{"body":{"kind": "issue", "reviewer": "rev-fake", "severity": "must", "file": "demo/module.go", "line": 42, "title": "空指针解引用风险", "found_in_version": "ec5fe817a63e9d3b28e5046d6fe0f2f92f62184f0063d17da8c0a799fb1f52f6", "found_in_round": 1},"ts":"2026-11-02T05:57:56Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"404","response":{"error": "revision_not_found", "message": "版本不存在: 发现版本 a799fb1f52f6… 未登记（问题须锚定本空间已登记版本）"}
+}

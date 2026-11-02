@@ -1,0 +1,2 @@
+{"body":{"member": "disc-a", "request_id": "ac14-n10-prime-disp", "expected_version": 1, "note": "x"},"ts":"2026-11-02T06:30:13Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-2f1a80c7d6c97bd1e49705c9fa5eb947/dispatches","http_status":"403","response":{"error": "forbidden", "message": "主体无权执行该动作: 动作 dispatch 拒绝：主体 orchestrate:prime 非该动作有权主体（当前任期 0、负责人 /）"}
+}

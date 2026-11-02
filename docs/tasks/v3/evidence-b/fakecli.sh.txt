@@ -1,0 +1,57 @@
+#!/bin/sh
+# fakecli.sh — zcode headless 协议镜像假 CLI（阶段 B 采证，STAGE-A 既定形态复用）。
+# 命令形态（internal/node/sessionx/adapter_zcode.go）：
+#   首轮: <cmd> --cwd <dir> --mode <mode> --json -p <prompt>
+#   续轮: <cmd> --cwd <dir> --mode <mode> --json --resume <session_id> -p <prompt>
+# 行为：首轮签发持久原生 ID（状态文件落 FAKECLI_STATE）；续轮核验 resume ID
+#（非本脚本签发 → stderr "no such session" + exit 5）；回显 history:<累计轮数>
+# 证明同线程续接；prompt 内嵌 SLEEP=<sec> 触发长跑（AC17 在途采证用）；
+# prompt 含 BOOM=1 时 exit 7（失败轮形态对照）。
+# 输出：整份终态 JSON {"sessionId","turnId","response"}。
+STATE="${FAKECLI_STATE:-/tmp/stageb-run/fakecli-state}"
+mkdir -p "$STATE" 2>/dev/null
+
+CWD=""; MODE=""; RESUME=""; PROMPT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) CWD="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
+    --json) shift ;;
+    --resume) RESUME="$2"; shift 2 ;;
+    -p) PROMPT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+# SLEEP 长跑支持（AC17 在途意图）
+SLEEP_SEC=$(printf '%s' "$PROMPT" | sed -n 's/.*SLEEP=\([0-9][0-9]*\).*/\1/p' | head -1)
+if [ -n "$SLEEP_SEC" ]; then
+  sleep "$SLEEP_SEC"
+fi
+
+if [ -n "$RESUME" ]; then
+  F="$STATE/$RESUME.json"
+  if [ ! -f "$F" ]; then
+    echo "no such session: $RESUME" >&2
+    exit 5
+  fi
+  SID="$RESUME"
+  N=$(( $(cat "$F") + 1 ))
+  echo "$N" > "$F"
+else
+  SID="fakesess-$(date +%s)-$$-$RANDOM"
+  echo "1" > "$STATE/$SID.json"
+  N=1
+fi
+
+RESP="ack:stageb history:$N"
+if printf '%s' "$PROMPT" | grep -q 'ECHO-MARK:'; then
+  MARK=$(printf '%s' "$PROMPT" | sed -n 's/.*ECHO-MARK:\([^&"]*\).*/\1/p' | head -1)
+  RESP="$RESP mark:$MARK"
+fi
+if printf '%s' "$PROMPT" | grep -q 'BOOM=1'; then
+  echo "fake internal error" >&2
+  exit 7
+fi
+
+printf '{"sessionId":"%s","turnId":"turn-%d","response":"%s"}' "$SID" "$N" "$RESP"

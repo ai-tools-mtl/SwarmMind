@@ -1,0 +1,2 @@
+{"body":null,"ts":"2026-11-02T05:50:19Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-1e5bd6e5858d0205dc5555416a11ce03/candidates/cand-xxx/finalize","http_status":"409","response":{"error": "illegal_transition", "message": "终态/已归档空间只读：候选定版/否决面向活跃空间开放（材料保留可查）"}
+}

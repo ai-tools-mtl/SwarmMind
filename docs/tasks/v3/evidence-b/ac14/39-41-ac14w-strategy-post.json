@@ -1,0 +1,2 @@
+{"body":null,"ts":"2026-11-02T06:19:10Z","method":"GET","url":"http://127.0.0.1:28801/api/v1/spaces/sp-86992f721788b6201e271d3c9e828ab1/strategy","http_status":"200","response":{"strategy": {"space_id": "sp-86992f721788b6201e271d3c9e828ab1", "has_loop": false, "phase": "drafting", "phase_valid": true, "last_reviewed_at": "0001-01-01T00:00:00Z", "stop": {"should_pause": false}}}
+}

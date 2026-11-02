@@ -1,0 +1,2 @@
+{"body":{"prompt": "wr2 init", "request_id": "stageb-ac13w2-tw1"},"ts":"2026-11-02T06:04:20Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-688496d012671f3a71f0bba5619072bc/turns","http_status":"202","response":{"turn": {"session_id": "s-688496d012671f3a71f0bba5619072bc", "turn_seq": 1, "op": "create", "task_id": "t-7a766d7b279b376359645fe8b4923c12", "trace_id": "2837f4a3f6cd73ef3db8287003d2ad4c"}}
+}

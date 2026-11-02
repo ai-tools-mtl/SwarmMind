@@ -1,0 +1,2 @@
+{"body":null,"ts":"2026-11-02T05:44:55Z","method":"GET","url":"http://127.0.0.1:28801/api/v1/sessions/s-995a962fd158f80a773c0f4e485d6356","http_status":"200","response":{"session": {"id": "s-995a962fd158f80a773c0f4e485d6356", "agent_name": "disc-a", "adapter": "zcode", "cwd": "/tmp/stageb-run/workspaces/disc-a", "permission_mode": "edit", "status": "pending", "turn_count": 0, "turns": [], "created_at": "2026-11-02T05:42:20.643547Z", "updated_at": "2026-11-02T05:42:20.643547Z", "pending": true, "request_id": "stageb-ac11-sess-a"}}
+}

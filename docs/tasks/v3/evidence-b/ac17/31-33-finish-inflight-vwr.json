@@ -1,0 +1,2 @@
+{"body":{"request_id": "stageb-ac17b-fin", "action": "finish", "expected_version": 4, "term": 1},"ts":"2026-11-02T06:11:06Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-43669f21b21676dec8aacb891a0786bb/control","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 4 ≠ 现版本 5（读档已过期，刷新后重试）"}
+}

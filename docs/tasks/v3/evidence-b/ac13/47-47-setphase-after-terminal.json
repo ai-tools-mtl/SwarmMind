@@ -1,0 +1,2 @@
+{"body":{"request_id": "stageb-ac13-ph-term", "action": "set_phase", "expected_version": 10, "phase": "drafting"},"ts":"2026-11-02T06:03:30Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/control","http_status":"409","response":{"error": "illegal_transition", "message": "参数非法: 非法阶段转换 rereview → drafting（表外路径）"}
+}

@@ -1,0 +1,2 @@
+{"body":null,"ts":"2026-11-02T05:47:32Z","method":"GET","url":"http://127.0.0.1:28801/api/v1/spaces/sp-0ed7733835d997bab5c38218d43daf8f/messages?since=0","http_status":"200","response":{"messages": [{"seq": 1, "member": "disc-a", "text": "我倾向方案甲：成本低、落地快（依据：现有栈兼容性评估）。", "by": "owner:owner", "created_at": "2026-11-02T05:47:29.55613Z"}, {"seq": 2, "member": "disc-b", "text": "我补充：方案乙扩展性更好，但迁移成本高；建议分阶段。", "by": "owner:owner", "created_at": "2026-11-02T05:47:32.267862Z"}], "pruned_before_seq": 0}
+}

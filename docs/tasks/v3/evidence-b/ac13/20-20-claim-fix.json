@@ -1,0 +1,2 @@
+{"body":{"kind": "review", "op": "claim_fix", "issue_id": "iss-214d518a5ea2", "version_hash": "abcb7af355296041540bf4d6faac1b038d47fd4f4d96171a1a76c04d7627dde6", "author_round": 2, "note": "已改为返回非 nil 并加守护"},"ts":"2026-11-02T05:58:40Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"201","response":{"op": "claim_fix", "recorded": true}
+}

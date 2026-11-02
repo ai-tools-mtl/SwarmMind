@@ -1,0 +1,2 @@
+{"body":{"request_id": "w2-frozen", "action": "set_phase", "expected_version": 3, "phase": "frozen"},"ts":"2026-11-02T06:04:42Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-ae6060b21632181de3fb4c4eb501094d/control","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 3 ≠ 现版本 4（读档已过期，刷新后重试）"}
+}

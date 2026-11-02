@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
@@ -164,7 +165,8 @@ func writeLocalSessionErr(w http.ResponseWriter, err error) {
 			code = http.StatusBadRequest
 		case protocol.CodeAgentNotFound, "session_not_found":
 			code = http.StatusNotFound
-		case "session_closed", "turn_in_flight", "binding_mismatch", "close_in_flight": // close_in_flight 为 W01-03 行为变更（在途拒绝关闭 409），主人旧面映射此处补齐（W01-04 实测发现漏项）
+		case "session_closed", "turn_in_flight", "binding_mismatch", "close_in_flight", // close_in_flight 为 W01-03 行为变更（在途拒绝关闭 409），主人旧面映射此处补齐（W01-04 实测发现漏项）
+			collab.CodeSpaceDispatchRequired: // 绑定会话的普通续轮拒绝（W04-02：指向空间派发）——本地会话轮路径同码 409（阶段 B 采证 O1：此前漏映射落 500，空间派发路径同码 409 正确）
 			code = http.StatusConflict
 		case "session_unsupported":
 			code = http.StatusServiceUnavailable

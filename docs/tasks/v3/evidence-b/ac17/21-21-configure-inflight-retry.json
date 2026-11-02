@@ -1,0 +1,2 @@
+{"body":{"request_id": "stageb-ac17-cfg2", "action": "configure_members", "expected_version": 7, "members": []},"ts":"2026-11-02T06:09:44Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-c2e93afff98b57105bf17b274467196b/control","http_status":"409","response":{"error": "illegal_transition", "message": "非法状态转换: configure_members：仅待配置/暂停态可变更成员（现 abandoned）"}
+}

@@ -1,0 +1,2 @@
+{"body":{"kind": "evidence", "version": "abcb7af355296041540bf4d6faac1b038d47fd4f4d96171a1a76c04d7627dde6", "layer": "cli_exit", "source": "human_confirmation", "verified": true, "ref": "orchestrate 伪称人工核对"},"ts":"2026-11-02T06:01:12Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"403","response":{"error": "forbidden", "message": "已证实标记（verified=true）只能由本机主人登记（人工核对证据）：编排主体不得自证——「有权人工核对」与来源回执事实不经编排凭据声明（非自报来源标已证实同样拒绝，来源声明不能自证自身）；人工核对证据请由主人在主人面登记"}
+}

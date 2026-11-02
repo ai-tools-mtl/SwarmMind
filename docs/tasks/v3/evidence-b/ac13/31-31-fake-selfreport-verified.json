@@ -1,0 +1,2 @@
+{"body":{"kind": "evidence", "version": "abcb7af355296041540bf4d6faac1b038d47fd4f4d96171a1a76c04d7627dde6", "layer": "cli_exit", "source": "agent_self_report", "verified": true, "ref": "fake-test-run-1"},"ts":"2026-11-02T06:01:12Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"400","response":{"error": "evidence_invalid", "message": "证据登记非法: agent 自报不得标记已证实（须回执/服务端事实/有权人工核对）"}
+}

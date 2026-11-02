@@ -1,0 +1,2 @@
+{"body":{"prompt": "ext2 init", "request_id": "stageb-ac14-ext2-t1"},"ts":"2026-11-02T06:17:17Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-b049fbf14e9dea3596d66e81215ab8be/turns","http_status":"202","response":{"turn": {"session_id": "s-b049fbf14e9dea3596d66e81215ab8be", "turn_seq": 1, "op": "create", "task_id": "t-61cadf54112ac48f129699fb5c562521", "trace_id": "da3a7e95a25ad7cfcb56b959392905f8"}}
+}

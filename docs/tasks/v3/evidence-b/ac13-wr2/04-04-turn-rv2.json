@@ -1,0 +1,2 @@
+{"body":{"prompt": "rv2 init", "request_id": "stageb-ac13w2-tr1"},"ts":"2026-11-02T06:04:20Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-6b6ece6f6eb44551508d65964e8cdb10/turns","http_status":"202","response":{"turn": {"session_id": "s-6b6ece6f6eb44551508d65964e8cdb10", "turn_seq": 1, "op": "create", "task_id": "t-6b6963c93c78bda7b99a9d620ef42b48", "trace_id": "8f229989dd67120bacb472f5065b3305"}}
+}

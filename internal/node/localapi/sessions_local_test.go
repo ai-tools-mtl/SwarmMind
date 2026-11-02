@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/node/sessionx"
@@ -123,7 +124,7 @@ func TestLocalSessionsAuthGate(t *testing.T) {
 }
 
 // TestLocalSessionsFlow 全链：权限断言核对（yolo 400 / 不符 409）→ 新建+首轮
-//（202 回执）→ 轮终详情（native ID/轮数）→ 续轮 → 关闭 → 关闭后续轮 409 →
+// （202 回执）→ 轮终详情（native ID/轮数）→ 续轮 → 关闭 → 关闭后续轮 409 →
 // 重复关闭幂等 → 列表与 404。
 func TestLocalSessionsFlow(t *testing.T) {
 	srv, _ := newSessionLocalServer(t)
@@ -207,7 +208,7 @@ func itoaInt64(v int64) string {
 }
 
 // TestLocalSessionsUnsupportedDowngrade 未装配会话内核：端点组 503 诚实降级
-//（不静默空转）。
+// （不静默空转）。
 func TestLocalSessionsUnsupportedDowngrade(t *testing.T) {
 	bus := transport.NewBus()
 	svc := newService(t, bus.Endpoint("nodeA")) // 无 Sessions
@@ -240,5 +241,19 @@ func TestWriteLocalSessionErrCloseInFlight409(t *testing.T) {
 		if rec.Code != tc.want {
 			t.Fatalf("writeLocalSessionErr(%q) 状态码 = %d, want %d", tc.code, rec.Code, tc.want)
 		}
+	}
+}
+
+// TestWriteLocalSessionErrSpaceDispatchRequired409 空间绑定会话的普通续轮拒绝
+// 码 409（阶段 B 采证 O1 回归锚：本地会话轮路径此前漏映射落 500——同一服务端码
+// 在空间派发路径映射 409 正确，两路径口径必须一致；常量引用 collab 单源）。
+func TestWriteLocalSessionErrSpaceDispatchRequired409(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLocalSessionErr(rec, &service.RemoteError{Code: collab.CodeSpaceDispatchRequired, Msg: "测试"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("writeLocalSessionErr(space_dispatch_required) 状态码 = %d, want 409", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "space_dispatch_required") {
+		t.Fatalf("应答体应保留错误码: %s", rec.Body.String())
 	}
 }

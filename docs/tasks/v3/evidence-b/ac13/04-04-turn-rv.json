@@ -1,0 +1,2 @@
+{"body":{"prompt": "审查线程初始化", "request_id": "stageb-ac13-turn-rv1"},"ts":"2026-11-02T05:56:06Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-2a1e03822e7c8b25bacc4da038a36d17/turns","http_status":"202","response":{"turn": {"session_id": "s-2a1e03822e7c8b25bacc4da038a36d17", "turn_seq": 1, "op": "create", "task_id": "t-86d1d56a9dab98a2708c4da3dfacf274", "trace_id": "34bd7da8ccb3dbea38ffe2a493016f02"}}
+}

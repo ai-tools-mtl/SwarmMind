@@ -1,0 +1,2 @@
+{"body":{"request_id": "ac14-owner-tk", "action": "takeover", "expected_term": 1, "takeover_kind": "manual"},"ts":"2026-11-02T06:15:42Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-1570916c2bc5faf4c17910802d61eb19/control","http_status":"409","response":{"error": "term_conflict", "message": "任期不符（expected_term 与当前任期不一致）: expected_term 1 ≠ 当前任期 0（同刻仅一方接管成功；刷新读档后重试）"}
+}

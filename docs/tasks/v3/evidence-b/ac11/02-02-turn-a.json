@@ -1,0 +1,2 @@
+{"body":{"input": "hello A ECHO-MARK:init-a", "request_id": "stageb-ac11-turn-a-1"},"ts":"2026-11-02T05:44:53Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-995a962fd158f80a773c0f4e485d6356/turns","http_status":"400","response":{"error": "input_invalid", "message": "prompt 必填"}
+}

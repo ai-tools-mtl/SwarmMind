@@ -1,0 +1,2 @@
+{"body":{"expected_version": 6},"ts":"2026-11-02T06:09:43Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-c2e93afff98b57105bf17b274467196b/archive","http_status":"409","response":{"error": "illegal_transition", "message": "非法状态转换: archive：仅已完成/已放弃空间可归档（现 running）"}
+}

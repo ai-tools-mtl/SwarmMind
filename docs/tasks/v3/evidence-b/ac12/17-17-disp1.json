@@ -1,0 +1,2 @@
+{"body":{"member": "disc-b", "request_id": "stageb-ac12-b-disp1", "expected_version": 3, "note": "预算内派发"},"ts":"2026-11-02T05:50:46Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-75e7c3210aa0681b755ec906f1e7331a/dispatches","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 3 ≠ 现版本 4"}
+}

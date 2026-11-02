@@ -1,0 +1,2 @@
+{"body":{"kind": "evidence", "version": "cb1732a3060bf2c10b81dcf63dace6dbaa9fecfbb63680f1257b5d94db0ea31d", "layer": "protocol_parse", "source": "protocol_receipt", "verified": true, "ref": "rebuild-turn-json"},"ts":"2026-11-02T06:26:34Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-86992f721788b6201e271d3c9e828ab1/records","http_status":"201","response":{"op": "evidence", "recorded": true}
+}

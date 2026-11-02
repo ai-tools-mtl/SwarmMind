@@ -1,0 +1,2 @@
+{"body":{"member": "disc-b", "request_id": "ac14-ext2-disp1", "expected_version": 5, "term": 1, "note": "AC14 ext2 管家驱动派发 ECHO-MARK:ext2"},"ts":"2026-11-02T06:16:49Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-4f1f40aba508fb87565ac42239b06428/dispatches","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 5 ≠ 现版本 2"}
+}

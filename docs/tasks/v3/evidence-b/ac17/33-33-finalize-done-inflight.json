@@ -1,0 +1,2 @@
+{"body":{"expected_version": 5, "final_outcome": "done"},"ts":"2026-11-02T06:11:27Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-43669f21b21676dec8aacb891a0786bb/finalize","http_status":"409","response":{"error": "completion_not_satisfied", "message": "完成判据未满足（等待人工裁决或材料补齐）: 完成判据未满足（3 项缺口：acceptance,phase,version）：缺口1[acceptance] 验收条件缺失：空间未配置 acceptance（完成判据必需） 缺口2[phase] 阶段 drafting 尚未进入审查：不存在完成（编写/冻结中） 缺口3[version] 无登记版本：编写产出未固定（版本/证据/审查均无从谈起）"}
+}

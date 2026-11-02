@@ -1,0 +1,2 @@
+{"body":null,"ts":"2026-11-02T06:26:34Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-86992f721788b6201e271d3c9e828ab1/candidates/cand-32844fef1e4a/finalize","http_status":"200","response":{"candidate": {"id": "cand-32844fef1e4a", "summary": "定版交付说明（UI 走查样例候选）", "proposer": "wr-fake", "round": 1, "final_text": "FINAL: 定版交付说明（UI 走查样例候选）", "registered_at": "2026-11-02T06:26:34.305794Z", "status": "finalized", "seen_count": 1, "finalized_at": "2026-11-02T06:26:34.79984Z", "finalized_by": "owner"}}
+}

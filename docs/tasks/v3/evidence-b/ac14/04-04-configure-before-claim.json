@@ -1,0 +1,2 @@
+{"body":{"request_id": "ac14-cfg-pre", "action": "configure_members", "expected_version": 1, "members": [{"name": "disc-b"}]},"ts":"2026-11-02T06:15:42Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-1570916c2bc5faf4c17910802d61eb19/control","http_status":"409","response":{"error": "illegal_transition", "message": "非法状态转换: configure_members：仅待配置/暂停态可变更成员（现 pending_leader）"}
+}

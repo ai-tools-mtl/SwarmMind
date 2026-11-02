@@ -1,0 +1,2 @@
+{"body":{"prompt": "hello B ECHO-MARK:init-b", "request_id": "stageb-ac11-turn-b-1"},"ts":"2026-11-02T05:45:22Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-f521f4830c5caf13908f2c73ee0dbb85/turns","http_status":"202","response":{"turn": {"session_id": "s-f521f4830c5caf13908f2c73ee0dbb85", "turn_seq": 1, "op": "create", "task_id": "t-c423d3b4e8b753f65e6a2341f32d86ab", "trace_id": "a9753c4e65f07c300b163623ca462214"}}
+}

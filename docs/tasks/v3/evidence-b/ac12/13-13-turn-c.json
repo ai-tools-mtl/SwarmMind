@@ -1,0 +1,2 @@
+{"body":{"prompt": "init C", "request_id": "stageb-ac12-turn-c1"},"ts":"2026-11-02T05:50:44Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-e60089a803e031061f21e13278301dc2/turns","http_status":"202","response":{"turn": {"session_id": "s-e60089a803e031061f21e13278301dc2", "turn_seq": 1, "op": "create", "task_id": "t-28a65d9ea300244befcb54e701869137", "trace_id": "b99231cd7cbeff7aa809b611e28ff8e6"}}
+}

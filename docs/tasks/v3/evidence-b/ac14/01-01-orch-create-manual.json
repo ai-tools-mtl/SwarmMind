@@ -1,0 +1,2 @@
+{"body":{"request_id": "stageb-ac14-orch-manual", "goal": "编排主体越权建 manual", "mode": "manual"},"ts":"2026-11-02T06:15:18Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces","http_status":"403","response":{"error": "forbidden", "message": "主体无权执行该动作: 编排主体仅可创建 external 待领取空间（得 manual）"}
+}

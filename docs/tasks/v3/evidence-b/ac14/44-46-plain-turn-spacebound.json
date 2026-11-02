@@ -1,0 +1,2 @@
+{"body":{"prompt": "绕过空间的普通续轮（应被拒绝）", "request_id": "stageb-ac14-bypass1"},"ts":"2026-11-02T06:19:10Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-b049fbf14e9dea3596d66e81215ab8be/turns","http_status":"500","response":{"error": "space_dispatch_required", "message": "该会话已绑定协作空间，请经空间派发（space dispatch）推进，普通续轮被拒绝"}
+}

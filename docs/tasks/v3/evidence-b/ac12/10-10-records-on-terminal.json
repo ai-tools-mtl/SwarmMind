@@ -1,0 +1,2 @@
+{"body":{"kind": "candidate", "member": "disc-a", "body": "FINAL: 终态空间应拒收", "round": 1},"ts":"2026-11-02T05:50:19Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-1e5bd6e5858d0205dc5555416a11ce03/records","http_status":"409","response":{"error": "illegal_transition", "message": "终态/已归档空间只读：不再收策略循环记录（材料保留可查，登记面向活跃空间开放）"}
+}

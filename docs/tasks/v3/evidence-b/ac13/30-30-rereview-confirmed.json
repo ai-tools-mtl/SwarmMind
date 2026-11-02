@@ -1,0 +1,2 @@
+{"body":{"kind": "review", "op": "rereview", "issue_id": "iss-214d518a5ea2", "reviewer": "rev-fake", "against_hash": "abcb7af355296041540bf4d6faac1b038d47fd4f4d96171a1a76c04d7627dde6", "result": "confirmed_fixed", "note": "对修复版本复审：问题已解"},"ts":"2026-11-02T06:01:12Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"201","response":{"op": "rereview", "recorded": true}
+}

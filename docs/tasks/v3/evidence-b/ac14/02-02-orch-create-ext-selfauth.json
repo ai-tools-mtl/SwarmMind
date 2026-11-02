@@ -1,0 +1,2 @@
+{"body":{"request_id": "stageb-ac14-orch-selfauth", "goal": "编排主体建 external 自授写审完成授权", "mode": "external", "policy": {"finish_auth": "verified_write_review"}},"ts":"2026-11-02T06:15:18Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces","http_status":"403","response":{"error": "forbidden", "message": "主体无权执行该动作: 完成授权仅主人可授（agent 新建空间不能自授 verified_write_review）"}
+}

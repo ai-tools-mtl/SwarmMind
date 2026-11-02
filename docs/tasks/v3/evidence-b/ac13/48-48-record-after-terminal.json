@@ -1,0 +1,2 @@
+{"body":{"kind": "candidate", "member": "wr-fake", "body": "FINAL: 终态后不应登记", "round": 9},"ts":"2026-11-02T06:03:30Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-55f08562852a22792af97aee3601f739/records","http_status":"409","response":{"error": "illegal_transition", "message": "终态/已归档空间只读：不再收策略循环记录（材料保留可查，登记面向活跃空间开放）"}
+}

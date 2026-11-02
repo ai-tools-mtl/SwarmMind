@@ -1,0 +1,2 @@
+{"body":{"request_id": "ac14-claim2", "action": "takeover", "expected_term": 0, "takeover_kind": "external", "lease_seconds": 3600},"ts":"2026-11-02T06:15:42Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-1570916c2bc5faf4c17910802d61eb19/control","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 0 ≠ 现版本 1（读档已过期，刷新后重试）"}
+}

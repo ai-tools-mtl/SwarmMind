@@ -1,0 +1,2 @@
+{"body":{"request_id": "w2-ph-paused", "action": "set_phase", "expected_version": 11, "phase": "paused", "note": "两次未修达阈值，暂停上报裁决"},"ts":"2026-11-02T06:06:00Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-ae6060b21632181de3fb4c4eb501094d/control","http_status":"409","response":{"error": "version_conflict", "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 11 ≠ 现版本 4（读档已过期，刷新后重试）"}
+}

@@ -1,0 +1,2 @@
+{"body":{"request_id": "w2-rework", "action": "set_phase", "expected_version": 5, "phase": "rework"},"ts":"2026-11-02T06:04:42Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-ae6060b21632181de3fb4c4eb501094d/control","http_status":"409","response":{"error": "illegal_transition", "message": "参数非法: 非法阶段转换 drafting → rework（表外路径）"}
+}

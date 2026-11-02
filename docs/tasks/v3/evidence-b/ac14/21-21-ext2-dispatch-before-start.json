@@ -1,0 +1,2 @@
+{"body":{"member": "disc-b", "request_id": "ac14-ext2-disp-pre", "expected_version": 3, "term": 1, "note": "启动前派发应拒"},"ts":"2026-11-02T06:17:19Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-4f1f40aba508fb87565ac42239b06428/dispatches","http_status":"409","response":{"error": "illegal_transition", "message": "非法状态转换: dispatch：仅运行态可派发（现 pending_config；先显式启动）"}
+}

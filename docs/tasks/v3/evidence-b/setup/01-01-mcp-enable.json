@@ -1,0 +1,2 @@
+{"body":{"enabled": true},"ts":"2026-11-02T05:55:44Z","method":"PUT","url":"http://127.0.0.1:28801/api/v1/local/mcp/access","http_status":"200","response":{"enabled": true, "credential_masked": "f2********", "scope": "启用后，持共享编排凭据（prime_token）的外部 MCP 调用方可向本机派发任务；禁用期间这些调用被拒绝（403 mcp_disabled），主人本机管理（local_token）不受影响。禁用不等于撤销凭据——作废旧凭据请使用「轮换」。", "prime_agent": "", "updated_at": "2026-11-02T05:55:44Z"}
+}

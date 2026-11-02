@@ -1,0 +1,2 @@
+{"body":{"kind": "candidate", "member": "disc-a", "body": "FINAL: 定版方案甲（分阶段吸收乙的扩展性设计）", "round": 1},"ts":"2026-11-02T05:48:03Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/spaces/sp-0ed7733835d997bab5c38218d43daf8f/records","http_status":"201","response":{"candidate": {"id": "cand-4a480c4a27f9", "summary": "定版方案甲（分阶段吸收乙的扩展性设计）", "proposer": "disc-a", "round": 1, "final_text": "FINAL: 定版方案甲（分阶段吸收乙的扩展性设计）", "registered_at": "2026-11-02T05:48:03.394114Z", "status": "pending", "seen_count": 1}, "created": true}
+}

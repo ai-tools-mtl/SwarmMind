@@ -1,0 +1,2 @@
+{"body":{"prompt": "ac14w init", "request_id": "stageb-ac14w-t1"},"ts":"2026-11-02T06:18:23Z","method":"POST","url":"http://127.0.0.1:28801/api/v1/sessions/s-88685342ce5382b41fce07385e77a781/turns","http_status":"202","response":{"turn": {"session_id": "s-88685342ce5382b41fce07385e77a781", "turn_seq": 1, "op": "create", "task_id": "t-ef12126f5466ac23993d2af1bbe537b2", "trace_id": "470021f4a6bb3997dc7a025ee9cbb1d3"}}
+}
