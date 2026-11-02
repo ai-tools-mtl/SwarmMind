@@ -1,0 +1,7 @@
+{
+  "session_id": "s-w07spaceref00001",
+  "turn_seq": 2,
+  "op": "send",
+  "cwd": "/tmp/w07-spaceref-ws",
+  "space": "sp-w07fixture0001"
+}

@@ -10,6 +10,7 @@ package ledger
 // 高水位与终态结果随夹具核对，确保不是「只解了 JSON 没进真路径」。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,5 +76,55 @@ func TestW07SpaceRefLedgerLoads(t *testing.T) {
 	}
 	if e.Origin != OriginLocal || e.State != StateAccepted {
 		t.Fatalf("来源/状态应随夹具恢复: origin=%v state=%v", e.Origin, e.State)
+	}
+}
+
+// w07LegacyShape 旧二进制账本行结构副本（W07-01 修复轮必修3：新→旧方向实证）——
+// 模拟 space 字段引入前的解码路径：条目内 Task.Session 为无 Space 字段的旧形态
+// 会话轮引用。仅测试内声明，不参与任何生产编码。
+type w07LegacyShape struct {
+	Version int `json:"version"`
+	Entries map[string]struct {
+		Task struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Session *struct {
+				SessionID string `json:"session_id"`
+				TurnSeq   int64  `json:"turn_seq"`
+				Op        string `json:"op"`
+				Cwd       string `json:"cwd,omitempty"`
+			} `json:"session,omitempty"`
+		} `json:"task"`
+		State  string `json:"state"`
+		Origin string `json:"origin,omitempty"`
+	} `json:"entries"`
+	SessionTurnHW map[string]int64 `json:"session_turn_hw,omitempty"`
+}
+
+// TestW07SpaceRefLedgerLegacyShapeLoads 新 node 落盘词形 × 旧二进制解码路径：
+// 携 space 的账本夹具经旧形态结构装载（无 Space 字段副本）——未知字段丢弃、
+// 装载不报错、既有字段（身份/轮号/操作/状态/高水位）完好。旧二进制降级回读
+// 新 node 账本即此路径（space 解码零值=普通轮词形，行为面兼容）。
+func TestW07SpaceRefLedgerLegacyShapeLoads(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("testdata", "w07_space_ref_ledger.json"))
+	if err != nil {
+		t.Fatalf("读取夹具: %v", err)
+	}
+	var legacy w07LegacyShape
+	if err := json.Unmarshal(b, &legacy); err != nil {
+		t.Fatalf("旧形态结构装载携 space 账本应容忍未知字段: %v", err)
+	}
+	e, ok := legacy.Entries["t-w07spaceref01"]
+	if !ok {
+		t.Fatal("旧形态装载应命中条目")
+	}
+	if e.Task.ID != "t-w07spaceref01" || e.Task.Status != "submitted" || e.State != "accepted" || e.Origin != "local" {
+		t.Fatalf("旧形态装载既有字段漂移: %+v", e)
+	}
+	if e.Task.Session == nil || e.Task.Session.SessionID != "s-w07spaceref00001" || e.Task.Session.TurnSeq != 2 || e.Task.Session.Op != "send" {
+		t.Fatalf("旧形态装载会话轮身份漂移: %+v", e.Task.Session)
+	}
+	if hw := legacy.SessionTurnHW["s-w07spaceref00001"]; hw != 2 {
+		t.Fatalf("旧形态装载高水位漂移: %d", hw)
 	}
 }

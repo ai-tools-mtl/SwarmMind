@@ -219,6 +219,17 @@ func (s *Server) effectiveProfiles() []protocol.ExecProfile {
 	return s.cfg.Agents.Effective()
 }
 
+// localCards 本机对外能力卡（W07-01 单一卡片装配点）：与注册/card_update 同源
+// 出口（AgentState.Cards——ExecProfile 生成 + 空间协作声明盖章一处生效），杜绝
+// 「目录卡与注册卡同装配不同值」的声明漂移（codex 复审必修2：/api/v1/agents
+// 与 sessionCard 曾直出 CardsFromProfiles，缺 spaces 字段）。Agents 未装配时空表。
+func (s *Server) localCards() []protocol.AgentCard {
+	if s.cfg.Agents == nil {
+		return nil
+	}
+	return s.cfg.Agents.Cards()
+}
+
 // ValidateListen 校验监听地址为回环（127.0.0.1/::1）——node 不监听任何公网端口
 // （SPEC 二，代码强制）。
 func ValidateListen(listenAddr string) error {
@@ -473,12 +484,13 @@ type localAgentEntry struct {
 }
 
 // handleAgents GET /api/v1/agents：本机能力目录（本机意愿，含未暴露；由
-// AgentState effective 视图生成，与注册/开关同源）。node 无全网视图——不代理
-// hub 目录（方案 v2：封侧门，全网目录唯一出口在 hub 侧）。
+// AgentState 单一卡片装配点生成，与注册/card_update/开关同源——W07-01 起经
+// localCards 携空间协作声明，杜绝与注册卡的声明漂移）。node 无全网视图——不代
+// 理 hub 目录（方案 v2：封侧门，全网目录唯一出口在 hub 侧）。
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	online := s.online()
 	local := make([]localAgentEntry, 0)
-	for _, card := range service.CardsFromProfiles(s.effectiveProfiles()) {
+	for _, card := range s.localCards() {
 		local = append(local, localAgentEntry{Card: card, NodeID: s.cfg.NodeID, Online: online})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

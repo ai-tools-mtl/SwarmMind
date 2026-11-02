@@ -125,9 +125,32 @@ type ExecProfile struct {
 }
 
 // SpacesCapV1 空间协作能力声明版本（AgentCard.Spaces 取值，W07-01）：node 装配
-// collab 存储即对全部能力卡声明本值；hub 门槛按「声明版本 ≥ 所需版本」判定，
-// 空串 = 未声明（旧版 node / 未装配）一律拒绝空间类下发。
+// collab 存储即对全部能力卡声明本值；hub 门槛按「声明版本在受支持集合内」判定
+// （SupportedSpacesCap 单源），空串 = 未声明（旧版 node / 未装配）一律拒绝空间
+// 类下发。
 const SpacesCapV1 = "v1"
+
+// SupportedSpacesCap 空间协作能力声明版本受支持判定（W07-01 单源，hub 门槛三处
+// ——SpacesCapability/SpacesCapable/SpacesNodeSupport 投影——统一走此判定）：
+// 恰为受支持集合成员（当前 = SpacesCapV1；未来多版本时扩展集合，语义 = 声明
+// 版本在受支持集合内）。空串（未声明）、旧版本词形（如 v0）、非法词（garbage）、
+// 空白一律 false——绝不把声明过但版本不受支持的 node 当有新特性。
+func SupportedSpacesCap(v string) bool { return v == SpacesCapV1 }
+
+// ValidSpacesCapWordform 声明版本词形判定（拒绝话术分流用）：合法词形 = "v" +
+// 非空十进制数字段（v1/v2…；v0 属合法词形的旧版本）。词形非法（garbage/空白）
+// 在门槛拒绝面另行如实注记为异常配置，不冒充「旧版本」。
+func ValidSpacesCapWordform(v string) bool {
+	if len(v) < 2 || v[0] != 'v' {
+		return false
+	}
+	for i := 1; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 // TaskInput 任务输入（SPEC 4.9）。
 type TaskInput struct {

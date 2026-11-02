@@ -103,3 +103,70 @@ func TestW07DirectoryAgentMemberCheck(t *testing.T) {
 		t.Fatal("跨 node 名不得命中")
 	}
 }
+
+// TestW07SpacesGateUnsupportedVersions 修复轮必修1反例回归：声明版本不受支持
+// （v0 旧版 / garbage 词形 / 空白）三拒绝面——查询（SpacesCapability/SpacesCapable）
+// 如实 false、拒绝面 ErrSpacesUnsupported 且话术三分（旧版本指路升级 / 词形非法
+// 异常注记 / 未声明升级指路）、节点投影 false（不把声明过但不受支持的 node 当
+// 有新特性）。
+func TestW07SpacesGateUnsupportedVersions(t *testing.T) {
+	f := newHub(t)
+	base := protocol.AgentCard{Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
+		OutputMode: "answer+artifacts", PermissionMode: "rw", ProtocolVer: 1, Exposed: true}
+	cases := []struct {
+		node    string
+		version string
+		msgSub  string // 各话术锚（词形非法 ≠ 旧版本 ≠ 未声明）
+	}{
+		{"n-v0", "v0", "旧于本 hub 支持"},
+		{"n-garbage", "garbage", "词形非法"},
+		{"n-blank", "  ", "词形非法"},
+	}
+	for _, c := range cases {
+		card := base
+		card.Spaces = c.version
+		f.newNode(c.node, []protocol.AgentCard{card}, true)
+	}
+
+	for _, c := range cases {
+		// 查询面：声明了但版本不受支持 → 如实 false（只判非空的旧实现全放行）。
+		if f.core.SpacesCapable(c.node, "coder") {
+			t.Fatalf("%s 声明 %q 不得视为受支持", c.node, c.version)
+		}
+		if v, ok := f.core.SpacesCapability(c.node, "coder"); ok || v != "" {
+			t.Fatalf("%s SpacesCapability 应 (\"\",false), got (%q,%v)", c.node, v, ok)
+		}
+		// 拒绝面：话术按声明态分流。
+		err := f.core.RequireSpacesCapable(c.node, "coder")
+		if !errors.Is(err, ErrSpacesUnsupported) {
+			t.Fatalf("%s 应 ErrSpacesUnsupported, got %v", c.node, err)
+		}
+		if !strings.Contains(err.Error(), c.msgSub) {
+			t.Fatalf("%s（声明 %q）拒绝话术应含 %q: %v", c.node, c.version, c.msgSub, err)
+		}
+	}
+	// 话术互斥锚：v0 话术不含「词形非法」，garbage 话术不含「旧于本 hub 支持」。
+	if err := f.core.RequireSpacesCapable("n-v0", "coder"); strings.Contains(err.Error(), "词形非法") {
+		t.Fatalf("v0 属旧版本不得冒充词形非法: %v", err)
+	}
+	if err := f.core.RequireSpacesCapable("n-garbage", "coder"); strings.Contains(err.Error(), "旧于本 hub 支持") {
+		t.Fatalf("garbage 属词形非法不得冒充旧版本: %v", err)
+	}
+
+	// 投影面：三 node 均 false（含声明过但不受支持的）。
+	support := f.core.SpacesNodeSupport()
+	for _, c := range cases {
+		if support[c.node] {
+			t.Fatalf("%s（声明 %q）投影应 false", c.node, c.version)
+		}
+	}
+	// 受支持 node 同表对照：true 在场（排除「整表为空」的假绿）。
+	f.newNode("n-ok", []protocol.AgentCard{func() protocol.AgentCard {
+		c := base
+		c.Spaces = protocol.SpacesCapV1
+		return c
+	}()}, true)
+	if !f.core.SpacesNodeSupport()["n-ok"] {
+		t.Fatal("受支持 node 投影应 true")
+	}
+}

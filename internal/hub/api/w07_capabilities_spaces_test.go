@@ -36,11 +36,7 @@ func TestW07CapabilitiesSpacesProjection(t *testing.T) {
 	}
 	var out struct {
 		Features map[string]bool `json:"features"`
-		Spaces   struct {
-			Hub                    bool            `json:"hub"`
-			Nodes                  map[string]bool `json:"nodes"`
-			PrivateHistoryReadable bool            `json:"private_history_readable"`
-		} `json:"spaces"`
+		Spaces   map[string]any  `json:"spaces"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatalf("应答解析失败: %v: %s", err, body)
@@ -49,15 +45,34 @@ func TestW07CapabilitiesSpacesProjection(t *testing.T) {
 	if out.Features["spaces"] {
 		t.Fatal("features.spaces 应恒 false（中心服务未装配如实）")
 	}
-	// 加法键三字段
-	if out.Spaces.Hub {
-		t.Fatal("spaces.hub 应 false（W07-02 接线前如实）")
+	// 加法键三字段：键存在性 + 类型 + 值三重断言（防「删键后零值假绿」——codex
+	// 复审建议1：仅断言值 false 时响应删键仍绿）。
+	if _, ok := out.Spaces["hub"]; !ok {
+		t.Fatalf("spaces.hub 键必须存在: %v", out.Spaces)
 	}
-	if !out.Spaces.Nodes["n-new"] || out.Spaces.Nodes["n-old"] {
-		t.Fatalf("节点声明投影不符: %v", out.Spaces.Nodes)
+	if _, ok := out.Spaces["nodes"]; !ok {
+		t.Fatalf("spaces.nodes 键必须存在: %v", out.Spaces)
 	}
-	if out.Spaces.PrivateHistoryReadable {
-		t.Fatal("private_history_readable 应恒 false（支持情况不表示私有历史可读）")
+	if _, ok := out.Spaces["private_history_readable"]; !ok {
+		t.Fatalf("spaces.private_history_readable 键必须存在: %v", out.Spaces)
+	}
+	hub, ok := out.Spaces["hub"].(bool)
+	if !ok || hub {
+		t.Fatalf("spaces.hub 应为布尔 false（W07-02 接线前如实）: %v", out.Spaces["hub"])
+	}
+	phr, ok := out.Spaces["private_history_readable"].(bool)
+	if !ok || phr {
+		t.Fatalf("spaces.private_history_readable 应为布尔 false（支持情况不表示私有历史可读）: %v", out.Spaces["private_history_readable"])
+	}
+	nodesRaw, ok := out.Spaces["nodes"].(map[string]any)
+	if !ok {
+		t.Fatalf("spaces.nodes 应为对象: %v", out.Spaces["nodes"])
+	}
+	if v, ok := nodesRaw["n-new"].(bool); !ok || !v {
+		t.Fatalf("n-new 投影应布尔 true: %v", nodesRaw)
+	}
+	if v, ok := nodesRaw["n-old"].(bool); !ok || v {
+		t.Fatalf("n-old 投影应布尔 false: %v", nodesRaw)
 	}
 	// 无注册 node：节点表空 map 如实（非 null/缺省——调用方按同形解析）
 	if err := f.core.RegisterNode("n-empty", nil); err != nil {

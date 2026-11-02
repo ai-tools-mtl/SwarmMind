@@ -143,8 +143,11 @@ func (s *Server) sessionsReady(w http.ResponseWriter) bool {
 }
 
 // sessionCard 目标本机能力的运行时卡片（权限断言核对源；不在配置返回 nil）。
+// W07-01 起与目录/注册同源经单一卡片装配点（localCards——AgentState.Cards），
+// 卡面字段（含 spaces 声明）与注册卡一致；本函数消费面仅权限核对，多出的声明
+// 字段零行为影响。
 func (s *Server) sessionCard(agent string) *protocol.AgentCard {
-	for _, card := range service.CardsFromProfiles(s.effectiveProfiles()) {
+	for _, card := range s.localCards() {
 		if card.Name == agent {
 			c := card
 			return &c

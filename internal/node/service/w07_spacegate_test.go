@@ -86,14 +86,19 @@ func execSpaceTurn(t *testing.T, svc *Service, led *ledger.Ledger, sid, space, o
 	svc.execute(task)
 }
 
-// waitGateFailure 等任务落终态并断言失败码前缀（有界轮询，非 fixed sleep）。
-func waitGateFailure(t *testing.T, led *ledger.Ledger, taskID, codePrefix string) {
+// waitGateFailure 等任务落终态并断言失败码前缀与人话原因片段（有界轮询，非
+// fixed sleep；msgSub 非空时逐字锚定——修复轮建议2：词形非法与绑定不符两类
+// 拒绝原因 msg 必须分开且各自断言，防同码同断言互冒）。
+func waitGateFailure(t *testing.T, led *ledger.Ledger, taskID, codePrefix, msgSub string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if e, ok := led.Get(taskID); ok && e.State == ledger.StateFinished {
 			if e.Result == nil || !strings.HasPrefix(e.Result.Error, codePrefix) {
 				t.Fatalf("应失败于 %s: %+v", codePrefix, e.Result)
+			}
+			if msgSub != "" && !strings.Contains(e.Result.Error, msgSub) {
+				t.Fatalf("拒绝原因应含 %q: %s", msgSub, e.Result.Error)
 			}
 			return
 		}
@@ -112,7 +117,7 @@ func TestW07SpaceTurnRejectedWithoutCollab(t *testing.T) {
 		t.Fatalf("建会话: %v", err)
 	}
 	taskID := trackGateTask(t, svc, led, sess.ID, collab.HubScope("sp-center-1"))
-	waitGateFailure(t, led, taskID, protocol.CodeSpacesUnsupported)
+	waitGateFailure(t, led, taskID, protocol.CodeSpacesUnsupported, "未装配空间协作存储")
 	// 会话零触碰：内核快照轮数不变（未当普通 send 执行）。
 	if s, _ := mgr.Status(sess.ID); s.TurnCount != 1 {
 		t.Fatalf("被拒轮不得触碰会话: turn_count=%d", s.TurnCount)
@@ -139,22 +144,29 @@ func trackGateTask(t *testing.T, svc *Service, led *ledger.Ledger, sid, space st
 }
 
 // TestW07SpaceTurnGateWordformAndBinding 已装配 collab：词形未知 / 绑定不符
-// fail-closed 拒绝；绑定一致的 scope（本机空间 ID）受理门核对通过。
+// fail-closed 拒绝（两类拒绝原因 msg 分开锚定——修复轮建议2）；绑定一致的
+// scope（本机空间 ID）受理门核对通过。
 func TestW07SpaceTurnGateWordformAndBinding(t *testing.T) {
 	f := newSpaceSvcFixture(t, spaceSvcOpt{})
 	sid := f.createSession(f.cwd)
 	sp := f.newManualSpace(sid)
 
-	// 词形未知：任意字符串冒充 scope 一律拒绝。
+	// 词形未知：任意字符串冒充 scope 一律拒绝（人话=词形非法，与绑定不符互斥）。
 	taskID := trackGateTask(t, f.svc, f.led, sid, "not-a-scope")
-	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported)
+	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported, "词形非法")
 	// 中心 scope 未在本机绑定（hub:<id> 词形合法但无绑定）→ 绑定不符拒绝
 	//（W07-02 接线前 fail-closed）。
 	taskID = trackGateTask(t, f.svc, f.led, sid, collab.HubScope("sp-center-1"))
-	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported)
-	// 绑定到别的空间（本机存在第二空间、会话绑定在 sp）→ 拒绝。
-	taskID = trackGateTask(t, f.svc, f.led, sid, "sp-forged00000001")
-	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported)
+	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported, "绑定不符")
+	// 绑定到别的空间：真实第二空间（第二会话绑定，非伪造 ID）——会话绑在 sp、
+	// 轮冒充 sp2 来源 → 绑定不符拒绝（人话带被冒充 scope 与实际绑定）。
+	sid2 := f.createSession(f.cwd2)
+	sp2 := f.newManualSpace(sid2)
+	if sp2.ID == sp.ID {
+		t.Fatal("第二空间应独立建空间")
+	}
+	taskID = trackGateTask(t, f.svc, f.led, sid, sp2.ID)
+	waitGateFailure(t, f.led, taskID, protocol.CodeSpacesUnsupported, "绑定不符")
 
 	// 正向锚：本机空间派发（意图轮自带 Space=空间 ID）受理→收敛全链照常——
 	// 收件门与既有意图核对（spaceTurnAllowed）叠加不互斥。
