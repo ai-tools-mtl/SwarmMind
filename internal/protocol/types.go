@@ -380,6 +380,17 @@ type SessionTurnRef struct {
 	Space string `json:"space,omitempty"`
 }
 
+// SpaceBindPayload 中心空间成员映射登记载荷（W07-02，MsgSpaceBind/MsgSpaceBindAck
+// 共用；应答原样回带两字段供 ReplyTo 之外的语义复核——hub 消费前核对预期来源与
+// 预期内容，防伪应答占位）。
+type SpaceBindPayload struct {
+	// Space 空间 scope（中心空间恒 hub:<id> 词形，collab.HubScope 单源构造；
+	// node 侧只接受 hub 词形——本机空间不经中心登记）。
+	Space string `json:"space"`
+	// SessionID 平台会话 ID（hub 注册表分配；成员原生线程的会话标识）。
+	SessionID string `json:"session_id"`
+}
+
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。
 type TaskSubmitRequest struct {
 	// TargetNode 必填。

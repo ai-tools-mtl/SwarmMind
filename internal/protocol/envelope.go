@@ -63,6 +63,15 @@ const (
 	// MsgTaskCancelled node→hub 取消确认 ack：任务已终态或不在账本（无可取消对象）。
 	// 执行中断路径不走本帧——回 task_result(cancelled) 走三段确认（task_result→result_ack）。
 	MsgTaskCancelled = "task_cancelled"
+	// MsgSpaceBind hub→node 中心空间成员映射登记（W07-02，收件门受理面：hub 下发
+	// 空间轮前登记 session↔hub-scope 绑定，node 持久登记后按绑定放行——W07-01
+	// 拒绝面预留的扩展点）。非执行通道：只写登记表不动任何执行面；旧 node 忽略
+	// 未知帧类型 fail-closed（hub 侧 RequireSpacesCapable 版本门保证本帧只发往
+	// 声明空间特性的 node）。应答 space_bind_ack / err（ReplyTo=请求 mid 关联）。
+	MsgSpaceBind = "space_bind"
+	// MsgSpaceBindAck node→hub 登记确认（W07-02）：绑定已持久落盘，hub 据此放行
+	// 空间轮下发；超时/拒绝（err 帧）则派发不下发（在途意图零登记，宁拒不瞎投）。
+	MsgSpaceBindAck = "space_bind_ack"
 	// MsgErr 双向错误帧；协议级错误（版本/epoch 残余/格式）另按规则断开。
 	MsgErr = "err"
 )

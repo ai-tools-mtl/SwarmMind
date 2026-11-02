@@ -173,7 +173,10 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		c.convergeCancelOp(accepted) // 会话轮取消任务的事务外收敛（W01-03：turn_not_found 兜底）
 		if merged {
 			// cancelled 分支：终态在 CancelTask 事务时已落、终态旁路已触发过，
-			// 此处只补真实执行数据，不重复触发（fireTerminal 语义：首次落终态）
+			// 此处只补真实执行数据，不重复触发（fireTerminal 语义：首次落终态）；
+			// 合并钩子（AddOnTaskMerged，W07-02）携带补齐后的真实数据触发——中心
+			// 空间意图按真实执行事实收敛（首落时 Result 未达不猜，合并即收口）。
+			c.fireTaskMerged(accepted)
 			c.dispatch(env.From)
 			break
 		}

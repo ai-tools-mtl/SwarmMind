@@ -268,15 +268,17 @@ func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (p
 	if s.sessions == nil {
 		return failed(sessionErrUnsupported, "本机未装配会话内核（agent 未声明 session_adapter 或 node 版本过旧）")
 	}
-	// 空间来源轮收件门（W07-01 版本门，node 侧第二道防线）：携 Space scope 的
-	// 轮是空间驱动派发，不是普通会话轮——
+	// 空间来源轮收件门（W07-01 版本门 + W07-02 受理面扩展，node 侧第二道防线）：
+	// 携 Space scope 的轮是空间驱动派发，不是普通会话轮——
 	//   - 词形未知（collab.ValidScopeClaim 不认）→ 拒绝（任意字符串冒充 scope
 	//     一律不猜）；
 	//   - 本机未装配空间协作存储（collab nil，旧版 node / spaces 未启用）→
 	//     spaces_unsupported 明确拒绝并指路升级，绝不静默按普通轮执行；
-	//   - 已装配但 scope 与会话的空间绑定不符（会话未绑空间 / 绑定的是别的
-	//     空间）→ fail-closed 拒绝：W07-02 远端派发 adapter 接线时扩展受理面
-	//     （登记中心空间成员映射后放行），本批只交付拒绝面。
+	//   - 本机空间：scope 与 collab 空间绑定不符 → fail-closed 拒绝（W07-01 拒绝面）；
+	//   - 中心空间（W07-02 受理面扩展）：本机 collab 无该会话绑定（中心成员线程
+	//     在 node 本地无空间归属）时按 hubBind 登记核对——hub 经 space_bind 帧下发
+	//     前登记的 session↔hub-scope 绑定相符才放行；未装配登记表/未登记/scope
+	//     不符一律 fail-closed 拒绝（绑定不符话术族，登记态差异如实分述不互冒）。
 	// 空 Space = 普通会话轮，既有链路零变化（含旧 hub 帧——解码零值）。
 	if ref.Space != "" {
 		if !collab.ValidScopeClaim(ref.Space) {
@@ -287,9 +289,19 @@ func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (p
 			return failed(protocol.CodeSpacesUnsupported,
 				"该轮声明空间来源但本机未装配空间协作存储（node 旧版本或 spaces 未启用）：拒绝执行，请升级 node 后重试")
 		}
-		if owner, bound := s.collab.SessionOwnerSpace(ref.SessionID); !bound || owner != ref.Space {
+		if owner, bound := s.collab.SessionOwnerSpace(ref.SessionID); bound {
+			if owner != ref.Space {
+				return failed(protocol.CodeSpacesUnsupported,
+					fmt.Sprintf("空间来源 %q 与会话 %s 的空间绑定不符（绑定空间 %q）：拒绝旁路执行", ref.Space, ref.SessionID, owner))
+			}
+		} else if got := s.hubBind.Space(ref.SessionID); got != ref.Space {
+			// 中心绑定核对（登记表 nil = 受理面未装配，同入不符族但话术如实分述）。
+			if s.hubBind == nil {
+				return failed(protocol.CodeSpacesUnsupported,
+					fmt.Sprintf("空间来源 %q 与会话 %s 的空间绑定不符（本机未装配中心绑定登记面，无登记可核对）：拒绝旁路执行", ref.Space, ref.SessionID))
+			}
 			return failed(protocol.CodeSpacesUnsupported,
-				fmt.Sprintf("空间来源 %q 与会话 %s 的空间绑定不符（绑定空间 %q）：拒绝旁路执行", ref.Space, ref.SessionID, owner))
+				fmt.Sprintf("空间来源 %q 与会话 %s 的空间绑定不符（中心绑定登记为 %q；未登记或绑定已变更均拒）：拒绝旁路执行——请由 hub 重新 space_bind 登记", ref.Space, ref.SessionID, got))
 		}
 	}
 	if ref.PermissionMode != "" && sessionPermissionDenylist[ref.PermissionMode] {
@@ -686,7 +698,7 @@ func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, prom
 					Msg: fmt.Sprintf("turn_seq=%d 已被不同内容占用（响应丢失重试须原样重发同文）", req.TurnSeq)}
 			}
 			return &LocalTurnAck{SessionID: sid, TurnSeq: req.TurnSeq,
-				Op: replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
+				Op:     replayTurnOp(s, sessionop.RequestRecord{SessionID: sid, TurnSeq: req.TurnSeq, TaskID: e.Task.ID, TraceID: e.Task.TraceID, Kind: sessionop.RequestKindTurn, Op: e.Task.Session.Op}),
 				TaskID: e.Task.ID, TraceID: e.Task.TraceID}, protocol.Task{}, true, nil
 		}
 		if inKernel && req.TurnSeq <= int64(sess.TurnCount) {

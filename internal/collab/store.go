@@ -99,6 +99,19 @@ func cloneSpace(sp *Space) *Space {
 	return &c
 }
 
+// SnapshotStore 快照持久化钩子（W07-02 hub SQLite adapter；装配期一次性注入）：
+// 内核状态机/journal/回执/意图全部不变，仅落盘面可替换——Load 返回快照字节
+// （不存在 ok=false），Save 原子持久化整份快照（实现方承担原子性：hub 侧经
+// SQLite 单事务 UPSERT）。nil = 默认 spaces.json 文件快照（既有行为零变化）。
+// 加载损坏/Save 失败语义与文件面同口径：损坏拒绝带病启动、Save 失败无回执
+// 内存零变更（N05 零虚假接受）。
+type SnapshotStore interface {
+	// Load 读取快照字节（不存在返回 ok=false；损坏返回错误——调用方拒绝启动）。
+	Load() (b []byte, ok bool, err error)
+	// Save 原子持久化整份快照（同字节形态：MarshalIndent + 换行）。
+	Save(b []byte) error
+}
+
 // Options 装配项。
 type Options struct {
 	// Now 时钟源（测试注入 fake 时钟）；nil = protocol.NowUTC（全工程 UTC 基准）。
@@ -112,12 +125,17 @@ type Options struct {
 	// Hooks 策略接口实现（W05-01；装配期一次性注入——Open 后不可换，规避运行期
 	// 热替换的判定/落账一致性问题；nil = 完成类动作一律拒绝，W04 只开放放弃定版）。
 	Hooks StrategyHooks
+	// Snapshot 快照持久化钩子（W07-02 hub SQLite adapter；nil = 默认文件快照）。
+	// 装配后加载与落盘均经钩子，path/tmp 字段不使用。同一内核两端复用（hub 不
+	// 分叉第二套状态机），仅持久化面按端惯例装配。
+	Snapshot SnapshotStore
 }
 
 // Store 空间协作存储：互斥串行 + 先写后见 + 操作 ID 幂等。
 type Store struct {
 	path        string
 	tmp         string
+	snap        SnapshotStore // 非nil = 快照持久化钩子（W07-02 hub SQLite adapter）；path/tmp 不使用
 	now         func() time.Time
 	log         Logger
 	leaseTTL    time.Duration
@@ -132,9 +150,10 @@ type Store struct {
 }
 
 // Open 打开（或初始化）数据目录下的空间存储。快照不存在从空状态起步；存在但
-// 损坏/版本未知 → 报错（拒绝带病启动，同 W02-01 mcp_access 口径）。
+// 损坏/版本未知 → 报错（拒绝带病启动，同 W02-01 mcp_access 口径）。装配
+// opt.Snapshot（W07-02 hub SQLite adapter）时经钩子加载，文件路径不参与。
 func Open(dir string, opt Options) (*Store, error) {
-	if dir == "" {
+	if dir == "" && opt.Snapshot == nil {
 		return nil, errors.New("collab: 数据目录为空")
 	}
 	if opt.LeaseTTL < 0 {
@@ -160,6 +179,18 @@ func Open(dir string, opt Options) (*Store, error) {
 		maxReceipts = DefaultMaxReceipts
 	}
 	path := filepath.Join(dir, fileName)
+	if opt.Snapshot != nil {
+		st, err := loadStateFromSnapshot(opt.Snapshot)
+		if err != nil {
+			return nil, err
+		}
+		return &Store{
+			snap: opt.Snapshot,
+			now:  now, log: log, leaseTTL: ttl, maxReceipts: maxReceipts,
+			hooks: opt.Hooks,
+			st:    st,
+		}, nil
+	}
 	st, err := loadState(path)
 	if err != nil {
 		return nil, err
@@ -172,21 +203,29 @@ func Open(dir string, opt Options) (*Store, error) {
 	}, nil
 }
 
-// loadState 读取并解析快照；不存在视为空状态。
-func loadState(path string) (*state, error) {
-	b, err := os.ReadFile(path)
+// loadStateFromSnapshot 经持久化钩子加载快照（W07-02 hub SQLite adapter 路径）：
+// 不存在从空状态起步；损坏/版本未知拒绝带病启动（同文件面口径——空间状态是协作
+// 事实唯一真相，宁拒启不瞎门）。
+func loadStateFromSnapshot(snap SnapshotStore) (*state, error) {
+	b, ok, err := snap.Load()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return newState(), nil
-		}
 		return nil, fmt.Errorf("collab: 读取空间快照失败: %w", err)
+	}
+	if !ok {
+		return newState(), nil
 	}
 	st := newState()
 	if err := json.Unmarshal(b, st); err != nil {
-		return nil, fmt.Errorf("collab: 空间快照损坏 %s: %w（拒绝带病启动；请人工检查或移除该文件）", path, err)
+		return nil, fmt.Errorf("collab: 空间快照损坏: %w（拒绝带病启动；请人工检查快照存储）", err)
 	}
+	return st, st.normalize()
+}
+
+// normalize 反序列化产生的 nil 容器补齐（加法字段旧快照缺省为空，加载 nil 守卫
+// 补齐，不升 stateVersion）；版本未知在调用方判定。
+func (st *state) normalize() error {
 	if st.Version != stateVersion {
-		return nil, fmt.Errorf("collab: 空间快照版本未知 %s: got %d want %d（拒绝猜测意图）", path, st.Version, stateVersion)
+		return fmt.Errorf("collab: 空间快照版本未知: got %d want %d（拒绝猜测意图）", st.Version, stateVersion)
 	}
 	if st.Spaces == nil {
 		st.Spaces = map[string]*Space{}
@@ -205,6 +244,25 @@ func loadState(path string) (*state, error) {
 	}
 	if st.Messages == nil {
 		st.Messages = map[string][]SpaceMessage{}
+	}
+	return nil
+}
+
+// loadState 读取并解析快照；不存在视为空状态。
+func loadState(path string) (*state, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return newState(), nil
+		}
+		return nil, fmt.Errorf("collab: 读取空间快照失败: %w", err)
+	}
+	st := newState()
+	if err := json.Unmarshal(b, st); err != nil {
+		return nil, fmt.Errorf("collab: 空间快照损坏 %s: %w（拒绝带病启动；请人工检查或移除该文件）", path, err)
+	}
+	if err := st.normalize(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return st, nil
 }
@@ -291,7 +349,9 @@ func trimOps(ops map[string]OpReceipt, limit int) {
 }
 
 // persist 原子落盘（独占 tmp + fsync + rename + 目录 fsync 尽力而为；0600）。
-// failPersist 为包内测试故障注入点（生产恒 nil）。
+// 装配 Snapshot 钩子（W07-02 hub SQLite adapter）时经钩子单事务持久化（原子性
+// 由实现承担），字节形态与文件面一致。failPersist 为包内测试故障注入点（生产恒
+// nil）。
 func (s *Store) persist(st *state) error {
 	if s.failPersist != nil {
 		if err := s.failPersist(); err != nil {
@@ -303,6 +363,12 @@ func (s *Store) persist(st *state) error {
 		return err
 	}
 	b = append(b, '\n')
+	if s.snap != nil {
+		if err := s.snap.Save(b); err != nil {
+			return fmt.Errorf("collab: 落盘失败: %w", err)
+		}
+		return nil
+	}
 	f, err := os.OpenFile(s.tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		// 上次落盘崩溃残留的 tmp：清掉重试一次（磁盘旧正本未动，安全）。

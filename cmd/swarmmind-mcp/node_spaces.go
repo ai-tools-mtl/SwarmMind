@@ -12,6 +12,11 @@
 //
 // 全部工具经共享编排凭据 SWARM_NODE_PRIME_TOKEN 调本机 REST（服务端逐动作授权，
 // 工具面不做第二套权限——只做参数校验与人话渲染，错误原话透传 nodeAPIErr）。
+//
+// W07-02 单源改造：九件工具的参数装配与人话渲染抽为共享实现（spaceToolXxx(api,
+// face, args)——api 为 REST 调用面、face 为面注记），node 与 hub 两后端同函数
+// 调用（禁止第二套参数/状态词典）；面差异收敛在 spaceFace 最小集（Where=本机/
+// 中心 + Hub scope 注记），词典/动作词表/错误透传逐字节同源。
 package main
 
 import (
@@ -21,6 +26,29 @@ import (
 
 	"github.com/mtl802/swarmmind/internal/protocol"
 )
+
+// spaceAPICaller 空间 REST 调用面（node 本机 localapi / hub 管理面两后端共用）。
+type spaceAPICaller func(method, path string, body any) (int, []byte, error)
+
+// spaceFace 后端面注记（词典同源下的面差异最小集）。
+type spaceFace struct {
+	Where string // "本机"（node 面）| "中心"（hub 面）
+	Hub   bool   // hub 面：状态渲染附 scope=hub:<id> 注记
+}
+
+// spaceFaceNode / spaceFaceHub 两后端面单例（面差异单点维护）。
+var (
+	spaceFaceNode = spaceFace{Where: "本机"}
+	spaceFaceHub  = spaceFace{Where: "中心", Hub: true}
+)
+
+// spaceAPI node 面调用面（本机 localapi + prime_token；W07-02 抽出共享实现后
+// nodeBackend 方法一行的装配点）。
+func (b nodeBackend) spaceAPI() spaceAPICaller {
+	return func(method, path string, body any) (int, []byte, error) {
+		return b.nodeAPI(method, path, body, b.primeToken)
+	}
+}
 
 // argNum 数值参数归一（进程内调用传 int/float64，线上 JSON 恒 float64——两者都收，
 // 拒绝非数值）。
@@ -87,11 +115,17 @@ func spaceStatusLine(sp spaceView) string {
 	return line
 }
 
-// toolSpaceCreate swarmmind_space_create（node 面）：创建协作空间。编排主体仅可
-// 建 external 待领取空间（成员可空）——AC14 顺序：领取→配置成员→显式启动；主人
-// local_token 可建任意方式（经主人 REST 面，MCP 工具按编排主体语义描述）。request_id
-// 可选幂等（同键同文 200+dup 返原空间、异文 409）。
+// toolSpaceCreate swarmmind_space_create（node 面装配点）：创建协作空间。
 func (b nodeBackend) toolSpaceCreate(args map[string]any) (string, error) {
+	return spaceToolCreate(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolCreate 创建协作空间共享实现（node/hub 两面同函数——参数装配与人话
+// 渲染单源）。编排主体仅可建 external 待领取空间（成员可空）——AC14 顺序：领取
+// →配置成员→显式启动；主人（node local_token / hub 管理会话）可建任意方式（经
+// 主人 REST 面，MCP 工具按编排主体语义描述）。request_id 可选幂等（同键同文
+// 200+dup 返原空间、异文 409）。
+func spaceToolCreate(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	goal := strings.TrimSpace(argString(args["goal"], args["goal"] != nil))
 	mode := strings.TrimSpace(argString(args["mode"], args["mode"] != nil))
 	if goal == "" || mode == "" {
@@ -122,7 +156,7 @@ func (b nodeBackend) toolSpaceCreate(args map[string]any) (string, error) {
 			return "", fmt.Errorf("policy（完成授权/领取约束）为主人专属配置：编排主体创建 external 空间使用默认 human_only，改配由主人管理面完成")
 		}
 	}
-	code, data, err := b.nodeAPI("POST", "/api/v1/spaces", req, b.primeToken)
+	code, data, err := api("POST", "/api/v1/spaces", req)
 	if err != nil {
 		return "", err
 	}
@@ -132,6 +166,7 @@ func (b nodeBackend) toolSpaceCreate(args map[string]any) (string, error) {
 	var out struct {
 		Space spaceView `json:"space"`
 		Dup   bool      `json:"dup"`
+		Scope string    `json:"scope,omitempty"` // hub 面注记（scope=hub:<id>，服务端 collab.HubScope 单源构造）
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
@@ -141,13 +176,22 @@ func (b nodeBackend) toolSpaceCreate(args map[string]any) (string, error) {
 	if out.Dup || code == 200 {
 		dupNote = "（request_id 幂等命中：同键同文返回原空间，未重复创建）\n"
 	}
-	return fmt.Sprintf("空间已创建：%s\n目标：%s\n%s方式：%s · 状态：%s（版本 %d）\n后续：领取（takeover）→ 配置成员（configure_members）→ 显式启动（start）→ 指名派发（swarmmind_space_dispatch）。",
-		sp.ID, sp.Goal, dupNote, sp.Mode, sp.Status, sp.Version), nil
+	scopeNote := ""
+	if face.Hub && out.Scope != "" {
+		scopeNote = fmt.Sprintf("scope：%s（中心空间）\n", out.Scope)
+	}
+	return fmt.Sprintf("空间已创建：%s\n目标：%s\n%s%s方式：%s · 状态：%s（版本 %d）\n后续：领取（takeover）→ 配置成员（configure_members）→ 显式启动（start）→ 指名派发（swarmmind_space_dispatch）。",
+		sp.ID, sp.Goal, dupNote, scopeNote, sp.Mode, sp.Status, sp.Version), nil
 }
 
-// toolSpaceList swarmmind_space_list（node 面）：空间列表（创建序）。
+// toolSpaceList swarmmind_space_list（node 面装配点）：空间列表。
 func (b nodeBackend) toolSpaceList() (string, error) {
-	code, data, err := b.nodeAPI("GET", "/api/v1/spaces", nil, b.primeToken)
+	return spaceToolList(b.spaceAPI(), spaceFaceNode)
+}
+
+// spaceToolList 空间列表共享实现（创建序）。
+func spaceToolList(api spaceAPICaller, face spaceFace) (string, error) {
+	code, data, err := api("GET", "/api/v1/spaces", nil)
 	if err != nil {
 		return "", err
 	}
@@ -161,10 +205,10 @@ func (b nodeBackend) toolSpaceList() (string, error) {
 		return "", fmt.Errorf("应答解析失败：%v", err)
 	}
 	if len(out.Spaces) == 0 {
-		return "本机还没有协作空间（swarmmind_space_create 创建；一次性任务不需要空间，直接 swarmmind_submit）。", nil
+		return face.Where + "还没有协作空间（swarmmind_space_create 创建；一次性任务不需要空间，直接 swarmmind_submit）。", nil
 	}
 	var bl strings.Builder
-	fmt.Fprintf(&bl, "本机协作空间列表：共 %d 个（创建时刻升序）", len(out.Spaces))
+	fmt.Fprintf(&bl, "%s协作空间列表：共 %d 个（创建时刻升序）", face.Where, len(out.Spaces))
 	for _, sp := range out.Spaces {
 		bl.WriteString("\n" + spaceStatusLine(sp))
 	}
@@ -184,14 +228,19 @@ type spaceIntentView struct {
 	Note      string `json:"note,omitempty"`
 }
 
-// toolSpaceStatus swarmmind_space_status（node 面）：空间详情——状态/负责人/任期/
-// 租约/预算用量/成员绑定与待核对提示（unverified 同词表强制提醒随轮终投影）。
+// toolSpaceStatus swarmmind_space_status（node 面装配点）：空间详情。
 func (b nodeBackend) toolSpaceStatus(args map[string]any) (string, error) {
+	return spaceToolStatus(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolStatus 空间详情共享实现——状态/负责人/任期/租约/预算用量/成员绑定与
+// 待核对提示（unverified 同词表强制提醒随轮终投影）；hub 面附 scope=hub:<id> 注记。
+func spaceToolStatus(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	if sid == "" {
 		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
 	}
-	code, data, err := b.nodeAPI("GET", "/api/v1/spaces/"+sid, nil, b.primeToken)
+	code, data, err := api("GET", "/api/v1/spaces/"+sid, nil)
 	if err != nil {
 		return "", err
 	}
@@ -200,6 +249,7 @@ func (b nodeBackend) toolSpaceStatus(args map[string]any) (string, error) {
 	}
 	var out struct {
 		Space spaceView `json:"space"`
+		Scope string    `json:"scope,omitempty"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
@@ -207,6 +257,9 @@ func (b nodeBackend) toolSpaceStatus(args map[string]any) (string, error) {
 	sp := out.Space
 	var bl strings.Builder
 	bl.WriteString(spaceStatusLine(sp) + "\n")
+	if face.Hub && out.Scope != "" {
+		fmt.Fprintf(&bl, "scope：%s（中心空间）\n", out.Scope)
+	}
 	fmt.Fprintf(&bl, "目标：%s\n", sp.Goal)
 	if sp.Acceptance != "" {
 		fmt.Fprintf(&bl, "验收：%s\n", sp.Acceptance)
@@ -251,12 +304,16 @@ func intOrUnlimited(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// toolSpaceDispatch swarmmind_space_dispatch（node 面）：指名派发（编排主体唯一
-// 执行入口；须当前驱动者形态——领取后持任期；派发按空间串行执行：同空间一次一
-// 棒，跨空间并行）。202 受理即回意图引用（不阻塞等待）；request_id 可选幂等（同
-// 键同文返原意图，重放不重复扣预算——N02）。轮终经 status 或 messages 观察；
-// 结果落账不自动触发下一轮。
+// toolSpaceDispatch swarmmind_space_dispatch（node 面装配点）：指名派发。
 func (b nodeBackend) toolSpaceDispatch(args map[string]any) (string, error) {
+	return spaceToolDispatch(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolDispatch 指名派发共享实现（编排主体唯一执行入口；须当前驱动者形态
+// ——领取后持任期；202 受理即回意图引用；request_id 可选幂等——N02；结果落账
+// 不自动触发下一轮。node 面=本机串行调度；hub 面=远端 adapter 经既有 session
+// Task 通道路由成员所在 node，同回执形态）。
+func spaceToolDispatch(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	member := strings.TrimSpace(argString(args["member"], args["member"] != nil))
 	if sid == "" || member == "" {
@@ -281,7 +338,7 @@ func (b nodeBackend) toolSpaceDispatch(args map[string]any) (string, error) {
 	if note := argString(args["note"], args["note"] != nil); note != "" {
 		req["note"] = note
 	}
-	code, data, err := b.nodeAPI("POST", "/api/v1/spaces/"+sid+"/dispatches", req, b.primeToken)
+	code, data, err := api("POST", "/api/v1/spaces/"+sid+"/dispatches", req)
 	if err != nil {
 		return "", err
 	}
@@ -309,11 +366,16 @@ var spaceControlOwnerOnly = map[string]bool{
 	"set_budget": true, "policy": true, "finalize": true, "archive": true,
 }
 
-// toolSpaceControl swarmmind_space_control（node 面）：有限控制——pause/resume/
-// ready/start/configure_members/takeover/renew（白名单内；驱动者/主人形态由服务端
-// 逐动作授权裁决）。set_budget/policy/finalize/archive 为主人专属（豁免保留面），
-// 工具面显式拒绝指路主人；无任意 HTTP/脚本执行能力（任务书红线）。
+// toolSpaceControl swarmmind_space_control（node 面装配点）：有限控制。
 func (b nodeBackend) toolSpaceControl(args map[string]any) (string, error) {
+	return spaceToolControl(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolControl 有限控制共享实现——pause/resume/ready/start/configure_members/
+// takeover/renew（白名单内；驱动者/主人形态由服务端逐动作授权裁决）。
+// set_budget/policy/finalize/archive 为主人专属（豁免保留面），工具面显式拒绝指路
+// 主人；无任意 HTTP/脚本执行能力（任务书红线）。
+func spaceToolControl(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	action := strings.TrimSpace(argString(args["action"], args["action"] != nil))
 	if sid == "" || action == "" {
@@ -380,7 +442,7 @@ func (b nodeBackend) toolSpaceControl(args map[string]any) (string, error) {
 		}
 		req["members"] = members
 	}
-	code, data, err := b.nodeAPI("POST", "/api/v1/spaces/"+sid+"/control", req, b.primeToken)
+	code, data, err := api("POST", "/api/v1/spaces/"+sid+"/control", req)
 	if err != nil {
 		return "", err
 	}
@@ -431,11 +493,15 @@ type spaceMessageView struct {
 	By     string `json:"by"`
 }
 
-// toolSpaceMessages swarmmind_space_messages（node 面）：空间消息增量读（since=
-// 已见最大 seq，只读不唤醒——发言与游标绝不触发任何执行，N01）。滚动窗口外的更早
-// 消息以 pruned_before_seq 标注。发言归主人/成员面（编排主体经主人 REST 代转），
-// 本工具只读。
+// toolSpaceMessages swarmmind_space_messages（node 面装配点）：空间消息增量读。
 func (b nodeBackend) toolSpaceMessages(args map[string]any) (string, error) {
+	return spaceToolMessages(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolMessages 空间消息增量读共享实现（since=已见最大 seq，只读不唤醒——
+// 发言与游标绝不触发任何执行，N01）。滚动窗口外的更早消息以 pruned_before_seq
+// 标注。发言归主人/成员面（编排主体经主人 REST 代转），工具只读。
+func spaceToolMessages(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	if sid == "" {
 		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
@@ -444,7 +510,7 @@ func (b nodeBackend) toolSpaceMessages(args map[string]any) (string, error) {
 	if since, ok := argNum(args, "since"); ok && since > 0 {
 		path += fmt.Sprintf("?since=%d", int64(since))
 	}
-	code, data, err := b.nodeAPI("GET", path, nil, b.primeToken)
+	code, data, err := api("GET", path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -517,11 +583,16 @@ func spaceRecordToolArgs(args map[string]any) map[string]any {
 	return req
 }
 
-// toolSpaceRecord swarmmind_space_record（node 面，W05-04）：策略循环记录登记
-// （candidate/review/issue/evidence 四族）。数据写入只是事实登记——不派发不推进
-// 循环不触发任何执行（执行唯一入口 swarmmind_space_dispatch）；校验在服务端引擎
-// （成员资格/hash 格式/自报不证实/发现版本须已登记），非法拒绝零登记。
+// toolSpaceRecord swarmmind_space_record（node 面装配点，W05-04）：策略循环记录登记。
 func (b nodeBackend) toolSpaceRecord(args map[string]any) (string, error) {
+	return spaceToolRecord(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolRecord 策略循环记录登记共享实现（candidate/review/issue/evidence 四族）。
+// 数据写入只是事实登记——不派发不推进循环不触发任何执行（执行唯一入口
+// swarmmind_space_dispatch）；校验在服务端引擎（成员资格/hash 格式/自报不证实/
+// 发现版本须已登记），非法拒绝零登记。
+func spaceToolRecord(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	if sid == "" {
 		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
@@ -531,7 +602,7 @@ func (b nodeBackend) toolSpaceRecord(args map[string]any) (string, error) {
 	if kind == "" {
 		return "", fmt.Errorf("kind 必填：candidate|review|issue|evidence（review 另需 op=revision|rereview|clean_review|claim_fix|reply）")
 	}
-	code, data, err := b.nodeAPI("POST", "/api/v1/spaces/"+sid+"/records", req, b.primeToken)
+	code, data, err := api("POST", "/api/v1/spaces/"+sid+"/records", req)
 	if err != nil {
 		return "", err
 	}
@@ -588,10 +659,15 @@ func tailHash(h string) string {
 	return h
 }
 
-// toolSpaceRecords swarmmind_space_records（node 面，W05-04）：策略循环记录增量读
-//（since=已见最大 seq，只读不唤醒）。记录四族 candidate/review/issue/evidence；
-// 滚动裁剪区间以 pruned_before_seq 标注。循环状态全量投影见 swarmmind_space_strategy。
+// toolSpaceRecords swarmmind_space_records（node 面装配点，W05-04）：记录增量读。
 func (b nodeBackend) toolSpaceRecords(args map[string]any) (string, error) {
+	return spaceToolRecords(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolRecords 策略循环记录增量读共享实现（since=已见最大 seq，只读不唤醒）。
+// 记录四族 candidate/review/issue/evidence；滚动裁剪区间以 pruned_before_seq 标注。
+// 循环状态全量投影见 swarmmind_space_strategy。
+func spaceToolRecords(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	if sid == "" {
 		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
@@ -600,7 +676,7 @@ func (b nodeBackend) toolSpaceRecords(args map[string]any) (string, error) {
 	if since, ok := argNum(args, "since"); ok && since > 0 {
 		path += fmt.Sprintf("?since=%d", int64(since))
 	}
-	code, data, err := b.nodeAPI("GET", path, nil, b.primeToken)
+	code, data, err := api("GET", path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -655,16 +731,20 @@ func spaceStrategyIssueLine(id, severity, file string, line int, state string, b
 	return fmt.Sprintf("%s [%s] %s:%d · %s%s", id, sev, file, line, st, mark)
 }
 
-// toolSpaceStrategy swarmmind_space_strategy（node 面，W05-04）：策略投影只读——
-// 循环阶段/候选及定版态/问题及重开态/修订与证据缺口/停止建议。无策略数据的空间
-// 如实空态不编造。完成判据缺口如实展示（数据面事实，不等于可自动完成——完成授权
-// 仍归逐动作表）。
+// toolSpaceStrategy swarmmind_space_strategy（node 面装配点，W05-04）：策略投影只读。
 func (b nodeBackend) toolSpaceStrategy(args map[string]any) (string, error) {
+	return spaceToolStrategy(b.spaceAPI(), spaceFaceNode, args)
+}
+
+// spaceToolStrategy 策略投影只读共享实现——循环阶段/候选及定版态/问题及重开态/
+// 修订与证据缺口/停止建议。无策略数据的空间如实空态不编造。完成判据缺口如实展示
+// （数据面事实，不等于可自动完成——完成授权仍归逐动作表）。
+func spaceToolStrategy(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
 	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
 	if sid == "" {
 		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
 	}
-	code, data, err := b.nodeAPI("GET", "/api/v1/spaces/"+sid+"/strategy", nil, b.primeToken)
+	code, data, err := api("GET", "/api/v1/spaces/"+sid+"/strategy", nil)
 	if err != nil {
 		return "", err
 	}
@@ -775,22 +855,30 @@ func (b nodeBackend) toolSpaceStrategy(args map[string]any) (string, error) {
 	return bl.String(), nil
 }
 
-// spaceToolDefs node 空间工具清单（tools/list 装配；描述面向 agent 写「能做什么」，
-// 与 REST 面同语义——差异如实写进描述）。
-func spaceToolDefs() []toolDef {
+// spaceToolDefs 空间工具清单（tools/list 装配；描述面向 agent 写「能做什么」，
+// 与 REST 面同语义——差异如实写进描述。face 注记：hub 面描述附中心空间 scope 注
+// 记与跨机语义（d() 包装）；node 面描述保持既有原文不变——词典单源，面差异仅在
+// 注记后缀）。
+func spaceToolDefs(face spaceFace) []toolDef {
+	hubNote := ""
+	d := func(s string) string { return s }
+	if face.Hub {
+		hubNote = "（hub 中心空间：scope 固定 hub:<id>——成员为全网开放目录能力「nodeID/agentName」，派发经既有 session Task 通道路由到成员所在 node 执行；跨机调度，同空间串行一次一棒）"
+		d = func(s string) string { return s + hubNote }
+	}
 	return []toolDef{
-		{Name: "swarmmind_space_create", Description: "创建协作空间（编排主体仅 external 待领取空间，成员可空）：围绕一个目标建立固定成员线程的持续协作单元。返回空间 ID；后续流程：takeover 领取 → configure_members 配置成员 → start 显式启动 → swarmmind_space_dispatch 指名派发。request_id 可选幂等（同键同文返原空间）。一次性任务不需要空间，直接 swarmmind_submit", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_create", Description: d("创建协作空间（编排主体仅 external 待领取空间，成员可空）：围绕一个目标建立固定成员线程的持续协作单元。返回空间 ID；后续流程：takeover 领取 → configure_members 配置成员 → start 显式启动 → swarmmind_space_dispatch 指名派发。request_id 可选幂等（同键同文返原空间）。一次性任务不需要空间，直接 swarmmind_submit"), InputSchema: toolObj(map[string]any{
 			"goal":       toolStr("空间目标（必填）"),
 			"mode":       toolStr("调度方式（必填；编排主体仅 external——待领取外部空间；manual/builtin 为主人面）"),
 			"acceptance": toolStr("可检查验收条件（可选）"),
 			"budget":     toolObj(map[string]any{"max_messages": toolNum("消息条数上限（0=不限）"), "max_dispatch_rounds": toolNum("派发轮次上限（0=不限）"), "max_wall_seconds": toolNum("运行墙钟上限秒（0=不限）")}, "预算三分离定义（可选；缺省全不限）"),
 			"request_id": toolStr("稳定创建请求 ID（可选）：同键同文返回原空间、异文 409"),
 		}, "goal", "mode")},
-		{Name: "swarmmind_space_list", Description: "列出本机协作空间：ID、目标、状态（待配置/待领取/可运行/运行/暂停/受阻/待核对/终态）、负责人与任期、在途数、暂停原因。发现可领取（待领取）或可续派的空间", InputSchema: toolObj(map[string]any{})},
-		{Name: "swarmmind_space_status", Description: "查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_list", Description: d("列出本机协作空间：ID、目标、状态（待配置/待领取/可运行/运行/暂停/受阻/待核对/终态）、负责人与任期、在途数、暂停原因。发现可领取（待领取）或可续派的空间"), InputSchema: toolObj(map[string]any{})},
+		{Name: "swarmmind_space_status", Description: d("查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID（swarmmind_space_list 可查）"),
 		}, "space_id")},
-		{Name: "swarmmind_space_dispatch", Description: "向协作空间指名成员派发一轮执行（编排主体唯一执行入口；须当前驱动者形态——领取空间后持任期）。返回意图受理回执（202 异步，空间串行调度：同空间一次一棒，跨空间并行）；request_id 可选幂等（重放不重复执行不重复扣预算）。结果落账不自动触发下一轮——继续推进须再次显式派发", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_dispatch", Description: d("向协作空间指名成员派发一轮执行（编排主体唯一执行入口；须当前驱动者形态——领取空间后持任期）。返回意图受理回执（202 异步，空间串行调度：同空间一次一棒，跨空间并行）；request_id 可选幂等（重放不重复执行不重复扣预算）。结果落账不自动触发下一轮——继续推进须再次显式派发"), InputSchema: toolObj(map[string]any{
 			"space_id":         toolStr("空间 ID"),
 			"member":           toolStr("指名成员（须在空间内且已绑定原生会话）"),
 			"expected_version": toolNum("读档空间版本（乐观锁；swarmmind_space_status 可查）"),
@@ -798,7 +886,7 @@ func spaceToolDefs() []toolDef {
 			"note":             toolStr("本轮派发说明（作为成员轮输入正文）"),
 			"request_id":       toolStr("稳定受理请求 ID（可选）：同键同文回原意图（响应丢失重试安全）"),
 		}, "space_id", "member", "expected_version")},
-		{Name: "swarmmind_space_control", Description: "协作空间有限控制：pause（暂停新增派发）/resume（恢复）/ready（配置就绪）/start（显式启动）/configure_members（成员改组）/takeover（接管或领取待领取空间，expected_term 原子 CAS）/renew（续租约）。仅当前驱动者或主人形态可调（服务端逐动作授权裁决）；set_budget/policy/finalize/archive 为主人专属不受理；无任意命令/脚本执行能力", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_control", Description: d("协作空间有限控制：pause（暂停新增派发）/resume（恢复）/ready（配置就绪）/start（显式启动）/configure_members（成员改组）/takeover（接管或领取待领取空间，expected_term 原子 CAS）/renew（续租约）。仅当前驱动者或主人形态可调（服务端逐动作授权裁决）；set_budget/policy/finalize/archive 为主人专属不受理；无任意命令/脚本执行能力"), InputSchema: toolObj(map[string]any{
 			"space_id":         toolStr("空间 ID"),
 			"action":           toolStr("pause|resume|ready|start|configure_members|takeover|renew"),
 			"expected_version": toolNum("读档空间版本（乐观锁）"),
@@ -811,11 +899,11 @@ func spaceToolDefs() []toolDef {
 			"reason":           toolStr("原因/备注（可选，落审计）"),
 			"request_id":       toolStr("稳定请求 ID（可选；重放返回原回执）"),
 		}, "space_id", "action", "expected_version")},
-		{Name: "swarmmind_space_messages", Description: "拉取协作空间消息（增量读）：since 传已见最大 seq 只返回之后的新消息，适合轮询补齐。消息只读不唤醒——发言与游标绝不触发任何执行；滚动窗口外更早消息不可再拉（响应标注裁剪位置）。派发结果与进度经 swarmmind_space_status 查看", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_messages", Description: d("拉取协作空间消息（增量读）：since 传已见最大 seq 只返回之后的新消息，适合轮询补齐。消息只读不唤醒——发言与游标绝不触发任何执行；滚动窗口外更早消息不可再拉（响应标注裁剪位置）。派发结果与进度经 swarmmind_space_status 查看"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID"),
 			"since":    toolNum("已见最大消息 seq（缺省 0=从头）"),
 		}, "space_id")},
-		{Name: "swarmmind_space_record", Description: "登记协作空间策略循环记录（数据写入只是事实登记，绝不等于执行——不派发不推进循环）：kind=candidate 登记成员 FINAL: 前缀候选结论（提出者须为空间成员，非法/越权拒绝不静默换人）；kind=review 按 op 登记版本（revision，内容/补丁 SHA-256）、复审结论（rereview：confirmed_fixed|still_open）、零发现复审（clean_review）、修复声明（claim_fix）、问题回应（reply）；kind=issue 登记审查问题（级别 must/should/info、文件:行、发现版本须已登记）；kind=evidence 登记测试执行证据（四层 cli_exit/protocol_parse/round_complete/work_accept；agent 自报来源标已证实直接拒绝；verified=true 编排面 403 拒绝——已证实标记只能由本机主人登记，人工核对证据走主人面）。新版本登记使旧复审结论失效", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_record", Description: d("登记协作空间策略循环记录（数据写入只是事实登记，绝不等于执行——不派发不推进循环）：kind=candidate 登记成员 FINAL: 前缀候选结论（提出者须为空间成员，非法/越权拒绝不静默换人）；kind=review 按 op 登记版本（revision，内容/补丁 SHA-256）、复审结论（rereview：confirmed_fixed|still_open）、零发现复审（clean_review）、修复声明（claim_fix）、问题回应（reply）；kind=issue 登记审查问题（级别 must/should/info、文件:行、发现版本须已登记）；kind=evidence 登记测试执行证据（四层 cli_exit/protocol_parse/round_complete/work_accept；agent 自报来源标已证实直接拒绝；verified=true 编排面 403 拒绝——已证实标记只能由本机主人登记，人工核对证据走主人面）。新版本登记使旧复审结论失效"), InputSchema: toolObj(map[string]any{
 			"space_id":         toolStr("空间 ID"),
 			"kind":             toolStr("记录族：candidate|review|issue|evidence"),
 			"op":               toolStr("review 族操作：revision|rereview|clean_review|claim_fix|reply"),
@@ -846,11 +934,11 @@ func spaceToolDefs() []toolDef {
 			"ref":              toolStr("evidence：回执号/命令 hash/人工主体"),
 			"note":             toolStr("备注（可选）"),
 		}, "space_id", "kind")},
-		{Name: "swarmmind_space_records", Description: "拉取协作空间策略循环记录（增量读）：since 传已见最大 seq 只返回之后的新记录，适合轮询补齐。记录四族 candidate/review/issue/evidence（控制留痕如阶段变更如实标注 control）；只读不唤醒——读游标绝不触发执行；滚动裁剪区间以 pruned_before_seq 标注。候选/版本/问题全量状态用 swarmmind_space_strategy", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_records", Description: d("拉取协作空间策略循环记录（增量读）：since 传已见最大 seq 只返回之后的新记录，适合轮询补齐。记录四族 candidate/review/issue/evidence（控制留痕如阶段变更如实标注 control）；只读不唤醒——读游标绝不触发执行；滚动裁剪区间以 pruned_before_seq 标注。候选/版本/问题全量状态用 swarmmind_space_strategy"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID"),
 			"since":    toolNum("已见最大记录 seq（缺省 0=从头）"),
 		}, "space_id")},
-		{Name: "swarmmind_space_strategy", Description: "查看协作空间策略循环投影（只读）：循环阶段与暂停前阶段、候选及定版态（FINAL 登记不等于已交付）、问题及重开态（重报已确认问题即回归重开）、当前版本与完成判据缺口清单（如实展示，不等于可自动完成）、停止建议（预算耗尽/修复阈值/验收争议——落账归控制面）。无策略数据的空间返回如实空态", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_strategy", Description: d("查看协作空间策略循环投影（只读）：循环阶段与暂停前阶段、候选及定版态（FINAL 登记不等于已交付）、问题及重开态（重报已确认问题即回归重开）、当前版本与完成判据缺口清单（如实展示，不等于可自动完成）、停止建议（预算耗尽/修复阈值/验收争议——落账归控制面）。无策略数据的空间返回如实空态"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID（swarmmind_space_list 可查）"),
 		}, "space_id")},
 	}

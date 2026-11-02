@@ -324,6 +324,14 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("初始化空间协作存储失败: %w", err)
 	}
 	defer spacesStore.Close()
+
+	// 中心空间成员映射登记表装配（W07-02 收件门受理面）：hub 经 space_bind 帧下发
+	// session↔hub-scope 绑定，本表持久登记后收件门/执行口守卫按绑定放行中心空间轮。
+	// 损坏拒绝启动（绑定是执行准入证据，宁拒启不瞎门——同 spaces.json 口径）。
+	hubBinds, err := service.OpenHubBindings(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("初始化中心空间绑定登记失败: %w", err)
+	}
 	// 空间协作能力声明（W07-01 版本门）：collab 装配成功即对能力表盖章
 	// AgentCard.Spaces（register/card_update 同源，经 agentState.Cards()）——
 	// hub 据此判断本 node 可承载空间成员线程；未装配（下方未执行）能力卡不
@@ -406,7 +414,10 @@ func run(cfgPath, dataDirOverride string) error {
 		//（spacedispatch.go；spaces REST 派发/消息面的数据链）。与 localapi 同一
 		// spacesStore 实例——单进程单真相。
 		Collab: spacesStore,
-		NodeID: cfg.NodeID,
+		// 中心空间绑定登记表（W07-02 收件门受理面）：hub space_bind 帧下发的
+		// session↔hub-scope 绑定持久登记（hubbind.go），收件门/执行口守卫消费。
+		HubBindings: hubBinds,
+		NodeID:      cfg.NodeID,
 	}
 	svc = service.New(svcCfg, tr)
 	// 跨机取回（P4④第二子轮/SPEC 4.12）：仅 networked 启用（须有 hub 中继；

@@ -333,6 +333,21 @@ func findSessionByRequest(view *store.State, requestID string) (store.Session, b
 	return store.Session{}, false
 }
 
+// ErrSpaceDispatchRequired 会话已绑定协作空间：普通续轮拒绝（W04-01 RFC §1.4
+// 方案 A 的中心面同规——调度单入口是 space dispatch；hub api 据此映射 409
+// space_dispatch_required，错误码词与 node 面同源 collab）。守卫本体由装配方
+// 注入（SetSpaceTurnGuard——hub spaces 服务装配后接线），core 不持 collab 依赖。
+var ErrSpaceDispatchRequired = errors.New("core: 该会话已绑定协作空间，请经空间派发（space dispatch）推进，普通续轮被拒绝")
+
+// SetSpaceTurnGuard 注入中心空间守卫（W07-02 装配期一次性；幂等覆盖）。guard
+// 返回非 nil 即拒绝本轮（普通续轮预检消费；重放回执不受守卫影响——guard 调用点
+// 在重放判定之后）。
+func (c *Core) SetSpaceTurnGuard(g func(sessionID string) error) {
+	c.muSpaceGuard.Lock()
+	c.spaceGuard = g
+	c.muSpaceGuard.Unlock()
+}
+
 // SubmitTurn 提交轮次（会话轮任务落库 + 轮次账本登记同事务原子；返回受理回执，
 // 轮终异步经任务结果链回写）。校验序对齐任务提交链（SPEC 4.5：目标 → 会话边界
 // → 序号/重放 → 绑定守卫 → 首轮独占 → 体积/容量 → 事务内全重检）：
@@ -354,6 +369,20 @@ func findSessionByRequest(view *store.State, requestID string) (store.Session, b
 //  9. 单写事务：全重检 → 任务落库（IdemKey=会话轮键）+ 信箱入队 + 轮行登记
 //     （含 request_id 留痕）。
 func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string) (*TurnRef, bool, error) {
+	return c.submitTurn(sessionID, req, actor, "")
+}
+
+// SubmitSpaceTurn 中心空间轮提交（W07-02 远端派发 adapter 专用；复用 SubmitTurn
+// 全部校验与投递链——「会话轮复用任务投递链」同一裁决，不新增任意远程执行通道）：
+// 与普通轮唯一差异是 SessionTurnRef.Space 携空间 scope（node 收件门按绑定核对
+// 受理；词形校验归调用方 collab.IsHubScope——hub spaces 服务单点，core 对来源
+// 字段原样透传与 Cwd/Adapter 同口径）。空 space = 普通轮（内部与 SubmitTurn 合流）。
+func (c *Core) SubmitSpaceTurn(sessionID string, req SessionTurnRequest, actor, space string) (*TurnRef, bool, error) {
+	return c.submitTurn(sessionID, req, actor, space)
+}
+
+// submitTurn 轮次受理共用体（space 空 = 普通轮；W07-02 中心空间轮携 scope）。
+func (c *Core) submitTurn(sessionID string, req SessionTurnRequest, actor, space string) (*TurnRef, bool, error) {
 	view := c.st.View()
 	sess, ok := view.Sessions[sessionID]
 	if !ok {
@@ -379,6 +408,16 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 				return &TurnRef{SessionID: sessionID, TurnSeq: tr.Seq, Op: rowTurnOp(tr, op), TaskID: tr.TaskID, TraceID: tr.TraceID}, true, nil
 			}
 			return nil, false, fmt.Errorf("%w: %s（已登记 turn_seq=%d 的内容与本次不符）", ErrSessionRequestConflict, requestID, tr.Seq)
+		}
+	}
+	// 中心空间调度单入口守卫（W07-02，中心面同规 W04-01 RFC §1.4 方案 A）：重放
+	// 路径已先行返回（零副作用回执不受守卫影响——与 node SubmitSessionTurnLocal
+	// 同序），此处拦新投递。guard 由装配方注入（hub spaces 服务装配后
+	// SetSpaceTurnGuard 接线，返回 ErrSpaceDispatchRequired；未接线 = 无空间服务，
+	// 行为零变化）。
+	if c.spaceGuard != nil {
+		if err := c.spaceGuard(sessionID); err != nil {
+			return nil, false, err
 		}
 	}
 	// 显式序号：重放回执 / 冲突 / 跳号（预检；事务内重检为准）。先于首轮独占——
@@ -435,6 +474,7 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 		Cwd:            sess.Cwd,
 		PermissionMode: sess.PermissionMode,
 		Adapter:        sess.Adapter, // 绑定快照随帧下发，node 首轮 spawn 前同口核验（T2-R2 必修2 补完）
+		Space:          space,        // W07-02 中心空间来源标记（空=普通轮零变化；node 收件门按绑定核对）
 	}
 	if err := checkOfferSize(&task); err != nil {
 		return nil, false, err
@@ -522,7 +562,7 @@ func (c *Core) SubmitTurn(sessionID string, req SessionTurnRequest, actor string
 		}
 		taskNow := task
 		taskNow.IdemKey = turnIdemKey(sessionID, txnSeq) // 序号定案后同源改键（缺省序号路径键随 seq 变）
-		taskNow.Session = &protocol.SessionTurnRef{SessionID: sessionID, TurnSeq: txnSeq, Op: opNow, Cwd: s.Cwd, PermissionMode: s.PermissionMode, Adapter: s.Adapter}
+		taskNow.Session = &protocol.SessionTurnRef{SessionID: sessionID, TurnSeq: txnSeq, Op: opNow, Cwd: s.Cwd, PermissionMode: s.PermissionMode, Adapter: s.Adapter, Space: space}
 		if _, exists := st.Tasks[taskNow.ID]; exists {
 			txnErr = ErrInvalid // 预生成 ID 撞既有任务（概率可忽略）：防御性拒绝
 			return nil
@@ -1199,6 +1239,17 @@ func findTurn(s store.Session, seq int64) (store.SessionTurn, bool) {
 		}
 	}
 	return store.SessionTurn{}, false
+}
+
+// SessionTurnByRequest 按 request_id 定位轮行（W07-02 恢复对账数据源：中心空间
+// 意图受理→投递崩溃窗后，按意图 request_id 找回已落库的轮行实物——「按实物对
+// 账，绝不凭回调自动重跑」的查询面）。副本返回。
+func (c *Core) SessionTurnByRequest(sessionID, requestID string) (store.SessionTurn, bool) {
+	sess, ok := c.st.View().Sessions[sessionID]
+	if !ok {
+		return store.SessionTurn{}, false
+	}
+	return findTurnByRequest(sess, requestID)
 }
 
 // findTurnByRequest 按 request_id 定位轮行（W01-03 RFC §3；同 ListSessions 的

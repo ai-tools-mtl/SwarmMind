@@ -383,7 +383,12 @@ func TestHubToolListRegression(t *testing.T) {
 		"swarmmind_group_create", "swarmmind_group_list", "swarmmind_group_say",
 		"swarmmind_group_messages", "swarmmind_group_close",
 		"swarmmind_work_create", "swarmmind_work_get", "swarmmind_work_list",
-		"swarmmind_work_takeover", "swarmmind_work_collect", "swarmmind_capabilities"}
+		"swarmmind_work_takeover", "swarmmind_work_collect",
+		// 空间九工具（W07-02 hub 模式装配，与 node 模式同一组共享实现——词典单源）
+		"swarmmind_space_create", "swarmmind_space_list", "swarmmind_space_status",
+		"swarmmind_space_dispatch", "swarmmind_space_control", "swarmmind_space_messages",
+		"swarmmind_space_record", "swarmmind_space_records", "swarmmind_space_strategy",
+		"swarmmind_capabilities"}
 	got := []string{}
 	for _, td := range (hubBackend{}).tools() {
 		got = append(got, td.Name)

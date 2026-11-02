@@ -88,6 +88,11 @@ type Config struct {
 	// 对账闭环（RecoverIntents 按实物分类，绝不自动重跑）。生产装配 cmd/node。
 	// docs/tasks/v3/W04-01-rfc.md 为模型定案依据。
 	Collab *collab.Store
+	// HubBindings 中心空间成员映射登记表（W07-02 收件门受理面，hubbind.go）：
+	// hub 经 space_bind 帧下发 session↔hub-scope 绑定，本表持久登记后收件门/执行
+	// 口守卫按绑定放行中心空间轮。nil（未装配）= 中心绑定判定短路（携 hub scope
+	// 的轮按未登记拒绝——fail-closed；普通轮零牵连）。生产装配 cmd/node。
+	HubBindings *HubBindings
 	// NodeID 本机节点 ID（空间派发任务的 TargetNode 展示值；localapi 同源）。
 	// 空 = 空间派发任务 TargetNode 留空（仅展示，不影响执行）。
 	NodeID string
@@ -160,6 +165,11 @@ type Service struct {
 	// 零行为变化）。串行调度/收敛分类/重启对账/绑定守卫的接线点见 spacedispatch.go。
 	collab *collab.Store
 
+	// hubBind 中心空间绑定登记表（W07-02，Config.HubBindings 注入；nil = 中心绑定
+	// 判定短路）。space_bind 帧受理与收件门/执行口守卫消费点见 hubbind.go 与
+	// sessionturn.go 收件门。
+	hubBind *HubBindings
+
 	// muSpaceAdv / spaceAdv 单空间调度推进单飞标记（kick 合并并发触发；map 仅在
 	// muSpaceAdv 内读写——进程内并发面，无持久化）。
 	muSpaceAdv sync.Mutex
@@ -219,6 +229,7 @@ func New(cfg Config, tr transport.Transport) *Service {
 		sessions:          cfg.Sessions,
 		sessionOps:        cfg.SessionOps,
 		collab:            cfg.Collab,
+		hubBind:           cfg.HubBindings,
 		spaceAdv:          make(map[string]bool),
 	}
 	for agent, root := range cfg.ArtifactRoots {
@@ -355,6 +366,14 @@ func (s *Service) HandleFrame(env *protocol.Envelope) {
 		// result_event：提交方终态推送（本地查询走 task_query 补查，已知限制：
 		// 在线错过即弃）；register_ack 由 conn 握手内联消费
 		log.Printf("[node] 记录帧 type=%s", env.Type)
+	case protocol.MsgSpaceBind:
+		// 中心空间成员映射登记（W07-02 收件门受理面，hubbind.go）：hub 下发空间轮
+		// 前登记 session↔hub-scope 绑定；受理即回 ack（ReplyTo=请求 mid），hub 收到
+		// ack 才放行空间轮下发
+		s.handleSpaceBind(env)
+	case protocol.MsgSpaceBindAck:
+		// 中心绑定登记是 hub→node 单向请求，本端不发起；迟到 ack 仅应异常，记录忽略
+		log.Printf("[node] 记录帧 type=%s", env.Type)
 	default:
 		log.Printf("[node] 忽略帧 type=%s", env.Type)
 	}
@@ -489,7 +508,7 @@ func (s *Service) execute(task protocol.Task) {
 			case <-s.ctx.Done():
 				if s.wsLocks.withdraw(ws, task.ID, wake) {
 					s.abortSessionTurn(task) // 会话轮句柄收敛（防 CancelTurn 等待悬挂）
-					return // 未获授予即放弃：条目保持 accepted，重启恢复再调度
+					return                   // 未获授予即放弃：条目保持 accepted，重启恢复再调度
 				}
 				// 授予与关闭竞态：持有已生效，按持有走下方关闭检查退出
 			case <-ce.doneCh():
@@ -499,7 +518,7 @@ func (s *Service) execute(task protocol.Task) {
 						return
 					}
 					s.finishCancelledBeforeRun(task.ID, ce.cancelFence()) // 管理面取消：不再执行，落终态回传
-					s.abortSessionTurn(task) // 会话轮句柄收敛（终态由 cancel.go 路径落账，无 sessionop 记账）
+					s.abortSessionTurn(task)                              // 会话轮句柄收敛（终态由 cancel.go 路径落账，无 sessionop 记账）
 					return
 				}
 				// 授予与取消竞态：持有已生效，按持有走下方取消检查退出
@@ -568,9 +587,9 @@ func (s *Service) execute(task protocol.Task) {
 				s.abortSessionTurn(task) // 终态未落上：句柄如实收敛（不虚报）
 				return
 			}
-			s.convergeSessionTurn(task) // 过期=终态：释放 CancelTurn 等待者（回执按账本判定）
+			s.convergeSessionTurn(task)    // 过期=终态：释放 CancelTurn 等待者（回执按账本判定）
 			s.spaceConvergeTurn(task, res) // 空间意图收敛分类（非空间任务零操作；failed→记账码如实）
-			s.notifyTerminal(task.ID) // 过期=终态，同走终态旁路（standalone 通知）
+			s.notifyTerminal(task.ID)      // 过期=终态，同走终态旁路（standalone 通知）
 			s.sendResult(task.ID, res)
 			return
 		}

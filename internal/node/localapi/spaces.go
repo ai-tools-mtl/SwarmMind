@@ -108,33 +108,18 @@ func (s *Server) authSpaceSubject(next func(http.ResponseWriter, *http.Request, 
 	}
 }
 
-// reservedRequestIDPrefixes collab 全局回执表（Ops，全空间共享一表）的内部 opID
-// 命名空间（终审必修5 grep 实据枚举 internal/collab/ops.go 全部 .apply( 调用点 +
-// localapi 引导）：客户端可控 request_id 的写入口（create/control/dispatch/
-// messages 四入口）统一不得撞入——回执表跨空间共享，他空间撞号即可占住本空间
-// 内部动作的回执键（create 携 boot-S-drafting → S 的 start 引导 conflict → 阶段
-// 空卡死）。保留清单：
-//   - "boot-"     start 后循环阶段引导（localapi bootstrapCycleAfterStart，
-//     落 control:set_phase 族回执）
-//   - "converge:" 派发意图收敛（collab ConvergeIntent，converge:<rid>:<outcome>）
-//   - "attach:"   派发任务关联（collab AttachDispatchTask，attach:<rid>）
-//   - "syspause:" 系统自动暂停（collab SystemPause，syspause:<space>:…:v<t>）
-//   - "syspausex:"租约过期暂停（collab PauseExpired，syspausex:<space>:…）
-var reservedRequestIDPrefixes = []string{"boot-", "converge:", "attach:", "syspause:", "syspausex:"}
+// reservedRequestIDPrefixes 保留前缀清单（W07-02 起单源 collab.ReservedRequestIDPrefixes
+// ——hub api 面同表共用，两端同清单防漂移；原 localapi 内联清单语义不变）。
+var reservedRequestIDPrefixes = collab.ReservedRequestIDPrefixes
 
 // requestIDReserved 中央保留前缀门：id（去围边后）命中任一内部命名空间前缀 →
 // 400 reserved_request_id（人话列明保留清单）返回 true；未命中 false。调用方在
 // 解码后、一切校验与事务之前先过本门（零副作用不占回执）。四写入口统一复用，
 // 单点维护保留清单。
 func (s *Server) requestIDReserved(w http.ResponseWriter, id string) bool {
-	trimmed := strings.TrimSpace(id)
-	for _, p := range reservedRequestIDPrefixes {
-		if strings.HasPrefix(trimmed, p) {
-			writeErr(w, http.StatusBadRequest, "reserved_request_id",
-				"request_id 以系统保留前缀开头（内部命名空间："+strings.Join(reservedRequestIDPrefixes, " / ")+
-					"——回执表全局共享，撞号会占住内部动作回执使其冲突卡死）：请换用其他请求标识")
-			return true
-		}
+	if collab.RequestIDReserved(id) {
+		writeErr(w, http.StatusBadRequest, "reserved_request_id", collab.ReservedRequestIDMessage)
+		return true
 	}
 	return false
 }
@@ -407,7 +392,7 @@ type spaceDispatchRequest struct {
 // handleSpaceDispatch POST /api/v1/spaces/{id}/dispatches：指名派发受理（202 异步
 // ——意图持久+预算扣减即时成立，串行调度器投递既有会话链，不阻塞等待）。同
 // request_id 重放命中回执零重复执行零重复扣减（N02）。执行侧接线归 service
-//（SpaceDispatch——派发不经 control：终审 S2）。
+// （SpaceDispatch——派发不经 control：终审 S2）。
 func (s *Server) handleSpaceDispatch(w http.ResponseWriter, r *http.Request, subj collab.Subject) {
 	if !s.spaceReady(w) {
 		return
@@ -678,34 +663,15 @@ func writeSpaceDispatchErr(w http.ResponseWriter, err error) {
 	writeSpaceErr(w, err)
 }
 
-// writeSpaceErr collab 错误 → HTTP 投影（RFC §一错误码表；未知码归 500）。
+// writeSpaceErr collab 错误 → HTTP 投影（RFC §一错误码表；未知码归 500）。映射
+// 表单源 collab.HTTPStatus（W07-02 起 hub api 面同表共用，两端同码即同状态）。
 func writeSpaceErr(w http.ResponseWriter, err error) {
 	var ce *collab.Error
 	if !errors.As(err, &ce) {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	code := http.StatusInternalServerError
-	switch ce.Code {
-	case collab.CodeInvalid:
-		code = http.StatusBadRequest
-	case collab.CodeNotFound:
-		code = http.StatusNotFound
-	case collab.CodeForbidden:
-		code = http.StatusForbidden
-	case collab.CodeIllegalTransition, collab.CodeVersionConflict, collab.CodeRequestConflict,
-		collab.CodeLeaseExpired, collab.CodeTermConflict, collab.CodeMemberInFlight,
-		collab.CodeExecutionInFlight, collab.CodeBudgetExhausted,
-		collab.CodeSessionBoundElsewhere, collab.CodeSpaceDispatchRequired,
-		collab.CodeMemberNotFound, collab.CodeNoMembers,
-		collab.CodeCompletionNotSatisfied:
-		// completion_not_satisfied 409 语义（W04-01 RFC §四）：判据未满足=可补齐的
-		// 业务拒绝（W05-04 引擎接线后 REST 可达——缺口清单人话透出，非服务端故障）。
-		code = http.StatusConflict
-	case collab.CodeFinishPolicyUnavailable:
-		code = http.StatusServiceUnavailable
-	}
-	writeErr(w, code, ce.Code, stripCollabPrefix(err.Error()))
+	writeErr(w, collab.HTTPStatus(ce.Code), ce.Code, stripCollabPrefix(err.Error()))
 }
 
 // stripCollabPrefix 错误文案去包前缀（collab: 已由错误码承担；人话正文直接透出）。

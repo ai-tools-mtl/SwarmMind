@@ -25,10 +25,12 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/api"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
-	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/hub/session"
+	"github.com/mtl802/swarmmind/internal/hub/spaces"
 	"github.com/mtl802/swarmmind/internal/hub/store"
+	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
+	"github.com/mtl802/swarmmind/internal/strategy"
 )
 
 // hubConfig configs/hub.yaml 结构（SPEC 五 hub 配置）。
@@ -46,7 +48,7 @@ type hubConfig struct {
 	// 默认 24h；0s（含 yaml 裸写数字 0，标量转换）= 永不自动清理；正值最小粒度
 	// 1 秒（亚秒拒绝启动）；保留期即幂等去重窗口（SPEC 4.5/4.6）。
 	TerminalRetention string `yaml:"terminal_retention"`
-	Notify     struct {
+	Notify            struct {
 		WebhookURL string `yaml:"webhook_url"` // 旧版任务终态通知 webhook（兼容入口：启动时一次性导入为通知渠道）
 		Format     string `yaml:"format"`      // raw（默认）| feishu（导入时映射渠道类型）
 	} `yaml:"notify"` // 任务终态 IM 通知旧配置段（P4③ 控制台化后仅作一次性导入入口；日常配置改用管理台「设置 → 通知」）
@@ -217,6 +219,32 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	defer coreSvc.Close()
 	mgr.Subscribe(coreSvc.HandleFrame)
 
+	// 中心空间服务装配（W07-02，docs/tasks/v3/W07-hub-routing.md）：collab 内核
+	// 同一实现（零第二套状态机）+ SQLite 快照 adapter（data_dir/hub_spaces.db，
+	// key+JSON body 单行快照——hub SQLite 存储惯例）+ 远端派发 adapter（既有
+	// session Task 通道 + RequireSpacesCapable 版本门 + space_bind 绑定登记）。
+	// 快照损坏/版本未知拒绝启动（空间状态是协作事实唯一真相，宁拒启不瞎门——
+	// 对齐 node spaces.json 先例）。策略引擎为纯进程内判定器（中心无 agent/管家
+	// 也可运行）；快照持久化与启动恢复接线归后续批次（node 侧同态，已登记缺口）。
+	stratEngine, err := strategy.NewEngine(strategy.DefaultConfig())
+	if err != nil {
+		return fmt.Errorf("初始化空间策略引擎失败: %w", err)
+	}
+	spaceSvc, err := spaces.Open(cfg.DataDir, coreSvc, spaces.Options{Hooks: stratEngine, Log: log.Default()})
+	if err != nil {
+		return fmt.Errorf("初始化中心空间服务失败: %w", err)
+	}
+	defer spaceSvc.Close()
+	// 中心空间调度单入口守卫（W07-02，W04-01 方案 A 中心面同规）：会话已绑定协作
+	// 空间后普通续轮拒绝（409 space_dispatch_required），派发走空间面。spaces
+	// 服务依赖 core（构造在后），守卫经 late-bound 注入。
+	coreSvc.SetSpaceTurnGuard(func(sessionID string) error {
+		if _, bound := spaceSvc.SessionOwnerSpace(sessionID); bound {
+			return core.ErrSpaceDispatchRequired
+		}
+		return nil
+	})
+
 	// 群存储周期维护（2026-10-22 修复轮2）：启动即扫一次（恢复重启前的待补偿
 	// 回流队列），此后定时清理 24h 过期消息 + 重试补偿队列（GROUP-RFC 三 独立
 	// 轻量信箱约定兑现）。随优雅关闭先行停止（defer LIFO：先于 groups.Close）。
@@ -253,7 +281,11 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	}, os.Getenv, homeDir, log.Printf)
 	apiSrv := &http.Server{Addr: cfg.APIListen, Handler: api.New(api.Config{
 		Core: coreSvc, AdminToken: adminToken, DataDir: cfg.DataDir, Groups: groups,
-		Notify:    notifier,
+		Notify: notifier,
+		// 中心空间面（W07-02）：spaces 服务 + 策略引擎（REST /api/v1/spaces* 与
+		// capabilities spaces 装配态数据源；nil 降级面见 api spaces.go）。
+		Spaces:    spaceSvc,
+		Strategy:  stratEngine,
 		Decision:  decisionSvc,
 		Version:   version, // 管理台页脚 server_version 数据源（登录响应/登录态账户视图下发）
 		NodeEntry: &api.NodeEntryConfig{Scheme: nodeScheme, Listen: cfg.NodeListen},

@@ -25,9 +25,11 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/group"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
+	"github.com/mtl802/swarmmind/internal/hub/spaces"
 	"github.com/mtl802/swarmmind/internal/hub/web"
 	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
+	"github.com/mtl802/swarmmind/internal/strategy"
 )
 
 // 会话 cookie 与时效（V0 简单实现：内存会话表，绝对过期）。
@@ -62,6 +64,13 @@ type Config struct {
 	// Notify 通知分发器（P4③ 控制台化升级：渠道 CRUD/发测试/站内通知端点）；
 	// nil 时通知端点统一 503 降级（旧构造方不感知）。
 	Notify *notify.Dispatcher
+	// Spaces 中心空间服务（W07-02；nil 时 spaces 端点组统一 503 降级——旧构造方
+	// 与既有测试不感知）。REST 面经内嵌 collab.Store 直调模型层 + 远端派发 adapter。
+	Spaces *spaces.Service
+	// Strategy 空间策略引擎（W07-02 hub 侧装配 strategy.Engine——纯进程内判定器，
+	// 中心无 agent/管家也可运行；nil 时 set_phase/strategy/records/candidates
+	// 端点 503 strategy_unavailable 诚实降级）。
+	Strategy *strategy.Engine
 	// Decision 派发建议决策服务（P5.1 D1，RFC-jev-dispatch）；nil/未启用时端点
 	// 恒 200 + suggestion:null（决策是建议非必经，不阻塞派单，RFC 三）。
 	Decision *decision.Service
@@ -170,6 +179,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/notify/inbox/read", s.auth(s.handleNotifyInboxRead))           // 标已读（id 缺省=全部）
 	mux.HandleFunc("GET /.well-known/agent.json", s.handleAgentCard)                            // A2A 发现卡（免鉴权，SPEC 六.五）
 	mux.HandleFunc("POST /a2a/rpc", s.auth(s.handleA2ARPC))                                     // A2A JSON-RPC（与现有同一令牌体系）
+	// 中心空间面（W07-02）：与 node 面同形同参（同一 collab 模型层零第二套）；
+	// 鉴权分层 hub 口径——写面 authSpaceSubject（admin 会话=主人 / PAT=编排主体）、
+	// 读面 auth（会话或 PAT）、sugar 与候选定版否决 authSpaceOwner（豁免⑯人工专属）。
+	// Spaces 未装配 503 spaces_unavailable（诚实降级，旧构造方零感知）。
+	mux.HandleFunc("POST /api/v1/spaces", s.authSpaceSubject(s.handleSpaceCreate))
+	mux.HandleFunc("GET /api/v1/spaces", s.auth(s.handleSpaceList))
+	mux.HandleFunc("GET /api/v1/spaces/{id}", s.auth(s.handleSpaceGet))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/control", s.authSpaceSubject(s.handleSpaceControl))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/dispatches", s.authSpaceSubject(s.handleSpaceDispatch))
+	mux.HandleFunc("GET /api/v1/spaces/{id}/dispatches/{request_id}", s.auth(s.handleSpaceDispatchGet))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/messages", s.authSpaceSubject(s.handleSpaceMessagePost))
+	mux.HandleFunc("GET /api/v1/spaces/{id}/messages", s.auth(s.handleSpaceMessagesGet))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/budget", s.authSpaceOwner(s.handleSpaceBudget))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/policy", s.authSpaceOwner(s.handleSpacePolicy))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/finalize", s.authSpaceOwner(s.handleSpaceFinalize))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/archive", s.authSpaceOwner(s.handleSpaceArchive))
+	mux.HandleFunc("GET /api/v1/spaces/{id}/strategy", s.auth(s.handleSpaceStrategy))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/records", s.authSpaceSubject(s.handleSpaceRecordPost))
+	mux.HandleFunc("GET /api/v1/spaces/{id}/records", s.auth(s.handleSpaceRecordsGet))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/candidates/{cid}/finalize", s.authSpaceOwner(s.handleSpaceCandidateFinalize))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/candidates/{cid}/dismiss", s.authSpaceOwner(s.handleSpaceCandidateDismiss))
 	console := web.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

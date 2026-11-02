@@ -282,7 +282,7 @@ func (nodeBackend) tools() []toolDef {
 	// 本机空间面 /api/v1/spaces*——编排主体领取/配置/启动/派发/控制/消息读全链 +
 	// 策略循环记录登记/增量读/投影；预算/策略/定版/归档为主人专属不装配（control
 	// 工具显式拒绝指路主人）。定义见 node_spaces.go。
-	tools = append(tools, spaceToolDefs()...)
+	tools = append(tools, spaceToolDefs(spaceFaceNode)...)
 	// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
 	tools = append(tools, capToolDef())
 	return tools
@@ -340,7 +340,7 @@ func toolWorkSteps(desc string) map[string]any {
 }
 
 func tools() []toolDef {
-	return []toolDef{
+	t := []toolDef{
 		{Name: "swarmmind_nodes", Description: "查看 SwarmMind 网内节点与 hub 终态保留生效值：哪些机器在线、各有多少进行中任务、终态任务记录保留多久", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_agents", Description: "查看全网可用能力（agent 目录）：每台节点上开放了哪些可调用的 agent", InputSchema: toolObj(map[string]any{})},
 		{Name: "swarmmind_submit", Description: "向指定节点的指定 agent 派发任务。返回任务 ID；用 swarmmind_wait 等结果。传 group_ref 可把任务挂到协作群：创建时群里出现系统消息，任务终态结果自动回流群。传 work_ref+step_seq+prime_term 三参可把任务绑定到工作单步骤（断点接管的正式执行记录；同键重试不新增尝试）", InputSchema: toolObj(map[string]any{
@@ -439,9 +439,15 @@ func tools() []toolDef {
 			"report":     toolStr("收集报告（必填）：逐步骤执行结果与结论摘要；处置关闭时写明放弃理由"),
 			"outcome":    toolStr("关闭方式：省略或 \"done\"=完成关闭（要求全部步骤 done）；\"abandoned\"=处置放弃剩余步骤"),
 		}, "work_id", "prime_term", "report")},
-		// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
-		capToolDef(),
 	}
+	// 空间九工具（W07-02，hub 模式装配）：投影中心空间面 /api/v1/spaces*——与
+	// node 模式同一组共享实现（同一参数解析与状态词典单源，禁止第二套词典）；
+	// 预算/策略/定版/归档/候选定版否决为主人专属不受理（control 显式拒收，豁免⑯）。
+	// 定义与实现见 node_spaces.go（共享）与 hub_spaces.go（hub 装配点）。
+	t = append(t, hubSpaceToolDefs()...)
+	// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
+	t = append(t, capToolDef())
+	return t
 }
 
 /* ---------- 工具实现 ---------- */
@@ -2681,6 +2687,26 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolWorkTakeover(args)
 	case "swarmmind_work_collect":
 		text, err = toolWorkCollect(args)
+	// 空间九工具（W07-02，hub 模式装配；与 node 模式同一参数词典——共享实现见
+	// node_spaces.go，hub 装配点见 hub_spaces.go；主人专属动作 control 面拒收同 node）。
+	case "swarmmind_space_create":
+		text, err = toolHubSpaceCreate(args)
+	case "swarmmind_space_list":
+		text, err = toolHubSpaceList()
+	case "swarmmind_space_status":
+		text, err = toolHubSpaceStatus(args)
+	case "swarmmind_space_dispatch":
+		text, err = toolHubSpaceDispatch(args)
+	case "swarmmind_space_control":
+		text, err = toolHubSpaceControl(args)
+	case "swarmmind_space_messages":
+		text, err = toolHubSpaceMessages(args)
+	case "swarmmind_space_record":
+		text, err = toolHubSpaceRecord(args)
+	case "swarmmind_space_records":
+		text, err = toolHubSpaceRecords(args)
+	case "swarmmind_space_strategy":
+		text, err = toolHubSpaceStrategy(args)
 	case "swarmmind_session_create":
 		text, err = toolSessionCreate(args)
 	case "swarmmind_session_send":

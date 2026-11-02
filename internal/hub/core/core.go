@@ -69,6 +69,9 @@ type Config struct {
 	// RelayFetchTimeout node 发起的产物取回中继应答预算（P4④跨机取回；0 =
 	// relayFetchTimeout 30s。测试注入短预算）。
 	RelayFetchTimeout time.Duration
+	// SpaceBindTimeout 中心空间绑定登记应答预算（W07-02；0 = 默认 10s。测试注入
+	// 短预算）。
+	SpaceBindTimeout time.Duration
 	// SweepInterval 后台清扫周期；0 = 不启动后台清扫（Sweep 手动驱动，测试用）。
 	SweepInterval time.Duration
 	// OnTaskTerminal 任务终态旁路钩子（可选，nil 安全）：任务首次落定终态时
@@ -94,9 +97,12 @@ type Core struct {
 
 	// onTerminalExtra AddOnTaskTerminal 注册的附加终态钩子（muHooks 保护：
 	// 注册发生在装配方装配期，fireTerminal 触发来自各工作 goroutine，按并发
-	// 纪律加锁——注册与触发无固定先后保证）。
+	// 纪律加锁——注册与触发无固定先后保证）。onMergedExtra 为取消合并钩子
+	// （AddOnTaskMerged：hub 先取消无结果、node 取消结果后到合并时触发——
+	// W07-02 中心空间意图按合并后的真实执行数据收敛）。
 	muHooks         sync.Mutex
 	onTerminalExtra []func(protocol.Task)
+	onMergedExtra   []func(protocol.Task)
 
 	// terminalRetention 终态保留时长（New 时从 cfg.TerminalRetention 解析落定：
 	// nil → protocol.TerminalRetention；0 = 永不清理）。TerminalRetention() 读侧。
@@ -125,6 +131,21 @@ type Core struct {
 	artClosed  bool
 	artWG      sync.WaitGroup
 	relayFetch time.Duration // node 发起的取回中继应答预算（0 = 默认 30s）
+
+	// 中心空间绑定登记在途表（W07-02，spacebind.go）：请求帧 mid → waiter。
+	// bindClosed = Close 已收束本域（muBind 保护）：不再受理新登记。
+	muBind     sync.Mutex
+	binds      map[string]*bindWaiter
+	bindClosed bool
+
+	// spaceBindTimeout 绑定登记应答预算（W07-02；0 = 默认 10s，测试注入短预算）。
+	spaceBindTimeout time.Duration
+
+	// spaceGuard 中心空间调度单入口守卫（W07-02，session.go 新轮预检消费；装配期
+	// 经 SetSpaceTurnGuard 一次性注入——hub spaces 服务装配后接线；nil = 无空间
+	// 服务，普通轮零变化）。
+	muSpaceGuard sync.Mutex
+	spaceGuard   func(sessionID string) error
 
 	sweepStop chan struct{}
 	sweepDone chan struct{}
@@ -156,6 +177,8 @@ func New(cfg Config) (*Core, error) {
 		sizes:             make(map[string]int64),
 		fetches:           make(map[string]*fetchWaiter),
 		relayFetch:        cfg.RelayFetchTimeout,
+		binds:             make(map[string]*bindWaiter),
+		spaceBindTimeout:  cfg.SpaceBindTimeout,
 		sweepStop:         make(chan struct{}),
 		sweepDone:         make(chan struct{}),
 	}
@@ -180,7 +203,7 @@ func New(cfg Config) (*Core, error) {
 // 点）完成。不在承诺内的两处残余：① 无状态拒绝回帧（invalid/forbidden/
 // artifact_not_found/关闭后 node_offline）即发即弃、不占收敛组——Close 后仍可
 // 能发出，至多得 transport 已关的 ErrClosed（调用方忽略）；② hub 自身取回
-//（HTTP 数据面）的无 timer waiter 只清表、未纳入收敛组——其生命周期归调用方
+// （HTTP 数据面）的无 timer waiter 只清表、未纳入收敛组——其生命周期归调用方
 // 自身超时预算收敛。幂等。Store/Transport 的关闭归装配方。
 func (c *Core) Close() error {
 	c.closeOnce.Do(func() {
@@ -197,6 +220,7 @@ func (c *Core) Close() error {
 			delete(c.fetches, mid)
 		}
 		c.muArt.Unlock()
+		c.closeBinds() // 中心空间绑定登记域收束（W07-02；在途等待经调用方预算自收敛）
 		// 置位后外发复核必见 closed → Wait 期间零新增 Add（Add 与置位同锁序，
 		// 契约见 artWG 字段注释）；此处等在途外发完成后再返回。
 		c.artWG.Wait()
@@ -266,7 +290,7 @@ func (c *Core) GetTask(taskID string) (protocol.Task, bool) {
 // HandleFrame 入站帧路由（transport.Subscribe 的回调）。身份信任传输层注入的
 // env.From（SPEC 4.1：hub 不信帧内值）；register/epoch 属会话层，不经此路由。
 // L1：入口代次复核——session 读循环的 epoch 校验与处理器调用之间存在换代窗口
-//（同 node 新连接完成注册发布后，旧会话已入队的残余帧仍可能到达本入口），此处
+// （同 node 新连接完成注册发布后，旧会话已入队的残余帧仍可能到达本入口），此处
 // 以 store 为真相源再复核一次，旧代次帧一律丢弃、不进入任何 core 事务。补推/
 // 重发幂等，丢弃安全（node 按未确认语义重发）；membus 内存链路双方代次恒为 0，
 // 天然通过。
@@ -298,8 +322,17 @@ func (c *Core) HandleFrame(env *protocol.Envelope) {
 		c.handleFetchReply(env)
 	case protocol.MsgErr:
 		// node 应答错误帧（如 artifact_mismatch/not_found）：ReplyTo 命中在途
-		// 取回则投递，否则记录（result_conflict 等面向 node 的 err 不经此）
+		// 取回则投递；再过中心空间绑定登记域（W07-02 space_bind 拒绝回帧）；
+		// 未命中记录（result_conflict 等面向 node 的 err 不经此）
+		if c.deliverBindReply(env) {
+			return
+		}
 		c.handleFetchReply(env)
+	case protocol.MsgSpaceBindAck:
+		// 中心空间绑定登记确认（W07-02）：ReplyTo 命中在途登记则投递
+		if !c.deliverBindReply(env) {
+			log.Printf("[hub] space_bind_ack 无在途登记，忽略 from=%s reply=%s", env.From, env.ReplyTo)
+		}
 	case protocol.MsgTaskAck:
 		c.handleTaskAck(env)
 	case protocol.MsgTaskStarted:
@@ -391,6 +424,25 @@ func (c *Core) AddOnTaskTerminal(hook func(protocol.Task)) {
 	c.muHooks.Lock()
 	defer c.muHooks.Unlock()
 	c.onTerminalExtra = append(c.onTerminalExtra, hook)
+}
+
+// AddOnTaskMerged 注册取消合并钩子（W07-02）：hub 先取消（无结果，终态旁路已在
+// CancelTask 首落时触发过）、node 取消结果后到合并时触发——携带合并后的真实执行
+// 数据。语义约束同 AddOnTaskTerminal（同步调用、不得长阻塞、错误自行消化）。
+func (c *Core) AddOnTaskMerged(hook func(protocol.Task)) {
+	c.muHooks.Lock()
+	defer c.muHooks.Unlock()
+	c.onMergedExtra = append(c.onMergedExtra, hook)
+}
+
+// fireTaskMerged 取消合并钩子触发（nil 安全；同步调用）。
+func (c *Core) fireTaskMerged(t *protocol.Task) {
+	c.muHooks.Lock()
+	hooks := append(make([]func(protocol.Task), 0, len(c.onMergedExtra)), c.onMergedExtra...)
+	c.muHooks.Unlock()
+	for _, h := range hooks {
+		h(*t)
+	}
 }
 
 // fireTerminal 终态旁路钩子触发（nil 安全；同步调用，见 Config.OnTaskTerminal

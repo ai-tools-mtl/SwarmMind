@@ -606,6 +606,9 @@ func (s *Service) spaceSweepLoop() {
 // 续轮只允许「本调度器投递的意图轮」（意图 accepted 且 TaskID 与本任务一致——
 // 服务端生成的任务 ID 不可伪造，hub 下发或本机直投的旁路轮一律拒绝并指向
 // space dispatch）。cancel/close 管理动作放行（取消保护依赖成员轮取消）。
+// 中心绑定（W07-02）：hubBind 登记的会话（中心空间成员线程，本机 collab 无绑定）
+// 普通轮（无 Space 标记或 scope 与登记不符）一律拒绝——中心空间调度单入口与本机
+// 同规；携相符 scope 的轮由收件门核对登记放行（不走本机意图核对——意图在 hub）。
 // 非空间会话零变化（未绑定恒放行）。
 func (s *Service) spaceTurnAllowed(task protocol.Task) bool {
 	if s.collab == nil || task.Session == nil || task.Session.TurnSeq <= 0 {
@@ -616,6 +619,11 @@ func (s *Service) spaceTurnAllowed(task protocol.Task) bool {
 	}
 	spaceID, bound := s.collab.SessionOwnerSpace(task.Session.SessionID)
 	if !bound {
+		if s.hubBind != nil {
+			if scope := s.hubBind.Space(task.Session.SessionID); scope != "" && task.Session.Space != scope {
+				return false
+			}
+		}
 		return true
 	}
 	for _, it := range s.collab.Intents(spaceID) {
