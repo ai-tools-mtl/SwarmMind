@@ -339,10 +339,19 @@ func findSessionByRequest(view *store.State, requestID string) (store.Session, b
 // 注入（SetSpaceTurnGuard——hub spaces 服务装配后接线），core 不持 collab 依赖。
 var ErrSpaceDispatchRequired = errors.New("core: 该会话已绑定协作空间，请经空间派发（space dispatch）推进，普通续轮被拒绝")
 
+// ErrSpaceScopeMismatch 会话已绑定协作空间但本轮声明的空间 scope 与绑定不符
+// （codex 审查必修A：守卫必须可区分普通轮与空间轮——空间驱动轮经守卫核对「会话
+// 在 hub 注册表的绑定空间 == 本轮 scope」放行；不符显式拒绝，映射 409
+// space_scope_mismatch，绝不冒充「普通轮请走空间派发」误导调用方）。
+var ErrSpaceScopeMismatch = errors.New("core: 该会话绑定的协作空间与本轮空间来源不符（绑定空间与 scope 不一致），拒绝投轮")
+
 // SetSpaceTurnGuard 注入中心空间守卫（W07-02 装配期一次性；幂等覆盖）。guard
-// 返回非 nil 即拒绝本轮（普通续轮预检消费；重放回执不受守卫影响——guard 调用点
-// 在重放判定之后）。
-func (c *Core) SetSpaceTurnGuard(g func(sessionID string) error) {
+// 参数 space = 本轮声明的空间 scope（空 = 普通轮；SubmitSpaceTurn 携 hub:<id>）：
+// 绑定会话的普通轮 → ErrSpaceDispatchRequired；空间轮核对该会话在 hub 注册表的
+// 绑定空间与 scope 一致才放行（不一致 → ErrSpaceScopeMismatch）；未绑定会话
+// guard 恒放行（零干预）。返回非 nil 即拒绝本轮（新轮预检消费；重放回执不受
+// 守卫影响——guard 调用点在重放判定之后）。
+func (c *Core) SetSpaceTurnGuard(g func(sessionID, space string) error) {
 	c.muSpaceGuard.Lock()
 	c.spaceGuard = g
 	c.muSpaceGuard.Unlock()
@@ -410,13 +419,16 @@ func (c *Core) submitTurn(sessionID string, req SessionTurnRequest, actor, space
 			return nil, false, fmt.Errorf("%w: %s（已登记 turn_seq=%d 的内容与本次不符）", ErrSessionRequestConflict, requestID, tr.Seq)
 		}
 	}
-	// 中心空间调度单入口守卫（W07-02，中心面同规 W04-01 RFC §1.4 方案 A）：重放
-	// 路径已先行返回（零副作用回执不受守卫影响——与 node SubmitSessionTurnLocal
-	// 同序），此处拦新投递。guard 由装配方注入（hub spaces 服务装配后
-	// SetSpaceTurnGuard 接线，返回 ErrSpaceDispatchRequired；未接线 = 无空间服务，
-	// 行为零变化）。
+	// 中心空间调度单入口守卫（W07-02，中心面同规 W04-01 RFC §1.4 方案 A；codex
+	// 审查必修A——守卫可区分普通轮与空间轮）：重放路径已先行返回（零副作用回执
+	// 不受守卫影响——与 node SubmitSessionTurnLocal 同序），此处拦新投递。space
+	// 参数随本轮声明透传（空 = 普通轮；SubmitSpaceTurn 携 hub:<id>）：绑定会话
+	// 普通轮 409 指向空间派发；空间轮核对绑定空间与 scope 一致才放行——否则
+	// 正常配置→启动→dispatch 的意图（已扣预算）会被无差别守卫拒绝后当瞬态失败
+	// 永久 pending 反复补投（codex 实证反例）。guard 由装配方注入（hub spaces
+	// 服务装配后 SetSpaceTurnGuard 接线；未接线 = 无空间服务，行为零变化）。
 	if c.spaceGuard != nil {
-		if err := c.spaceGuard(sessionID); err != nil {
+		if err := c.spaceGuard(sessionID, space); err != nil {
 			return nil, false, err
 		}
 	}

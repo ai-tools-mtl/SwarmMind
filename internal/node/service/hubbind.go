@@ -85,6 +85,40 @@ func (h *HubBindings) Get(sessionID string) (HubBindEntry, bool) {
 	return e, ok
 }
 
+// Remove 删除会话的登记绑定（space_unbind 解除路径；幂等——未登记零变更亦
+// 成功）。原子快照落盘成功才成立（落盘失败错误如实上抛——hub 收不到 ack 不视
+// 为已解除，重试面兜底）。
+func (h *HubBindings) Remove(sessionID string) error {
+	if h == nil {
+		return errors.New("hubbind: 登记表未装配")
+	}
+	if sessionID == "" {
+		return errors.New("hubbind: session_id 必填")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.binds[sessionID]; !ok {
+		return nil // 幂等：本就未登记
+	}
+	next := make(map[string]HubBindEntry, len(h.binds))
+	for k, v := range h.binds {
+		if k == sessionID {
+			continue
+		}
+		next[k] = v
+	}
+	b, err := json.MarshalIndent(next, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	if err := atomicWriteFile(h.tmp, h.path, b); err != nil {
+		return fmt.Errorf("hubbind: 绑定解除落盘失败: %w", err)
+	}
+	h.binds = next
+	return nil
+}
+
 // Space 会话的登记 scope（便捷形；未登记空串）。
 func (h *HubBindings) Space(sessionID string) string {
 	e, ok := h.Get(sessionID)
@@ -134,6 +168,19 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 		log.Printf("[node] space_bind 载荷解析失败 from=%s: %v", env.From, err)
 		s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
 			&protocol.ErrInfo{Code: "invalid", Msg: "space_bind 载荷非法"})
+		return
+	}
+	if p.Space == "" {
+		// 解除登记（codex 必修D②空 scope 语义）：删除绑定，普通轮恢复放行；
+		// 幂等（未登记零变更亦 ack——解除重试安全）。
+		if err := s.hubBind.Remove(p.SessionID); err != nil {
+			log.Printf("[node] space_unbind 失败 session=%s: %v", p.SessionID, err)
+			s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
+				&protocol.ErrInfo{Code: "bind_store_failed", Msg: "绑定解除落盘失败：" + err.Error()})
+			return
+		}
+		log.Printf("[node] 中心空间绑定已解除 session=%s from=%s", p.SessionID, env.From)
+		s.sendBindReply(protocol.MsgSpaceBindAck, env.MessageID, p, nil)
 		return
 	}
 	if !collab.IsHubScope(p.Space) {

@@ -21,6 +21,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/spaces"
 	hubstore "github.com/mtl802/swarmmind/internal/hub/store"
+	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/strategy"
 	"github.com/mtl802/swarmmind/internal/transport"
 )
@@ -59,6 +60,8 @@ func newSpacesRESTFixture(t *testing.T) *spacesRESTFixture {
 		t.Fatalf("spaces: %v", err)
 	}
 	t.Cleanup(func() { _ = svc.Close() })
+	// 生产守卫接线（codex 必修F：REST 面守卫覆盖实测——缺接线曾假阴）。
+	hubCore.SetSpaceTurnGuard(svc.SpaceTurnGuard())
 	adminToken := "admin-tok-rest"
 	s := New(Config{
 		Core: hubCore, AdminToken: adminToken, DataDir: dir,
@@ -349,4 +352,123 @@ func TestSpacesAssembledCapabilitiesTrue(t *testing.T) {
 	if v, _ := sp["private_history_readable"].(bool); v {
 		t.Fatal("private_history_readable 恒 false")
 	}
+}
+
+// TestSpaceGuardSessionTurns409 必修A REST 级（codex 必修F「REST 测试注释声称
+// 守卫实际未验」闭合）：空间绑定会话的普通续轮 POST /sessions/{id}/turns → 409
+// space_dispatch_required（错误码词 collab 单源；守卫经 Service.SpaceTurnGuard
+// 生产闭包接线）。
+func TestSpaceGuardSessionTurns409(t *testing.T) {
+	f := newSpacesRESTFixture(t)
+	// 注册会话能力卡（Spaces 盖章——版本门同源词形）+ 建会话。
+	f.core.RegisterNode("restN", []protocol.AgentCard{{
+		Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
+		OutputMode: "answer+artifacts", PermissionMode: "workspace-write",
+		ProtocolVer: 1, Exposed: true, SessionAdapter: protocol.SessionAdapterCodex,
+		Spaces: protocol.SpacesCapV1,
+	}})
+	code, body := f.adminPost("/api/v1/sessions", `{"node_id":"restN","agent":"coder","cwd":"/tmp/rest"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建会话: %d %v", code, body)
+	}
+	sv, _ := body["session"].(map[string]any)
+	sessID, _ := sv["id"].(string)
+	if sessID == "" {
+		t.Fatalf("会话 ID 解析失败: %v", body)
+	}
+	// 空间 + 绑定（manual 创建 → pending_config 态 configure 合法）。
+	code, body = f.adminPost("/api/v1/spaces", `{"goal":"守卫反例","mode":"manual","request_id":"g-1"}`)
+	spID, _ := body["space"].(map[string]any)["id"].(string)
+	sp, ok := f.svc.Space(spID)
+	if !ok {
+		t.Fatalf("空间缺失: %v", body)
+	}
+	if _, _, err := f.svc.Control(spID, collab.ControlRequest{RequestID: "g-cfg", Action: collab.ActConfigureMembers,
+		ExpectedVersion: sp.Version, Members: []collab.Member{{Name: "restN/coder", SessionID: sessID}}},
+		collab.Subject{Name: "admin", Class: collab.ClassOwner}); err != nil {
+		t.Fatalf("配置成员: %v", err)
+	}
+	// 普通续轮 → 409 space_dispatch_required。
+	code, body = f.adminPost("/api/v1/sessions/"+sessID+"/turns", `{"prompt":"旁路普通轮"}`)
+	if code != http.StatusConflict || body["error"] != collab.CodeSpaceDispatchRequired {
+		t.Fatalf("绑定会话普通轮应 409 space_dispatch_required: %d %v", code, body)
+	}
+	// 相符 scope 的空间轮放行正例不在 REST /turns 面（该端点恒普通轮；空间轮唯一
+	// 入口是 space dispatch）——由 TestDispatchFullChainConverges 在同一生产守卫
+	// 接线下承担（受理→收敛全链）。
+}
+
+// TestSpaceUnbindDiffOnRemoval 必修D REST 级（解除闭环 diff 接线）：成员移除后
+// api 侧 diff 下发解除（黑洞传输解除未达 → 入 Service 重试面，PendingUnbindSessions
+// 可见——解除失败重试面的端到端实证）。
+func TestSpaceUnbindDiffOnRemoval(t *testing.T) {
+	f := newSpacesRESTFixture(t)
+	f.core.RegisterNode("restN", []protocol.AgentCard{{
+		Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
+		OutputMode: "answer+artifacts", PermissionMode: "workspace-write",
+		ProtocolVer: 1, Exposed: true, SessionAdapter: protocol.SessionAdapterCodex,
+		Spaces: protocol.SpacesCapV1,
+	}})
+	code, body := f.adminPost("/api/v1/sessions", `{"node_id":"restN","agent":"coder","cwd":"/tmp/rest2"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建会话: %d %v", code, body)
+	}
+	sv, _ := body["session"].(map[string]any)
+	sessID, _ := sv["id"].(string)
+	code, body = f.adminPost("/api/v1/spaces", `{"goal":"解除反例","mode":"manual","request_id":"u-1"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建空间: %d %v", code, body)
+	}
+	spID, _ := body["space"].(map[string]any)["id"].(string)
+	sp, ok := f.svc.Space(spID)
+	if !ok {
+		t.Fatalf("空间缺失: %v", body)
+	}
+	admin := collab.Subject{Name: "admin", Class: collab.ClassOwner}
+	if _, _, err := f.svc.Control(spID, collab.ControlRequest{RequestID: "u-cfg", Action: collab.ActConfigureMembers,
+		ExpectedVersion: sp.Version, Members: []collab.Member{{Name: "restN/coder", SessionID: sessID}}}, admin); err != nil {
+		t.Fatalf("配置成员: %v", err)
+	}
+	// 移除成员经 REST（api handler diff 接线面——直调 Control 绕过 handler 不触发
+	// 解除；pending_config 态合法）→ 解除下发（黑洞未达 → 入队）。
+	sp, _ = f.svc.Space(spID)
+	code, body = f.adminPost("/api/v1/spaces/"+spID+"/control",
+		`{"action":"configure_members","expected_version":`+itoaRest(sp.Version)+`,"members":[],"request_id":"u-rm"}`)
+	if code != http.StatusOK {
+		t.Fatalf("移除成员: %d %v", code, body)
+	}
+	_ = admin
+	found := false
+	for _, sid := range f.svc.PendingUnbindSessions() {
+		if sid == sessID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("移除成员后解除登记应入队重试面（黑洞传输未达）: %v", f.svc.PendingUnbindSessions())
+	}
+}
+
+// itoaRest int64 十进制（测试体 JSON 拼装）。
+func itoaRest(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	uv := uint64(v)
+	if neg {
+		uv = uint64(-uv)
+	}
+	var b [24]byte
+	i := len(b)
+	for uv > 0 {
+		i--
+		b[i] = byte('0' + uv%10)
+		uv /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }

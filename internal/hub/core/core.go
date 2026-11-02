@@ -141,11 +141,11 @@ type Core struct {
 	// spaceBindTimeout 绑定登记应答预算（W07-02；0 = 默认 10s，测试注入短预算）。
 	spaceBindTimeout time.Duration
 
-	// spaceGuard 中心空间调度单入口守卫（W07-02，session.go 新轮预检消费；装配期
-	// 经 SetSpaceTurnGuard 一次性注入——hub spaces 服务装配后接线；nil = 无空间
-	// 服务，普通轮零变化）。
+	// spaceGuard 中心空间调度单入口守卫（W07-02；codex 必修A——签名携本轮 scope
+	// 可区分普通轮与空间轮；装配期经 SetSpaceTurnGuard 一次性注入——hub spaces
+	// 服务装配后接线；nil = 无空间服务，普通轮零变化）。
 	muSpaceGuard sync.Mutex
-	spaceGuard   func(sessionID string) error
+	spaceGuard   func(sessionID, space string) error
 
 	sweepStop chan struct{}
 	sweepDone chan struct{}

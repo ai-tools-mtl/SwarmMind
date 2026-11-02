@@ -124,6 +124,14 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 	}
 }
 
+// SpaceUnbind 中心空间绑定解除（W07-02 codex 必修D②；复用 space_bind 帧 + 空
+// scope 语义——协议 SpaceBindPayload 注释同步）：node 登记表删除绑定，普通轮恢复
+// 放行。幂等（node 未登记亦 ack）。ack 载荷语义复核同 SpaceBind（Space 空值比对
+// 成立）。
+func (c *Core) SpaceUnbind(nodeID, sessionID string, timeout time.Duration) error {
+	return c.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: "", SessionID: sessionID}, timeout)
+}
+
 // deliverBindReply 绑定登记应答投递（ReplyTo 命中在途表则投递；来源不符不投递
 // 不消费——waiter 留到超时，伪应答无法占位）。命中返回 true（帧已归本域处理，
 // 调用方不再路由）。

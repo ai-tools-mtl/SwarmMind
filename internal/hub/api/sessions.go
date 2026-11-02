@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/hub/core"
 	"github.com/mtl802/swarmmind/internal/hub/mailbox"
 	"github.com/mtl802/swarmmind/internal/protocol"
@@ -146,6 +147,14 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 // writeSessionErr 会话编排错误 → HTTP 状态与错误码（SPEC 六.五）。
 func writeSessionErr(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, core.ErrSpaceDispatchRequired):
+		// 绑定会话普通续轮拒绝（W07-02 守卫；409 指向空间派发——错误码词与 node
+		// 面同源 collab.CodeSpaceDispatchRequired）。
+		writeErr(w, http.StatusConflict, collab.CodeSpaceDispatchRequired, err.Error())
+	case errors.Is(err, core.ErrSpaceScopeMismatch):
+		// 绑定会话空间轮 scope 不符（codex 必修A：与普通轮拒绝分码分话术——不冒充
+		// 「请走空间派发」误导调用方）。
+		writeErr(w, http.StatusConflict, "space_scope_mismatch", err.Error())
 	case errors.Is(err, core.ErrSessionNotFound):
 		writeErr(w, http.StatusNotFound, "session_not_found", err.Error())
 	case errors.Is(err, core.ErrSessionClosed):

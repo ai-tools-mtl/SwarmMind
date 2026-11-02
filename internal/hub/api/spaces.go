@@ -216,6 +216,15 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 		writeErr(w, http.StatusBadRequest, "reserved_request_id", collab.ReservedRequestIDMessage)
 		return
 	}
+	// 成员解绑解除面（codex 必修D②）：configure_members 前取旧成员视图——应用后
+	// diff 被移除的绑定并下发 node 解除登记（普通轮恢复放行；失败入 Service 重试
+	// 面）。零副作用预取（只读）。
+	var preMembers []collab.Member
+	if req.Action == collab.ActConfigureMembers {
+		if pre, ok := s.cfg.Spaces.SpaceView(id); ok {
+			preMembers = pre.Members
+		}
+	}
 	var setPhaseFrom strategy.Phase
 	if req.Action == collab.ActSetPhase && !s.cfg.Spaces.ServedIdentical(id, req) {
 		from, ok := s.setPhasePrecheck(w, id, req)
@@ -233,6 +242,30 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 	if err != nil {
 		writeSpaceErr(w, err)
 		return
+	}
+	// 解除登记（codex 必修D②）：成员移除/换绑会话在 collab 事务内释放归属成功
+	// 后，向 node 下发解除（hub 注册表已无归属才发——换绑他空间的会话由新空间
+	// 派发时 bind 幂等覆盖）。解除失败由 Service.UnbindSession 重试面兜底。
+	if req.Action == collab.ActConfigureMembers && !dup && res.Applied && len(preMembers) > 0 {
+		kept := map[string]bool{}
+		for _, m := range res.Space.Members {
+			kept[m.Name+"\x00"+m.SessionID] = true
+		}
+		for _, om := range preMembers {
+			if om.SessionID == "" || kept[om.Name+"\x00"+om.SessionID] {
+				continue
+			}
+			if _, stillBound := s.cfg.Spaces.SessionOwnerSpace(om.SessionID); stillBound {
+				continue // 已归属其他空间：不解除（新空间派发 bind 覆盖）
+			}
+			if sv, ok := s.cfg.Core.GetSession(om.SessionID); ok {
+				s.cfg.Spaces.UnbindSession(sv.NodeID, om.SessionID, spaces.Scope(id))
+			}
+		}
+	}
+	// resume 放行（node NotifySpaceResumed 同规）：恢复后已受理排队意图继续投递。
+	if req.Action == collab.ActResume && !dup && res.Applied {
+		s.cfg.Spaces.KickSpace(id)
 	}
 	// 策略引擎跟随落账（W05-03 分离边界，node 面同构）：start 生效 → 引导；
 	// set_phase 生效 → 引擎留痕。dup 命中零回放（重放不回放留痕）。

@@ -235,15 +235,12 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 		return fmt.Errorf("初始化中心空间服务失败: %w", err)
 	}
 	defer spaceSvc.Close()
-	// 中心空间调度单入口守卫（W07-02，W04-01 方案 A 中心面同规）：会话已绑定协作
-	// 空间后普通续轮拒绝（409 space_dispatch_required），派发走空间面。spaces
+	// 中心空间调度单入口守卫（W07-02，W04-01 方案 A 中心面同规；codex 必修A——
+	// 守卫可区分普通轮与空间轮：普通续轮 409 space_dispatch_required；空间轮核对
+	// 绑定空间与 scope 一致放行——否则 dispatch 意图被拒后当瞬态永久 pending）。
+	// 闭包单源 Service.SpaceTurnGuard（cmd/hub 与测试夹具同函数接线）。spaces
 	// 服务依赖 core（构造在后），守卫经 late-bound 注入。
-	coreSvc.SetSpaceTurnGuard(func(sessionID string) error {
-		if _, bound := spaceSvc.SessionOwnerSpace(sessionID); bound {
-			return core.ErrSpaceDispatchRequired
-		}
-		return nil
-	})
+	coreSvc.SetSpaceTurnGuard(spaceSvc.SpaceTurnGuard())
 
 	// 群存储周期维护（2026-10-22 修复轮2）：启动即扫一次（恢复重启前的待补偿
 	// 回流队列），此后定时清理 24h 过期消息 + 重试补偿队列（GROUP-RFC 三 独立
