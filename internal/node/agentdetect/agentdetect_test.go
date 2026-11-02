@@ -5,6 +5,7 @@ package agentdetect
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,33 @@ const leakSecret = "FAKE-SECRET-swarmmind-agentdetect-leak-canary-42"
 
 // leakContent 内容金丝：配置文件正文特征串（内容永不进结果）。
 const leakContent = "leak-canary-content-line-do-not-return"
+
+// TestDetectOnlyRunsVersionArgv 无模型探针零模型调用锚（W06-04 fixture 复核：
+// 任务书 fixture 清单「无模型探针时零模型调用」）：全链检测（安装+配置+标记+投影）
+// 对探测目标的全部调用恰一次、argv 恰为单个 `--version`——检测层不存在任何模型
+// 调用路径（无 prompt、无补全、无会话），子进程纪律 argv 固定 [<command>,
+// "--version"] 由 fake 目标的调用留痕实证，不靠源码自证。
+func TestDetectOnlyRunsVersionArgv(t *testing.T) {
+	log := t.TempDir() + "/argv.log"
+	// fake 目标把每次被调用的参数逐行留痕后输出版本行（任何模型式调用——带
+	// prompt/文件参数的第二次调用——都会在留痕里现形）。
+	body := "printf '%s\\n' \"$@\" >> " + log + "\necho \"recording-cli 1.0\""
+	cmd := writeScript(t, t.TempDir(), "recording-cli", body)
+	home := makeZcodeHome(t, `{"authToken":"`+leakSecret+`"}`)
+	s := New(Options{})
+	rep := s.Detect(context.Background(), Request{Host: HostZcode, Name: "rec", Command: cmd, ConfigHome: home})
+	if rep.Installed.Status != StatusPass || rep.ExecutionReady.Status != StatusPass {
+		t.Fatalf("全链应过（锚点前提），实得 installed=%+v ready=%+v", rep.Installed, rep.ExecutionReady)
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("调用留痕缺失（探测目标从未被运行）: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 1 || lines[0] != "--version" {
+		t.Fatalf("全链检测对目标的调用应恰一次且 argv 恰为 [--version]（零模型调用锚），实得 %q", lines)
+	}
+}
 
 // TestDetectZeroScanAllNotChecked 零扫描（无命令/无 config_home/无投影）：
 // 四层全「未检测」如实 + 时间零值（没跑过就不记时间）。

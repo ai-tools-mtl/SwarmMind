@@ -26,28 +26,45 @@ import (
 // localAgentView 本机目录单条：完整 ExecProfile（本机主人视角）+ 今日执行数 +
 // 检测摘要（W06-02 加法字段：数据源=上次 discover/registration-preview 的内存
 // 缓存，未发现过=not_checked 如实；检测摘要属节点本地真相，hub 目录投影归
-// W07-01/C 阶段，本轮不动）。
+// W07-01/C 阶段，本轮不动）+ 开关来源与变更时刻（W06-04 加法：agents-state.json
+// 覆盖记录投影——本机唯一有数据面支撑的「变更时间」，配置表本身不留存保存前值）。
 type localAgentView struct {
 	protocol.ExecProfile
 	TodayTasks int                `json:"today_tasks"`
 	Detect     agentDetectSummary `json:"detect"`
+	Switches   *AgentSwitchStamps `json:"switches,omitempty"`
 }
 
 // handleLocalAgents GET /api/v1/local/agents：本机 ExecProfile 列表 + 今日任务数
 // （账本中该 agent 名下、创建于今天（UTC）的任务条数——旅程①的调用统计）+ 检测
-// 摘要四值投影（加法字段，旧字段零变化）。
+// 摘要投影（W06-02 四值 + W06-04 逐层明细/漂移注记，加法字段旧字段零变化）+
+// 统筹声明身份投影与本机同工作区多声明盘点（W06-04 顶层加法键）。
 func (s *Server) handleLocalAgents(w http.ResponseWriter, r *http.Request) {
 	profiles := s.effectiveProfiles()
 	views := make([]localAgentView, 0, len(profiles))
 	today := protocol.NowUTC()
+	var stamps map[string]AgentSwitchStamps
+	if s.cfg.Agents != nil {
+		stamps = s.cfg.Agents.SwitchStamps()
+	}
 	for _, p := range profiles {
-		views = append(views, localAgentView{
+		v := localAgentView{
 			ExecProfile: p,
 			TodayTasks:  s.todayTaskCount(p.Name, today),
-			Detect:      s.detectSummaryFor(p.Name),
-		})
+			Detect:      s.detectSummaryFor(p),
+		}
+		if st, ok := stamps[p.Name]; ok {
+			stCopy := st
+			v.Switches = &stCopy
+		}
+		views = append(views, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node_id": s.cfg.NodeID, "agents": views})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node_id":             s.cfg.NodeID,
+		"agents":              views,
+		"orchestrator":        orchIdentityFor(profiles),       // W06-04：声明来源投影（多声明/旧名回退不冒认唯一生效）
+		"workspace_conflicts": workspaceConflictsFor(profiles), // W06-04：同工作区多声明如实列出（恰一/零共用=空表）
+	})
 }
 
 // todayTaskCount 账本中目标 agent 今日（UTC 自然日）的任务条数（快照读，无事务）。

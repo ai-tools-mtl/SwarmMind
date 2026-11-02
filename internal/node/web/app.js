@@ -712,6 +712,8 @@ const S = {
   nodeID: '',
   status: null,            // GET /api/v1/local/status
   agents: [],              // GET /api/v1/local/agents（本机 ExecProfile 视图）
+  orchIdentity: null,      // 同响应顶层 orchestrator：本机声明身份投影（W06-04——declared/conflict/name_fallback/note，多声明与旧名回退不冒认唯一生效）
+  workspaceConflicts: [],  // 同响应顶层 workspace_conflicts：同工作区多声明盘点（W06-04）
   tasks: [],               // GET /api/v1/local/tasks 当前已载入的列表（首页+「加载更早」历史页；账本行自带 status+origin，留痕补尾行无 status）。轮询只刷新首页、历史保序并入，不整列表覆盖（复审②-1）
   tasksTotal: 0,           // 列表合并总行数（后端 total）：「已载 X / 共 Y 条」与翻页依据
   tasksMoreBusy: false,    // 「加载更早」在途标志（防双击重复翻页；只由翻页流程自身解除，轮询不得提前复位——复审②-2）
@@ -874,6 +876,9 @@ async function loadAll() {
   S.nodeID = st.data?.node_id || '';
   S.status = st.data || null;
   S.agents = ag.data?.agents || [];
+  // W06-04：声明身份投影与工作区冲突盘点（顶层加法键；旧后端缺省回落空值不冒认）
+  S.orchIdentity = ag.data?.orchestrator || null;
+  S.workspaceConflicts = Array.isArray(ag.data?.workspace_conflicts) ? ag.data.workspace_conflicts : [];
   // 列表刷新（复审②-1）：取新首页（TASKS_PAGE 条），已载历史保序并入而非整列表
   // 覆盖——轮询清历史页会让「加载更早」翻到的内容 5s 内消失（207/207→200/207）。
   // 合并正确性：提交路径新任务插队首部、旧行相对序不变，新首页含旧载行前段（有
@@ -3520,9 +3525,20 @@ function normalizeProfile(p) {
 function servicesPage() {
   /* P06/P00 指引（W06-02）：「本机独立使用为正常态」为锚点文案——不连中心一切
    * 功能照常；连接走既有「连接」页接入向导（不建新页）。 */
+  /* W06-04 身份/工作区冲突说明：多声明不冒认「唯一管家已生效」——横幅文案来源
+   * 由服务端投影（orchestrator.note）给出；同工作区多声明如实列出（配置事实，
+   * 是否拆分由主人裁量，不阻塞派单）。横幅并入 head（page-head 之后、通知卡之前
+   * 显著呈现；不触碰「return head + notifyCard() + empty + …」既有字节锁表达式，
+   * TestWebNotifyFormSharedBlock 锁的通知卡上移形态保持）。 */
+  const orchBanner = S.orchIdentity?.conflict
+    ? `<div class="notice warn spaced"><b>智行管家声明冲突（本机多声明）</b>：${esc(S.orchIdentity.note)}</div>`
+    : '';
+  const wsNote = (S.workspaceConflicts || []).length
+    ? `<div class="notice spaced"><b>同工作区多声明</b>：${S.workspaceConflicts.map(c => `<code>${esc(c.workdir)}</code> ← ${c.agents.map(n => `<code>${esc(n)}</code>`).join('、')}`).join('；')}。多个声明共用同一工作区时，并发任务会在同一目录内执行、可能互相覆盖文件与产物——如需隔离请为各能力分开 workdir。</div>`
+    : '';
   const head = `<div class="page-head"><div><h1>服务</h1>
     <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p>
-    <p class="muted small">本机独立使用为完全正常的形态（发现 / 登记 / 派单 / 通知离线照常）；需要跨机协作时，${button('走「连接」页的接入向导', 'go:wizard', 'link')}，凭据人工核对。</p></div></div>`;
+    <p class="muted small">本机独立使用为完全正常的形态（发现 / 登记 / 派单 / 通知离线照常）；需要跨机协作时，${button('走「连接」页的接入向导', 'go:wizard', 'link')}，凭据人工核对。</p></div></div>` + orchBanner + wsNote;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
   // 恒渲染，网页即可登记第一个 agent；去掉「只引导手编 YAML」的死路文案。
   const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
@@ -3531,7 +3547,7 @@ function servicesPage() {
   /* 通知卡上移至页头后第一位（2026-10-26 notify-polish 改动四：渠道配置是服务页
    * 高频入口，不再沉底；空态/agent 服务卡居中，能力配置编辑区沉底）。 */
   return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +
-    (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
+    (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持（变更时刻见各能力「配置详情」的开关记录行）。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
     cfgSection();
 }
 
@@ -3569,6 +3585,11 @@ function cfgSection() {
       ${button('保存全部（校验+写盘）', 'cfg-save', 'primary')}
       ${button('从文件重载', 'cfg-reload', '')}
     </div>
+    <details><summary>兼容与历史说明（W06-04）</summary><p class="muted small">
+    配置历史：本机<b>不留存</b>逐次保存的前值——「保存全部」即以当前表覆盖 node.yaml（round-trip 保留注释与未知字段），无历史文件，本页不编造历史；保存前的逐字段差异对比走「发现本机 agent → 登记预览」（实时算 old→new，零写盘）。有数据面支撑的变更记录只有开关覆盖：开放/管家声明经网页改动时记录来源与时刻（agents-state.json，重启保持），见各能力「配置详情」的开关记录行。
+    </p><p class="muted small">
+    旧声明兼容：智行管家以能力卡<b>声明位</b>（orchestrator）为准；能力名含 <code>zcode-dev</code> 的旧名字约定只是零声明时的兼容回退识别，页面在能力卡与派单下拉明确标注「旧名约定识别（非声明）」，不冒认「唯一管家已生效」——本机多声明并存时服务页横幅与能力卡均呈现冲突警示，全网恰一以 hub 目录为准（跨机冲突由 hub 告警）。配置漂移：状态文件中已删能力的旧开关记录在启动加载时自动忽略（日志留痕），不阻塞 node。
+    </p></details>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
     关闭开放（exposed=false）只影响其他机器调用，本机派单不受限。结构性变更（增删 / command / agent_args / kind / session_adapter）保存后需「应用并重启」。</p>
@@ -3675,13 +3696,23 @@ function cfgDrawerView(a, i) {
     </div>`;
 }
 /* orchNote 智行管家声明提示：生效/待同步同 exposed 三态；冲突（hub 汇聚发现
- * 多声明）由目录状态展示（orchestrator_conflicts），本机侧只提示声明已生效。 */
+ * 多声明）由目录状态展示（orchestrator_conflicts），本机侧只提示声明已生效。
+ * W06-04 身份冲突落面：本机多声明并存（S.orchIdentity.conflict，服务端投影）
+ * 时绿灯降级为冲突警示——「唯一管家已生效」不得在多声明态被冒认。 */
 function orchNote(a) {
   if (!a.orchestrator) return '';
   const name = 'orch-' + CSS.escape(a.name);
   if (a._pending) return `<div class="notice warn spaced" id="${name}">同步中…</div>`;
   if (a._synced === false) return `<div class="notice warn spaced" id="${name}"><b>本机已生效 · 待同步</b>：hub 暂不可达，重连注册后自动生效。</div>`;
+  if (S.orchIdentity?.conflict) return `<div class="notice warn spaced" id="${name}"><b>已声明 · 本机多声明并存</b>：此刻无唯一生效声明（多声明冲突时 hub 告警并回退名字识别）；请到其他声明能力的卡片取消声明，只保留一台。</div>`;
   return `<div class="notice ok spaced" id="${name}"><b>智行管家已声明</b>：复合目标将交由本能力拆解派发汇总（hub 汇聚全网声明，冲突时告警并回退名字识别）。</div>`;
+}
+/* nameFallbackBadge 旧名字约定候选徽标（W06-04）：未声明但能力名含 zcode-dev——
+ * 来源是名字约定而非主人声明，必须标注。回退识别仅在零声明态生效（有声明位时
+ * 声明优先，与 hub isPrimeDir 同语义），徽标措辞按条件事实表述。 */
+function nameFallbackBadge(a) {
+  if (a.orchestrator || !(S.orchIdentity?.name_fallback || []).includes(a.name)) return '';
+  return ` <span class="badge" title="能力名含 zcode-dev：零声明态下派单侧按旧名字约定将其识别为智行管家（兼容回退，非主人声明）；存在声明位时声明优先、回退不生效。钦定管家即随能力表上报正式声明">旧名约定候选（非声明）</span>`;
 }
 
 /* ---------- 能力卡检测徽标（W06-02 四值投影，加法） ----------
@@ -3704,7 +3735,10 @@ function detectBadgeHtml(a) {
     detectGlyphHtml('就绪', d.execution_ready, readyTip) + detectGlyphHtml('调用', d.call_allowed, '');
 }
 /* detectSummaryRow 配置详情表「检测摘要」行：四值 + 检查时间 + 未验证原因；
- * execution_ready pass 时强制带原注记（执行前置检查通过（模型未验证））。 */
+ * execution_ready pass 时强制带原注记（执行前置检查通过（模型未验证））。
+ * W06-04：detect.layers 在位时追加逐层明细行——每层独立的检查来源/时刻/未验证
+ * 或失败原因（配置识别≠登录成功≠执行就绪≠调用允许，绝不合并成一盏绿灯）；
+ * 旧载荷无 layers 只回紧凑行（不冒认）。 */
 function detectSummaryRow(a) {
   const d = a?.detect;
   if (!d) return '';
@@ -3713,7 +3747,34 @@ function detectSummaryRow(a) {
   if (d.execution_ready === 'pass') parts.push('执行前置检查通过（模型未验证）：未运行真实模型探针，不声称账号/额度可用');
   if (d.checked_at) parts.push('检查于 ' + timeFull(d.checked_at));
   if (d.not_checked_reason) parts.push(d.not_checked_reason);
-  return `<tr><th>检测摘要</th><td><small class="muted">${parts.map(esc).join(' · ')}</small><small>数据源=本机「发现/登记预览」的最近一次检测（进程内存，重启后如实回到未检测）；全网投影不在本端</small></td></tr>`;
+  const head = `<tr><th>检测摘要</th><td><small class="muted">${parts.map(esc).join(' · ')}</small><small>数据源=本机「发现/登记预览」的最近一次检测（进程内存，重启后如实回到未检测）；全网投影不在本端</small></td></tr>`;
+  if (!d.layers) return head;
+  const lay = (label, lv) => {
+    if (!lv) return '';
+    const when = lv.checked_at ? '检查于 ' + timeFull(lv.checked_at) : '未运行（未检测不冒认）';
+    const reason = lv.reason ? `<br>${esc(lv.reason)}` : '';
+    return `<tr><th>检测 · ${esc(label)}</th><td><span class="badge ${lv.status === 'pass' ? 'online' : lv.status === 'fail' ? 'offline' : ''}">${fmt(lv.status)}</span> <small class="muted">来源 ${esc(lv.source || '—')} · ${when}${reason}</small></td></tr>`;
+  };
+  return head +
+    lay('安装', d.layers.installed) + lay('配置识别', d.layers.config_recognized) +
+    lay('执行就绪', d.layers.execution_ready) + lay('本机调用', d.layers.call_allowed);
+}
+/* switchWord 开关来源与变更时刻人话（W06-04）：override=网页覆盖（带时刻，重启
+ * 保持）；yaml=node.yaml 基线值（无覆盖记录）。 */
+function switchWord(st) {
+  if (!st) return '—';
+  return st.source === 'override'
+    ? '网页覆盖生效中' + (st.updated_at ? '（设置于 ' + timeFull(st.updated_at) + '，重启保持）' : '')
+    : 'node.yaml 基线值（无覆盖记录）';
+}
+/* driftNoticeHtml 检测漂移注记（W06-04）：登记面或路径事实与上次检测不一致时
+ * 如实呈现「需重新检测」——四层状态仍为上次检测值，注记不自动改写，也绝不静默
+ * 沿用旧绿灯。 */
+function driftNoticeHtml(a) {
+  const dr = a?.detect?.drift;
+  if (!dr?.drifted) return '';
+  const notes = (dr.notes || []).map(esc).join('<br>');
+  return `<div class="notice warn spaced"><b>检测结果已过期（基础事实与上次检测不一致）</b>：<br>${notes}<br>四层状态仍为上次检测值；请到「能力配置 → 发现本机 agent」按当前登记面重新检测。</div>`;
 }
 
 function svcCard(a) {
@@ -3726,7 +3787,7 @@ function svcCard(a) {
         ? `<div class="notice ok spaced" id="sync-${esc(a.name)}"><b>已同步 hub · 网内生效</b>：${on ? '能力已进入全网目录（经 hub）。' : '新任务将不再准入；注册表保留一条下线登记。'}</div>`
         : '';
   return `<section class="card svc-card spaced ${on ? '' : 'off'}" id="svc-${esc(a.name)}">
-    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span>${a.orchestrator ? ' <span class="badge online">管家 · 本机</span>' : ''}${detectBadgeHtml(a)}</h2>
+    <div class="row"><div><h2 style="margin-bottom:4px">${esc(a.name)} <span class="badge">${esc(a.kind)}</span> <span class="badge">${on ? '网内可调用' : '仅本机'}</span>${a.orchestrator ? ' <span class="badge online">管家 · 本机</span>' : ''}${nameFallbackBadge(a)}${detectBadgeHtml(a)}</h2>
       <small class="muted">${esc(a.description || '（无描述）')} · ${esc(permLabel(a.permission_mode))} · 今日已执行 <b>${esc(a.today_tasks ?? 0)}</b> 次</small></div>
     <div class="actions"><div class="expose-ctl">
     ${/* 开放控件单开关化（2026-10-29 部署后走查反馈二）：开放/停止双按钮视觉权重
@@ -3735,7 +3796,7 @@ function svcCard(a) {
         * 行为语义原样（暴露/收起只换皮）；role=switch + aria-checked 可达语义。 */
     `<label class="checkline" title="开放给其他机器调用：关闭后只停止接收外部新任务——不停已在执行/排队的任务（本控制台暂无停止入口，hub 来源任务可在 hub 管理台取消）">开放给其他机器调用<button type="button" role="switch" aria-checked="${on}" class="switch${on ? ' on' : ''}" data-act="expose-toggle:${esc(a.name)}" data-agent="${esc(a.name)}"></button></label>`}
       ${on ? '' : '<small class="muted">已停止接受新任务；在途任务不受影响</small>'}
-    </div></div></div>${syncNote}${orchNote(a)}
+    </div></div></div>${syncNote}${orchNote(a)}${driftNoticeHtml(a)}
     <details><summary>配置详情（只读 · 来自本机 ExecProfile）</summary>
       <div class="table-wrap"><table><tbody>
         <tr><th>command</th><td><code>${esc(a.command)}</code> ${a.allow_args ? '' : '<span class="readonly">allow_args=false：任务参数将被拒绝</span>'}</td></tr>
@@ -3746,6 +3807,7 @@ function svcCard(a) {
         <tr><th>config_home</th><td><code>${esc(a.config_home || '（空 = data_dir/home）')}</code><small>进程 HOME 指此，与 workdir 分离；凭证不出本机</small></td></tr>
         <tr><th>agent_args</th><td>${(a.agent_args || []).length ? '<code>' + a.agent_args.map(esc).join(' ') + '</code>' : '（无固定附加参数）'}<small>固定拼在任务参数前，任务不可改</small></td></tr>
         <tr><th>permission_mode</th><td>${esc(a.permission_mode || '未声明')}<small>${esc(permissionNote(a.permission_mode))}</small></td></tr>
+        ${a.switches ? `<tr><th>开关记录</th><td><small class="muted">开放（exposed）：${esc(switchWord(a.switches.exposed))}<br>管家声明（orchestrator）：${esc(switchWord(a.switches.orchestrator))}</small></td></tr>` : ''}
         ${detectSummaryRow(a)}
       </tbody></table></div>
       <p class="footer-note">这些字段永不离开本机；对外只可见能力卡（名称/描述/权限模式/开关）。</p></details></section>`;
@@ -4286,13 +4348,21 @@ function tasksPage() {
    * A1-19（FE-POLISH 轮2）：管家判定与 hub isPrimeDir 同语义——能力卡
    * orchestrator 声明优先（AgentCard 自 2026-10-28 客户端声明制起携带本字段，
    * node 目录响应已透传），名字含 zcode-dev 降为向后兼容回退；不再仅凭名字
-   * 判定（codex 六节对照表外项：回退识别不得说成用户已指定）。 */
-  const isPrime = e => e.card.orchestrator === true || e.card.name.includes('zcode-dev');
+   * 判定（codex 六节对照表外项：回退识别不得说成用户已指定）。
+   * W06-04 身份来源落面：旧名回退项在下拉标签与悬停里显式标注「旧名约定识别
+   * （非声明）」——回退识别的来源可见，不冒认主人声明。回退抑制与 hub isPrimeDir
+   * 同语义：存在声明位时声明优先、名字约定回退不生效（旧判定是 OR 并集——声明
+   * 在位时 zcode-dev 名字仍被识别为管家，与「声明优先」矛盾，本批对齐）。 */
+  const hasPrimeDecl = S.catalog.some(e => e.card?.orchestrator === true);
+  const isPrime = e => e.card.orchestrator === true || (!hasPrimeDecl && e.card.name.includes('zcode-dev'));
+  const isPrimeDecl = e => e.card.orchestrator === true;
   const optOf = e => {
     const v = e.node_id + '|' + e.card.name;
     const off = standalone || e.online ? '' : ' · 离线（任务先存着，上线就送）';
-    const tip = `${e.card.name}${isPrime(e) ? ' · 智行管家：拆解复合目标并派发汇总' : ''} — ${e.card.description || '（无描述）'} · ${permLabel(e.card.permission_mode)}${off}`;
-    const label = isPrime(e) ? `智行管家 · ${e.card.name}` : e.card.name;
+    const role = isPrimeDecl(e) ? ' · 智行管家：拆解复合目标并派发汇总（主人声明）'
+      : isPrime(e) ? ' · 零声明态按旧名字约定识别为智行管家（兼容回退，非主人声明）' : '';
+    const tip = `${e.card.name}${role} — ${e.card.description || '（无描述）'} · ${permLabel(e.card.permission_mode)}${off}`;
+    const label = isPrimeDecl(e) ? `智行管家 · ${e.card.name}` : isPrime(e) ? `智行管家（旧名约定识别） · ${e.card.name}` : e.card.name;
     return `<option value="${esc(v)}" ${c.target === v ? 'selected' : ''} title="${esc(tip)}">${esc(label)}${off}</option>`;
   };
   const primeOpts = S.catalog.filter(isPrime), restOpts = S.catalog.filter(e => !isPrime(e));

@@ -306,6 +306,46 @@ func (s *AgentState) persistDisk(disk agentsStateDisk) error {
 	return nil
 }
 
+// AgentSwitchStamp 单开关当前值的来源与变更时刻（W06-04 配置历史兼容投影）：
+// source=yaml = 当前值即 node.yaml 基线（无覆盖记录）；source=override = 网页
+// 开关覆盖生效中，updated_at 为覆盖设置时刻（UTC，agents-state.json 持久化、重启
+// 保持）。这是本机唯一有数据面支撑的「变更时间」记录——能力配置表本身不留存逐次
+// 保存的前值（PUT round-trip 覆盖写，无历史文件），页面不得编造历史。
+type AgentSwitchStamp struct {
+	Source    string     `json:"source"`             // yaml | override
+	UpdatedAt *time.Time `json:"updated_at,omitempty"` // 覆盖设置时刻（UTC）；yaml 来源无
+}
+
+// AgentSwitchStamps 单 agent 两开关（exposed/orchestrator）的来源与时刻。
+type AgentSwitchStamps struct {
+	Exposed      AgentSwitchStamp `json:"exposed"`
+	Orchestrator AgentSwitchStamp `json:"orchestrator"`
+}
+
+// SwitchStamps 全表开关覆盖时间戳投影（name → 两开关来源与时刻）：只读快照，
+// 并发安全。配置漂移（状态文件中已删能力的旧记录）已在此前加载时忽略，不投影。
+func (s *AgentState) SwitchStamps() map[string]AgentSwitchStamps {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]AgentSwitchStamps, len(s.baseline))
+	for _, p := range s.baseline {
+		st := AgentSwitchStamps{
+			Exposed:      AgentSwitchStamp{Source: "yaml"},
+			Orchestrator: AgentSwitchStamp{Source: "yaml"},
+		}
+		if rec, ok := s.override[p.Name]; ok {
+			at := rec.UpdatedAt
+			st.Exposed = AgentSwitchStamp{Source: "override", UpdatedAt: &at}
+		}
+		if rec, ok := s.orchOverride[p.Name]; ok {
+			at := rec.UpdatedAt
+			st.Orchestrator = AgentSwitchStamp{Source: "override", UpdatedAt: &at}
+		}
+		out[p.Name] = st
+	}
+	return out
+}
+
 // Sync 把当前能力表上报 hub（每次注册成功回调触发）：重启/重连后与 hub 注册表
 // 收敛，开关不因连接重建而漂移。离线时上报失败静默——register 已携全量能力表。
 func (s *AgentState) Sync(reporter func([]protocol.AgentCard) error) {

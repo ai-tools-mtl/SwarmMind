@@ -434,7 +434,8 @@ func TestRegistrationAdapterPersists(t *testing.T) {
 
 // TestLocalAgentsDetectProjection 检测投影：未发现=not_checked+如实原因；
 // discover 后四值与检查时间落位；旧字段 JSON 零变化（键集快照：条目键 ⊆
-// ExecProfile 全集 ∪ {today_tasks, detect}，detect 对象键恰五个）。
+// ExecProfile 全集 ∪ {today_tasks, detect, switches}，detect 对象键封闭）；
+// W06-04：layers 逐层明细与 drift 漂移注记（登记面与检测输入一致时未漂移）。
 func TestLocalAgentsDetectProjection(t *testing.T) {
 	dir := t.TempDir()
 	workdir := filepath.Join(dir, "work")
@@ -442,9 +443,10 @@ func TestLocalAgentsDetectProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := writeFakeCLI(t, t.TempDir(), "fake-cli", `echo "cli 1.0"`)
+	home := makeZcodeHomeFixture(t, `{"authToken":"x"}`) // 登记面 config_home 与检测输入一致（真实登记流程）
 	profile := protocol.ExecProfile{
 		Name: "zc", Kind: protocol.AgentKindCLI, Command: cmd, Workdir: workdir,
-		TimeoutSec: 60, Exposed: true,
+		ConfigHome: home, TimeoutSec: 60, Exposed: true,
 	}
 	srv, _ := newDiscoverServer(t, dir, []protocol.ExecProfile{profile})
 
@@ -482,11 +484,12 @@ func TestLocalAgentsDetectProjection(t *testing.T) {
 		t.Fatalf("未发现应带原因且无检查时间: %v", det)
 	}
 
-	// ② 旧字段零变化（键集快照）：条目键只允许既有全集 + detect
+	// ② 旧字段零变化（键集快照）：条目键只允许既有全集 + detect/switches
+	//（W06-04 加法：switches=开关来源与变更时刻投影，agents-state.json 覆盖记录）
 	execKeys := []string{"name", "kind", "command", "workdir", "agent_args", "timeout_sec",
 		"allow_args", "allow_env", "config_home", "description", "permission_mode",
 		"exposed", "stdin_to_arg", "orchestrator", "session_adapter"}
-	allowed := map[string]bool{"today_tasks": true, "detect": true}
+	allowed := map[string]bool{"today_tasks": true, "detect": true, "switches": true}
 	for _, k := range execKeys {
 		allowed[k] = true
 	}
@@ -496,8 +499,7 @@ func TestLocalAgentsDetectProjection(t *testing.T) {
 		}
 	}
 
-	// ③ discover 后投影四值落位 + 检查时间
-	home := makeZcodeHomeFixture(t, `{"authToken":"x"}`)
+	// ③ discover 后投影四值落位 + 检查时间（检测输入=登记面 command/config_home）
 	code, out := postLocal(t, srv, "tok-local", "/api/v1/local/agents/discover",
 		`{"candidates":[{"name":"zc","host":"zcode","command":"`+cmd+`","config_home":"`+home+`"}]}`)
 	if code != http.StatusOK {
@@ -514,13 +516,37 @@ func TestLocalAgentsDetectProjection(t *testing.T) {
 	if det["checked_at"] == nil || det["checked_at"] == "" {
 		t.Fatalf("发现后应有检查时间: %v", det)
 	}
-	// detect 对象键集恰五个（快照纪律：投影字段不擅自增减）
+	// detect 对象键集封闭（快照纪律：投影字段不擅自增减；W06-04 加法登记
+	// layers=逐层明细 drift=漂移注记）
 	for k := range det {
 		switch k {
-		case "installed", "config_recognized", "execution_ready", "call_allowed", "checked_at", "not_checked_reason":
+		case "installed", "config_recognized", "execution_ready", "call_allowed", "checked_at", "not_checked_reason",
+			"layers", "drift":
 		default:
 			t.Fatalf("detect 摘要出现未登记键 %q: %v", k, det)
 		}
+	}
+	// W06-04：layers 逐层明细在位（四层各自 status/source，未检测层带原因；
+	// 层键封闭）；drift 注记在位且未漂移（刚检测完，输入与路径事实一致）
+	layers, ok := det["layers"].(map[string]any)
+	if !ok {
+		t.Fatalf("发现后应有 layers 逐层明细: %v", det)
+	}
+	for _, lk := range []string{"installed", "config_recognized", "execution_ready", "call_allowed"} {
+		lv, ok := layers[lk].(map[string]any)
+		if !ok {
+			t.Fatalf("layers 缺 %s: %v", lk, layers)
+		}
+		for k := range lv {
+			switch k {
+			case "status", "source", "checked_at", "reason":
+			default:
+				t.Fatalf("layers.%s 出现未登记键 %q: %v", lk, k, lv)
+			}
+		}
+	}
+	if dr, ok := det["drift"].(map[string]any); !ok || dr["drifted"] != false {
+		t.Fatalf("刚检测完 drift 应在位且 drifted=false: %v", det["drift"])
 	}
 	// 版本留痕元数据不因投影出现（投影只回四值+时间+原因，VersionRaw 不进目录响应）
 	raw, _ := json.Marshal(agents[0])
