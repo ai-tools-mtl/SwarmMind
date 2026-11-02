@@ -106,7 +106,8 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 			switch env.Type {
 			case protocol.MsgSpaceBindAck:
 				var p protocol.SpaceBindPayload
-				if err := json.Unmarshal(env.Payload, &p); err != nil || p.Space != req.Space || p.SessionID != req.SessionID {
+				if err := json.Unmarshal(env.Payload, &p); err != nil || p.Space != req.Space ||
+					p.SessionID != req.SessionID || p.ExpectSpace != req.ExpectSpace {
 					return fmt.Errorf("space_bind 应答内容与请求不符（疑似异常对端，拒绝冒充成功）")
 				}
 				return nil
@@ -128,8 +129,8 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 // scope 语义——协议 SpaceBindPayload 注释同步）：node 登记表删除绑定，普通轮恢复
 // 放行。幂等（node 未登记亦 ack）。ack 载荷语义复核同 SpaceBind（Space 空值比对
 // 成立）。
-func (c *Core) SpaceUnbind(nodeID, sessionID string, timeout time.Duration) error {
-	return c.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: "", SessionID: sessionID}, timeout)
+func (c *Core) SpaceUnbind(nodeID, sessionID, expectScope string, timeout time.Duration) error {
+	return c.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: "", SessionID: sessionID, ExpectSpace: expectScope}, timeout)
 }
 
 // deliverBindReply 绑定登记应答投递（ReplyTo 命中在途表则投递；来源不符不投递

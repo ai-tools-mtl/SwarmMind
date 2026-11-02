@@ -238,7 +238,9 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 			"空间存在在途/排队执行意图：恢复须待收束，或携 confirm:true 显式确认继续（继续将按现有队列依次派发；预算/负责人/版本变化见空间详情）")
 		return
 	}
-	res, dup, err := s.cfg.Spaces.Control(id, req, subj)
+	// 控制动作经调度互斥面（codex 复审必修B-残②）：pause/resume/成员/完成类
+	// 变更与投递推进/收敛停队同锁串行。
+	res, dup, err := s.cfg.Spaces.ControlSpace(id, req, subj)
 	if err != nil {
 		writeSpaceErr(w, err)
 		return
@@ -351,7 +353,7 @@ func (s *Server) bootstrapCycleAfterStart(spaceID string, subj collab.Subject) {
 	if string(next) == view.Phase {
 		return
 	}
-	_, _, err = s.cfg.Spaces.Control(spaceID, collab.ControlRequest{
+	_, _, err = s.cfg.Spaces.ControlSpace(spaceID, collab.ControlRequest{
 		RequestID:       "boot-" + spaceID + "-" + string(next),
 		Action:          collab.ActSetPhase,
 		ExpectedVersion: view.Version,
@@ -590,7 +592,7 @@ func (s *Server) spaceSugar(w http.ResponseWriter, r *http.Request, act collab.A
 		writeErr(w, http.StatusBadRequest, "reserved_request_id", collab.ReservedRequestIDMessage)
 		return
 	}
-	res, dup, err := s.cfg.Spaces.Control(r.PathValue("id"), collab.ControlRequest{
+	res, dup, err := s.cfg.Spaces.ControlSpace(r.PathValue("id"), collab.ControlRequest{
 		RequestID:       requestID,
 		Action:          act,
 		ExpectedVersion: req.ExpectedVersion,

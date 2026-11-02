@@ -78,6 +78,19 @@ func buildFakeCLI(t *testing.T) string {
 // barrierAll=true 时 fake CLI 携 WAIT_FILE 阻塞到 barrier 文件出现（取消/重启对账
 // 场景用）。capableNode 控制主 node 能力卡是否盖章 Spaces（版本门反例用）。
 func newChainFixture(t *testing.T, barrierAll, capableNode bool) *chainFixture {
+	return newChainFixtureO(t, chainOpts{barrier: barrierAll, capable: capableNode})
+}
+
+// chainOpts 夹具变体（codex 复审 F 补强——受控构造：retention/sweep 注入做任务
+// 清理反例；其余测试走默认零后台清扫）。
+type chainOpts struct {
+	barrier           bool
+	capable           bool
+	sweepInterval     time.Duration // hub core Sweep（0 = 不启动）
+	terminalRetention time.Duration // 任务终态保留（0 = 协议默认；极短值做清理反例）
+}
+
+func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 	t.Helper()
 	oldSweep := sweepInterval
 	sweepInterval = 50 * time.Millisecond
@@ -94,7 +107,8 @@ func newChainFixture(t *testing.T, barrierAll, capableNode bool) *chainFixture {
 	}
 	t.Cleanup(func() { _ = f.hubStore.Close() })
 	bus := transport.NewBus()
-	f.hubCore, err = core.New(core.Config{Store: f.hubStore, Transport: bus.Endpoint("hub"), SpaceBindTimeout: 2 * time.Second})
+	f.hubCore, err = core.New(core.Config{Store: f.hubStore, Transport: bus.Endpoint("hub"),
+		SpaceBindTimeout: 2 * time.Second, SweepInterval: o.sweepInterval, TerminalRetention: retentionPtr(o.terminalRetention)})
 	if err != nil {
 		t.Fatalf("hub core: %v", err)
 	}
@@ -115,7 +129,7 @@ func newChainFixture(t *testing.T, barrierAll, capableNode bool) *chainFixture {
 	}
 	fake := buildFakeCLI(t)
 	env := []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex, "FAKE_THREAD_ID=thr-chain-1"}
-	if barrierAll {
+	if o.barrier {
 		f.barrier = filepath.Join(dir, "go.barrier")
 		env = append(env, "FAKE_WAIT_FILE="+f.barrier)
 	}
@@ -159,7 +173,7 @@ func newChainFixture(t *testing.T, barrierAll, capableNode bool) *chainFixture {
 	// 能力注册：主 node coder（按参数盖章 Spaces）；n2 为无端点的已注册能力
 	//（版本门/绑定未达反例共用——无端点 = Send ErrNoEndpoint = node 不在线）。
 	spacesCap := ""
-	if capableNode {
+	if o.capable {
 		spacesCap = protocol.SpacesCapV1
 	}
 	coderCard := protocol.AgentCard{Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
@@ -1073,8 +1087,10 @@ func TestEOldPlainTurnRequestConflict(t *testing.T) {
 			if got.Status != collab.IntentCancelled {
 				t.Fatalf("应确定性取消收束（绝不假 converged）: %+v", got)
 			}
-			if !strings.Contains(got.Note, "request_id") {
-				t.Fatalf("取消注记应锚 request conflict: %s", got.Note)
+			// 两路冲突注记均为如实取消：advanceLocked 四态核验的「轮号冲突」
+			//（先于提交）或提交面 request_conflict——确定性分类任一承担。
+			if !strings.Contains(got.Note, "冲突") && !strings.Contains(got.Note, "request") {
+				t.Fatalf("取消注记应锚冲突族（轮号冲突/request_conflict）: %s", got.Note)
 			}
 			svs, _ := f.hubCore.GetSession(sv2.ID)
 			if n := len(svs.Turns); n != 1 {
@@ -1127,4 +1143,454 @@ func TestCloseRealHookPathDrainOrRecovery(t *testing.T) {
 	f.svc = svc2
 	f.hubCore.SetSpaceTurnGuard(svc2.SpaceTurnGuard())
 	f.waitIntentStatus("d-hookrace-1", collab.IntentConverged)
+}
+
+// retentionPtr nil 语义透传（0 = nil = 协议默认）。
+func retentionPtr(d time.Duration) *time.Duration {
+	if d == 0 {
+		return nil
+	}
+	return &d
+}
+
+// ---------- codex 复审轮 2 残项反例（受控屏障/确定性构造，不赌时序） ----------
+
+// TestAExplicitSeqReplayBeforeGuard 复审必修A-残：普通轮已完成→会话加入空间→
+// 仅携原 turn_seq 同文重试——两端口径一致返回原回执（dup，非 space_dispatch_
+// required）；request_id 路径同验（零副作用重放判定先于守卫——与 node 同序）。
+func TestAExplicitSeqReplayBeforeGuard(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	f.secondAgentCard(t)
+	// 独立未绑定会话（fixture 主会话已被夹具绑定——不能用）。
+	sv2, _, err := f.hubCore.CreateSession(core.SessionCreateRequest{NodeID: "n1", AgentName: "coder2", Cwd: f.nodeCwd}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 绑定前：普通轮 seq=1（request_id "rp"；执行面成败不影响重放——轮行在案）。
+	ref1, _, err := f.hubCore.SubmitTurn(sv2.ID, core.SessionTurnRequest{Prompt: "原文", RequestID: "rp"}, "admin")
+	if err != nil {
+		t.Fatalf("普通轮: %v", err)
+	}
+	// 会话加入空间（pause→configure→resume；守卫自此拦截新普通轮）。
+	f.addSecondMember(t, "a-replay", collab.Member{Name: "n1/coder2", SessionID: sv2.ID})
+	// 仅携原 turn_seq 同文重试 → 原回执（dup，非 409）——复审必修A-残主断言。
+	ref2, dup, err := f.hubCore.SubmitTurn(sv2.ID, core.SessionTurnRequest{Prompt: "原文", TurnSeq: ref1.TurnSeq}, "admin")
+	if err != nil {
+		t.Fatalf("显式序号重放应返回原回执（守卫不得先拦）: %v", err)
+	}
+	if !dup || ref2.TurnSeq != ref1.TurnSeq || ref2.TaskID != ref1.TaskID {
+		t.Fatalf("重放应命中原回执: dup=%v ref1=%+v ref2=%+v", dup, ref1, ref2)
+	}
+	// request_id 路径同验。
+	ref3, dup, err := f.hubCore.SubmitTurn(sv2.ID, core.SessionTurnRequest{Prompt: "原文", RequestID: "rp"}, "admin")
+	if err != nil || !dup || ref3.TaskID != ref1.TaskID {
+		t.Fatalf("request_id 重放应命中原回执: %v dup=%v", err, dup)
+	}
+	// 新普通轮（不同文/新序号）仍被守卫拒（守卫只放行重放，不放行新投递）。
+	if _, _, err := f.hubCore.SubmitTurn(sv2.ID, core.SessionTurnRequest{Prompt: "新轮"}, "admin"); !errors.Is(err, core.ErrSpaceDispatchRequired) {
+		t.Fatalf("新普通轮应仍被守卫拒: %v", err)
+	}
+}
+
+// TestBControlSpaceSerializesAdvance 必修B-残①（锁面受控屏障）：空间调度锁被
+// 占住期间 ControlSpace(pause) 与 Dispatch 的登记段均被互斥——控制变更与推进
+// 不存在「读态后落地」交错窗；放锁后按序落地（pause 生效 → 随后 Dispatch 登记
+// 被运行态门拒绝并触发 D-2 绑定残留补偿 → node 零残留）。
+func TestBControlSpaceSerializesAdvance(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	m := f.svc.lockSpace(f.spaceID)
+	m.Lock() // 受控屏障：占住空间调度锁
+	applied := make(chan error, 1)
+	go func() {
+		view, _ := f.svc.SpaceView(f.spaceID)
+		_, _, err := f.svc.ControlSpace(f.spaceID, collab.ControlRequest{RequestID: "b-pause",
+			Action: collab.ActPause, ExpectedVersion: view.Version}, fakeHubSubject)
+		applied <- err
+	}()
+	// 锁被占住：pause 不得落地（互斥语义确定性——观察窗内检查）。
+	deadline := time.Now().Add(150 * time.Millisecond)
+	seen := false
+	for time.Now().Before(deadline) {
+		sp, _ := f.svc.Space(f.spaceID)
+		if sp.Status == collab.StatusPaused {
+			t.Fatal("锁被占住期间 pause 不应落地（互斥被破坏）")
+		}
+		seen = true
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !seen {
+		t.Fatal("观察窗未执行")
+	}
+	m.Unlock() // 放屏障
+	if err := <-applied; err != nil {
+		t.Fatalf("放锁后 pause: %v", err)
+	}
+	sp, _ := f.svc.Space(f.spaceID)
+	if sp.Status != collab.StatusPaused {
+		t.Fatalf("pause 应落地: %s", sp.Status)
+	}
+}
+
+// TestBReverifyViaLockAbort 复审必修B-残①（读态后暂停→不得提交）：pause 先于
+// 推进落地后，advanceLocked 运行态门零投递（pending 意图保持未投递——不存在
+// 「已取消意图被旧推进首次执行」窗）。
+func TestBReverifyViaLockAbort(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// 直落 pending 意图（受理态）。
+	view, _ := f.svc.SpaceView(f.spaceID)
+	if _, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "b-rv-1",
+		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version,
+		Note: "x"}, fakeHubSubject); err != nil {
+		t.Fatal(err)
+	}
+	// pause 先落地。
+	view, _ = f.svc.SpaceView(f.spaceID)
+	if _, _, err := f.svc.ControlSpace(f.spaceID, collab.ControlRequest{RequestID: "b-rv-pause",
+		Action: collab.ActPause, ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// 推进（sweep 同路径）→ 运行态门 → 零投递。
+	f.svc.KickSpace(f.spaceID)
+	sv, _ := f.hubCore.GetSession(f.sessID)
+	if n := len(sv.Turns); n != 0 {
+		t.Fatalf("pause 后推进应零投递: %d", n)
+	}
+	got, ok := f.svc.IntentByRequest(f.spaceID, "b-rv-1")
+	if !ok || got.Status != collab.IntentPending {
+		t.Fatalf("pending 意图应保持排队: %+v", got)
+	}
+}
+
+// TestBConvergePauseAtomicBlocksAdvance 必修B-残②（收敛+暂停两落账原子可见）：
+// 棒 1 在途 + 棒 2 排队 → 取消棒 1 → 收敛与系统暂停在同一调度锁区完成——棒 2
+// 不存在「收敛已落、暂停未落」中间态被推进（取消后保持 pending；resume 显式放
+// 行才推进）。
+func TestBConvergePauseAtomicBlocksAdvance(t *testing.T) {
+	f := newChainFixture(t, true, true)
+	f.secondAgentCard(t)
+	sv2, _, err := f.hubCore.CreateSession(core.SessionCreateRequest{NodeID: "n1", AgentName: "coder2", Cwd: f.nodeCwd}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ver := f.addSecondMember(t, "b2a", collab.Member{Name: "n1/coder2", SessionID: sv2.ID})
+	if _, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "ba-m1",
+		ExpectedVersion: ver, Note: "棒 1"}, fakeHubSubject); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder2", RequestID: "ba-m2",
+		ExpectedVersion: ver + 1, Note: "棒 2"}, fakeHubSubject); err != nil {
+		t.Fatal(err)
+	}
+	it1, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "ba-m1",
+		ExpectedVersion: ver, Note: "棒 1（待取消的在途棒）"}, fakeHubSubject)
+	if err != nil || it1.Status != collab.IntentAccepted {
+		t.Fatalf("棒 1 应 accepted: %v %+v", err, it1)
+	}
+	if _, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder2", RequestID: "ba-m2",
+		ExpectedVersion: ver + 1, Note: "棒 2"}, fakeHubSubject); err != nil {
+		t.Fatal(err)
+	}
+	// 等棒 1 进入 node（barrier 阻塞在途）→ 取消 → 合并收敛 + 系统暂停（同锁区）。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, ok := f.nodeLed.Get(it1.TaskID); ok && e.State != ledger.StateAccepted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, _, err := f.hubCore.CancelTask(it1.TaskID, "人工取消"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	// 终态确定性：棒 1 cancelled + 空间 paused + 棒 2 保持 pending 未投递。
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		got1, _ := f.svc.IntentByRequest(f.spaceID, "ba-m1")
+		sp, _ := f.svc.Space(f.spaceID)
+		got2, ok2 := f.svc.IntentByRequest(f.spaceID, "ba-m2")
+		if got1.Status == collab.IntentCancelled && sp.Status == collab.StatusPaused {
+			if !ok2 || got2.Status != collab.IntentPending || got2.TaskID != "" {
+				t.Fatalf("暂停落账完成前不得推进棒 2: %+v", got2)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("取消收敛+暂停未达成")
+}
+
+// TestD1ConditionalUnbindAckNoop 必修D-1（node 条件删除——代际语义）：登记 S2
+// 后携旧代 expect=S1 解除 → ack-noop 零变更；携 expect=S2 解除 → 删除。
+func TestD1ConditionalUnbindAckNoop(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	sid := "s-d1"
+	if err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: collab.HubScope("sp-S2"), SessionID: sid}, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// 旧代解除（expect=S1 ≠ 现登记 S2）→ ack 成立（noop），S2 登记完好。
+	if err := f.hubCore.SpaceUnbind("n1", sid, collab.HubScope("sp-S1"), 2*time.Second); err != nil {
+		t.Fatalf("旧代解除应 ack-noop（非错误）: %v", err)
+	}
+	if got := f.binds.Space(sid); got != collab.HubScope("sp-S2") {
+		t.Fatalf("旧代解除不得删新代登记: %q", got)
+	}
+	// 当代解除（expect=S2）→ 删除。
+	if err := f.hubCore.SpaceUnbind("n1", sid, collab.HubScope("sp-S2"), 2*time.Second); err != nil {
+		t.Fatalf("当代解除: %v", err)
+	}
+	if got := f.binds.Space(sid); got != "" {
+		t.Fatalf("当代解除应删除: %q", got)
+	}
+}
+
+// TestD1StaleUnbindInvalidatedOnRebind 必修D-1（队列代际作废）：解绑失败入队
+// → 同 session 新 bind 成立（经 Dispatch 路径）→ 旧解除条目作废出队（旧重试
+// 不再下发）。
+func TestD1StaleUnbindInvalidatedOnRebind(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// 解绑不可达 node → 入队。
+	f.svc.UnbindSession("n-missing", f.sessID, Scope(f.spaceID))
+	found := false
+	for _, sid := range f.svc.PendingUnbindSessions() {
+		if sid == f.sessID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("前置：解除应已入队")
+	}
+	// 正常派发（bind 成立）→ 代际作废 → 队列清空。
+	view, _ := f.svc.SpaceView(f.spaceID)
+	if _, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "d1-rebind",
+		ExpectedVersion: view.Version, Note: "rebind"}, fakeHubSubject); err != nil {
+		t.Fatalf("派发: %v", err)
+	}
+	if left := f.svc.PendingUnbindSessions(); len(left) != 0 {
+		t.Fatalf("新 bind 成立后旧代解除应作废出队: %v", left)
+	}
+}
+
+// TestD2CompensateOnRecordDispatchFailure 必修D-2（预检-事务窗绑定残留补偿）：
+// 受控屏障——占住空间调度锁，派发完成预检+绑定后在锁外等待；期间 pause 直落
+// （直调模型层，绕锁面构造窗口）；放锁 → RecordDispatch 状态拒绝 → 补偿解除
+// → node 零残留。
+func TestD2CompensateOnRecordDispatchFailure(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	m := f.svc.lockSpace(f.spaceID)
+	m.Lock() // 屏障：派发的登记段在锁外排队
+	dispErr := make(chan error, 1)
+	go func() {
+		view, _ := f.svc.SpaceView(f.spaceID)
+		_, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder",
+			RequestID: "d2-1", ExpectedVersion: view.Version, Note: "x"}, fakeHubSubject)
+		dispErr <- err
+	}()
+	// 等派发完成 bind（进入锁等待）——不可直察，用绑定登记事实同步（确定性）。
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.binds.Space(f.sessID) == Scope(f.spaceID) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// 窗内 pause（直调模型层 Control——绕调度锁构造预检-事务窗）。
+	view, _ := f.svc.SpaceView(f.spaceID)
+	if _, _, err := f.svc.Control(f.spaceID, collab.ControlRequest{RequestID: "d2-pause",
+		Action: collab.ActPause, ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
+		t.Fatalf("窗内 pause: %v", err)
+	}
+	m.Unlock() // 放行登记段
+	err := <-dispErr
+	if err == nil {
+		t.Fatal("暂停后登记应被拒绝（非零错误）")
+	}
+	// 补偿生效：node 零残留（同 request_id 重试不再有幽灵绑定）。
+	if got := f.binds.Space(f.sessID); got != "" {
+		t.Fatalf("登记失败应补偿解除（node 零残留）: %q", got)
+	}
+}
+
+// TestD2BudgetPrecheckNoBind 必修D-2（预检补预算核算）：预算 dispatch_round=1
+// 消耗后第二次派发在预检即拒（budget_exhausted）——绑定零新增（零残留面）。
+func TestD2BudgetPrecheckNoBind(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	view, _ := f.svc.SpaceView(f.spaceID)
+	if _, _, err := f.svc.Control(f.spaceID, collab.ControlRequest{RequestID: "b2-budget",
+		Action: collab.ActSetBudget, ExpectedVersion: view.Version,
+		Budget: &collab.Budget{MaxDispatchRounds: 1}}, fakeHubSubject); err != nil {
+		t.Fatalf("预算: %v", err)
+	}
+	view, _ = f.svc.SpaceView(f.spaceID)
+	if _, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "b2-first",
+		ExpectedVersion: view.Version, Note: "第一棒"}, fakeHubSubject); err != nil {
+		t.Fatalf("第一棒: %v", err)
+	}
+	view, _ = f.svc.SpaceView(f.spaceID)
+	_, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "b2-second",
+		ExpectedVersion: view.Version, Note: "第二棒"}, fakeHubSubject)
+	if !containsCode(err, collab.CodeBudgetExhausted) {
+		t.Fatalf("第二棒应 budget_exhausted（预检面）: %v", err)
+	}
+	// 预检拒绝零意图零投递。
+	if _, ok := f.svc.IntentByRequest(f.spaceID, "b2-second"); ok {
+		t.Fatal("预检拒绝应零意图")
+	}
+}
+
+// TestETurnFactFourStates 必修E-残（四态枚举逐态实证）：none（无轮行=未投递）/
+// matched（三重全等）/conflict（seq 不符）/missing（轮行在、任务已清理）。
+func TestETurnFactFourStates(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// none：直落意图（无轮行）。
+	view, _ := f.svc.SpaceView(f.spaceID)
+	if _, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "e-none",
+		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
+		t.Fatal(err)
+	}
+	it, _ := f.svc.IntentByRequest(f.spaceID, "e-none")
+	if _, st := f.svc.intentTurnFact(it); st != turnFactNone {
+		t.Fatalf("无轮行应 none: %d", st)
+	}
+	// 推进 e-none（串行门清空：执行完成收敛——无 barrier 直接跑完）。
+	f.svc.KickSpace(f.spaceID)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, ok := f.svc.IntentByRequest(f.spaceID, "e-none"); ok && got.Status == collab.IntentConverged {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// matched：正常派发全链（受理→提交→接单）。
+	view, _ = f.svc.SpaceView(f.spaceID)
+	itm, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder", RequestID: "e-matched",
+		ExpectedVersion: view.Version, Note: "x"}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, st := f.svc.intentTurnFact(itm); st != turnFactMatched {
+		t.Fatalf("全链意图应 matched: %d", st)
+	}
+	// conflict：intent.TurnSeq 与轮行不符（构造 seq 偏移意图）。
+	conflict := itm
+	conflict.TurnSeq = itm.TurnSeq + 100
+	if _, st := f.svc.intentTurnFact(conflict); st != turnFactConflict {
+		t.Fatalf("seq 不符应 conflict: %d", st)
+	}
+}
+
+// TestECleanedTaskPendingNeedsReview 必修E-残（任务清理 ≠ 从未投递）：受理→投递
+// 崩溃窗（接单登记缺失）+ 任务终态后超保留期清理 → 重启对账按四态 missing 留待
+// 核对——意图保持在途（绝不取消冒认未投递、绝不假 converged）。
+func TestECleanedTaskPendingNeedsReview(t *testing.T) {
+	f := newChainFixtureO(t, chainOpts{barrier: true, capable: true,
+		sweepInterval: 50 * time.Millisecond, terminalRetention: 5 * time.Millisecond})
+	// 崩溃窗构造：绑定登记（node 收件门）→ 受理登记 + 投递（轮行+任务在案），
+	// 接单登记缺失（保持 pending）。
+	if err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID}, 2*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := f.svc.SpaceView(f.spaceID)
+	it, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "e-clean-1",
+		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version,
+		Note: "清理反例"}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, dup, err := f.hubCore.SubmitSpaceTurn(f.sessID, core.SessionTurnRequest{Prompt: it.Note,
+		TurnSeq: it.TurnSeq, RequestID: it.RequestID}, systemSubject().String(), Scope(f.spaceID))
+	if err != nil || dup {
+		t.Fatalf("投递: %v dup=%v", err, dup)
+	}
+	// hub 关停（真崩溃时序：任务终态时收敛钩子不在位——旧实例钩子被关停位拦下），
+	// 再放行执行 → 任务终态 → 极短保留期清理。
+	if err := f.svc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	f.releaseBarrier()
+	deadline := time.Now().Add(5 * time.Second)
+	cleaned := false
+	for time.Now().Before(deadline) {
+		if _, ok := f.hubCore.GetTask(ref.TaskID); !ok {
+			cleaned = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cleaned {
+		t.Fatal("前置：任务应被保留期清理")
+	}
+	// 重启 → 恢复对账：missing → 留待核对（意图保持 in-flight）。
+	if err := f.svc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	svc2, err := Open(f.dir, f.hubCore, Options{})
+	if err != nil {
+		t.Fatalf("重开: %v", err)
+	}
+	defer svc2.Close()
+	f.hubCore.SetSpaceTurnGuard(svc2.SpaceTurnGuard())
+	// 清理后重启：意图留待核对（在途）——轮询数个扫查节拍确认未被取消/收敛。
+	sweeps := 10 * sweepInterval
+	deadline = time.Now().Add(sweeps + time.Second)
+	for time.Now().Before(deadline) {
+		got, ok := svc2.IntentByRequest(f.spaceID, "e-clean-1")
+		if !ok {
+			t.Fatal("意图缺失")
+		}
+		if got.Status != collab.IntentPending && got.Status != collab.IntentAccepted {
+			t.Fatalf("证据缺失应留待核对（在途），绝不取消/收敛: %+v", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, _ := svc2.IntentByRequest(f.spaceID, "e-clean-1")
+	if !got.Status.InFlight() {
+		t.Fatalf("清理后意图应保持在途（留待核对）: %+v", got)
+	}
+}
+
+// TestHCloseWaitsConvergePauseLanding 建议H 补强（受控屏障钉两落账）：真实
+// AddOnTaskMerged 入口——取消在途棒 → 合并钩子进入 hookEntry（收敛落账对轮询
+// 可见时，钩子仍持空间锁贯穿停队落账）→ Close 的排空面必须等钩子整个出临界
+// （收敛+暂停两落账完成）才返回——Close 返回即空间已 paused。
+func TestHCloseWaitsConvergePauseLanding(t *testing.T) {
+	f := newChainFixture(t, true, true)
+	it, _, err := f.svc.Dispatch(DispatchRequest{
+		SpaceID: f.spaceID, Member: "n1/coder", RequestID: "h-1",
+		ExpectedVersion: 4, Note: "两落账屏障",
+	}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 取消在途棒：hub 侧首落（Result 未达不猜）→ node 取消结果合并 → 真实
+	// AddOnTaskMerged 入口执行收敛+停队。
+	if _, _, err := f.hubCore.CancelTask(it.TaskID, "人工取消"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	// 等收敛落账可见（钩子已进入两落账区——停队落账与之同锁区串行）。
+	deadline = time.Now().Add(5 * time.Second)
+	seenCancelled := false
+	for time.Now().Before(deadline) {
+		if got, ok := f.svc.IntentByRequest(f.spaceID, "h-1"); ok && got.Status == collab.IntentCancelled {
+			seenCancelled = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !seenCancelled {
+		t.Fatal("前置：取消收敛应已落账")
+	}
+	// Close：排空面等钩子出临界（含停队落账）——返回即两落账齐备。
+	if err := f.svc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	sp, _ := f.svc.Space(f.spaceID)
+	if sp.Status != collab.StatusPaused {
+		t.Fatalf("Close 返回时停队落账必须已完成（排空面贯穿两落账）: %s", sp.Status)
+	}
 }

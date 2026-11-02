@@ -391,6 +391,10 @@ type SpaceBindPayload struct {
 	Space string `json:"space"`
 	// SessionID 平台会话 ID（hub 注册表分配；成员原生线程的会话标识）。
 	SessionID string `json:"session_id"`
+	// ExpectSpace 解除登记的预期既有绑定 scope（解除路径必填；codex 复审必修
+	// D-1 代际语义：node 仅当当前登记 scope 与预期一致才删除——旧代解绑重试不
+	// 得删掉新代登记；不符如实 ack-noop。登记路径忽略本字段）。
+	ExpectSpace string `json:"expect_space,omitempty"`
 }
 
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。

@@ -125,6 +125,15 @@ type Service struct {
 	muUnbind       sync.Mutex
 	pendingUnbinds map[string]hubUnbind
 
+	// 每空间调度互斥（codex 复审必修B-残）：贯穿「准入→提交」与「收敛→暂停」
+	// 两落账的一致同步边界——advanceLocked（投递推进）/convergeOnTaskTerminal
+	//（收敛+停队）/ControlSpace（pause/resume/成员/完成类控制）同锁串行，消除
+	// 「读态→绑定应答→提交」窗内意图被取消后旧推进仍提交、与「收敛后暂停落账
+	// 完成前推进下一棒」两竞态窗。锁内允许 SpaceBind 网络等待（秒级预算）——
+	// 控制面最坏等待一次绑定往返，正确性优先；锁外操作（读面/消息面）零影响。
+	muSpaceLocks sync.Mutex
+	spaceLocks   map[string]*sync.Mutex
+
 	// 关停优雅收束面（Close 三段式：关停位 → 排空 → 关库）：
 	//   - muClose/closed 关停位：置位后新回调入口快速退出（hub 侧钩子注册在
 	//     core 上无法注销——旧服务实例的注册持续可达，重开新实例后旧钩子同样
@@ -171,7 +180,7 @@ func Open(dataDir string, c *core.Core, opt Options) (*Service, error) {
 		return nil, err
 	}
 	s := &Service{Store: st, core: c, snap: snap, stop: make(chan struct{}), done: make(chan struct{}),
-		closeDone: make(chan struct{}), pendingUnbinds: map[string]hubUnbind{}}
+		closeDone: make(chan struct{}), pendingUnbinds: map[string]hubUnbind{}, spaceLocks: map[string]*sync.Mutex{}}
 	// 双钩子统一经 hookEntry 入口（关停位检查 + 在途排空计数；见 Service 注）。
 	c.AddOnTaskTerminal(s.hookEntry)
 	// 取消合并钩子（同一收敛函数双注册）：hub 侧取消首落终态时 Result 未达不猜
@@ -242,6 +251,28 @@ func (s *Service) Close() error {
 // Scope 空间 scope（collab.HubScope 词形单源；W07-01 定案「创建入口 scope 固定
 // hub:<id>」——中心空间服务对内对外的唯一词形）。
 func Scope(spaceID string) string { return collab.HubScope(spaceID) }
+
+// lockSpace 每空间调度互斥锁定位（惰性建锁；锁面见 Service.spaceLocks 注）。
+func (s *Service) lockSpace(spaceID string) *sync.Mutex {
+	s.muSpaceLocks.Lock()
+	defer s.muSpaceLocks.Unlock()
+	m, ok := s.spaceLocks[spaceID]
+	if !ok {
+		m = &sync.Mutex{}
+		s.spaceLocks[spaceID] = m
+	}
+	return m
+}
+
+// ControlSpace 控制动作（调度互斥面）：pause/resume/成员/预算/策略/完成类控制
+// 在空间调度锁内执行——控制变更对投递推进/收敛停队原子可见（codex 必修B-残②：
+// 消除「收敛后暂停落账完成前推进下一棒」窗）。模型层逐动作授权/状态机照常。
+func (s *Service) ControlSpace(spaceID string, req collab.ControlRequest, subj collab.Subject) (collab.ControlResult, bool, error) {
+	m := s.lockSpace(spaceID)
+	m.Lock()
+	defer m.Unlock()
+	return s.Control(spaceID, req, subj)
+}
 
 // SpaceTurnGuard 中心空间会话轮守卫闭包（生产装配单源：cmd/hub 与测试夹具同函数
 // 接线——codex 必修A/F）：绑定会话普通轮（space=""）→ ErrSpaceDispatchRequired
@@ -321,8 +352,23 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	if err := s.core.SpaceBind(mt.nodeID, protocol.SpaceBindPayload{Space: scope, SessionID: mt.sessionID}, 0); err != nil {
 		return collab.DispatchIntent{}, false, bindError(err)
 	}
+	s.invalidateUnbind(mt.sessionID) // 新代绑定成立：旧代解除条目作废（codex 必修D-1 代际语义）
 	s.muDispatch.Lock()
-	defer s.muDispatch.Unlock()
+	// 空间调度锁（codex 必修B-残①）：受理登记与投递推进同锁串行——本意图不会
+	// 在「登记→推进」窗内被 pause/租约取消（控制面 ControlSpace 同锁互斥）。
+	slm := s.lockSpace(req.SpaceID)
+	slm.Lock()
+	needUnbind := false // D-2：登记失败时的绑定残留补偿（成功登记/重放不清偿）
+	defer func() {
+		slm.Unlock()
+		s.muDispatch.Unlock()
+		if needUnbind {
+			// 绑定残留补偿（codex 必修D-2）：本次已 bind 的会话立即条件解除
+			//（expect-scope 条件删除——D-1 同款自愈面）；失败入重试队列。人话
+			// 日志留痕，残留后续由 bind 幂等覆盖或解除重试收敛。
+			s.UnbindSession(mt.nodeID, mt.sessionID, Scope(req.SpaceID))
+		}
+	}()
 	// 互斥段内重放重检（并发派发收敛：先落者为准，后来者按重放/冲突出回执）。
 	if it, ok := s.IntentByRequest(req.SpaceID, req.RequestID); ok {
 		if it.Member != req.Member {
@@ -352,15 +398,14 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 		Note:            req.Note,
 	}, subj)
 	if err != nil {
+		needUnbind = true // 登记失败：预检-事务窗（成员移除/暂停/预算/版本）绑定残留补偿
 		return collab.DispatchIntent{}, false, err
 	}
 	if dup {
 		return it, true, nil // 并发收敛：另一 goroutine 已受理
 	}
-	// 投递准入（outbox 先登记后 send；codex 必修B——对齐 node advanceSpace：
-	// running 态 + 有效租约 + 同空间串行一次一棒，accepted 在途/非运行态不投，
-	// 租约过期取消未投递意图——不在这里直接 submitIntent）。
-	s.advanceSpace(req.SpaceID)
+	// 投递准入（outbox 先登记后 send；调度锁内推进——见 advanceLocked 注）。
+	s.advanceLocked(req.SpaceID)
 	// 返回前重读意图（attach/取消收束发生在投递段内——调用方看到当前态：
 	// accepted（带 TaskID）或确定性取消收束态，不回投递前快照）。
 	if cur, ok := s.IntentByRequest(req.SpaceID, req.RequestID); ok {
@@ -439,7 +484,25 @@ func (s *Service) precheckDispatch(req DispatchRequest, subj collab.Subject) err
 	if sp.Status != collab.StatusRunning {
 		return fmt.Errorf("%w: dispatch：仅运行态可派发（现 %s；先显式启动）", collab.ErrIllegalTransition, sp.Status)
 	}
+	// 预算只读核算（codex 必修D-2：预检覆盖 RecordDispatch 的预算拒绝面——
+	// 三计数分离同口径；权威复核仍在 RecordDispatch 事务内）。
+	if sp.Budget.MaxDispatchRounds > 0 && sp.Used.DispatchRounds >= sp.Budget.MaxDispatchRounds {
+		return fmt.Errorf("%w: dispatch_round 已达上限 %d", collab.ErrBudgetExhausted, sp.Budget.MaxDispatchRounds)
+	}
+	if sp.Budget.MaxWallSeconds > 0 && wallSecondsNow(sp.Used) >= int64(sp.Budget.MaxWallSeconds) {
+		return fmt.Errorf("%w: 运行墙钟已达上限 %ds", collab.ErrBudgetExhausted, sp.Budget.MaxWallSeconds)
+	}
 	return nil
+}
+
+// wallSecondsNow 墙钟用量快照（running 段含未结算；与 collab BudgetUsed 同口径
+// 的只读复算——包内字段 exported，算术本地）。
+func wallSecondsNow(u collab.BudgetUsed) int64 {
+	total := u.WallSeconds
+	if !u.RunningSince.IsZero() && protocol.NowUTC().After(u.RunningSince) {
+		total += int64(protocol.NowUTC().Sub(u.RunningSince) / time.Second)
+	}
+	return total
 }
 
 // splitMemberName 成员名拆解（目录词形 nodeID/agentName；nodeID 不含 /、agent
@@ -475,6 +538,7 @@ func (s *Service) submitIntent(spaceID string, it collab.DispatchIntent, rebind 
 			log.Printf("[hub] 空间意图投递暂缓（绑定登记未达）space=%s intent=%s: %v（下次扫查重试）", spaceID, it.RequestID, err)
 			return nil
 		}
+		s.invalidateUnbind(it.SessionID)
 	}
 	ref, dup, err := s.core.SubmitSpaceTurn(it.SessionID, core.SessionTurnRequest{
 		Prompt:    it.Note,
@@ -490,10 +554,19 @@ func (s *Service) submitIntent(spaceID string, it collab.DispatchIntent, rebind 
 		return nil
 	}
 	if dup {
-		// 重放命中（先前受理的轮已落库——崩溃窗恢复路径）：按轮行实物接单登记
-		//（三重核验见 intentTurnFact——codex 必修E：旧普通轮撞号不得冒领意图）。
-		if tr, ok := s.intentTurnFact(it); ok {
+		// 重放命中（先前受理的轮已落库——崩溃窗恢复路径）：按轮行实物四态核验
+		//（codex 必修E）接单登记——matched 补关联；conflict 如实取消；missing
+		// 留待核对；none 理论不可达（dup 蕴含轮行在）防御日志。
+		tr, st := s.intentTurnFact(it)
+		switch st {
+		case turnFactMatched:
 			s.attachIntent(spaceID, it, tr.TaskID)
+		case turnFactConflict:
+			_ = s.cancelIntent(spaceID, it, "重放关联冲突（轮行/任务来源标记与本意图不符）：取消收束")
+		case turnFactMissing:
+			log.Printf("[hub] 重放关联证据缺失（任务已清理），意图留待核对 space=%s intent=%s", spaceID, it.RequestID)
+		default:
+			log.Printf("[hub] 重放命中但无轮行（防御位）space=%s intent=%s", spaceID, it.RequestID)
 		}
 		return nil
 	}
@@ -541,7 +614,7 @@ func (s *Service) nodeIDOf(it collab.DispatchIntent) string {
 // 幂等（node 未登记亦 ack）。重启队列丢失为已登记边界：node 残留绑定 fail-closed
 // （普通轮拒收），后续任何 space_bind 幂等覆盖自愈。
 func (s *Service) UnbindSession(nodeID, sessionID, scope string) {
-	if err := s.core.SpaceUnbind(nodeID, sessionID, 0); err != nil {
+	if err := s.core.SpaceUnbind(nodeID, sessionID, scope, 0); err != nil {
 		s.muUnbind.Lock()
 		s.pendingUnbinds[sessionID] = hubUnbind{nodeID: nodeID, sessionID: sessionID, scope: scope}
 		s.muUnbind.Unlock()
@@ -549,6 +622,20 @@ func (s *Service) UnbindSession(nodeID, sessionID, scope string) {
 		return
 	}
 	log.Printf("[hub] 中心空间绑定已解除 session=%s scope=%s", sessionID, scope)
+}
+
+// invalidateUnbind 解除登记代际作废（codex 复审必修D-1）：同 session 新 bind
+// 成立即作废旧代解除条目——旧重试不再下发（node 条件删除为第二道防线）。绑定
+// 成功路径（Dispatch/补绑定）调用。
+func (s *Service) invalidateUnbind(sessionID string) {
+	s.muUnbind.Lock()
+	if _, ok := s.pendingUnbinds[sessionID]; ok {
+		delete(s.pendingUnbinds, sessionID)
+		s.muUnbind.Unlock()
+		log.Printf("[hub] 旧代解除登记已作废（session 重新绑定成立）session=%s", sessionID)
+		return
+	}
+	s.muUnbind.Unlock()
 }
 
 // KickSpace 显式推进单空间投递（api resume 面接线——node NotifySpaceResumed 同
@@ -576,13 +663,13 @@ func (s *Service) retryUnbinds() {
 	}
 	s.muUnbind.Unlock()
 	for _, u := range pending {
-		if err := s.core.SpaceUnbind(u.nodeID, u.sessionID, 0); err != nil {
+		if err := s.core.SpaceUnbind(u.nodeID, u.sessionID, u.scope, 0); err != nil {
 			continue // 留队下次扫查重试
 		}
 		s.muUnbind.Lock()
 		delete(s.pendingUnbinds, u.sessionID)
 		s.muUnbind.Unlock()
-		log.Printf("[hub] 中心空间绑定已解除（重试成功）session=%s scope=%s", u.sessionID, u.scope)
+		log.Printf("[hub] 中心空间绑定已解除（重试成功，条件删除核验预期 scope）session=%s scope=%s", u.sessionID, u.scope)
 	}
 }
 
@@ -649,6 +736,13 @@ func (s *Service) convergeOnTaskTerminal(t protocol.Task) {
 	if !ok {
 		return // 无在途意图锚（重放/已收敛）：零操作
 	}
+	// 空间调度锁（codex 复审必修B-残②）：收敛与停队两落账在同一锁区完成——推进
+	// 面（Dispatch/advance/sweep 同锁）要么见到「收敛前（accepted 在途→等待）」
+	// 要么见到「暂停后（运行态门拦下）」，不存在「收敛已落、暂停未落」的中间态
+	// 被抢跑推进下一棒。
+	m := s.lockSpace(spaceID)
+	m.Lock()
+	defer m.Unlock()
 	if _, err := s.ConvergeIntent(spaceID, it.RequestID, outcome, it.TaskID, note, systemSubject()); err != nil {
 		log.Printf("[hub] 中心空间意图收敛落账失败 space=%s intent=%s: %v（重启对账按实物重试）", spaceID, it.RequestID, err)
 		return
@@ -657,8 +751,8 @@ func (s *Service) convergeOnTaskTerminal(t protocol.Task) {
 	if !halt {
 		// 串行队列推进（node spaceConvergeTurn kick 同规）：已受理的排队意图继续
 		// 投递——结果落账不「产生」新派发（N04），但已受理队列照常推进；paused
-		// 空间由 advanceSpace 运行态门拦下（不触发暂停空间的下一步）。
-		s.advanceSpace(spaceID)
+		// 空间由 advanceLocked 运行态门拦下（不触发暂停空间的下一步）。
+		s.advanceLocked(spaceID)
 	} else {
 		if _, applied, perr := s.Store.SystemPause(spaceID, "成员轮被取消（人工介入）：新增派发暂停，显式 resume 恢复"); perr != nil {
 			log.Printf("[hub] 取消后系统暂停失败 space=%s: %v", spaceID, perr)
@@ -700,20 +794,41 @@ func firstSegment(s, def string) string {
 	return s
 }
 
-// intentTurnFact 意图轮行实物定位（codex 必修E——三重核验）：按 request_id 找
-// 轮行后必须核对「预留 seq 一致 + 任务空间来源标记一致（且归属本意图会话）」。
-// 旧普通轮撞号（同 request_id 或已占 seq）不得冒领意图——恢复误认旧轮会把从未
-// 执行的新意图记 converged（codex 实证反例）；核验不过按无实物处理。
-func (s *Service) intentTurnFact(it collab.DispatchIntent) (hubstore.SessionTurn, bool) {
+// turnFactState 意图轮行实物核验结论（codex 复审必修E-残——四态取代 bool）：
+//   - turnFactNone：无轮行 = 未投递（可取消收束——「不自动重跑」语义）；
+//   - turnFactMatched：request_id+预留 seq+任务空间来源三重全等 = 补接单收敛；
+//   - turnFactConflict：轮行在案但 seq/来源标记不符 = 旧轮撞号冒领（如实取消
+//     注记冲突，绝不冒充 converged）；
+//   - turnFactMissing：轮行在案、任务已过保留期清理 = 执行事实不可核验 → 留待
+//     核对（needs_review 同族语义——绝不释放在途、绝不取消冒认未投递）。
+type turnFactState int
+
+const (
+	turnFactNone turnFactState = iota
+	turnFactMatched
+	turnFactConflict
+	turnFactMissing
+)
+
+// intentTurnFact 意图轮行实物定位（四态；调用点：advanceLocked 崩溃窗/提交重放
+// 补关联/pending 恢复/convergeIntentByTaskFact 空回退——逐一对齐各态语义）。
+func (s *Service) intentTurnFact(it collab.DispatchIntent) (hubstore.SessionTurn, turnFactState) {
 	tr, ok := s.core.SessionTurnByRequest(it.SessionID, it.RequestID)
-	if !ok || tr.Seq != it.TurnSeq {
-		return hubstore.SessionTurn{}, false
+	if !ok {
+		return hubstore.SessionTurn{}, turnFactNone
+	}
+	if tr.Seq != it.TurnSeq {
+		return hubstore.SessionTurn{}, turnFactConflict
 	}
 	t, ok := s.core.GetTask(tr.TaskID)
-	if !ok || t.Session == nil || t.Session.SessionID != it.SessionID || t.Session.Space != Scope(it.SpaceID) {
-		return hubstore.SessionTurn{}, false
+	if !ok {
+		// 任务已清理：Attach 失败+超保留期的形态——执行事实不可核验。
+		return hubstore.SessionTurn{}, turnFactMissing
 	}
-	return tr, true
+	if t.Session == nil || t.Session.SessionID != it.SessionID || t.Session.Space != Scope(it.SpaceID) {
+		return hubstore.SessionTurn{}, turnFactConflict
+	}
+	return tr, turnFactMatched
 }
 
 // intentByTurn 按意图锚（session+seq）找在途意图（迟到结果消费的锚核验：意图与
@@ -743,10 +858,12 @@ func (s *Service) recover() {
 	for _, it := range s.RecoverIntents() {
 		switch it.Status {
 		case collab.IntentPending:
-			// 轮行实物三重核验（codex 必修E：request_id + 预留 seq + 任务空间来源
-			// 标记——旧普通轮撞号按无实物处理，绝不冒领）。
-			tr, ok := s.intentTurnFact(it)
-			if !ok {
+			// 轮行实物四态核验（codex 复审必修E-残：none=未投递可取消；matched=
+			// 补接单收敛；conflict=如实取消注记冲突；missing=证据缺失留待核对
+			// ——任务清理 ≠ 从未投递，绝不取消冒认、绝不释放在途）。
+			tr, st := s.intentTurnFact(it)
+			switch st {
+			case turnFactNone:
 				if _, err := s.ConvergeIntent(it.SpaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID,
 					"中心恢复对账：未投递意图不自动重跑（恢复后显式重新派发）", systemSubject()); err != nil {
 					log.Printf("[hub] 重启对账：pending 意图取消收束失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
@@ -754,7 +871,19 @@ func (s *Service) recover() {
 				}
 				log.Printf("[hub] 重启对账：未投递意图已取消收束 space=%s intent=%s member=%s", it.SpaceID, it.RequestID, it.Member)
 				continue
+			case turnFactConflict:
+				if _, err := s.ConvergeIntent(it.SpaceID, it.RequestID, string(collab.IntentCancelled), it.TaskID,
+					"中心恢复对账：轮行/任务来源标记与本意图冲突（旧轮撞号嫌疑）——取消收束待人工核对", systemSubject()); err != nil {
+					log.Printf("[hub] 重启对账：冲突意图取消收束失败 space=%s intent=%s: %v（下次启动重试）", it.SpaceID, it.RequestID, err)
+					continue
+				}
+				log.Printf("[hub] 重启对账：冲突意图已取消收束（注记冲突）space=%s intent=%s", it.SpaceID, it.RequestID)
+				continue
+			case turnFactMissing:
+				log.Printf("[hub] 重启对账：意图轮证据缺失（任务已清理），留待核对 space=%s intent=%s member=%s", it.SpaceID, it.RequestID, it.Member)
+				continue
 			}
+			_ = tr
 			// 有轮行实物：接单登记收敛（同文重放路径 AttachDispatchTask 幂等命中
 			// 原结果；已收敛意图 attach 报 illegal_transition → 按实物分类兜底）。
 			if _, err := s.AttachDispatchTask(it.SpaceID, it.RequestID, tr.TaskID, systemSubject()); err == nil {
@@ -773,8 +902,9 @@ func (s *Service) recover() {
 func (s *Service) convergeIntentByTaskFact(it collab.DispatchIntent, via string) {
 	taskID := it.TaskID
 	if taskID == "" {
-		// pending 崩溃窗回退路径：轮行实物即任务锚（三重核验同 intentTurnFact）。
-		if tr, ok := s.intentTurnFact(it); ok {
+		// pending 崩溃窗回退路径：轮行实物即任务锚（四态核验同 intentTurnFact——
+		// missing/conflict 不取锚，交由恢复对账主流程按态处置）。
+		if tr, st := s.intentTurnFact(it); st == turnFactMatched {
 			taskID = tr.TaskID
 		}
 	}
@@ -849,6 +979,14 @@ func (s *Service) sweepLoop() {
 // 提交幂等收敛（SubmitSpaceTurn 同 request_id+seq 重放命中、AttachDispatchTask
 // 同任务幂等）——不叠投不双跑。accepted 留在途等结果（不把失联解释为没执行）。
 func (s *Service) advanceSpace(spaceID string) {
+	m := s.lockSpace(spaceID)
+	m.Lock()
+	defer m.Unlock()
+	s.advanceLocked(spaceID)
+}
+
+// advanceLocked 投递推进主体（调用方持空间调度锁；准入语义注释见 advanceSpace）。
+func (s *Service) advanceLocked(spaceID string) {
 	sp, ok := s.Space(spaceID)
 	if !ok {
 		return
@@ -869,7 +1007,8 @@ func (s *Service) advanceSpace(spaceID string) {
 			continue
 		}
 		// 租约前置检查（S1 口径：仅存在待投递意图时触发——过期只是事实记录，
-		// 不构成无谓暂停；与 node advanceSpace 同表）。
+		// 不构成无谓暂停；与 node advanceSpace 同表；PauseExpired 与本推进同锁，
+		// 不存在「取消后旧推进仍提交」窗）。
 		if !sp.Leader.LeaseValid(now) && !sp.Leader.LeaseUntil.IsZero() {
 			reason := "负责人租约已过期（调度前置检查，任期 " + strconvFormatUint(sp.Leader.Term) + "）：自动暂停，恢复须显式 resume"
 			updated, cancelled, err := s.Store.PauseExpired(spaceID, reason)
@@ -881,16 +1020,50 @@ func (s *Service) advanceSpace(spaceID string) {
 				spaceID, updated.Leader.Term, cancelled, updated.PausedReason)
 			return
 		}
-		// 崩溃窗：轮行实物在先（三重核验）→ 补接单登记即收敛到 accepted（不走投递）。
-		if tr, ok := s.intentTurnFact(it); ok {
+		// 崩溃窗：轮行实物在先（四态核验）→ 补接单登记即收敛到 accepted（不走投递）。
+		tr, st := s.intentTurnFact(it)
+		switch st {
+		case turnFactMatched:
 			s.attachIntent(spaceID, it, tr.TaskID)
 			return // 一次一棒
+		case turnFactConflict:
+			_ = s.cancelIntent(spaceID, it, "轮号冲突（intentTurnFact："+it.RequestID+" 预留 seq "+itoa64(it.TurnSeq)+" 与在案轮行/任务来源标记不符）：取消收束")
+			return
+		case turnFactMissing:
+			// 证据缺失（轮行在、任务已过保留期清理）：执行事实不可核验 → 留待
+			// 核对（绝不释放在途、绝不取消冒认未投递）。
+			log.Printf("[hub] 空间意图轮证据缺失（任务已清理），留待核对 space=%s intent=%s", spaceID, it.RequestID)
+			return
 		}
 		if err := s.submitIntent(spaceID, it, true); err != nil {
 			log.Printf("[hub] 空间滞留意图补投递失败 space=%s intent=%s: %v（下次扫查重试）", spaceID, it.RequestID, err)
 		}
 		return // 一次一棒（无论本次投递成败——瞬态滞留下次推进重试）
 	}
+}
+
+// itoa64 int64 十进制（核验注记拼装）。
+func itoa64(v int64) string {
+	if v == 0 {
+		return "0"
+	}
+	neg := v < 0
+	uv := uint64(v)
+	if neg {
+		uv = uint64(-uv)
+	}
+	var b [24]byte
+	i := len(b)
+	for uv > 0 {
+		i--
+		b[i] = byte('0' + uv%10)
+		uv /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }
 
 // strconvFormatUint uint64 十进制（日志/原因文案拼装；避免引 strconv 单用途）。

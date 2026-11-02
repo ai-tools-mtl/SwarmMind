@@ -85,20 +85,22 @@ func (h *HubBindings) Get(sessionID string) (HubBindEntry, bool) {
 	return e, ok
 }
 
-// Remove 删除会话的登记绑定（space_unbind 解除路径；幂等——未登记零变更亦
-// 成功）。原子快照落盘成功才成立（落盘失败错误如实上抛——hub 收不到 ack 不视
-// 为已解除，重试面兜底）。
-func (h *HubBindings) Remove(sessionID string) error {
+// RemoveIfScope 条件删除绑定（codex 复审必修D-1 代际语义）：仅当当前登记 scope
+// 与 expectScope 一致才删除并落盘（返回 removed=true）；未登记（幂等 ack-noop）
+// 或 scope 不符（旧代解绑重试不得删新代登记）返回 removed=false 零变更。落盘
+// 失败错误如实上抛——hub 收不到 ack 不视为已解除，重试面兜底。
+func (h *HubBindings) RemoveIfScope(sessionID, expectScope string) (bool, error) {
 	if h == nil {
-		return errors.New("hubbind: 登记表未装配")
+		return false, errors.New("hubbind: 登记表未装配")
 	}
 	if sessionID == "" {
-		return errors.New("hubbind: session_id 必填")
+		return false, errors.New("hubbind: session_id 必填")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.binds[sessionID]; !ok {
-		return nil // 幂等：本就未登记
+	cur, ok := h.binds[sessionID]
+	if !ok || cur.Space != expectScope {
+		return false, nil // 幂等 no-op：未登记或代际不符
 	}
 	next := make(map[string]HubBindEntry, len(h.binds))
 	for k, v := range h.binds {
@@ -109,14 +111,14 @@ func (h *HubBindings) Remove(sessionID string) error {
 	}
 	b, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 	b = append(b, '\n')
 	if err := atomicWriteFile(h.tmp, h.path, b); err != nil {
-		return fmt.Errorf("hubbind: 绑定解除落盘失败: %w", err)
+		return false, fmt.Errorf("hubbind: 绑定解除落盘失败: %w", err)
 	}
 	h.binds = next
-	return nil
+	return true, nil
 }
 
 // Space 会话的登记 scope（便捷形；未登记空串）。
@@ -171,15 +173,22 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 		return
 	}
 	if p.Space == "" {
-		// 解除登记（codex 必修D②空 scope 语义）：删除绑定，普通轮恢复放行；
-		// 幂等（未登记零变更亦 ack——解除重试安全）。
-		if err := s.hubBind.Remove(p.SessionID); err != nil {
+		// 解除登记（空 scope 语义；codex 复审必修D-1 条件删除）：仅当当前登记
+		// scope 与预期一致才删除——旧代解绑重试不得删掉新代登记（不符如实
+		// ack-noop；未登记幂等 ack）。普通轮恢复放行由删除成立承担。
+		removed, err := s.hubBind.RemoveIfScope(p.SessionID, p.ExpectSpace)
+		if err != nil {
 			log.Printf("[node] space_unbind 失败 session=%s: %v", p.SessionID, err)
 			s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
 				&protocol.ErrInfo{Code: "bind_store_failed", Msg: "绑定解除落盘失败：" + err.Error()})
 			return
 		}
-		log.Printf("[node] 中心空间绑定已解除 session=%s from=%s", p.SessionID, env.From)
+		if removed {
+			log.Printf("[node] 中心空间绑定已解除 session=%s scope=%s from=%s", p.SessionID, p.ExpectSpace, env.From)
+		} else {
+			log.Printf("[node] space_unbind ack-noop（当前登记与预期不符或未登记）session=%s expect=%s from=%s",
+				p.SessionID, p.ExpectSpace, env.From)
+		}
 		s.sendBindReply(protocol.MsgSpaceBindAck, env.MessageID, p, nil)
 		return
 	}

@@ -419,22 +419,10 @@ func (c *Core) submitTurn(sessionID string, req SessionTurnRequest, actor, space
 			return nil, false, fmt.Errorf("%w: %s（已登记 turn_seq=%d 的内容与本次不符）", ErrSessionRequestConflict, requestID, tr.Seq)
 		}
 	}
-	// 中心空间调度单入口守卫（W07-02，中心面同规 W04-01 RFC §1.4 方案 A；codex
-	// 审查必修A——守卫可区分普通轮与空间轮）：重放路径已先行返回（零副作用回执
-	// 不受守卫影响——与 node SubmitSessionTurnLocal 同序），此处拦新投递。space
-	// 参数随本轮声明透传（空 = 普通轮；SubmitSpaceTurn 携 hub:<id>）：绑定会话
-	// 普通轮 409 指向空间派发；空间轮核对绑定空间与 scope 一致才放行——否则
-	// 正常配置→启动→dispatch 的意图（已扣预算）会被无差别守卫拒绝后当瞬态失败
-	// 永久 pending 反复补投（codex 实证反例）。guard 由装配方注入（hub spaces
-	// 服务装配后 SetSpaceTurnGuard 接线；未接线 = 无空间服务，行为零变化）。
-	if c.spaceGuard != nil {
-		if err := c.spaceGuard(sessionID, space); err != nil {
-			return nil, false, err
-		}
-	}
-	// 显式序号：重放回执 / 冲突 / 跳号（预检；事务内重检为准）。先于首轮独占——
-	// 幂等回执补拉不重校验（同 submit 链 idem 查重先于容量/依赖准入的口径），
-	// 在途轮的重放仍须拿到回执而非被守卫挡住。
+	// 显式序号重放（预检；事务内重检为准）：重放回执 / 冲突 / 跳号。codex 复审
+	// 必修A-残——显式序号零副作用重放判定先于空间守卫（与 node SubmitSessionTurnLocal
+	// 同序）：普通轮已完成→会话加入空间→仅携原 turn_seq 同文重试，两端口径一致
+	// 返回原回执（非 space_dispatch_required）——零副作用重放回执不受守卫影响。
 	if req.TurnSeq > 0 && req.TurnSeq != nextSeq {
 		tr, existed := findTurn(sess, req.TurnSeq)
 		if !existed {
@@ -446,6 +434,19 @@ func (c *Core) submitTurn(sessionID string, req SessionTurnRequest, actor, space
 		// 原轮回执（T2-R1 必修6）：Op/TraceID 以轮行留痕为准，不随会话现态改写；
 		// 旧行（无留痕字段）防御回退按现态推导。
 		return &TurnRef{SessionID: sessionID, TurnSeq: tr.Seq, Op: rowTurnOp(tr, op), TaskID: tr.TaskID, TraceID: tr.TraceID}, true, nil
+	}
+	// 中心空间调度单入口守卫（W07-02，中心面同规 W04-01 RFC §1.4 方案 A；codex
+	// 审查必修A——守卫可区分普通轮与空间轮；复审必修A-残——零副作用重放判定
+	// （request_id 与显式序号两路）已先行返回，此处只拦新投递）。space
+	// 参数随本轮声明透传（空 = 普通轮；SubmitSpaceTurn 携 hub:<id>）：绑定会话
+	// 普通轮 409 指向空间派发；空间轮核对绑定空间与 scope 一致才放行——否则
+	// 正常配置→启动→dispatch 的意图（已扣预算）会被无差别守卫拒绝后当瞬态失败
+	// 永久 pending 反复补投（codex 实证反例）。guard 由装配方注入（hub spaces
+	// 服务装配后 SetSpaceTurnGuard 接线；未接线 = 无空间服务，行为零变化）。
+	if c.spaceGuard != nil {
+		if err := c.spaceGuard(sessionID, space); err != nil {
+			return nil, false, err
+		}
 	}
 	if !hasCreate {
 		// 首轮独占（预检）：create 在途即拒（事务内重检为准）
