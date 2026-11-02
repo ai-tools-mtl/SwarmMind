@@ -345,6 +345,10 @@ func (s *Service) noteBound(sessionID string, gen uint64) {
 	s.bindGens[sessionID] = gen
 }
 
+// BoundGenOf 本进程已成功登记的代次（0 = 未知——重启后未重建/未绑定过）；
+// api 移除 diff 的移除前快照读取面（R2①）。
+func (s *Service) BoundGenOf(sessionID string) uint64 { return s.boundGenOf(sessionID) }
+
 // boundGenOf 本进程已成功登记的代次（0 = 未知——重启后未重建/未绑定过）。
 func (s *Service) boundGenOf(sessionID string) uint64 {
 	s.muBindGen.Lock()
@@ -352,24 +356,44 @@ func (s *Service) boundGenOf(sessionID string) uint64 {
 	return s.bindGens[sessionID]
 }
 
-// clearBound 清除进程内绑定代次事实（解除成立/stale 后下次解除先探针重建）。
-func (s *Service) clearBound(sessionID string) {
+// clearBoundIfGen 代次条件清除（codex 复审轮 3 必修 R3）：仅当缓存当前代次 ==
+// 本操作代次才清除——否则条目属新操作（新 bind 已推进缓存），保留。零值 gen =
+// 探针/未知形态：仅缓存为空/零值时等价 no-op。
+func (s *Service) clearBoundIfGen(sessionID string, gen uint64) {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
-	delete(s.bindGens, sessionID)
+	if s.bindGens[sessionID] == gen {
+		delete(s.bindGens, sessionID)
+	}
+}
+
+// deletePendingIfGen 队列条目代次条件删除（codex 复审轮 3 必修 R3）：仅当队列
+// 条目 gen == 本操作 gen 才删——否则条目属新操作，保留。返回是否实际删除。
+func (s *Service) deletePendingIfGen(sessionID string, gen uint64) bool {
+	s.muUnbind.Lock()
+	defer s.muUnbind.Unlock()
+	if cur, ok := s.pendingUnbinds[sessionID]; ok && cur.gen == gen {
+		delete(s.pendingUnbinds, sessionID)
+		return true
+	}
+	return false
 }
 
 // ensureBindSession 锁外绑定登记（codex 复审轮 2 核心机制 3——锁内零网络；bind
 // 携代次，stale ack-noop 经 ack.CurrentGen 重同步后重试一次；进程内已知已 bind
 // 即跳过——同代幂等由 node 承担兜底）。
-func (s *Service) ensureBindSession(nodeID, sessionID, scope string) (uint64, error) {
+// 返回 (gen, owned, err)：owned=true 仅当**本请求经 PutIfGenNewer 新建了该代次**
+//（持有按此代次解除的权利）；owned=false = 复用既有绑定（gen 仅供日志/幂等覆盖
+// 判定，**不授予解除权**——复用路径 CAS 失败不得补偿解除，绑定归属原操作，
+// codex 复审轮 3 必修 R1）。
+func (s *Service) ensureBindSession(nodeID, sessionID, scope string) (gen uint64, owned bool, err error) {
 	if s.boundGenOf(sessionID) != 0 {
-		return s.boundGenOf(sessionID), nil // 进程内已知已 bind（返回其代次）
+		return s.boundGenOf(sessionID), false, nil // 复用既有绑定：无解除权
 	}
-	gen := s.nextBindGen(sessionID)
+	gen = s.nextBindGen(sessionID)
 	ack, err := s.core.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: scope, SessionID: sessionID, Generation: gen}, 0)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	if !ack.Accepted {
 		// stale（重启后 hub 计数落后于 node 登记事实）：重同步后重试一次。
@@ -378,14 +402,14 @@ func (s *Service) ensureBindSession(nodeID, sessionID, scope string) (uint64, er
 		gen = s.nextBindGen(sessionID)
 		ack, err = s.core.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: scope, SessionID: sessionID, Generation: gen}, 0)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
 		if !ack.Accepted {
-			return 0, fmt.Errorf("绑定登记 stale 重同步后仍不符（node current_gen=%d）", ack.CurrentGen)
+			return 0, false, fmt.Errorf("绑定登记 stale 重同步后仍不符（node current_gen=%d）", ack.CurrentGen)
 		}
 	}
 	s.noteBound(sessionID, gen)
-	return gen, nil
+	return gen, true, nil // 本请求新建代次：持有解除权
 }
 
 // lockSpace 每空间调度互斥锁定位（惰性建锁；锁面见 Service.spaceLocks 注）。
@@ -485,7 +509,7 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	// 绑定登记（node 收件门受理面；代次协议——锁外网络等待，登记失败零副作用：
 	// 意图零登记，宁拒不瞎投）。boundGen = 本次绑定代次（补偿按发起时代次解除
 	// ——codex 复审轮 3 必修 2：旧补偿不得读新 gen 删新绑定）。
-	boundGen, err := s.ensureBindSession(mt.nodeID, mt.sessionID, Scope(req.SpaceID))
+	boundGen, boundOwned, err := s.ensureBindSession(mt.nodeID, mt.sessionID, Scope(req.SpaceID))
 	if err != nil {
 		return collab.DispatchIntent{}, false, bindError(err)
 	}
@@ -549,10 +573,11 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	slm.Unlock()
 	s.muDispatch.Unlock()
 	compensate := func() {
-		if needUnbind {
-			// 绑定残留补偿（codex 必修D-2）：本次已 bind 的会话立即按发起时代次
-			// 条件解除（代次协议结构性防删新登记）；失败入重试队列。人话日志
-			// 留痕，残留后续由 bind 幂等覆盖或解除重试收敛。
+		if needUnbind && boundOwned {
+			// 绑定残留补偿（codex 必修D-2 + 复审轮 3 必修 R1）：仅**本请求新建
+			// 代次**（owned）才有按该代次解除的权利；复用既有绑定的失败路径不
+			// 补偿（绑定归属原操作，语义上本就该保留）。失败入重试队列，人话
+			// 日志留痕。
 			s.UnbindSessionGen(mt.nodeID, mt.sessionID, boundGen)
 		}
 	}
@@ -790,7 +815,7 @@ func (s *Service) UnbindSession(nodeID, sessionID string) {
 // 代次**重试（codex 复审轮 3 必修 2）。stale ack-noop = 新代登记已在位——语义
 // 满足（结构性：旧代解除删不掉新登记）。
 func (s *Service) UnbindSessionGen(nodeID, sessionID string, gen uint64) {
-	if !s.unbindGenOnce(nodeID, sessionID, gen) {
+	if !s.unbindGenOnce(nodeID, sessionID, &gen) {
 		s.muUnbind.Lock()
 		s.pendingUnbinds[sessionID] = hubUnbind{nodeID: nodeID, sessionID: sessionID, gen: gen}
 		s.muUnbind.Unlock()
@@ -799,9 +824,11 @@ func (s *Service) UnbindSessionGen(nodeID, sessionID string, gen uint64) {
 }
 
 // unbindGenOnce 按发起时代次的单次解除尝试（返回 true = 终态：解除成立或语义
-// 满足）。gen=0 先经代次探针从登记事实重建。
-func (s *Service) unbindGenOnce(nodeID, sessionID string, gen uint64) bool {
-	if gen == 0 {
+// 满足）。gen=0 先经代次探针从登记事实重建——**学到的 CurrentGen 经 *gen 回写
+// 为确定性目标**（codex 复审轮 3 必修 R2②：重试按已学代次解除，不再次探针追逐
+// 当前值）；学到的代次解除若 noop = 新代已在位，语义满足即收口不追逐。
+func (s *Service) unbindGenOnce(nodeID, sessionID string, gen *uint64) bool {
+	if *gen == 0 {
 		// 代次探针（gen=0 解除=node 零副作用回 current_gen——codex 复审轮 3
 		// 必修 1）：hub 重启后从登记事实重建，再携正确代次解除。
 		ack, err := s.core.SpaceUnbind(nodeID, sessionID, 0, 0)
@@ -809,28 +836,28 @@ func (s *Service) unbindGenOnce(nodeID, sessionID string, gen uint64) bool {
 			log.Printf("[hub] 中心空间解除探针未达 session=%s: %v", sessionID, err)
 			return false
 		}
-		gen = ack.CurrentGen
-		if gen == 0 {
-			s.clearBound(sessionID)
+		if ack.CurrentGen == 0 {
+			s.clearBoundIfGen(sessionID, 0)
 			log.Printf("[hub] 中心空间解除探针：node 无登记（语义已满足）session=%s", sessionID)
 			return true
 		}
+		*gen = ack.CurrentGen // 学到的代次 = 确定性目标（入队/重试按此代次）
 	}
-	ack, err := s.core.SpaceUnbind(nodeID, sessionID, gen, 0)
+	ack, err := s.core.SpaceUnbind(nodeID, sessionID, *gen, 0)
 	if err != nil {
-		log.Printf("[hub] 中心空间解除登记未达 session=%s gen=%d: %v", sessionID, gen, err)
+		log.Printf("[hub] 中心空间解除登记未达 session=%s gen=%d: %v", sessionID, *gen, err)
 		return false
 	}
 	if ack.Accepted {
-		s.clearBound(sessionID)
-		log.Printf("[hub] 中心空间绑定已解除 session=%s gen=%d", sessionID, gen)
+		s.clearBoundIfGen(sessionID, *gen) // 条件清除（R3）：仅缓存仍属本代次才清
+		log.Printf("[hub] 中心空间绑定已解除 session=%s gen=%d", sessionID, *gen)
 		return true
 	}
 	// stale ack-noop（node 登记代次已前移于发起代次——新代登记在位）：语义满足
-	//（结构性：旧代解除删不掉新登记）；进程内事实同步清除（下次解除先探针）。
-	s.clearBound(sessionID)
+	//（结构性：旧代解除删不掉新登记）即收口不追逐；缓存条件清除（R3）。
+	s.clearBoundIfGen(sessionID, *gen)
 	log.Printf("[hub] 中心空间解除 ack-noop（node 登记代次 %d 已前移于本进程事实 %d，语义满足）session=%s",
-		ack.CurrentGen, gen, sessionID)
+		ack.CurrentGen, *gen, sessionID)
 	return true
 }
 
@@ -873,15 +900,14 @@ func (s *Service) retryUnbinds() {
 	}
 	s.muUnbind.Unlock()
 	for _, u := range pending {
-		// 按**保存的原代次**重试（codex 复审轮 3 必修 2——不读当前 boundGen：
-		// 旧补偿读到新 gen 会删新绑定，codex 实证反例）。
-		if !s.unbindGenOnce(u.nodeID, u.sessionID, u.gen) {
+		// 按**保存的原代次**重试（codex 复审轮 3 必修 R2②——重试按已学代次，
+		// 不追逐当前值）。出队按条目身份条件删除（R3：条目被新操作替换则保留）。
+		if !s.unbindGenOnce(u.nodeID, u.sessionID, &u.gen) {
 			continue // 留队下次扫查重试
 		}
-		s.muUnbind.Lock()
-		delete(s.pendingUnbinds, u.sessionID)
-		s.muUnbind.Unlock()
-		log.Printf("[hub] 中心空间绑定解除重试收口 session=%s gen=%d", u.sessionID, u.gen)
+		if s.deletePendingIfGen(u.sessionID, u.gen) {
+			log.Printf("[hub] 中心空间绑定解除重试收口 session=%s gen=%d", u.sessionID, u.gen)
+		}
 	}
 }
 
@@ -1266,7 +1292,7 @@ func (s *Service) ensureBound(spaceID string, it collab.DispatchIntent) error {
 	if nodeIDOfSession == "" {
 		return fmt.Errorf("意图目标 node 定位失败（会话注册表无 %s）", it.SessionID)
 	}
-	_, err := s.ensureBindSession(nodeIDOfSession, it.SessionID, Scope(spaceID))
+	_, _, err := s.ensureBindSession(nodeIDOfSession, it.SessionID, Scope(spaceID))
 	return err
 }
 

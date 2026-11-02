@@ -429,24 +429,19 @@ func TestSpaceUnbindDiffOnRemoval(t *testing.T) {
 		ExpectedVersion: sp.Version, Members: []collab.Member{{Name: "restN/coder", SessionID: sessID}}}, admin); err != nil {
 		t.Fatalf("配置成员: %v", err)
 	}
-	// 移除成员经 REST（api handler diff 接线面——直调 Control 绕过 handler 不触发
-	// 解除；pending_config 态合法）→ 解除下发（黑洞未达 → 入队）。
+	// 移除成员经 REST（api handler diff 接线面）：绑定代次未知（本 fixture 无
+	// bind——gen=0 诚实跳过，不入队不追逐——codex 复审轮 3 必修 R2① 同快照语义）
+	// → 移除成员正常落地（200）且解除面零队列条目。
 	sp, _ = f.svc.Space(spID)
 	code, body = f.adminPost("/api/v1/spaces/"+spID+"/control",
 		`{"action":"configure_members","expected_version":`+itoaRest(sp.Version)+`,"members":[],"request_id":"u-rm"}`)
 	if code != http.StatusOK {
 		t.Fatalf("移除成员: %d %v", code, body)
 	}
+	if left := f.svc.PendingUnbindSessions(); len(left) != 0 {
+		t.Fatalf("gen=0 诚实跳过不入队: %v", left)
+	}
 	_ = admin
-	found := false
-	for _, sid := range f.svc.PendingUnbindSessions() {
-		if sid == sessID {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("移除成员后解除登记应入队重试面（黑洞传输未达）: %v", f.svc.PendingUnbindSessions())
-	}
 }
 
 // itoaRest int64 十进制（测试体 JSON 拼装）。

@@ -220,9 +220,15 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 	// diff 被移除的绑定并下发 node 解除登记（普通轮恢复放行；失败入 Service 重试
 	// 面）。零副作用预取（只读）。
 	var preMembers []collab.Member
+	preGens := map[string]uint64{} // 移除前各会话的绑定代次快照（R2①：原子快照解绑）
 	if req.Action == collab.ActConfigureMembers {
 		if pre, ok := s.cfg.Spaces.SpaceView(id); ok {
 			preMembers = pre.Members
+		}
+		for _, pm := range preMembers {
+			if pm.SessionID != "" {
+				preGens[pm.SessionID] = s.cfg.Spaces.BoundGenOf(pm.SessionID)
+			}
 		}
 	}
 	var setPhaseFrom strategy.Phase
@@ -261,7 +267,16 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 				continue // 已归属其他空间：不解除（新空间派发 bind 覆盖）
 			}
 			if sv, ok := s.cfg.Core.GetSession(om.SessionID); ok {
-				s.cfg.Spaces.UnbindSession(sv.NodeID, om.SessionID)
+				// 携**移除前快照代次**解除（codex 复审轮 3 必修 R2①：归属检查
+				// 与代次读取同一快照——并发新空间 bind 推进代次后，node 代次不符
+				// 自然 noop，快照代次解不删新绑定）。gen=0（重启后代次未知）诚实
+				// 跳过：node 若有残留绑定 fail-closed（普通轮拒收）+ 后续 bind
+				// 幂等覆盖自愈——探针追逐当前值的窗不开放。
+				if preGen := preGens[om.SessionID]; preGen != 0 {
+					s.cfg.Spaces.UnbindSessionGen(sv.NodeID, om.SessionID, preGen)
+				} else {
+					log.Printf("[hub] spaces: 移除会话绑定代次未知（重启后未重建），跳过解除 session=%s（node 残留 fail-closed 自愈）", om.SessionID)
+				}
 			}
 		}
 	}

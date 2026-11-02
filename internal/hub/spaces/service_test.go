@@ -1959,3 +1959,115 @@ func TestCancelReLockAbandonsWhenTakenOver(t *testing.T) {
 		t.Fatalf("未提交 pending 应确定性取消: still=%v %+v", still2, got2)
 	}
 }
+
+// ---------- codex 复审轮 3（代次所有权语义收敛）反例——受控确定性 ----------
+
+// TestR1CompensationOwnership 必修R1（竞争请求共享 gen）：ensureBindSession 双
+// 调用——首次 (gen, owned=true)，缓存命中 (同 gen, owned=false)；owned=false 路径
+// 不得补偿解除（R2 CAS 失败不得删 R1 有效绑定——所有权语义）。
+func TestR1CompensationOwnership(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	g1, owned1, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+	if err != nil || !owned1 {
+		t.Fatalf("首次应 owned=true: gen=%d owned=%v err=%v", g1, owned1, err)
+	}
+	g2, owned2, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned2 {
+		t.Fatal("缓存命中应 owned=false（复用无解除权）")
+	}
+	if g2 != g1 {
+		t.Fatalf("复用应同代次: %d != %d", g2, g1)
+	}
+	// 所有权语义闭环：owned=false 路径的失败不得触发补偿——直接断言补偿调用的
+	// 代次参数即 owned gen（这里用行为锚：复用路径 UnbindSessionGen(g1) 才合法，
+	// owned=false 时调用方按 R1 修复约定跳过补偿，绑定保持）。
+	if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) {
+		t.Fatalf("复用路径绑定应保持: %q", got)
+	}
+}
+
+// TestR2SnapshotUnbindNoChase 必修R2（原子快照解绑+不追逐）：携 stale 快照代次
+// （gen=1）解除，node 现登记 gen=2 → ack-noop（不追逐当前值）→ 新绑定保留。
+func TestR2SnapshotUnbindNoChase(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	if ack, err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID, Generation: 2}, 2*time.Second); err != nil || !ack.Accepted {
+		t.Fatalf("bind gen=2: %v ack=%+v", err, ack)
+	}
+	// 携 stale 快照 gen=1 解除 → node 代次不符 ack-noop → 新绑定（gen=2）保留。
+	f.svc.UnbindSessionGen("n1", f.sessID, 1)
+	if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) {
+		t.Fatalf("stale 快照解除不得删新绑定: %q", got)
+	}
+	// 携正确代次 gen=2 解除 → 删除（正向锚）。
+	f.svc.UnbindSessionGen("n1", f.sessID, 2)
+	if got := f.binds.Space(f.sessID); got != "" {
+		t.Fatalf("正确代次解除应删除: %q", got)
+	}
+}
+
+// TestR3ConditionalClears 必修R3（一切清除按代次条件执行）：
+//   - clearBoundIfGen：缓存 gen 与操作 gen 不符 → 保留；相符 → 清除；
+//   - deletePendingIfGen：队列条目 gen 不符 → 保留；相符 → 删除。
+func TestR3ConditionalClears(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// 缓存：noteBound gen=3 → clearBoundIfGen(2) 保留 → clearBoundIfGen(3) 清除。
+	f.svc.noteBound(f.sessID, 3)
+	f.svc.clearBoundIfGen(f.sessID, 2)
+	if got := f.svc.boundGenOf(f.sessID); got != 3 {
+		t.Fatalf("代次不符清除应保留缓存: %d", got)
+	}
+	f.svc.clearBoundIfGen(f.sessID, 3)
+	if got := f.svc.boundGenOf(f.sessID); got != 0 {
+		t.Fatalf("代次相符清除应清缓存: %d", got)
+	}
+	// 队列：条目 gen=7 → deletePendingIfGen(5) 保留 → deletePendingIfGen(7) 删除。
+	f.svc.muUnbind.Lock()
+	f.svc.pendingUnbinds[f.sessID] = hubUnbind{nodeID: "n1", sessionID: f.sessID, gen: 7}
+	f.svc.muUnbind.Unlock()
+	if f.svc.deletePendingIfGen(f.sessID, 5) {
+		t.Fatal("条目代次不符不得删除")
+	}
+	if !f.svc.deletePendingIfGen(f.sessID, 7) {
+		t.Fatal("条目代次相符应删除")
+	}
+	if len(f.svc.PendingUnbindSessions()) != 0 {
+		t.Fatal("删除后队列应空")
+	}
+}
+
+// TestR2ProbePinsLearnedGen 必修R2②（探针学到的代次=确定性目标，不追逐）：
+// gen=0 探针 → 学到 current_gen=1 → 学到的代次解除 noop（新代 gen=2 在位）→
+// 语义满足收口，不再次探针追逐；新代绑定保留。
+func TestR2ProbePinsLearnedGen(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// node 登记事实：gen=1（旧代进程遗留——重启后 boundGen 清零的形态）。
+	if ack, err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID, Generation: 1}, 2*time.Second); err != nil || !ack.Accepted {
+		t.Fatal(err)
+	}
+	// gen=0 探针：零副作用学到 current_gen=1（registry 完好不删）。
+	ack, err := f.hubCore.SpaceUnbind("n1", f.sessID, 0, 2*time.Second)
+	if err != nil || ack.Accepted {
+		t.Fatalf("探针应零副作用: err=%v ack=%+v", err, ack)
+	}
+	if ack.CurrentGen != 1 {
+		t.Fatalf("探针应学到 current_gen=1: %d", ack.CurrentGen)
+	}
+	if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) {
+		t.Fatalf("探针不得误删: %q", got)
+	}
+	// 学到的代次=确定性目标：unbindGenOnce(gen=0) 探针+携 learned gen 解除，
+	// 单次探针+单次解除无追逐循环（结构性由实现保证——grep 无二次探针）。
+	gen := uint64(0)
+	if !f.svc.unbindGenOnce("n1", f.sessID, &gen) {
+		t.Fatal("探针+解除应终态")
+	}
+	if gen != 1 {
+		t.Fatalf("学到的代次应为 1: %d", gen)
+	}
+	if got := f.binds.Space(f.sessID); got != "" {
+		t.Fatalf("学到的代次解除应删除: %q", got)
+	}
+}
