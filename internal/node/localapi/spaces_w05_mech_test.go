@@ -262,6 +262,7 @@ func TestW05MechDiscussionChain(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("候选登记应 201: %d %s", code, out)
 	}
+	candID := gjsonStr2(t, out, "candidate.id")
 
 	// 5. 投影如实：候选 pending（待定版 ≠ 已交付）；在途归零。
 	code, out = f.do("tok-prime", "GET", "/api/v1/spaces/"+spID+"/strategy", "")
@@ -270,6 +271,74 @@ func TestW05MechDiscussionChain(t *testing.T) {
 	}
 	if n := f.st.InFlightCount(spID); n != 0 {
 		t.Fatalf("收束后在途应归零: %d", n)
+	}
+
+	// 6. 候选定版/否决主人产品面（集成者裁决修复：含候选的讨论空间完成授权面——
+	// W05 硬门槛「讨论候选由主人/finalize 定版、默认等待人工」）：orchestrate 永不
+	// 放行（403 人话指路，零副作用）→ 404 锚（不存在候选）→ 主人定版 200（主体
+	// 服务端派生 finalized_by=owner）→ 投影 finalized 且候选缺口清零 → 否决路径 +
+	// 重否决幂等 → 留痕可查。
+	code, out = f.do("tok-prime", "POST", "/api/v1/spaces/"+spID+"/candidates/"+candID+"/finalize", "")
+	if code != http.StatusForbidden || !strings.Contains(out, "主人人工动作") {
+		t.Fatalf("orchestrate 定版应 403 人话指路主人控制台: %d %s", code, out)
+	}
+	if n := f.st.InFlightCount(spID); n != 0 {
+		t.Fatalf("403 须零副作用（在途保持 0）: %d", n)
+	}
+	code, out = f.do("tok-prime", "GET", "/api/v1/spaces/"+spID+"/strategy", "")
+	if code != http.StatusOK || !strings.Contains(out, `"status":"pending"`) {
+		t.Fatalf("403 后候选应仍待定版（零副作用）: %d %s", code, out)
+	}
+	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/candidates/cand-notexist/finalize", "")
+	if code != http.StatusNotFound || !strings.Contains(out, "candidate_not_found") {
+		t.Fatalf("不存在候选定版应 404 candidate_not_found: %d %s", code, out)
+	}
+	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/candidates/"+candID+"/finalize", "")
+	if code != http.StatusOK || !strings.Contains(out, `"status":"finalized"`) || !strings.Contains(out, `"finalized_by":"owner"`) {
+		t.Fatalf("主人定版应 200 且主体服务端派生: %d %s", code, out)
+	}
+	code, out = f.do("tok-prime", "GET", "/api/v1/spaces/"+spID+"/strategy", "")
+	var proj struct {
+		Strategy struct {
+			Candidates []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"candidates"`
+			Gaps []struct {
+				Field string `json:"field"`
+			} `json:"gaps"`
+		} `json:"strategy"`
+	}
+	if err := json.Unmarshal([]byte(out), &proj); err != nil {
+		t.Fatalf("投影解析: %v %s", err, out)
+	}
+	if len(proj.Strategy.Candidates) != 1 || proj.Strategy.Candidates[0].ID != candID || proj.Strategy.Candidates[0].Status != "finalized" {
+		t.Fatalf("投影候选应 finalized: %s", out)
+	}
+	for _, g := range proj.Strategy.Gaps {
+		if g.Field == "candidate" {
+			t.Fatalf("定版后候选缺口应清零（CompletionGaps 第 3 条）: %s", out)
+		}
+	}
+	// 否决路径：第二候选登记 → 主人否决 200 → 重否决幂等 200（引擎状态机原样）。
+	code, out = f.do("tok-prime", "POST", "/api/v1/spaces/"+spID+"/records",
+		`{"kind":"candidate","member":"alice","body":"FINAL: 方案二（否决路径用）","round":2}`)
+	if code != http.StatusCreated {
+		t.Fatalf("第二候选登记应 201: %d %s", code, out)
+	}
+	cand2 := gjsonStr2(t, out, "candidate.id")
+	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/candidates/"+cand2+"/dismiss", "")
+	if code != http.StatusOK || !strings.Contains(out, `"status":"dismissed"`) {
+		t.Fatalf("主人否决应 200: %d %s", code, out)
+	}
+	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/candidates/"+cand2+"/dismiss", "")
+	if code != http.StatusOK || !strings.Contains(out, `"status":"dismissed"`) {
+		t.Fatalf("重否决应幂等 200: %d %s", code, out)
+	}
+	// 留痕可查：定版/否决均落 candidate 族记录（records 增量读可见）。
+	code, out = f.do("tok-prime", "GET", "/api/v1/spaces/"+spID+"/records", "")
+	if code != http.StatusOK || !strings.Contains(out, `"kind":"candidate_finalized"`) || !strings.Contains(out, `"kind":"candidate_dismissed"`) {
+		t.Fatalf("records 应含定版/否决留痕: %d %s", code, out)
 	}
 }
 

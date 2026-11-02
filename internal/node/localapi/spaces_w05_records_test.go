@@ -6,6 +6,7 @@ package localapi
 // AC12/13/17 断言）见 spaces_w05_mech_test.go。
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -163,5 +164,41 @@ func TestSpaceRecordsSurface(t *testing.T) {
 		`{"kind":"candidate","member":"alice","body":"FINAL: 终态后登记"}`)
 	if code != http.StatusConflict || !strings.Contains(out, "illegal_transition") {
 		t.Fatalf("终态空间 records 应 409 拒收: %d %s", code, out)
+	}
+
+	// 控制留痕 type=control 锚（裁决修复2）：非四族留痕恒带 type=control（SPEC 六.六
+	// swarmmind_space_records 行「控制留痕如实标 control，不冒充记录」文实对齐）——
+	// 本空间含 start 引导的 phase_changed 控制留痕，逐条断言 type 五值封闭。
+	code, out = spaceDo(t, srv3.Server, tok, http.MethodGet, "/api/v1/spaces/"+id3+"/records", "")
+	if code != http.StatusOK {
+		t.Fatalf("终态空间 records 只读应放行: %d %s", code, out)
+	}
+	var recs struct {
+		Records []struct {
+			Kind string `json:"kind"`
+			Type string `json:"type"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(out), &recs); err != nil {
+		t.Fatalf("records 解析: %v %s", err, out)
+	}
+	if len(recs.Records) == 0 {
+		t.Fatalf("records 应非空（含候选登记与 start 引导留痕）: %s", out)
+	}
+	validType := map[string]bool{"candidate": true, "review": true, "issue": true, "evidence": true, "control": true}
+	sawControl := false
+	for _, rec := range recs.Records {
+		if !validType[rec.Type] {
+			t.Fatalf("record type 应为五值封闭之一（kind=%s）, got %q", rec.Kind, rec.Type)
+		}
+		if rec.Kind == "phase_changed" && rec.Type != "control" {
+			t.Fatalf("phase_changed 控制留痕应如实标 type=control: kind=%s type=%s", rec.Kind, rec.Type)
+		}
+		if rec.Type == "control" {
+			sawControl = true
+		}
+	}
+	if !sawControl {
+		t.Fatalf("应见 type=control 的控制留痕（start 引导 phase_changed）: %s", out)
 	}
 }

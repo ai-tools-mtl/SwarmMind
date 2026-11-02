@@ -497,6 +497,10 @@ const SPACE_W05_NOTE = '本区展示协作策略（W05）循环事实：候选�
 const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';
 const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';
 const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };
+/* SPACE_CAND_ACTIONS 候选定版/否决按钮词 + SPACE_CAND_CONFIRM 确认词（主人人工动作
+ * 唯一出处；hub 端中心后端 W07 接线前不渲染按钮——词典先行同文防接线漂移）。 */
+const SPACE_CAND_ACTIONS = { finalize: '定版', dismiss: '否决' };
+const SPACE_CAND_CONFIRM = { finalize: '确认定版', dismiss: '确认否决' };
 const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };
 const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };
 const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };
@@ -1770,10 +1774,16 @@ function spaceW05Zone(st) {
   const shortHash = h => { const s = String(h || ''); return s ? s.slice(0, 12) + '…' : '—'; };
   const phaseLine = `<p class="muted small">阶段 ${esc(d.phase || '—（未初始化）')}${d.paused_from ? '（暂停前 ' + esc(d.paused_from) + '，恢复须回该阶段）' : ''}${d.current_revision ? ' · 当前版本 ' + esc(shortHash(d.current_revision)) : ''}${d.last_reviewed_hash ? ' · 最近复审 ' + esc(shortHash(d.last_reviewed_hash)) : ''}</p>`;
   const cands = d.candidates || [];
+  const hasPending = cands.some(c => c.status === 'pending');
+  /* 待定版行渲染「定版」「否决」按钮（主人人工动作；type="button" 显式——button()
+   * 默认无 type，表单内会被当 submit，铁律）。操作列仅在存在待定版候选时出现。 */
+  const candOps = c => c.status === 'pending'
+    ? `<td><small>${button(SPACE_CAND_ACTIONS.finalize, 'space-cand:finalize:' + esc(c.id), 'primary', 'type="button"')} ${button(SPACE_CAND_ACTIONS.dismiss, 'space-cand:dismiss:' + esc(c.id), 'danger', 'type="button"')}</small></td>`
+    : '<td></td>';
   const candTable = cands.length
-    ? `<div class="table-wrap"><table><thead><tr><th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th></tr></thead><tbody>
-    ${cands.map(c => `<tr><td title="${esc(c.final_text || '')}">${esc(c.summary || c.id)}</td><td><small>${esc(c.proposer || '—')}</small></td><td><small>${c.round ?? '—'}</small></td><td><small>${esc(SPACE_CAND_STATES[c.status] || c.status || '—')}</small></td><td><small>${c.seen_count || 1} 次</small></td></tr>`).join('')}
-    </tbody></table></div><p class="footer-note">FINAL 前缀发言登记为候选（登记≠交付）：定版/否决显式可见，交付判定归完成判据。</p>`
+    ? `<div class="table-wrap"><table><thead><tr><th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th>${hasPending ? '<th>操作</th>' : ''}</tr></thead><tbody>
+    ${cands.map(c => `<tr><td title="${esc(c.final_text || '')}">${esc(c.summary || c.id)}</td><td><small>${esc(c.proposer || '—')}</small></td><td><small>${c.round ?? '—'}</small></td><td><small>${esc(SPACE_CAND_STATES[c.status] || c.status || '—')}</small></td><td><small>${c.seen_count || 1} 次</small></td>${hasPending ? candOps(c) : ''}</tr>`).join('')}
+    </tbody></table></div><p class="footer-note">FINAL 前缀发言登记为候选（登记≠交付）：定版/否决显式可见（仅主人可操作，编排主体 403），交付判定归完成判据。</p>`
     : '';
   const evCell = ev => {
     if (!ev) return '<small class="muted">缺失</small>';
@@ -1886,6 +1896,33 @@ function spaceAct(sp, act) {
     case 'finalize_abandoned': openSpaceModal('final', 'abandoned'); break;
     default: openSpaceModal(act === 'configure_members' ? 'members' : act);   // dispatch/takeover/budget/policy/members→表单弹层
   }
+}
+/* spaceCandAct 候选定版/否决（W05-04 裁决修复：主人人工动作——完成授权不开放给
+ * 编排主体，服务端 prime_token 一律 403 人话指路）：确认弹层→POST candidates/{cid}/
+ * {finalize|dismiss}→403/404/409 人话 toast 如实透出；成功后刷新详情页（w05 投影
+ * 分区随 drawerZonesApply diff 更新，定版/否决态显式可见）。arg 形态 finalize:{cid}。 */
+function spaceCandAct(arg) {
+  const sp = currentSpace();
+  if (!sp) { toast('空间信息不可得'); return; }
+  const [verb, cid] = String(arg || '').split(':');
+  const word = SPACE_CAND_ACTIONS[verb];
+  if (!word || !cid) return;
+  const what = verb === 'finalize'
+    ? '候选定版为交付结论（定版≠自动完成——完成仍须经操作区显式定版并过完成判据）。'
+    : '候选显式否决（留痕可查，不静默删除；否决后不再计入待定版）。';
+  confirmModal(`${word}候选 · ${spShortId(sp.id)}`, `${esc(what)}<br><small class="muted">${esc(spShortId(cid))}</small>`, SPACE_CAND_CONFIRM[verb], async () => {
+    const r = await api('POST', `/api/v1/spaces/${encodeURIComponent(sp.id)}/candidates/${encodeURIComponent(cid)}/${verb}`, {}).catch(() => null);
+    if (r && r.code === 200) {
+      toast(verb === 'finalize' ? '候选已定版（留痕已记）' : '候选已否决（留痕已记）');
+      spaceActRefresh(sp.id);
+    } else if (r && r.code === 403) {
+      toast(word + '被拒绝：' + (r ? errLine(r.data) : '无应答'));
+    } else if (r && r.code === 404) {
+      toast(word + '失败：候选不存在或已不可寻（候选列表见策略区，刷新后核对）');
+    } else {
+      toast(word + '被拒绝：' + (r ? errLine(r.data) : '网络异常（结果未知，请刷新后核对候选状态，勿盲目重试）'));
+    }
+  });
 }
 /* spaceSend 详情页发言（主人）：compose 分区模板零状态——busy 直更按钮，成功直清
  * 输入框，分区模板自始至终不被输入触碰（D22）。 */
@@ -5197,6 +5234,7 @@ document.addEventListener('click', e => {
         spaceAct(sp, arg);
         return;
       }
+      case 'space-cand': spaceCandAct(arg); return;   // 候选定版/否决（主人专属，arg=finalize:{cid}|dismiss:{cid}）
       case 'sp-row-add': {
         const box = spaceRowsBox();
         box.rows.push({ name: '', session: '' });

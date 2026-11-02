@@ -332,6 +332,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/spaces/{id}/strategy", s.authRead(s.handleSpaceStrategy))                        // 策略投影只读（W05-04 P04 策略区：循环阶段/候选/问题/版本/证据缺口/停止建议）
 	mux.HandleFunc("POST /api/v1/spaces/{id}/records", s.authSpaceSubject(s.handleSpaceRecordPost))              // 策略循环记录登记（W05-04：candidate/review/issue/evidence；数据写入≠执行）
 	mux.HandleFunc("GET /api/v1/spaces/{id}/records", s.authRead(s.handleSpaceRecordsGet))                       // 策略循环记录增量读（since=已见最大 seq，游标只读）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/candidates/{cid}/finalize", s.authSpaceOwner(s.handleSpaceCandidateFinalize)) // 候选定版（W05-04 裁决修复：主人专属·豁免⑯，orchestrate 403 指路主人控制台）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/candidates/{cid}/dismiss", s.authSpaceOwner(s.handleSpaceCandidateDismiss))   // 候选否决（同门同豁免：显式淘汰留痕）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

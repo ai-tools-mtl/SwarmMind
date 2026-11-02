@@ -1,11 +1,18 @@
 // spaces_records.go 策略面 REST（W05-04，docs/tasks/v3/W05-strategies.md REST 表
-// 「记录候选/审查/材料」+「P04 策略区」行）：
+// 「记录候选/审查/材料」+「P04 策略区」行；候选定版/否决主人产品面为集成者裁决
+// 修复轮补齐，SPEC 六.六豁免⑯）：
 //   - GET  /api/v1/spaces/{id}/strategy        策略投影只读（循环阶段/候选及定版
 //     态/问题及重开态/修订与证据缺口/停止建议；无策略数据的空间如实空态不编造）
 //   - POST /api/v1/spaces/{id}/records         记录登记（record.kind 限定
 //     candidate/review/issue/evidence；数据写入≠执行——本面只落策略引擎循环事实，
 //     不派发不推进循环不触发任何执行）
-//   - GET  /api/v1/spaces/{id}/records?since=N 记录增量读（留痕序号游标，只读）
+//   - GET  /api/v1/spaces/{id}/records?since=N 记录增量读（留痕序号游标，只读；
+//     每条恒带 type：四族 candidate/review/issue/evidence + 控制留痕 control 五值封闭）
+//   - POST /api/v1/spaces/{id}/candidates/{cid}/finalize  候选定版（仅主人；
+//     CompletionGaps 第 3 条「候选清零或显式定版」的人工授权面——W05 硬门槛
+//     「讨论候选由主人/finalize 定版、默认等待人工」，完成授权不开放给 orchestrate）
+//   - POST /api/v1/spaces/{id}/candidates/{cid}/dismiss   候选否决（仅主人；
+//     显式淘汰留痕，不静默删除）
 //
 // 数据面归属：本面全部经 strategy.Engine 既有记录方法（RegisterCandidateVia/
 // RegisterRevision/RecordIssue/RecordEvidence/RecordReReview/RecordCleanReview/
@@ -110,7 +117,7 @@ func recordKindError(w http.ResponseWriter, err error) {
 		switch {
 		case se.Code == "proposer_not_member":
 			code = http.StatusForbidden
-		case se.Code == "revision_not_found" || se.Code == "issue_not_found":
+		case se.Code == "revision_not_found" || se.Code == "issue_not_found" || se.Code == "candidate_not_found":
 			code = http.StatusNotFound
 		}
 	}
@@ -276,6 +283,84 @@ func (s *Server) recordEvidence(w http.ResponseWriter, spaceID string, req space
 	writeJSON(w, http.StatusCreated, map[string]any{"recorded": true, "op": "evidence"})
 }
 
+// authSpaceOwner 候选定版/否决主人专属门（镜像 sugar 家族 authLocal 形态：认证
+// 401 → 编排凭据显式 403 人话指路主人控制台 → next）：完成授权类动作不经编排凭据
+// 入口（orchestrate/prime 永不放行——W05 硬门槛「讨论候选由主人/finalize 定版、
+// 默认等待人工」）。prime_token 在此给 403 而非 401：认证已过、授权拒绝——让调用
+// 方看到「为什么」而不是猜令牌错（错误呈现纪律：授权拒绝原因如实可见）。
+func (s *Server) authSpaceOwner(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearer(r)
+		level := levelNone
+		if ok {
+			level = s.classify(token)
+		}
+		if level == levelNone {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "本机管理令牌缺失或错误（Authorization: Bearer <local_token|prime_token>）")
+			return
+		}
+		if level != levelRead { // 仅 local_token（主人）放行；prime_token 编排主体 403
+			writeErr(w, http.StatusForbidden, collab.CodeForbidden,
+				"候选定版/否决是主人人工动作（完成授权不开放给编排主体——讨论候选默认等待主人定版）：请由本机主人在控制台「协作空间」页操作")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// handleSpaceCandidateFinalize POST /api/v1/spaces/{id}/candidates/{cid}/finalize：
+// 候选定版（仅主人——CompletionGaps 第 3 条「候选清零或显式定版」的人工授权面，
+// 含候选的讨论空间完成可达性由本端点承担）。终态/已归档空间 409 拒收（同 records
+// POST 门）；引擎语义原样（端点层零第二套校验）：候选不存在 404 candidate_not_found、
+// 已定版幂等命中原样返回、dismissed→finalized 重定版按 transitionCandidate 既有
+// 状态机放行。定版主体由服务端门派生固定标识 owner（authSpaceOwner 已验证
+// local_token；请求无 body 无从自报——AGENTS 审计主体铁律）。无 request_id/乐观锁
+// （引擎内存事实无 CAS，幂等由候选状态机承担——同 records 面口径）。
+func (s *Server) handleSpaceCandidateFinalize(w http.ResponseWriter, r *http.Request) {
+	s.spaceCandidateTransition(w, r, strategy.CandidateFinalized)
+}
+
+// handleSpaceCandidateDismiss POST /api/v1/spaces/{id}/candidates/{cid}/dismiss：
+// 候选否决（仅主人；显式淘汰留痕，不静默删除——engine 语义原样：已否决再否决
+// 幂等命中，pending/finalized→dismissed 按 transitionCandidate 既有状态机放行）。
+func (s *Server) handleSpaceCandidateDismiss(w http.ResponseWriter, r *http.Request) {
+	s.spaceCandidateTransition(w, r, strategy.CandidateDismissed)
+}
+
+// spaceCandidateTransition 两端点共用实现：403 由 authSpaceOwner 门先行承担，此处
+// 只做空间在位/活跃门与引擎单方法直调（TrailCandidateFinalized/Dismissed 留痕、
+// RecordFamily=candidate 由引擎承担——records 增量读可见）。
+func (s *Server) spaceCandidateTransition(w http.ResponseWriter, r *http.Request, to strategy.CandidateStatus) {
+	if !s.spaceReady(w) || !s.spaceStrategyReady(w) {
+		return
+	}
+	id := r.PathValue("id")
+	view, ok := s.cfg.Collab.SpaceView(id)
+	if !ok {
+		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+id)
+		return
+	}
+	if view.Archived || view.Status.Terminal() {
+		writeErr(w, http.StatusConflict, collab.CodeIllegalTransition,
+			"终态/已归档空间只读：候选定版/否决面向活跃空间开放（材料保留可查）")
+		return
+	}
+	cid := r.PathValue("cid")
+	by := spaceOwnerSubject().Name // 服务端派生固定主体（门已验证 local_token）
+	var cand strategy.Candidate
+	var err error
+	if to == strategy.CandidateFinalized {
+		cand, err = s.cfg.Strategy.FinalizeCandidate(id, cid, by)
+	} else {
+		cand, err = s.cfg.Strategy.DismissCandidate(id, cid, by)
+	}
+	if err != nil {
+		recordKindError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"candidate": cand})
+}
+
 // handleSpaceRecordsGet GET /api/v1/spaces/{id}/records?since=N：记录增量读
 //（since=已见最大留痕序号；滚动裁剪区间以 pruned_before_seq 如实标注）。空间不
 // 存在 404；无循环事实 → 空集（事实不存在 ≠ 错误）。
@@ -301,8 +386,13 @@ func (s *Server) handleSpaceRecordsGet(w http.ResponseWriter, r *http.Request) {
 	records := make([]map[string]any, 0, len(trail))
 	for _, ev := range trail {
 		m := map[string]any{"seq": ev.Seq, "at": ev.At, "kind": string(ev.Kind), "note": ev.Note}
+		// type 恒带（五值封闭）：四族记录 candidate/review/issue/evidence + 控制留痕
+		// control（phase_changed/dispute_* 等——与 SPEC 六.六 swarmmind_space_records
+		// 行「控制留痕如实标 control，不冒充记录」文实对齐）。
 		if family := ev.Kind.RecordFamily(); family != "" {
 			m["type"] = family
+		} else {
+			m["type"] = "control"
 		}
 		records = append(records, m)
 	}

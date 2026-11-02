@@ -589,6 +589,10 @@ const SPACE_W05_NOTE = '本区展示协作策略（W05）循环事实：候选�
 const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';
 const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';
 const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };
+/* SPACE_CAND_ACTIONS 候选定版/否决按钮词 + SPACE_CAND_CONFIRM 确认词（主人人工动作
+ * 唯一出处；hub 端中心后端 W07 接线前不渲染按钮——词典先行同文防接线漂移）。 */
+const SPACE_CAND_ACTIONS = { finalize: '定版', dismiss: '否决' };
+const SPACE_CAND_CONFIRM = { finalize: '确认定版', dismiss: '确认否决' };
 const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };
 const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };
 const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };

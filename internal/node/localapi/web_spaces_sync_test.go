@@ -74,6 +74,8 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		"const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';",
 		"const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';",
 		"const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };",
+		"const SPACE_CAND_ACTIONS = { finalize: '定版', dismiss: '否决' };",
+		"const SPACE_CAND_CONFIRM = { finalize: '确认定版', dismiss: '确认否决' };",
 		"const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };",
 		"const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };",
 		"const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };",
@@ -85,13 +87,19 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 	}
 
 	// ---- W05-04 策略区接线锚点：node 真渲染 + hub 壳同表头未接线声明。 ----
-	// node：w05 区投影渲染（分区 diff 机制既有）+ strategy 投影拉取。
+	// node：w05 区投影渲染（分区 diff 机制既有）+ strategy 投影拉取 + 候选定版/否决
+	// 主人产品面（W05-04 裁决修复：pending 行按钮走 SPACE_CAND_ACTIONS 词典，主人
+	// 专属端点，编排主体服务端 403 人话指路）。
 	for _, want := range []string{
 		"function spaceW05Zone(st) {",
 		"w05: spaceW05Zone(pg.strategy),",
 		"'/strategy'",
 		"SPACE_EVIDENCE_SOURCES[ev.source]",
 		"不冒充已交付",
+		"button(SPACE_CAND_ACTIONS.finalize, 'space-cand:finalize:' + esc(c.id), 'primary', 'type=\"button\"')",
+		"button(SPACE_CAND_ACTIONS.dismiss, 'space-cand:dismiss:' + esc(c.id), 'danger', 'type=\"button\"')",
+		"case 'space-cand': spaceCandAct(arg); return;",
+		"function spaceCandAct(arg) {",
 	} {
 		if !strings.Contains(nodeJS, want) {
 			t.Errorf("node app.js 应含 %q（P04 策略区接线）", want)
@@ -134,6 +142,7 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		`'space-send'`,   // 假发言入口禁令
 		`'space-act:'`,   // 假控制动作入口禁令
 		`'sp-submit'`,    // 假弹层提交禁令
+		`'space-cand:'`,  // 假候选定版/否决入口禁令（裁决修复1：hub 中心后端未接线不加按钮——词典先行同文，按钮不越端）
 	} {
 		if strings.Contains(hubJSStr, ban) {
 			t.Errorf("hub app.js 不应含 %q（后端未接线不得提供假操作入口）", ban)
