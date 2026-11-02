@@ -381,20 +381,25 @@ type SessionTurnRef struct {
 }
 
 // SpaceBindPayload 中心空间成员映射登记载荷（W07-02，MsgSpaceBind/MsgSpaceBindAck
-// 共用；应答原样回带两字段供 ReplyTo 之外的语义复核——hub 消费前核对预期来源与
-// 预期内容，防伪应答占位）。空 scope = 解除登记语义（codex 必修D②：成员解绑/
-// 会话归属释放时 hub 下发解除，node 登记表删除绑定、普通轮恢复放行；幂等——未
-// 登记亦 ack）。
+// 共用；**代次身份协议**——集成者裁决方案 A：hub 为每 session 维护单调 bind
+// 代次，登记/解除全携代次，node 按代次条件生效，结构性消除 ABA/同空间重绑删新
+// 绑定/旧重试删新登记/并发补偿删他人绑定——比代次不比 scope）。空 scope = 解除
+// 登记语义（幂等；代次不符 ack-noop）。
 type SpaceBindPayload struct {
 	// Space 空间 scope（登记：中心空间恒 hub:<id> 词形，collab.HubScope 单源
 	// 构造，node 侧只接受 hub 词形——本机空间不经中心登记；空串 = 解除登记）。
 	Space string `json:"space"`
 	// SessionID 平台会话 ID（hub 注册表分配；成员原生线程的会话标识）。
 	SessionID string `json:"session_id"`
-	// ExpectSpace 解除登记的预期既有绑定 scope（解除路径必填；codex 复审必修
-	// D-1 代际语义：node 仅当当前登记 scope 与预期一致才删除——旧代解绑重试不
-	// 得删掉新代登记；不符如实 ack-noop。登记路径忽略本字段）。
-	ExpectSpace string `json:"expect_space,omitempty"`
+	// Generation 绑定代次（hub 单调分配；登记仅当代次 > 当前登记代次才生效——
+	// 同代同 scope 幂等接受；解除仅当代次 == 当前登记代次才删，不符 ack-noop）。
+	Generation uint64 `json:"generation,omitempty"`
+	// Accepted 应答字段（node 回带）：本次登记/解除是否实际生效（代次不符的
+	// ack-noop 为 false——hub 据此代次重同步/判定语义满足）。
+	Accepted bool `json:"accepted,omitempty"`
+	// CurrentGen 应答字段（node 回带）：node 当前登记代次（无登记 0）——hub 重启
+	// 后从该事实惰性重建代次计数（重启恢复从登记事实重建）。
+	CurrentGen uint64 `json:"current_gen,omitempty"`
 }
 
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。

@@ -42,7 +42,7 @@ func injectHubBind(t *testing.T, f *spaceSvcFixture) *HubBindings {
 // sendSpaceBind 直发 space_bind 帧（hub 下发词形；HandleFrame 与真实帧路由同口）。
 func sendSpaceBind(t *testing.T, svc *Service, sid, scope string) {
 	t.Helper()
-	b, err := jsonMarshal(protocol.SpaceBindPayload{Space: scope, SessionID: sid})
+	b, err := jsonMarshal(protocol.SpaceBindPayload{Space: scope, SessionID: sid, Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +136,13 @@ func TestW07SpaceBindRegistersAndPersists(t *testing.T) {
 }
 
 // TestW07HubScopeTurnAllowedAfterBind 登记后携相符 hub scope 的 create 轮放行
-//（收件门核对登记绑定 → sessionx 内核真实执行完成）。
+// （收件门核对登记绑定 → sessionx 内核真实执行完成）。
 func TestW07HubScopeTurnAllowedAfterBind(t *testing.T) {
 	f := newSpaceSvcFixture(t, spaceSvcOpt{})
 	binds := injectHubBind(t, f)
 	sid := "s-hubturn1"
 	scope := collab.HubScope("sp-center-1")
-	if err := binds.Put(sid, scope, protocol.NowUTC()); err != nil {
+	if ok2, _, err := binds.PutIfGenNewer(sid, scope, 1, protocol.NowUTC()); err != nil || !ok2 {
 		t.Fatalf("登记: %v", err)
 	}
 	taskID := execHubSpaceTurn(t, f.svc, f.led, sid, scope, protocol.SessionTurnOpCreate, f.cwd, 1)
@@ -157,7 +157,7 @@ func TestW07HubScopeTurnRejectedWrongOrMissing(t *testing.T) {
 	binds := injectHubBind(t, f)
 	sidBound := "s-hubbound1"
 	sidNone := "s-hubnone1"
-	if err := binds.Put(sidBound, collab.HubScope("sp-center-1"), protocol.NowUTC()); err != nil {
+	if _, _, err := binds.PutIfGenNewer(sidBound, collab.HubScope("sp-center-1"), 1, protocol.NowUTC()); err != nil {
 		t.Fatalf("登记: %v", err)
 	}
 	// 异 scope：登记 hub:x，轮冒充 hub:y。
@@ -182,7 +182,7 @@ func TestW07HubBoundSessionRejectsPlainTurns(t *testing.T) {
 	binds := injectHubBind(t, f)
 	sid := "s-hubplain1"
 	scope := collab.HubScope("sp-center-1")
-	if err := binds.Put(sid, scope, protocol.NowUTC()); err != nil {
+	if ok2, _, err := binds.PutIfGenNewer(sid, scope, 1, protocol.NowUTC()); err != nil || !ok2 {
 		t.Fatalf("登记: %v", err)
 	}
 	// 先经登记相符的 create 轮建立内核会话（seq=1；收件门放行路径）。

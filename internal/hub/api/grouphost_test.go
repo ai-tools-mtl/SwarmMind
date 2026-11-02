@@ -207,15 +207,20 @@ func TestHostAdvanceOnTerminal(t *testing.T) {
 	}
 
 	// 在途棒终态 → 自动点名下一棒（等待至 T2 落库：CAS 置棒先于任务持久化，
-	// 只看 HostRound 会在置棒与落库之间的窗口假过）
+	// 只看 HostRound 会在置棒与落库之间的窗口假过）。点名注记与任务落库是钩子内
+	// 两次先后写——race 负载下注记可见滞后于置棒（2026-11-03 采证：恰一条断言在
+	// wait 返回后立即读数得 0），注记计数一并纳入等待谓词（条件等待非固定等待）。
 	completeTask(t, f, "mac-mini", t1, "第一棒完成")
-	waitFor(t, 2*time.Second, "第二棒应落库且主持推进", func() bool {
+	waitFor(t, 2*time.Second, "第二棒应落库且主持推进且点名注记可见", func() bool {
 		grp2, _ := hostState(s, g.ID)
 		if grp2.HostRound != 2 || grp2.HostTurn == "" || grp2.HostTurn == t1 {
 			return false
 		}
 		tk, ok := f.st.View().Tasks[grp2.HostTurn]
-		return ok && tk.IdemKey == hostBatonIdem(g.ID, 2) && tk.GroupRef == g.ID
+		if !ok || tk.IdemKey != hostBatonIdem(g.ID, 2) || tk.GroupRef != g.ID {
+			return false
+		}
+		return countNotes(t, f, hc, g.ID, "主持人点名第 2 棒") == 1
 	})
 	batons := 0
 	for _, tk := range f.st.View().Tasks {
@@ -274,7 +279,7 @@ func TestHostStopOnFinal(t *testing.T) {
 }
 
 // TestHostStopOnBudget 预算停轮：HostRound 达 Budget.MaxRounds 即不再点名
-//（发言与轮转同一预算旋钮）。主持状态经快照预置注入（REST 造不出该状态）。
+// （发言与轮转同一预算旋钮）。主持状态经快照预置注入（REST 造不出该状态）。
 func TestHostStopOnBudget(t *testing.T) {
 	seed := `{"groups":{"g-seed":{"group_id":"g-seed","goal":"预算停轮","status":"discussing",
 "host":"admin","members":["mac-mini/butler"],"budget":{"max_rounds":1},

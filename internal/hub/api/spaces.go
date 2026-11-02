@@ -261,7 +261,7 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 				continue // 已归属其他空间：不解除（新空间派发 bind 覆盖）
 			}
 			if sv, ok := s.cfg.Core.GetSession(om.SessionID); ok {
-				s.cfg.Spaces.UnbindSession(sv.NodeID, om.SessionID, spaces.Scope(id))
+				s.cfg.Spaces.UnbindSession(sv.NodeID, om.SessionID)
 			}
 		}
 	}

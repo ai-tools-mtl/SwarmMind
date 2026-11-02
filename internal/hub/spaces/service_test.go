@@ -626,7 +626,7 @@ func TestSpaceBindAckEndToEnd(t *testing.T) {
 
 	// hub→node space_bind（membus 同步分发：handler 内同步回帧到 hub 录制端点）。
 	reqMid := "bind-iron-" + protocol.NewMessageID()
-	pl, _ := json.Marshal(protocol.SpaceBindPayload{Space: collab.HubScope("sp-x"), SessionID: "s-iron"})
+	pl, _ := json.Marshal(protocol.SpaceBindPayload{Space: collab.HubScope("sp-x"), SessionID: "s-iron", Generation: 1})
 	if err := bus.Endpoint("hub").Send("n1", &protocol.Envelope{
 		Version: protocol.ProtocolVersion, Type: protocol.MsgSpaceBind,
 		MessageID: reqMid, From: "hub", To: "n1", Payload: pl,
@@ -656,29 +656,93 @@ func TestSpaceBindAckEndToEnd(t *testing.T) {
 	}
 }
 
-// TestCloseDrainsInFlightCallbacks 关停排空面回归（集成者门禁修复锚）：Close 必
-// 须等在途收敛回调出临界后才关库——手动占住排空门（模拟在途回调），Close 阻塞
-// 至 Done 才完成；不占门时 Close 即刻完成（排空面零残留）。
+// TestCloseDrainsInFlightCallbacks 关停排空面回归（worker 化受控屏障——codex 复审
+// 轮 2 核心机制 2）：真实取消合并入队 → worker 消费时被测试屏障（空间调度锁）拦
+// 在收敛锁区 → Close 排空面等待 worker → 放屏障后收敛+停队落账完成 → Close 才返
+// 返回——「队列项落账完成后 Close 才返回」由互斥语义确定性钉住。
 func TestCloseDrainsInFlightCallbacks(t *testing.T) {
-	f := newChainFixture(t, false, true) // 无任务流——hubCore 不触发回调
-	// 手动占住排空门（hookEntry 过检后的计数形态；直接操作同一 WaitGroup）。
-	f.svc.hookWG.Add(1)
-	closed := make(chan error, 1)
-	go func() { closed <- f.svc.Close() }()
-	// Close 必须被排空门阻塞（WaitGroup 语义确定性——非 sleep 时序赌）。
-	select {
-	case err := <-closed:
-		t.Fatalf("在途回调未出临界 Close 不得完成（关库竞态即门禁实锤）: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	f := newChainFixture(t, true, true)
+	it, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder",
+		RequestID: "drain-1", ExpectedVersion: 4, Note: "排空屏障"}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
 	}
-	f.svc.hookWG.Done()
-	select {
-	case err := <-closed:
-		if err != nil {
-			t.Fatalf("Close: %v", err)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
+			break
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("排空门放行后 Close 应完成")
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 出队观测缝先于 CancelTask（两个收敛回调 item 均须被缝观测：item1=hub 侧
+	// 首落 nil 结果项、item2=node 合并真实事实项——信号计数确定性对齐）。
+	dequeued := make(chan struct{}, 8)
+	f.svc.onConvDequeued = func() {
+		select {
+		case dequeued <- struct{}{}:
+		default:
+		}
+	}
+	// 受控屏障：占住空间调度锁（worker 消费合并项时在收敛锁区阻塞）。defer 保证
+	// 任何 Fatal 路径都放屏障（否则清理 Close 永久等 worker——实测死锁锚）。
+	m := f.svc.lockSpace(f.spaceID)
+	m.Lock()
+	barrierHeld := true
+	release := func() {
+		if barrierHeld {
+			barrierHeld = false
+			m.Unlock()
+		}
+	}
+	defer release()
+	if _, _, err := f.hubCore.CancelTask(it.TaskID, "人工取消"); err != nil {
+		t.Fatalf("CancelTask: %v", err)
+	}
+	// 等合并已真实触发（node 取消结果合并回写 ⇒ Result 非 nil——fireTaskMerged/
+	// hookEntry 已同步返回入队）。
+	deadline = time.Now().Add(5 * time.Second)
+	merged := false
+	for time.Now().Before(deadline) {
+		if tk, ok := f.hubCore.GetTask(it.TaskID); ok && tk.Result != nil {
+			merged = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !merged {
+		t.Fatal("前置：取消合并应已触发（Result 回写）")
+	}
+	// 等 worker 两次出队（取消合并链恒两回调：hub 侧首落 nil 结果项 + node 合并
+	// 真实事实项——第二次出队即真实事实项已被 worker 持有、停在收敛锁区外排队；
+	// 落账未发生——Close 排空面必须等它完成才返回）。
+	<-dequeued
+	<-dequeued
+	// 屏障下意图不得已被收敛（worker 在锁区外排队）。
+	if got, ok := f.svc.IntentByRequest(f.spaceID, "drain-1"); ok && got.Status == collab.IntentCancelled {
+		t.Fatalf("屏障下收敛不得已落账: %+v", got)
+	}
+	// Close：排空面等 worker（worker 在屏障后排队等锁）——不得在屏障期内返回。
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- f.svc.Close() }()
+	deadline = time.Now().Add(150 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case cerr := <-closeErr:
+			got, _ := f.svc.IntentByRequest(f.spaceID, "drain-1")
+			sp, _ := f.svc.Space(f.spaceID)
+			t.Fatalf("屏障未放行 Close 不得返回（排空面被跳过）: err=%v intent=%+v space=%s", cerr, got, sp.Status)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	release() // 放屏障 → worker 完成收敛+停队 → Close 排空返回
+	if err := <-closeErr; err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	got, _ := f.svc.IntentByRequest(f.spaceID, "drain-1")
+	sp, _ := f.svc.Space(f.spaceID)
+	if got.Status != collab.IntentCancelled || sp.Status != collab.StatusPaused {
+		t.Fatalf("排空完成后两落账应齐备: intent=%+v space=%s", got, sp.Status)
 	}
 }
 
@@ -974,9 +1038,9 @@ func TestCSweepGateAfterWithdraw(t *testing.T) {
 			if n := len(sv.Turns); n != 0 {
 				t.Fatalf("撤声明后零外发（轮数应 0）: %d", n)
 			}
-			if got := f.binds.Space(f.sessID); got != "" {
-				t.Fatalf("撤声明后补绑定应零残留: %q", got)
-			}
+			// 代次协议注：补绑定（同代幂等刷新）先于提交口版本门发生，同代同
+			// scope 登记不构成新授权残留（node 侧即为原登记原代次）；外发执行
+			// 零发生（上锚）为必修C 的实质断言。登记回收由代次解除重试面收敛。
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1038,7 +1102,7 @@ func TestDNoResidueAndUnbindClosure(t *testing.T) {
 	if got := f.binds.Space(sv2.ID); got != Scope(sp.ID) {
 		t.Fatalf("派发后绑定应在册: %q", got)
 	}
-	f.svc.UnbindSession("n1", sv2.ID, Scope(sp.ID))
+	f.svc.UnbindSession("n1", sv2.ID)
 	if got := f.binds.Space(sv2.ID); got != "" {
 		t.Fatalf("解除后注册表应删除: %q", got)
 	}
@@ -1047,7 +1111,7 @@ func TestDNoResidueAndUnbindClosure(t *testing.T) {
 		t.Fatalf("解绑后（collab 归属未释放）普通轮仍应守卫拒绝: %v", err)
 	}
 	// 重试面：不可达 node 解除入队（PendingUnbindSessions 观察面）。
-	f.svc.UnbindSession("n-missing", "s-d-unreachable", Scope(sp.ID))
+	f.svc.UnbindSession("n-missing", "s-d-unreachable")
 	found := false
 	for _, sid := range f.svc.PendingUnbindSessions() {
 		if sid == "s-d-unreachable" {
@@ -1323,19 +1387,26 @@ func TestBConvergePauseAtomicBlocksAdvance(t *testing.T) {
 func TestD1ConditionalUnbindAckNoop(t *testing.T) {
 	f := newChainFixture(t, false, true)
 	sid := "s-d1"
-	if err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: collab.HubScope("sp-S2"), SessionID: sid}, 2*time.Second); err != nil {
-		t.Fatal(err)
+	if ack, err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: collab.HubScope("sp-S2"), SessionID: sid, Generation: 2}, 2*time.Second); err != nil || !ack.Accepted {
+		t.Fatalf("登记 S2: %v ack=%+v", err, ack)
 	}
-	// 旧代解除（expect=S1 ≠ 现登记 S2）→ ack 成立（noop），S2 登记完好。
-	if err := f.hubCore.SpaceUnbind("n1", sid, collab.HubScope("sp-S1"), 2*time.Second); err != nil {
+	// 旧代解除（gen=1 ≠ 现登记 gen=2）→ ack-noop（非错误），S2 登记完好。
+	ack, err := f.hubCore.SpaceUnbind("n1", sid, 1, 2*time.Second)
+	if err != nil {
 		t.Fatalf("旧代解除应 ack-noop（非错误）: %v", err)
+	}
+	if ack.Accepted {
+		t.Fatal("旧代解除应 ack-noop（accepted=false）")
 	}
 	if got := f.binds.Space(sid); got != collab.HubScope("sp-S2") {
 		t.Fatalf("旧代解除不得删新代登记: %q", got)
 	}
-	// 当代解除（expect=S2）→ 删除。
-	if err := f.hubCore.SpaceUnbind("n1", sid, collab.HubScope("sp-S2"), 2*time.Second); err != nil {
+	// 当代解除（gen=2）→ 删除。
+	if ack, err = f.hubCore.SpaceUnbind("n1", sid, 2, 2*time.Second); err != nil {
 		t.Fatalf("当代解除: %v", err)
+	}
+	if !ack.Accepted {
+		t.Fatal("当代解除应成立")
 	}
 	if got := f.binds.Space(sid); got != "" {
 		t.Fatalf("当代解除应删除: %q", got)
@@ -1348,7 +1419,7 @@ func TestD1ConditionalUnbindAckNoop(t *testing.T) {
 func TestD1StaleUnbindInvalidatedOnRebind(t *testing.T) {
 	f := newChainFixture(t, false, true)
 	// 解绑不可达 node → 入队。
-	f.svc.UnbindSession("n-missing", f.sessID, Scope(f.spaceID))
+	f.svc.UnbindSession("n-missing", f.sessID)
 	found := false
 	for _, sid := range f.svc.PendingUnbindSessions() {
 		if sid == f.sessID {
@@ -1485,7 +1556,7 @@ func TestECleanedTaskPendingNeedsReview(t *testing.T) {
 		sweepInterval: 50 * time.Millisecond, terminalRetention: 5 * time.Millisecond})
 	// 崩溃窗构造：绑定登记（node 收件门）→ 受理登记 + 投递（轮行+任务在案），
 	// 接单登记缺失（保持 pending）。
-	if err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID}, 2*time.Second); err != nil {
+	if _, err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID, Generation: 1}, 2*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	view, _ := f.svc.SpaceView(f.spaceID)

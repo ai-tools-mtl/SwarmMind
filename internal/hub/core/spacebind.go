@@ -59,8 +59,8 @@ func (c *Core) SpaceBindTimeout() time.Duration {
 // space_bind_ack（timeout 预算；0 = 默认）。ack 载荷回带两字段与请求逐一复核
 // （语义核验：不符按异常拒绝，不冒充成功）。错误三态：node 离线（ErrNodeOffline）、
 // 超时（ErrBindTimeout）、node 显式拒绝（err 帧人话透出）。幂等：重复登记同键同
-// scope 由 node 侧刷新登记（成功即成功），派发侧重试安全。
-func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout time.Duration) error {
+// scope 由 node 侧按代次条件生效（见 SpaceBindAck），派发侧重试安全。
+func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout time.Duration) (SpaceBindAck, error) {
 	if timeout <= 0 {
 		timeout = c.SpaceBindTimeout()
 	}
@@ -69,7 +69,7 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 	c.muBind.Lock()
 	if c.bindClosed {
 		c.muBind.Unlock()
-		return fmt.Errorf("%w: hub 关闭中，暂不受理绑定登记", ErrNodeOffline)
+		return SpaceBindAck{}, fmt.Errorf("%w: hub 关闭中，暂不受理绑定登记", ErrNodeOffline)
 	}
 	c.binds[mid] = w // 登记先于 Send（铁律；锁内零 Send——membus 同步回调重入纪律）
 	c.muBind.Unlock()
@@ -84,7 +84,7 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 	// 错放 ReplyTo 会使 node 回帧关联不上恒超时——sendFetchRequest 同款教训锚）。
 	b, merr := json.Marshal(req)
 	if merr != nil {
-		return fmt.Errorf("space_bind 载荷编码失败: %w", merr)
+		return SpaceBindAck{}, fmt.Errorf("space_bind 载荷编码失败: %w", merr)
 	}
 	if err := c.tr.Send(nodeID, &protocol.Envelope{
 		Version:   protocol.ProtocolVersion,
@@ -94,9 +94,9 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 		Payload:   b,
 	}); err != nil {
 		if errors.Is(err, transport.ErrNoEndpoint) || errors.Is(err, transport.ErrClosed) {
-			return fmt.Errorf("%w: %v", ErrNodeOffline, err)
+			return SpaceBindAck{}, fmt.Errorf("%w: %v", ErrNodeOffline, err)
 		}
-		return fmt.Errorf("space_bind 发送失败: %w", err)
+		return SpaceBindAck{}, fmt.Errorf("space_bind 发送失败: %w", err)
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -107,30 +107,38 @@ func (c *Core) SpaceBind(nodeID string, req protocol.SpaceBindPayload, timeout t
 			case protocol.MsgSpaceBindAck:
 				var p protocol.SpaceBindPayload
 				if err := json.Unmarshal(env.Payload, &p); err != nil || p.Space != req.Space ||
-					p.SessionID != req.SessionID || p.ExpectSpace != req.ExpectSpace {
-					return fmt.Errorf("space_bind 应答内容与请求不符（疑似异常对端，拒绝冒充成功）")
+					p.SessionID != req.SessionID || p.Generation != req.Generation {
+					return SpaceBindAck{}, fmt.Errorf("space_bind 应答内容与请求不符（疑似异常对端，拒绝冒充成功）")
 				}
-				return nil
+				return SpaceBindAck{Accepted: p.Accepted, CurrentGen: p.CurrentGen}, nil
 			case protocol.MsgErr:
 				if env.Err != nil {
-					return &BindReject{Code: env.Err.Code, Msg: env.Err.Msg}
+					return SpaceBindAck{}, &BindReject{Code: env.Err.Code, Msg: env.Err.Msg}
 				}
-				return &BindReject{Code: "rejected", Msg: "node 未附拒绝原因"}
+				return SpaceBindAck{}, &BindReject{Code: "rejected", Msg: "node 未附拒绝原因"}
 			default:
 				continue // 未知帧类型：继续等待合法应答直至超时
 			}
 		case <-timer.C:
-			return ErrBindTimeout
+			return SpaceBindAck{}, ErrBindTimeout
 		}
 	}
 }
 
-// SpaceUnbind 中心空间绑定解除（W07-02 codex 必修D②；复用 space_bind 帧 + 空
-// scope 语义——协议 SpaceBindPayload 注释同步）：node 登记表删除绑定，普通轮恢复
-// 放行。幂等（node 未登记亦 ack）。ack 载荷语义复核同 SpaceBind（Space 空值比对
-// 成立）。
-func (c *Core) SpaceUnbind(nodeID, sessionID, expectScope string, timeout time.Duration) error {
-	return c.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: "", SessionID: sessionID, ExpectSpace: expectScope}, timeout)
+// SpaceBindAck 绑定登记应答（代次协议——codex 复审轮 2 核心机制 1）。
+type SpaceBindAck struct {
+	// Accepted 本次登记/解除是否实际生效（代次不符的 ack-noop 为 false）。
+	Accepted bool
+	// CurrentGen node 当前登记代次（无登记 0；hub 重启后从该事实惰性重建代次
+	// 计数——重启恢复从登记事实重建）。
+	CurrentGen uint64
+}
+
+// SpaceUnbind 中心空间绑定解除（代次协议：解除帧携发起时的绑定代次——node 仅当
+// 当前登记代次精确匹配才删除；stale 代次 ack-noop 即语义满足——新代登记已在位，
+// 旧代解除不删新登记）。返回 (ack, err) 同 SpaceBind。
+func (c *Core) SpaceUnbind(nodeID, sessionID string, generation uint64, timeout time.Duration) (SpaceBindAck, error) {
+	return c.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: "", SessionID: sessionID, Generation: generation}, timeout)
 }
 
 // deliverBindReply 绑定登记应答投递（ReplyTo 命中在途表则投递；来源不符不投递

@@ -38,7 +38,10 @@ const hubBindFileName = "hub_space_bindings.json"
 type HubBindEntry struct {
 	// Space 空间 scope（恒 hub:<id> 词形；写入前经 collab.IsHubScope 校验）。
 	Space string `json:"space"`
-	// BoundAt 最近登记时刻（UTC；重复登记刷新时刻不改 scope——同键同 scope 幂等）。
+	// Generation 绑定代次（hub 单调分配；登记/解除的代次条件判据——结构性消除
+	// ABA/旧重试删新登记/并发补偿删他人绑定：比代次不比 scope）。
+	Generation uint64 `json:"generation"`
+	// BoundAt 最近登记时刻（UTC；同代幂等刷新时刻）。
 	BoundAt time.Time `json:"bound_at"`
 }
 
@@ -85,22 +88,29 @@ func (h *HubBindings) Get(sessionID string) (HubBindEntry, bool) {
 	return e, ok
 }
 
-// RemoveIfScope 条件删除绑定（codex 复审必修D-1 代际语义）：仅当当前登记 scope
-// 与 expectScope 一致才删除并落盘（返回 removed=true）；未登记（幂等 ack-noop）
-// 或 scope 不符（旧代解绑重试不得删新代登记）返回 removed=false 零变更。落盘
-// 失败错误如实上抛——hub 收不到 ack 不视为已解除，重试面兜底。
-func (h *HubBindings) RemoveIfScope(sessionID, expectScope string) (bool, error) {
+// RemoveIfGen 条件删除绑定（解除路径；代次精确匹配——codex 复审轮 2 核心机制
+// 1）：仅当当前登记存在且代次 == generation 才删除并落盘（removed=true）；未
+// 登记或代次不等（旧代解除/新代之后的 stale 解除）→ removed=false 零变更
+// （ack-noop——结构性保证「旧重试删不掉新登记、并发补偿删不掉他人绑定」）。落盘
+// 失败错误如实上抛——hub 收不到成功 ack 不视为已解除，重试面兜底。
+func (h *HubBindings) RemoveIfGen(sessionID string, generation uint64) (bool, HubBindEntry, error) {
 	if h == nil {
-		return false, errors.New("hubbind: 登记表未装配")
+		return false, HubBindEntry{}, errors.New("hubbind: 登记表未装配")
 	}
 	if sessionID == "" {
-		return false, errors.New("hubbind: session_id 必填")
+		return false, HubBindEntry{}, errors.New("hubbind: session_id 必填")
+	}
+	if generation == 0 {
+		return false, HubBindEntry{}, errors.New("hubbind: generation 必填（代次协议）")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cur, ok := h.binds[sessionID]
-	if !ok || cur.Space != expectScope {
-		return false, nil // 幂等 no-op：未登记或代际不符
+	if !ok {
+		return false, HubBindEntry{}, nil // ack-noop：未登记
+	}
+	if cur.Generation != generation {
+		return false, cur, nil // ack-noop：代次不等（分述日志由受理方输出）
 	}
 	next := make(map[string]HubBindEntry, len(h.binds))
 	for k, v := range h.binds {
@@ -111,14 +121,14 @@ func (h *HubBindings) RemoveIfScope(sessionID, expectScope string) (bool, error)
 	}
 	b, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
-		return false, err
+		return false, HubBindEntry{}, err
 	}
 	b = append(b, '\n')
 	if err := atomicWriteFile(h.tmp, h.path, b); err != nil {
-		return false, fmt.Errorf("hubbind: 绑定解除落盘失败: %w", err)
+		return false, HubBindEntry{}, fmt.Errorf("hubbind: 绑定解除落盘失败: %w", err)
 	}
 	h.binds = next
-	return true, nil
+	return true, HubBindEntry{}, nil
 }
 
 // Space 会话的登记 scope（便捷形；未登记空串）。
@@ -130,33 +140,50 @@ func (h *HubBindings) Space(sessionID string) string {
 	return e.Space
 }
 
-// Put 登记绑定（space_bind 帧受理路径；幂等——同键同 scope 刷新时刻，同键异
-// scope 以最近登记为准并落日志由调用方承担）。原子快照落盘成功才成立（落盘失败
-// 错误如实上抛，内存不变——不虚报登记成功，hub 收不到 ack 即不下发空间轮）。
-func (h *HubBindings) Put(sessionID, scope string, now time.Time) error {
+// PutIfGenNewer 登记绑定（space_bind 帧受理路径；代次条件生效——codex 复审轮 2
+// 核心机制 1）：无登记 → 接受；代次 > 当前登记代次 → 接受（新代覆盖）；代次 ==
+// 当前登记代次且 scope 相同 → 幂等接受（重派/补绑定安全）；否则（代次 ≤ 当前
+// 且非同代同 scope——含 hub 重启后 stale 代次）拒绝（返回 accepted=false，不改
+// 现状）。原子快照落盘成功才成立（落盘失败错误如实上抛，内存不变——不虚报登记
+// 成功，hub 收不到成功 ack 即不下发空间轮）。
+func (h *HubBindings) PutIfGenNewer(sessionID, scope string, generation uint64, now time.Time) (bool, HubBindEntry, error) {
 	if h == nil {
-		return errors.New("hubbind: 登记表未装配")
+		return false, HubBindEntry{}, errors.New("hubbind: 登记表未装配")
 	}
 	if sessionID == "" || scope == "" {
-		return errors.New("hubbind: session_id 与 space 必填")
+		return false, HubBindEntry{}, errors.New("hubbind: session_id 与 space 必填")
+	}
+	if generation == 0 {
+		return false, HubBindEntry{}, errors.New("hubbind: generation 必填（代次协议）")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	cur, ok := h.binds[sessionID]
+	if ok {
+		switch {
+		case generation > cur.Generation:
+			// 新代：接受。
+		case generation == cur.Generation && cur.Space == scope:
+			return true, cur, nil // 同代同 scope：幂等接受（零落盘零变更）
+		default:
+			return false, cur, nil // stale 代次：拒绝（hub 重启后经 ack current_gen 重同步）
+		}
+	}
 	next := make(map[string]HubBindEntry, len(h.binds)+1)
 	for k, v := range h.binds {
 		next[k] = v
 	}
-	next[sessionID] = HubBindEntry{Space: scope, BoundAt: now}
+	next[sessionID] = HubBindEntry{Space: scope, Generation: generation, BoundAt: now}
 	b, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
-		return err
+		return false, HubBindEntry{}, err
 	}
 	b = append(b, '\n')
 	if err := atomicWriteFile(h.tmp, h.path, b); err != nil {
-		return fmt.Errorf("hubbind: 绑定登记落盘失败: %w", err)
+		return false, HubBindEntry{}, fmt.Errorf("hubbind: 绑定登记落盘失败: %w", err)
 	}
 	h.binds = next
-	return nil
+	return true, HubBindEntry{}, nil
 }
 
 // handleSpaceBind space_bind 帧受理（W07-02 收件门受理面；hub→node 单向登记）：
@@ -173,10 +200,10 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 		return
 	}
 	if p.Space == "" {
-		// 解除登记（空 scope 语义；codex 复审必修D-1 条件删除）：仅当当前登记
-		// scope 与预期一致才删除——旧代解绑重试不得删掉新代登记（不符如实
-		// ack-noop；未登记幂等 ack）。普通轮恢复放行由删除成立承担。
-		removed, err := s.hubBind.RemoveIfScope(p.SessionID, p.ExpectSpace)
+		// 解除登记（空 scope 语义；代次精确匹配——比代次不比 scope）：仅当当前
+		// 登记代次 == 请求代次才删除；未登记/代次不等 → ack-noop（分述日志；
+		// 结构性保证旧重试删不掉新登记、并发补偿删不掉他人绑定）。
+		removed, stale, err := s.hubBind.RemoveIfGen(p.SessionID, p.Generation)
 		if err != nil {
 			log.Printf("[node] space_unbind 失败 session=%s: %v", p.SessionID, err)
 			s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
@@ -184,10 +211,15 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 			return
 		}
 		if removed {
-			log.Printf("[node] 中心空间绑定已解除 session=%s scope=%s from=%s", p.SessionID, p.ExpectSpace, env.From)
+			log.Printf("[node] 中心空间绑定已解除 session=%s gen=%d from=%s", p.SessionID, p.Generation, env.From)
 		} else {
-			log.Printf("[node] space_unbind ack-noop（当前登记与预期不符或未登记）session=%s expect=%s from=%s",
-				p.SessionID, p.ExpectSpace, env.From)
+			log.Printf("[node] space_unbind ack-noop（未登记或代次不等）session=%s gen=%d current=%d from=%s",
+				p.SessionID, p.Generation, stale.Generation, env.From)
+		}
+		p.Accepted = removed
+		p.CurrentGen = stale.Generation
+		if removed {
+			p.CurrentGen = 0
 		}
 		s.sendBindReply(protocol.MsgSpaceBindAck, env.MessageID, p, nil)
 		return
@@ -203,13 +235,21 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 			&protocol.ErrInfo{Code: "invalid", Msg: "space_bind session_id 必填"})
 		return
 	}
-	if err := s.hubBind.Put(p.SessionID, p.Space, protocol.NowUTC()); err != nil {
+	accepted, stale, err := s.hubBind.PutIfGenNewer(p.SessionID, p.Space, p.Generation, protocol.NowUTC())
+	if err != nil {
 		log.Printf("[node] space_bind 登记失败 session=%s scope=%s: %v", p.SessionID, p.Space, err)
 		s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
 			&protocol.ErrInfo{Code: "bind_store_failed", Msg: "绑定登记落盘失败：" + err.Error()})
 		return
 	}
-	log.Printf("[node] 中心空间绑定已登记 session=%s scope=%s from=%s", p.SessionID, p.Space, env.From)
+	if accepted {
+		log.Printf("[node] 中心空间绑定已登记 session=%s scope=%s gen=%d from=%s", p.SessionID, p.Space, p.Generation, env.From)
+	} else {
+		log.Printf("[node] space_bind ack-noop（stale 代次）session=%s scope=%s gen=%d current=%d from=%s",
+			p.SessionID, p.Space, p.Generation, stale.Generation, env.From)
+	}
+	p.Accepted = accepted
+	p.CurrentGen = stale.Generation
 	s.sendBindReply(protocol.MsgSpaceBindAck, env.MessageID, p, nil)
 }
 
