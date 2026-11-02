@@ -601,6 +601,12 @@ func (s *Server) spaceSugar(w http.ResponseWriter, r *http.Request, act collab.A
 	if requestID == "" {
 		requestID = "sugar-" + string(act) + "-" + protocol.NewTraceID() // 自动生成（不承担重放回执）
 	}
+	// 保留前缀门（终审必修5 sugar 入口收口，codex 三审实证遗漏）：sugar 直调
+	// Control 同享全局回执表——T 的 /budget 携 boot-S-drafting 可占住 S 的引导
+	// 回执键使其 conflict 卡死（自动生成族 sugar- 前缀非保留，不受门影响）。
+	if s.requestIDReserved(w, requestID) {
+		return
+	}
 	res, dup, err := s.cfg.Collab.Control(r.PathValue("id"), collab.ControlRequest{
 		RequestID:       requestID,
 		Action:          act,

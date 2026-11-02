@@ -612,6 +612,23 @@ func TestReservedRequestIDPrefixesAllEntries(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
 		t.Fatalf("control 携保留前缀应 400: %d %s", code, out)
 	}
+	// ⑤b sugar 入口同门（codex 三审实证遗漏，必修5 收口最后入口）：sugar 直调
+	// Control 同享全局回执表——T 的 /budget 携 boot-<S>-drafting 占住 S 引导回执键
+	// → S start 引导 conflict 卡死。400 零副作用（T 版本不动）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"request_id":"rr-t","goal":"撞号载体","mode":"manual"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建 T 应 201: %d %s", code, out)
+	}
+	tid, tver := gjsonStr2(t, out, "space.id"), int64(1)
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+tid+"/budget",
+		`{"request_id":"boot-`+sid+`-drafting","expected_version":`+itoaVer(tver)+`,"reason":"撞号尝试"}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("sugar budget 携保留前缀应 400: %d %s", code, out)
+	}
+	if _, tv := spacePhaseVersion(t, srv.Server, tok, tid); tv != tver {
+		t.Fatalf("sugar 400 须零副作用（T 版本不动）: %d", tv)
+	}
 	// ⑥ 反例闭环：S start → 引导不被占号，正常收敛 drafting。
 	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/control",
 		`{"request_id":"rr-start","action":"start","expected_version":`+itoaVer(ver)+`}`)
