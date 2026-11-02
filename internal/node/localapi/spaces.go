@@ -173,11 +173,23 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 		return
 	}
 	id := r.PathValue("id")
+	// 内部保留前缀门（终审必修4①）："boot-" 命名空间归 start 后循环阶段引导的内部
+	// 请求标识——客户端撞号会占住回执使引导落账 conflict、重试永败、阶段空卡死。
+	// 显式 400 人话（MCP 面同理由服务端承担：工具透传本 400 人话即可）。
+	if strings.HasPrefix(req.RequestID, "boot-") {
+		writeErr(w, http.StatusBadRequest, "reserved_request_id",
+			"request_id 前缀 \"boot-\" 为系统保留（start 后循环阶段引导的内部请求标识）：请换用其他请求标识，避免与引导落账撞号互卡")
+		return
+	}
 	// set_phase 门（W05-04 接线，取代 W05-03 的 501 显式拒开）：判定在 strategy、
 	// 落账在 collab——REST 直调不再可能落表外边/旁路暂停恢复约束（预检拒绝先于
 	// 一切事务，零副作用不占 request_id）。
+	// 重放判定先于预检（终审必修2②）：已受理同文请求（原回执在册）跳过预检直落
+	// Control 取原回执——预检裁决的是「新转换」，阶段推进后原请求重放不得被新状态
+	// 409 卡死（回执先于预检，同 apply「重放命中先于一切校验」序）；未命中/异文走
+	// 正常路径（异文由 apply 报 request_conflict）。
 	var setPhaseFrom strategy.Phase // 预检解析的来源阶段（落账后引擎留痕用）
-	if req.Action == collab.ActSetPhase {
+	if req.Action == collab.ActSetPhase && !s.cfg.Collab.ServedIdentical(id, req) {
 		from, ok := s.setPhasePrecheck(w, id, req)
 		if !ok {
 			return
@@ -202,9 +214,11 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 	// 策略引擎跟随落账（W05-03 分离边界：引擎事实跟随落账结果，不预写）：
 	//   - start 实际生效 → BootstrapCycle 引导（幂等）+ ActSetPhase(drafting) 落账
 	//     ——「装配层在空间显式启动后调用」的既定契约，阶段面自此有真相可投影；
-	//   - set_phase 实际生效 → SetPhase 记引擎侧留痕与 PausedFrom（dup 重放命中
-	//     不回放留痕）。
-	if s.cfg.Strategy != nil && res.Applied {
+	//   - set_phase 实际生效 → SetPhase 记引擎侧留痕与 PausedFrom。
+	// dup 门（终审必修2①）：重放命中返回原回执（Applied 为落账时的原值）——引擎
+	// 副作用绝不随重放回放，「dup 不回放留痕」由此才成立（重放 SetPhase 会清
+	// PausedFrom、重放引导会占落账事务——原回执语义只有零副作用重放才保得住）。
+	if s.cfg.Strategy != nil && !dup {
 		switch req.Action {
 		case collab.ActStart:
 			s.bootstrapCycleAfterStart(id, subj)
@@ -220,17 +234,29 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 			}
 		}
 	}
+	// start 重放收敛引导（终审必修4②）：start 已在册（dup 命中）而循环阶段仍空/
+	// 非法 → 幂等引导补课（首次引导失败——如引导落账事务冲突——后重试 start 的
+	// 收敛路径；已初始化时阶段合法不进入本分支，BootstrapCycle 幂等命中零开销）。
+	if s.cfg.Strategy != nil && dup && req.Action == collab.ActStart {
+		if view, ok := s.cfg.Collab.SpaceView(id); ok && !strategy.Phase(strings.TrimSpace(view.Phase)).Valid() {
+			s.bootstrapCycleAfterStart(id, subj)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": res, "dup": dup})
 }
 
 // setPhasePrecheck set_phase 端点面预检（W05-04 接线；无副作用，拒绝先于一切事务
-// ——不落回执、不占 request_id，同 request_id 改投他动作照常受理）。分层表述：
+// ——不落回执、不占 request_id，同 request_id 改投他动作照常受理；已受理同文重放
+// 在调用方先经 ServedIdentical 短路，不到本函数）。分层表述：
 //   - 400 invalid_request：非法词形（空/未知词/含非法字符——值基错误在预检即拒，
 //     不再透传模型层）；
 //   - 409 illegal_transition：不合法转换（阶段未初始化、当前阶段未知、表外边、
-//     暂停恢复约束——strategy.ValidatePhaseTransition 人话原样透出）；
+//     暂停恢复约束——strategy.ValidatePhaseTransition 人话原样透出）+ completed
+//     终态直写门（终审必修3：终态只能经完成动作判据核验落账，直写绕过判据且不可
+//     重入卡死空间）；
 //   - 同值幂等（from == to）不预检直通模型层：collab 落账面承担运行面状态门槛与
-//     同值零变更（applied=false），与 archive 先例同形；
+//     同值零变更（applied=false），与 archive 先例同形（completed→completed 同值
+//     亦走此路——不视为新转换）；
 //   - 404 not_found：空间不存在（读档即判，语义与模型层一致）；
 //   - 503 strategy_unavailable：策略引擎未装配（装配缺失诚实降级，不假放行）。
 //
@@ -266,6 +292,17 @@ func (s *Server) setPhasePrecheck(w http.ResponseWriter, spaceID string, req col
 	}
 	if from == to {
 		return from, true // 同值幂等：交模型层落运行面门槛与零变更裁决
+	}
+	// completed 终态门（终审必修3）：completed 只能经完成动作落账（finish/finalize
+	// 过完成判据核验）——REST 直写绕过判据（无版本无证据 200），且阶段终态不可重入
+	//（完成判据 gap「阶段已为 completed：终态不可重入」）会把空间永久卡死在完成
+	// 不可达面。表内 →completed 边保留在 ValidatePhaseTransition 不动（进程内装配
+	// advance/完成链消费方不受影响），仅端点预检面拦直写；completed→completed 同值
+	// 已在上方幂等直通，不视为新转换。
+	if to == strategy.PhaseCompleted {
+		writeErr(w, http.StatusConflict, collab.CodeIllegalTransition,
+			"completed 不能经 set_phase 直接写入：终态只能经完成动作落账（finish/finalize 过完成判据核验——直接写绕过判据，且终态不可重入会卡死空间）；完成请走主人 finalize 或 finish 判据链")
+		return "", false
 	}
 	if err := s.cfg.Strategy.ValidatePhaseTransition(spaceID, from, to); err != nil {
 		writeErr(w, http.StatusConflict, collab.CodeIllegalTransition, stripStrategyPrefix(err.Error()))

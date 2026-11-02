@@ -107,7 +107,8 @@ func (e *Engine) Projection(spaceID string, space collab.SpaceView, now time.Tim
 
 // RecordsSince 留痕记录增量读（W05-04 GET /records?since 数据源）：Seq > since 的
 // 留痕事件升序；prunedBefore = 滚动裁剪后不可再取的区间上界（最旧保留序号-1，
-// 0 = 无裁剪）。无循环事实返回空集（事实不存在 ≠ 错误，调用方如实空态）。
+// 0 = 无裁剪；最旧序号为 0（旧格式无序号事实）时上界无意义，返回 0——负值不作
+// 为游标语义透出）。无循环事实返回空集（事实不存在 ≠ 错误，调用方如实空态）。
 func (e *Engine) RecordsSince(spaceID string, since int64) (records []TrailEvent, prunedBefore int64) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -115,7 +116,7 @@ func (e *Engine) RecordsSince(spaceID string, since int64) (records []TrailEvent
 	if !ok {
 		return nil, 0
 	}
-	if len(lp.Trail) > 0 {
+	if len(lp.Trail) > 0 && lp.Trail[0].Seq > 0 {
 		prunedBefore = lp.Trail[0].Seq - 1
 	}
 	for i := range lp.Trail {

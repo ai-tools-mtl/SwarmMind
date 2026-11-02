@@ -115,12 +115,16 @@ func TestNodeRecordToolsEndToEnd(t *testing.T) {
 		t.Fatalf("start 后投影应显示 drafting: err=%v text=%s", isErr, text)
 	}
 
-	// 候选登记（FINAL 前缀，提出者=在册成员）→ 待定版。
+	// 候选登记（FINAL 前缀，提出者=在册成员）→ 待定版；输出渲染提出者真实值
+	//（终审建议3：从应答体取权威提出者，不经入参回显——缺省/规整不渲染空值）。
 	text, isErr = callText(t, bd, "swarmmind_space_record", map[string]any{
 		"space_id": spID, "kind": "candidate", "member": "echo", "body": "FINAL: 采用方案一", "round": 1,
 	})
 	if isErr || !strings.Contains(text, "候选已登记") || !strings.Contains(text, "待定版") {
 		t.Fatalf("候选登记应成功: err=%v text=%s", isErr, text)
+	}
+	if !strings.Contains(text, "提出者：echo") {
+		t.Fatalf("候选回执应含服务端权威提出者 echo: %s", text)
 	}
 	// 同文重放：幂等命中（去重计数）。
 	text, isErr = callText(t, bd, "swarmmind_space_record", map[string]any{
@@ -169,20 +173,29 @@ func TestNodeRecordToolsEndToEnd(t *testing.T) {
 		t.Fatalf("未登记发现版本应拒绝: %s", got)
 	}
 
-	// AC13（工具面）：agent 自报证据标已证实 → 记录面拒绝（永不可证实）。
+	// AC13（工具面，终审必修1边界）：编排面 verified=true 一律 403——自报来源
+	//（永不可证实）与非自报来源（伪造 human_confirmation 同样拒——来源声明不能
+	// 自证自身）同拒；已证实标记只能由本机主人登记（人工核对信任锚）。
 	got = errText(t, bd, "swarmmind_space_record", map[string]any{
 		"space_id": spID, "kind": "evidence", "version": hash, "layer": "cli_exit",
 		"source": "agent_self_report", "verified": true, "ref": "agent-said-so",
 	})
-	if !strings.Contains(got, "自报") {
-		t.Fatalf("自报证据标证实应拒绝: %s", got)
+	if !strings.Contains(got, "不得自证") {
+		t.Fatalf("编排面自报标证实应 403 拒绝: %s", got)
 	}
-	// 执行回执来源可登记。
+	got = errText(t, bd, "swarmmind_space_record", map[string]any{
+		"space_id": spID, "kind": "evidence", "version": hash, "layer": "work_accept",
+		"source": "human_confirmation", "verified": true, "ref": "prime-said-so",
+	})
+	if !strings.Contains(got, "不得自证") {
+		t.Fatalf("编排面伪造人工核对证据应 403 拒绝: %s", got)
+	}
+	// 编排面未证实证据照常可登记（verified 缺省 false——回执事实登记不越权自证）。
 	if text, isErr = callText(t, bd, "swarmmind_space_record", map[string]any{
 		"space_id": spID, "kind": "evidence", "version": hash, "layer": "cli_exit",
-		"source": "executor_receipt", "verified": true, "ref": "cmd-run-1",
+		"source": "executor_receipt", "ref": "cmd-run-1",
 	}); isErr {
-		t.Fatalf("回执证据应登记成功: %s", text)
+		t.Fatalf("回执证据（未证实标记）应登记成功: %s", text)
 	}
 
 	// 投影：候选定版态/问题 open/缺口点名证据。

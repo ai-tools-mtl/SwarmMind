@@ -167,3 +167,51 @@ func TestRestoreLoopRejectsCorrupt(t *testing.T) {
 		t.Fatalf("目标已占用应拒绝：%v", err)
 	}
 }
+
+// TestRestoreLoopTrailSeqStrictness 留痕序号收紧锚（终审建议1）：序号形态二值——
+// 混序（部分零部分非零）/负高水位/矛盾（FactSeq=0 有非零序号）拒绝且零副作用；
+// 旧格式（全零 Trail 且 FactSeq==0）整体容忍，恢复后 RecordsSince 对零序号最旧
+// 事件 prunedBefore=0（负上界不作为游标语义透出）。
+func TestRestoreLoopTrailSeqStrictness(t *testing.T) {
+	eng := newTestEngine(t)
+	const sp = "sp-rs3"
+	mk := func(seqs []int64, fact int64) SpaceLoop {
+		s := SpaceLoop{SpaceID: sp, FactSeq: fact}
+		for _, q := range seqs {
+			s.Trail = append(s.Trail, TrailEvent{Seq: q, Kind: TrailPhaseChanged, Note: "锚点事件"})
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name string
+		snap SpaceLoop
+		sub  string
+	}{
+		{"混序拒绝", mk([]int64{1, 0, 2}, 2), "混序"},
+		{"负高水位拒绝", mk(nil, -1), "负值"},
+		{"矛盾拒绝", mk([]int64{1, 2}, 0), "超高水位"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fresh, err := NewEngine(DefaultConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fresh.RestoreLoop(sp, tc.snap); err == nil || !strings.Contains(err.Error(), tc.sub) {
+				t.Fatalf("应拒绝（含 %q），得 %v", tc.sub, err)
+			}
+			if _, ok := fresh.Snapshot(sp); ok {
+				t.Fatal("拒绝零副作用：不得建空间事实")
+			}
+		})
+	}
+	// 旧格式容忍：全零 Trail + FactSeq==0。
+	if err := eng.RestoreLoop(sp, mk([]int64{0, 0, 0}, 0)); err != nil {
+		t.Fatalf("旧格式全零应容忍: %v", err)
+	}
+	if _, ok := eng.Snapshot(sp); !ok {
+		t.Fatal("旧格式恢复后应有空间事实")
+	}
+	if _, pruned := eng.RecordsSince(sp, 0); pruned != 0 {
+		t.Fatalf("零序号最旧事件 prunedBefore 应为 0（负上界不透出）: %d", pruned)
+	}
+}

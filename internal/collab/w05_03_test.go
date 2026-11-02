@@ -64,6 +64,30 @@ func TestW0503SetPhaseLands(t *testing.T) {
 	}, owner); err != nil || !dup {
 		t.Fatalf("重放应命中回执: dup=%v err=%v", dup, err)
 	}
+	// ServedIdentical 只读重放判定（W05-04 终审必修2②，端点预检层专用）：
+	// 同文命中；未受理/异文/跨空间/空 ID 一律 false（异文兜底由 apply 报冲突）。
+	if !st.ServedIdentical(id, ControlRequest{
+		RequestID: "ph2", Action: ActSetPhase, ExpectedVersion: ver + 1, Phase: " frozen ",
+	}) {
+		t.Fatal("同文已受理应命中 ServedIdentical")
+	}
+	for name, req := range map[string]ControlRequest{
+		"未受理": {RequestID: "ph-absent", Action: ActSetPhase, ExpectedVersion: 1, Phase: "frozen"},
+		"异文":  {RequestID: "ph2", Action: ActSetPhase, ExpectedVersion: ver + 1, Phase: "review"},
+		"异动作": {RequestID: "ph2", Action: ActPause, ExpectedVersion: ver + 1},
+	} {
+		if st.ServedIdentical(id, req) {
+			t.Fatalf("%s 不得命中 ServedIdentical: %+v", name, req)
+		}
+	}
+	if st.ServedIdentical("sp-other", ControlRequest{
+		RequestID: "ph2", Action: ActSetPhase, ExpectedVersion: ver + 1, Phase: " frozen ",
+	}) {
+		t.Fatal("跨空间不得命中（指纹含目标空间维度）")
+	}
+	if st.ServedIdentical(id, ControlRequest{Action: ActSetPhase}) {
+		t.Fatal("空 request_id 不得命中")
+	}
 }
 
 // TestW0503SetPhaseDriverForm 驱动者形态（external 领取后 steward 持任期）可落

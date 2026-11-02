@@ -428,6 +428,24 @@ func TestW05MechWriteReviewChain(t *testing.T) {
 	if code, out = rec(`{"kind":"evidence","version":"` + v2 + `","layer":"cli_exit","source":"agent_self_report","verified":true,"ref":"agent-said-so"}`); code != http.StatusBadRequest {
 		t.Fatalf("自报伪造应 400: %d %s", code, out)
 	}
+	// AC13 越权通道（终审必修1）：编排主体伪造人工核对证据（human_confirmation+
+	// verified=true）→ 403 零副作用——已证实标记是「有权人工核对」的登记，只能由
+	// 主人作出（local_token=人工核对信任锚）；非自报来源标已证实同样拒（来源声明
+	// 不能自证自身）。owner 登记放行由下方四层 work_accept/human_confirmation 承担
+	//（登记后判据通过 finalize 200=放行实证）。
+	code, out = f.do("tok-prime", "POST", "/api/v1/spaces/"+spID+"/records",
+		`{"kind":"evidence","version":"` + v2 + `","layer":"work_accept","source":"human_confirmation","verified":true,"ref":"prime-said-so"}`)
+	if code != http.StatusForbidden || !strings.Contains(out, "不得自证") {
+		t.Fatalf("编排主体伪造已证实证据应 403: %d %s", code, out)
+	}
+	for _, ev := range func() []strategy.TrailEvent {
+		r, _ := f.eng.RecordsSince(spID, 0)
+		return r
+	}() {
+		if strings.Contains(ev.Note, "prime-said-so") {
+			t.Fatalf("伪造 403 须零登记副作用: %+v", ev)
+		}
+	}
 	code, out = f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/finalize",
 		`{"expected_version":` + itoaVer(ver) + `,"final_outcome":"done"}`)
 	if code != http.StatusConflict || !strings.Contains(out, "completion_not_satisfied") {

@@ -306,17 +306,34 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 			return errf(ErrInvalid, "零发现复审记录 hash 非法")
 		}
 	}
-	// 留痕序号（W05-04 records 游标基准）：高水位在位时事件序号须严格递增且不超
-	// 高水位；缺省（旧快照/无序号历史事实）容忍——序号是读面游标，不承担恢复正确性。
+	// 留痕序号（W05-04 records 游标基准；终审建议1收紧）：序号形态二值——
+	//   - 全零 Trail 且 FactSeq==0：旧格式（无序号历史事实）整体容忍——「读面游标
+	//     不承担恢复正确性」；
+	//   - 全非零：严格递增且不超高水位（FactSeq==0 而存在非零序号=矛盾拒绝）；
+	//   - 混序（部分零部分非零）=写入器损坏，拒绝；FactSeq 负值拒绝（高水位非负
+	//     不变量）。
+	if snap.FactSeq < 0 {
+		return errf(ErrInvalid, "留痕高水位 FactSeq %d 非法（负值）", snap.FactSeq)
+	}
 	lastSeq := int64(0)
+	sawZeroSeq, sawNonZeroSeq := false, false
 	for i := range snap.Trail {
-		if snap.Trail[i].Seq == 0 {
+		seq := snap.Trail[i].Seq
+		if seq == 0 {
+			sawZeroSeq = true
 			continue
 		}
-		if snap.Trail[i].Seq <= lastSeq || snap.Trail[i].Seq > snap.FactSeq {
-			return errf(ErrInvalid, "留痕事件序号非法/倒挂（%d > 高水位 %d）", snap.Trail[i].Seq, snap.FactSeq)
+		sawNonZeroSeq = true
+		if seq <= lastSeq {
+			return errf(ErrInvalid, "留痕事件序号倒挂（%d ≤ 前序 %d）", seq, lastSeq)
 		}
-		lastSeq = snap.Trail[i].Seq
+		if seq > snap.FactSeq {
+			return errf(ErrInvalid, "留痕事件序号 %d 超高水位 %d（矛盾快照）", seq, snap.FactSeq)
+		}
+		lastSeq = seq
+	}
+	if sawZeroSeq && sawNonZeroSeq {
+		return errf(ErrInvalid, "留痕序号混序（部分零部分非零）：写入器损坏，拒绝恢复")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()

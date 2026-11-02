@@ -286,6 +286,28 @@ func (s *Store) Control(spaceID string, req ControlRequest, subj Subject) (Contr
 	return out, dup, nil
 }
 
+// ServedIdentical 只读重放判定（W05-04 终审必修2②，端点预检层专用）：同 request_id
+// 同文（kind+内容指纹，与 apply 完全同语义——payload 包装目标空间）是否已被受理
+// 且原回执仍在册。命中=本请求是已受理事务的重放，端点层可跳过无副作用预检直落
+// Control 取原回执（dup=true 零执行）——预检裁决的是「新转换」，阶段推进后原请求
+// 重放不应被新状态 409 卡死（回执先于预检，同 apply「重放命中先于一切校验」序）。
+// 未命中/异文/回执已滚动淘汰一律 false：调用方走正常路径，异文仍由 apply 在事务内
+// 报 request_conflict 兜底。只读零副作用（读接口关闭后可用，同包内读面约定）。
+func (s *Store) ServedIdentical(spaceID string, req ControlRequest) bool {
+	if req.RequestID == "" || req.Action == "" {
+		return false
+	}
+	payload := struct {
+		SpaceID string         `json:"space_id"`
+		Req     ControlRequest `json:"req"`
+	}{spaceID, req}
+	hash := opHash("control:"+string(req.Action), payload)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.st.Ops[req.RequestID]
+	return ok && r.Kind == "control:"+string(req.Action) && r.Hash == hash
+}
+
 // controlPause 暂停：running/blocked/needs_review → paused。只阻止新增派发，
 // 不取消在途、不换任期（在途结果照收落账）。
 func controlPause(sp *Space, req ControlRequest, now time.Time) (bool, string, error) {

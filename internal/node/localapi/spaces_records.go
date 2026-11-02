@@ -136,6 +136,18 @@ func (s *Server) handleSpaceRecordPost(w http.ResponseWriter, r *http.Request, s
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 records JSON: "+err.Error())
 		return
 	}
+	// 已证实标记边界（终审必修1，AC13）：verified=true 的登记主体只能是主人
+	//（local_token=人工核对信任锚——「用户明确探针/有权人工核对」）——编排主体
+	// 一律 403 零副作用：已证实标记是「有权人工核对」或服务端回执事实，编排主体
+	// 不得自证（伪造 human_confirmation+verified=true 即可自绿完成判据——AC13
+	// 越权通道）；非自报来源的 verified=true 同样拒——来源声明不能自证自身。
+	// owner 登记仍受引擎语义约束（agent_self_report 来源标证实 400 永拒，主人也
+	// 不能把自报洗成已证实）。
+	if req.Verified && subj.Class != collab.ClassOwner {
+		writeErr(w, http.StatusForbidden, collab.CodeForbidden,
+			"已证实标记（verified=true）只能由本机主人登记（人工核对证据）：编排主体不得自证——「有权人工核对」与来源回执事实不经编排凭据声明（非自报来源标已证实同样拒绝，来源声明不能自证自身）；人工核对证据请由主人在主人面登记")
+		return
+	}
 	id := r.PathValue("id")
 	view, ok := s.cfg.Collab.SpaceView(id)
 	if !ok {

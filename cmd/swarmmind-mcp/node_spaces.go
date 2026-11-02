@@ -540,9 +540,10 @@ func (b nodeBackend) toolSpaceRecord(args map[string]any) (string, error) {
 	}
 	var out struct {
 		Candidate *struct {
-			ID      string `json:"id"`
-			Summary string `json:"summary"`
-			Status  string `json:"status"`
+			ID       string `json:"id"`
+			Proposer string `json:"proposer"`
+			Summary  string `json:"summary"`
+			Status   string `json:"status"`
 		} `json:"candidate,omitempty"`
 		Revision *struct {
 			ID            string `json:"id"`
@@ -565,8 +566,10 @@ func (b nodeBackend) toolSpaceRecord(args map[string]any) (string, error) {
 	}
 	switch {
 	case out.Candidate != nil:
+		// 提出者从应答体取真实值（终审建议3：服务端归属/去重后的权威提出者——
+		// args["member"] 回显会在参数缺省/服务端规整时渲染空值或失真值）。
 		return fmt.Sprintf("候选已登记：%s\n提出者：%s · 摘要：%s · 状态：%s（待定版——FINAL 登记不等于交付，定版由主人显式动作）\n%s数据写入只是事实登记，不触发执行；循环推进仍经显式派发。",
-			out.Candidate.ID, argString(args["member"], false), out.Candidate.Summary, out.Candidate.Status, dupNote), nil
+			out.Candidate.ID, out.Candidate.Proposer, out.Candidate.Summary, out.Candidate.Status, dupNote), nil
 	case out.Revision != nil:
 		return fmt.Sprintf("版本已登记：%s（内容 %s…）\n新版本登记使旧复审结论失效（版本变更留痕）；证据须另行逐层登记（四层分离）。\n%s数据写入只是事实登记，不触发执行。",
 			out.Revision.ID, tailHash(out.Revision.ContentSHA256), dupNote), nil
@@ -812,7 +815,7 @@ func spaceToolDefs() []toolDef {
 			"space_id": toolStr("空间 ID"),
 			"since":    toolNum("已见最大消息 seq（缺省 0=从头）"),
 		}, "space_id")},
-		{Name: "swarmmind_space_record", Description: "登记协作空间策略循环记录（数据写入只是事实登记，绝不等于执行——不派发不推进循环）：kind=candidate 登记成员 FINAL: 前缀候选结论（提出者须为空间成员，非法/越权拒绝不静默换人）；kind=review 按 op 登记版本（revision，内容/补丁 SHA-256）、复审结论（rereview：confirmed_fixed|still_open）、零发现复审（clean_review）、修复声明（claim_fix）、问题回应（reply）；kind=issue 登记审查问题（级别 must/should/info、文件:行、发现版本须已登记）；kind=evidence 登记测试执行证据（四层 cli_exit/protocol_parse/round_complete/work_accept；agent 自报来源标已证实直接拒绝）。新版本登记使旧复审结论失效", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_record", Description: "登记协作空间策略循环记录（数据写入只是事实登记，绝不等于执行——不派发不推进循环）：kind=candidate 登记成员 FINAL: 前缀候选结论（提出者须为空间成员，非法/越权拒绝不静默换人）；kind=review 按 op 登记版本（revision，内容/补丁 SHA-256）、复审结论（rereview：confirmed_fixed|still_open）、零发现复审（clean_review）、修复声明（claim_fix）、问题回应（reply）；kind=issue 登记审查问题（级别 must/should/info、文件:行、发现版本须已登记）；kind=evidence 登记测试执行证据（四层 cli_exit/protocol_parse/round_complete/work_accept；agent 自报来源标已证实直接拒绝；verified=true 编排面 403 拒绝——已证实标记只能由本机主人登记，人工核对证据走主人面）。新版本登记使旧复审结论失效", InputSchema: toolObj(map[string]any{
 			"space_id":         toolStr("空间 ID"),
 			"kind":             toolStr("记录族：candidate|review|issue|evidence"),
 			"op":               toolStr("review 族操作：revision|rereview|clean_review|claim_fix|reply"),

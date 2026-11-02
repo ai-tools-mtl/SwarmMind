@@ -23,6 +23,15 @@ import (
 // nil → 策略面 503 诚实降级路径由 TestSetPhaseStrategyUnavailable 锁定）。
 func newStrategySpaceSrv(t *testing.T) (*httptestServer, *strategy.Engine) {
 	t.Helper()
+	srv, eng, _ := newStrategySpaceSrvStore(t)
+	return srv, eng
+}
+
+// newStrategySpaceSrvStore 同上并暴露 collab Store（终审必修3/4 用例需绕过端点
+// 预检直落模型层构造在案态：completed 相位种子、Store 层 start 的引导缺位态——
+// 引导是端点层职责，Store 层 start 只落状态）。
+func newStrategySpaceSrvStore(t *testing.T) (*httptestServer, *strategy.Engine, *collab.Store) {
+	t.Helper()
 	st, err := collab.Open(t.TempDir(), collab.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +51,54 @@ func newStrategySpaceSrv(t *testing.T) (*httptestServer, *strategy.Engine) {
 	}
 	srv := httptest.NewServer(New(cfg).Handler())
 	t.Cleanup(srv.Close)
-	return &httptestServer{srv}, eng
+	return &httptestServer{srv}, eng, st
+}
+
+// trailView records 留痕读取视图（高水位 + note 拼接；终审建议2/必修2 断言辅助）。
+type trailView struct {
+	hw   int64  // 已见最大留痕 seq
+	notes string // 「kind:note」逐行拼接（Contains 断言具体转换内容）
+}
+
+// readTrail 读 records（since 游标）为 trailView。
+func readTrail(t *testing.T, srv *httptest.Server, tok, id string, since int64) trailView {
+	t.Helper()
+	code, out := spaceDo(t, srv, tok, http.MethodGet, "/api/v1/spaces/"+id+"/records?since="+itoaVer(since), "")
+	if code != http.StatusOK {
+		t.Fatalf("records 读应 200: %d %s", code, out)
+	}
+	var d struct {
+		Records []struct {
+			Seq  int64  `json:"seq"`
+			Kind string `json:"kind"`
+			Note string `json:"note"`
+		} `json:"records"`
+	}
+	if err := json.Unmarshal([]byte(out), &d); err != nil {
+		t.Fatalf("records 解析: %v %s", err, out)
+	}
+	var v trailView
+	var b strings.Builder
+	for _, rec := range d.Records {
+		if rec.Seq > v.hw {
+			v.hw = rec.Seq
+		}
+		b.WriteString(rec.Kind + ":" + rec.Note + "\n")
+	}
+	v.notes = b.String()
+	return v
+}
+
+// trailHighWater records 留痕高水位。
+func trailHighWater(t *testing.T, srv *httptest.Server, tok, id string) int64 {
+	t.Helper()
+	return readTrail(t, srv, tok, id, 0).hw
+}
+
+// trailNotesSince seq>since 的留痕 note 拼接（断言具体转换内容用）。
+func trailNotesSince(t *testing.T, srv *httptest.Server, tok, id string, since int64) string {
+	t.Helper()
+	return readTrail(t, srv, tok, id, since).notes
 }
 
 // httptestServer 薄包装（spaceDo 收 *httptest.Server；策略面测试共用取引用形态）。
@@ -79,29 +135,38 @@ func TestSetPhaseRESTWiredLifecycle(t *testing.T) {
 	ver++
 
 	// 表内边 drafting→frozen：受理落账（200 applied）+ 引擎留痕（records 可查）。
+	hwBefore := trailHighWater(t, srv.Server, tok, id)
 	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
 		`{"request_id":"lc-ph1","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"frozen"}`)
 	if code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
 		t.Fatalf("表内边 set_phase 应受理落账, got %d: %s", code, out)
 	}
 	ver++
-	// 引擎留痕跟随落账：records 增量读含 phase_changed。
-	code, out = spaceDo(t, srv.Server, tok, http.MethodGet, "/api/v1/spaces/"+id+"/records", "")
-	if code != http.StatusOK {
-		t.Fatalf("records 读应 200: %d %s", code, out)
+	// 引擎留痕跟随落账（终审建议2：Seq 增量 + 具体转换内容——仅断言「存在
+	// phase_changed」会被 start 引导留痕假绿，删落账 SetPhase 仍绿）。
+	if hw := trailHighWater(t, srv.Server, tok, id); hw <= hwBefore {
+		t.Fatalf("落账后引擎留痕应新增（Seq 增量 %d → %d）", hwBefore, hw)
 	}
-	if !strings.Contains(out, `"kind":"phase_changed"`) {
-		t.Fatalf("落账后留痕应含 phase_changed: %s", out)
+	if notes := trailNotesSince(t, srv.Server, tok, id, hwBefore); !strings.Contains(notes, "phase_changed:drafting → frozen") {
+		t.Fatalf("落账应留痕具体转换 drafting → frozen: %q", notes)
 	}
 
-	// 表外边 frozen→completed：预检 409 零副作用（阶段/版本不动，不占 request_id）。
+	// 表外边 frozen→rereview：预检 409 零副作用（阶段/版本不动，不占 request_id）。
 	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
-		`{"request_id":"lc-bad","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"completed"}`)
+		`{"request_id":"lc-bad","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"rereview"}`)
 	if code != http.StatusConflict || !strings.Contains(out, "illegal_transition") {
 		t.Fatalf("表外边应 409 illegal_transition, got %d: %s", code, out)
 	}
 	if !strings.Contains(out, "表外") {
 		t.Fatalf("拒绝人话应点明表外路径: %s", out)
+	}
+	// completed 终态直写门（终审必修3）：frozen→completed 虽同为表外，先行命中
+	// completed 专用人话（终态只能经完成动作落账——表内 →completed 边仅供完成链，
+	// REST 直写一律预检拦）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"lc-comp","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"completed"}`)
+	if code != http.StatusConflict || !strings.Contains(out, "完成动作") {
+		t.Fatalf("frozen 直写 completed 应 409 completed 门人话: %d %s", code, out)
 	}
 	// 同 request_id 改投他动作照常受理（预检拒绝先于事务，不占 ID）。
 	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
@@ -252,6 +317,214 @@ func TestSetPhaseUninitializedAndUnavailable(t *testing.T) {
 		if code != http.StatusServiceUnavailable || !strings.Contains(out, "strategy_unavailable") {
 			t.Fatalf("%s %s 引擎未装配应 503, got %d: %s", spec[0], spec[1], code, out)
 		}
+	}
+}
+
+// TestSetPhaseReplayServedIdentical 重放两洞回归（终审必修2，codex 反例锚）：
+//  ① drafting→frozen(A)→review 后重放 A（原文原 ID 原版本）：返回原回执 200 dup
+//     非 409——预检裁决的是新转换，已服同文重放经 ServedIdentical 短路不被新状态
+//     卡死（回执先于预检）；
+//  ② dup 命中引擎零回放：重放不追加留痕（Seq 高水位不变）；review→rework(B)→
+//     paused 后重放 B：PausedFrom 不被清（投影 paused_from=rework 保持），引擎侧
+//     无 paused→rework 回放留痕，恢复 rework 仍合法受理。
+func TestSetPhaseReplayServedIdentical(t *testing.T) {
+	srv, _ := newStrategySpaceSrv(t)
+	tok := "tok-local"
+	code, out := spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"goal":"g","mode":"manual","members":[{"name":"alice","role":"writer"},{"name":"bob","role":"reviewer"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建空间应 201: %d %s", code, out)
+	}
+	id, ver := gjsonStr2(t, out, "space.id"), int64(1)
+	for _, act := range []string{"ready", "start"} {
+		code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+			`{"request_id":"rp-`+act+`","action":"`+act+`","expected_version":`+itoaVer(ver)+`}`)
+		if code != http.StatusOK {
+			t.Fatalf("%s 应 200: %d %s", act, code, out)
+		}
+		ver++
+	}
+	ver++ // start 后循环引导落账占一版（现版本 4）
+	setPhase := func(reqID string, v int64, phase string) (int, string) {
+		return spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+			`{"request_id":"` + reqID + `","action":"set_phase","expected_version":` + itoaVer(v) + `,"phase":"` + phase + `"}`)
+	}
+
+	// ① drafting→frozen（A）→ frozen→review（阶段推进后重放 A）。
+	if code, out = setPhase("rp-a", ver, "frozen"); code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("drafting→frozen 应受理: %d %s", code, out)
+	}
+	ver++
+	if code, out = setPhase("rp-a2", ver, "review"); code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("frozen→review 应受理: %d %s", code, out)
+	}
+	ver++
+	hw := trailHighWater(t, srv.Server, tok, id)
+	code, out = setPhase("rp-a", 4, "frozen") // 原文重放（首次 expected_version=4）
+	if code != http.StatusOK || !strings.Contains(out, `"dup":true`) || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("已服同文重放应 200 dup 命中原回执（非 409）: %d %s", code, out)
+	}
+	if _, cur := spacePhaseVersion(t, srv.Server, tok, id); cur != ver {
+		t.Fatalf("重放零副作用（版本不动 %d）: %d", ver, cur)
+	}
+	if hw2 := trailHighWater(t, srv.Server, tok, id); hw2 != hw {
+		t.Fatalf("重放不得回放引擎留痕（高水位 %d 不变）: %d", hw, hw2)
+	}
+	if notes := trailNotesSince(t, srv.Server, tok, id, 0); strings.Contains(notes, "review → frozen") {
+		t.Fatalf("重放不得产生 review → frozen 引擎留痕: %q", notes)
+	}
+
+	// ② review→rework（B）→ rework→paused（PausedFrom=rework 在案）。
+	if code, out = setPhase("rp-b", ver, "rework"); code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("review→rework 应受理: %d %s", code, out)
+	}
+	ver++
+	if code, out = setPhase("rp-c", ver, "paused"); code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("rework→paused 应受理: %d %s", code, out)
+	}
+	ver++
+	code, out = spaceDo(t, srv.Server, tok, http.MethodGet, "/api/v1/spaces/"+id+"/strategy", "")
+	if code != http.StatusOK || !strings.Contains(out, `"paused_from":"rework"`) {
+		t.Fatalf("投影应携 paused_from=rework: %d %s", code, out)
+	}
+	hw = trailHighWater(t, srv.Server, tok, id)
+	// 重放 B：dup 命中；PausedFrom 不被清；无 paused→rework 回放留痕。
+	code, out = setPhase("rp-b", 6, "rework") // 原文重放（首次 expected_version=6）
+	if code != http.StatusOK || !strings.Contains(out, `"dup":true`) {
+		t.Fatalf("重放 B 应 dup 命中: %d %s", code, out)
+	}
+	code, out = spaceDo(t, srv.Server, tok, http.MethodGet, "/api/v1/spaces/"+id+"/strategy", "")
+	if code != http.StatusOK || !strings.Contains(out, `"paused_from":"rework"`) {
+		t.Fatalf("重放后 PausedFrom 不得被清（仍 rework）: %d %s", code, out)
+	}
+	if hw2 := trailHighWater(t, srv.Server, tok, id); hw2 != hw {
+		t.Fatalf("重放 B 不得回放引擎留痕: %d → %d", hw, hw2)
+	}
+	if notes := trailNotesSince(t, srv.Server, tok, id, 0); strings.Contains(notes, "paused → rework") {
+		t.Fatalf("重放不得产生 paused → rework 回放留痕: %q", notes)
+	}
+	// 恢复 rework 仍合法受理（PausedFrom 未被重放清除）。
+	if code, out = setPhase("rp-d", ver, "rework"); code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+		t.Fatalf("paused→rework 恢复应受理: %d %s", code, out)
+	}
+}
+
+// TestSetPhaseCompletedGate completed 终态直写门（终审必修3）：review 态 set_phase=
+// completed 409 零副作用（终态只能经完成动作判据核验落账——直写绕过判据且阶段
+// 终态不可重入会卡死空间；表内 →completed 边不动，仅端点预检面拦）；同值幂等
+//（completed→completed）from==to 直通模型层 applied=false，不视为新转换。
+func TestSetPhaseCompletedGate(t *testing.T) {
+	srv, _, st := newStrategySpaceSrvStore(t)
+	tok := "tok-local"
+	code, out := spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"goal":"g","mode":"manual","members":[{"name":"alice","role":"writer"},{"name":"bob","role":"reviewer"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建空间应 201: %d %s", code, out)
+	}
+	id, ver := gjsonStr2(t, out, "space.id"), int64(1)
+	for _, act := range []string{"ready", "start"} {
+		code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+			`{"request_id":"cg-`+act+`","action":"`+act+`","expected_version":`+itoaVer(ver)+`}`)
+		if code != http.StatusOK {
+			t.Fatalf("%s 应 200: %d %s", act, code, out)
+		}
+		ver++
+	}
+	ver++ // 循环引导 drafting（现版本 4）
+	for _, ph := range []string{"frozen", "review"} {
+		code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+			`{"request_id":"cg-p-`+ph+`","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"`+ph+`"}`)
+		if code != http.StatusOK || !strings.Contains(out, `"applied":true`) {
+			t.Fatalf("→%s 应受理: %d %s", ph, code, out)
+		}
+		ver++
+	}
+	// 直写拒绝：409 人话 + 零副作用（版本/相位不动，无 completed 留痕）。
+	hw := trailHighWater(t, srv.Server, tok, id)
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"cg-x","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"completed"}`)
+	if code != http.StatusConflict || !strings.Contains(out, "完成动作") {
+		t.Fatalf("review 直写 completed 应 409 人话: %d %s", code, out)
+	}
+	if phase, cur := spacePhaseVersion(t, srv.Server, tok, id); phase != "review" || cur != ver {
+		t.Fatalf("拒绝零副作用（review/%d）: %s/%d", ver, phase, cur)
+	}
+	if hw2 := trailHighWater(t, srv.Server, tok, id); hw2 != hw {
+		t.Fatalf("拒绝零留痕: %d → %d", hw, hw2)
+	}
+	// 同值幂等路径：构造 completed 相位在案（模型层直落——端点预检拦的是 REST
+	// 直写「新转换」，completed 在案属遗留/完成链态；Store 直调等价构造）。
+	if _, dup, err := st.Control(id, collab.ControlRequest{
+		RequestID: "cg-seed", Action: collab.ActSetPhase, ExpectedVersion: ver, Phase: "completed",
+	}, collab.Subject{Name: "owner", Class: collab.ClassOwner}); err != nil || dup {
+		t.Fatalf("种子 completed 相位应成立: err=%v dup=%v", err, dup)
+	}
+	ver++
+	// completed→completed：同值幂等直通（不视为新转换）→ applied=false 零变更。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"cg-same","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"completed"}`)
+	if code != http.StatusOK || !strings.Contains(out, `"applied":false`) {
+		t.Fatalf("completed→completed 同值应幂等零变更: %d %s", code, out)
+	}
+	if _, cur := spacePhaseVersion(t, srv.Server, tok, id); cur != ver {
+		t.Fatalf("同值幂等不得递增版本: %d → %d", ver, cur)
+	}
+}
+
+// TestStartReservedRequestIDAndConverge 终审必修4：①客户端 request_id 撞内部保留
+// 前缀 "boot-" 显式 400（reserved_request_id——撞号会占住引导回执使引导落账
+// conflict、重试永败、阶段空卡死；MCP 面同理由服务端承担）；②start 已落账而循环
+// 阶段空（引导缺位——Store 层 start 只落状态不引导，等价「首次引导失败」后在案态）
+// 时重放 start（dup 命中）幂等引导补课收敛 phase=drafting；收敛后再重放零变更
+//（阶段合法不进引导分支，BootstrapCycle 幂等不占版）。
+func TestStartReservedRequestIDAndConverge(t *testing.T) {
+	srv, _, st := newStrategySpaceSrvStore(t)
+	tok := "tok-local"
+	code, out := spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"goal":"g","mode":"manual","members":[{"name":"alice","role":"writer"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建空间应 201: %d %s", code, out)
+	}
+	id, ver := gjsonStr2(t, out, "space.id"), int64(1)
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"cv-ready","action":"ready","expected_version":1}`)
+	if code != http.StatusOK {
+		t.Fatalf("ready 应 200: %d %s", code, out)
+	}
+	ver++
+	// ① 保留前缀 400 零副作用（以引导真实撞号形态：boot-<space>-drafting）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"boot-`+id+`-drafting","action":"set_phase","expected_version":2,"phase":"drafting"}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("boot- 前缀应 400 reserved_request_id: %d %s", code, out)
+	}
+	if phase, cur := spacePhaseVersion(t, srv.Server, tok, id); phase != "" || cur != ver {
+		t.Fatalf("400 零副作用（空相位/版本 %d）: %s/%d", ver, phase, cur)
+	}
+	// ② 引导缺位构造：Store 层 start（只落状态，装配引导归端点层）→ running+空相位。
+	if _, dup, err := st.Control(id, collab.ControlRequest{
+		RequestID: "cv-start", Action: collab.ActStart, ExpectedVersion: ver,
+	}, collab.Subject{Name: "owner", Class: collab.ClassOwner}); err != nil || dup {
+		t.Fatalf("Store 层 start 应成立: err=%v dup=%v", err, dup)
+	}
+	// 重放 start（同 ID 同文）：dup 命中 → 收敛引导补课 → phase=drafting。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"cv-start","action":"start","expected_version":2}`)
+	if code != http.StatusOK || !strings.Contains(out, `"dup":true`) {
+		t.Fatalf("start 重放应 dup 命中并触发收敛引导: %d %s", code, out)
+	}
+	if phase, cur := spacePhaseVersion(t, srv.Server, tok, id); phase != "drafting" {
+		t.Fatalf("收敛引导后应 drafting（ver=%d）: %s/%d", ver+1, phase, cur)
+	}
+	_, ver = spacePhaseVersion(t, srv.Server, tok, id)
+	// 收敛后再重放：阶段合法不进引导分支，零变更零占版。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
+		`{"request_id":"cv-start","action":"start","expected_version":2}`)
+	if code != http.StatusOK || !strings.Contains(out, `"dup":true`) {
+		t.Fatalf("收敛后重放仍应 dup 命中: %d %s", code, out)
+	}
+	if phase, cur := spacePhaseVersion(t, srv.Server, tok, id); phase != "drafting" || cur != ver {
+		t.Fatalf("收敛后重放零变更（drafting/%d）: %s/%d", ver, phase, cur)
 	}
 }
 
