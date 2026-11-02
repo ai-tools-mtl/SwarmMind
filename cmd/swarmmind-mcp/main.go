@@ -225,13 +225,14 @@ func (nodeBackend) initResult() map[string]any {
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。" +
 			"会话四工具（session_create/send/list/status）投影本机 agent 会话面：会话固定建在本机，" +
 			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。" +
-			"空间六工具（space_create/list/status/dispatch/control/messages）投影本机协作空间面：" +
+			"空间工具（space_create/list/status/dispatch/control/messages + record/records/strategy，W04-02+W05-04）投影本机协作空间面：" +
 			"编排主体可领取待领取空间、配置成员、显式启动并指名派发（同空间串行，结果落账不自动触发下一轮）；" +
-			"预算/策略/定版/归档为主人专属（control 工具不受理）；消息只读不唤醒。",
+			"预算/策略/定版/归档为主人专属（control 工具不受理）；消息与策略记录只读/登记不唤醒——记录写入不等于执行。",
 	}
 }
 
-// nodeTools node 模式工具清单：本机六件套 + 会话四工具 + 空间六工具（W04-02）+
+// nodeTools node 模式工具清单：本机六件套 + 会话四工具 + 空间九工具（W04-02 六件
+// + W05-04 策略面三件）+
 // capabilities（全网目录/群聊/decide/dispatch_suggest 为 hub 专属——决策服务在
 // hub 内嵌，node 无此能力，不静默降级）。
 func (nodeBackend) tools() []toolDef {
@@ -277,9 +278,10 @@ func (nodeBackend) tools() []toolDef {
 			"session_id": toolStr("会话 ID"),
 		}, "session_id")},
 	}
-	// 空间六工具（W04-02，SPEC 六.六豁免⑯收窄兑现）：投影本机空间面 /api/v1/spaces*
-	// ——编排主体领取/配置/启动/派发/控制/消息读全链；预算/策略/定版/归档为主人
-	// 专属不装配（control 工具显式拒绝指路主人）。定义见 node_spaces.go。
+	// 空间工具（W04-02 六件 + W05-04 策略面三件，SPEC 六.六豁免⑯收窄兑现）：投影
+	// 本机空间面 /api/v1/spaces*——编排主体领取/配置/启动/派发/控制/消息读全链 +
+	// 策略循环记录登记/增量读/投影；预算/策略/定版/归档为主人专属不装配（control
+	// 工具显式拒绝指路主人）。定义见 node_spaces.go。
 	tools = append(tools, spaceToolDefs()...)
 	// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
 	tools = append(tools, capToolDef())
@@ -376,7 +378,7 @@ func tools() []toolDef {
 			"subtask_description": toolStr("子任务描述（做什么，越具体越准）"),
 			"capability_options":  toolArr("候选执行者列表，node_id/agent 形式（如 mac-mini/diskcheck），至少 2 项"),
 		}, "subtask_description", "capability_options")},
-		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选概率分布。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_dispatch_suggest", Description: "查询派发建议：给定任务目标，由 hub 决策服务（本地决策模型）从网内在线能力（agent@node 候选）中推荐最合适的执行者，附置信度与候选分布（模型输出原样透传，不构成统计校准证明）。决策是建议不是必经——可自行改派，不作为 swarmmind_submit 的前置；决策模型不可用时返回无建议（不阻塞派单）", InputSchema: toolObj(map[string]any{
 			"goal": toolStr("任务目标/需求描述（一句话说清要做什么，越具体越准；工作单步骤描述也可直接传入）"),
 		}, "goal")},
 		{Name: "swarmmind_session_create", Description: "创建持久会话：绑定远端节点上的指定能力与工作目录，建立跨轮对话线程（首轮后拿到原生会话 ID，续聊不丢上下文）。返回会话 ID；首轮用 swarmmind_session_send 提交。一次性任务不需要会话，直接 swarmmind_submit", InputSchema: toolObj(map[string]any{
@@ -1438,7 +1440,7 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		text, err = b.toolSessionList()
 	case "swarmmind_session_status":
 		text, err = b.toolSessionStatus(args)
-	// 空间六工具（W04-02，node 面；hub 模式不装配——hub 空间归 W07）。
+	// 空间工具（W04-02 六件 + W05-04 策略面三件，node 面；hub 模式不装配——hub 空间归 W07）。
 	case "swarmmind_space_create":
 		text, err = b.toolSpaceCreate(args)
 	case "swarmmind_space_list":
@@ -1451,6 +1453,12 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 		text, err = b.toolSpaceControl(args)
 	case "swarmmind_space_messages":
 		text, err = b.toolSpaceMessages(args)
+	case "swarmmind_space_record":
+		text, err = b.toolSpaceRecord(args)
+	case "swarmmind_space_records":
+		text, err = b.toolSpaceRecords(args)
+	case "swarmmind_space_strategy":
+		text, err = b.toolSpaceStrategy(args)
 	case "swarmmind_capabilities":
 		text, err = b.toolCapabilities()
 	default:

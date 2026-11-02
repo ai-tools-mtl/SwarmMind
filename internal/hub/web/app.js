@@ -580,7 +580,19 @@ const SPACE_EMPTY_LIST = '还没有协作空间';
 const SPACE_EMPTY_LIST_HINT = '协作空间把目标、成员与执行收在一个地方：先写清目标与验收，再讨论策略与预算，显式启动后指名成员推进——普通发言只落账，绝不触发执行。';
 const SPACE_NO_MEMBERS_HINT = '空间还没有成员：配置成员并绑定原生会话后才能标记就绪、启动与派发（入口在详情页「配置成员」；external 空间待管家领取后同样先配成员）。';
 const SPACE_W05_TITLE = '问题 / 版本 / 测试证据';
-const SPACE_W05_NOTE = '本区由协作策略（W05）驱动：完成判据、问题清单与代码版本将在策略接线后在此展示；当前如实留空占位，不以讨论内容冒充判据。';
+/* SPACE_W05_NOTE 策略区引言行（双端同词）；SPACE_W05_EMPTY 无循环事实空态；
+ * SPACE_W05_OFF 投影暂不可达兜底；SPACE_W05_*_STATES/_SEVERITIES/_EVIDENCE_*
+ * 记录态词典（W05-04 P04 策略区）。AC 展示红线：FINAL 前缀登记显示「待定版」
+ * 不冒充已交付（定版态显式）；agent 自报证据不粉饰为已证实；判据缺口如实全列
+ *（缺口清零也不等于自动完成——完成授权归操作区）。 */
+const SPACE_W05_NOTE = '本区展示协作策略（W05）循环事实：候选定版态、版本与证据四层、问题重开态与完成判据缺口；不以讨论内容冒充判据。';
+const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';
+const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';
+const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };
+const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };
+const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };
+const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };
+const SPACE_EVIDENCE_SOURCES = { agent_self_report: 'agent 自报', executor_receipt: '执行回执', protocol_receipt: '协议回执', host_observation: '服务端事实', human_confirmation: '人工核对' };
 const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';
 const SPACE_HUB_OFF_NOTE = '中心端空间能力由 W07 交付接线；本页为双端同构壳，当前不提供创建与操作入口，也不展示替代数据。本机空间请使用 node 控制台「协作空间」页。';
 const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];
@@ -3407,9 +3419,18 @@ function spaceListShellPage() {
     <p class="footer-note">本页为双端同构壳（W04-03）：字段序/状态词/动作词与 node 控制台同源（空间词典 shared block 逐字节同文）；接线前不提供创建与操作入口、不展示替代数据。</p></section>`;
 }
 function spaceDetailShellPage() {
+  /* W05-04：w05 策略区同构壳——表头词与 node P04 策略区同源（空间词典 shared
+   * block），数据面如实未接线（W07），不展示替代数据。 */
+  const w05Shell = `<h3>${esc(SPACE_W05_TITLE)}</h3>
+  <p class="muted">${esc(SPACE_W05_NOTE)}</p>
+  <div class="notice warn spaced"><b>${esc(SPACE_HUB_OFF)}</b> · 策略循环事实展示待 W07 接线：以下表头为双端同构布局，当前不展示替代数据。</div>
+  <div class="table-wrap"><table><thead><tr><th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th></tr></thead><tbody><tr><td colspan="5"><small class="muted">${esc(SPACE_HUB_OFF)}：候选及定版态待 W07 按本机控制台同构展示。</small></td></tr></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>版本</th><th>编写（轮次）</th><th>${esc(SPACE_EVIDENCE_LAYERS.cli_exit)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.protocol_parse)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.round_complete)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.work_accept)}</th></tr></thead><tbody><tr><td colspan="6"><small class="muted">${esc(SPACE_HUB_OFF)}：版本与证据四层待 W07 同构展示。</small></td></tr></tbody></table></div>
+  <div class="table-wrap"><table><thead><tr><th>问题</th><th>级别</th><th>文件:行</th><th>有效状态</th><th>重报/修复</th></tr></thead><tbody><tr><td colspan="5"><small class="muted">${esc(SPACE_HUB_OFF)}：问题及重开态待 W07 同构展示。</small></td></tr></tbody></table></div>`;
   return `<div class="page-head"><div><button type="button" class="link" data-act="space-back">← 返回空间列表</button><h1>空间详情</h1><p class="muted">目标/验收、成员线程、调度条与讨论消息（中心端后端 W07 接线后可用）。</p></div></div>
   <section class="card"><div class="notice warn spaced"><b>${esc(SPACE_HUB_OFF)}</b> · 空间详情（#/spaces/{id}）依赖中心端空间后端（W07）；独立详情路由与九分区骨架（head/goal/members/sched/msgs/compose/w05/events/actions）已按双端契约就位，当前不展示替代数据。</div>
-  <p class="footer-note">本机空间请使用 node 控制台「协作空间」页（本机成员完整独立操作）。</p></section>`;
+  <p class="footer-note">本机空间请使用 node 控制台「协作空间」页（本机成员完整独立操作）。</p></section>
+  <section class="card spaced">${w05Shell}</section>`;
 }
 function groupsPage() {
   return S.groupId ? groupDetailPage() : groupListPage();

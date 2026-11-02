@@ -488,7 +488,19 @@ const SPACE_EMPTY_LIST = '还没有协作空间';
 const SPACE_EMPTY_LIST_HINT = '协作空间把目标、成员与执行收在一个地方：先写清目标与验收，再讨论策略与预算，显式启动后指名成员推进——普通发言只落账，绝不触发执行。';
 const SPACE_NO_MEMBERS_HINT = '空间还没有成员：配置成员并绑定原生会话后才能标记就绪、启动与派发（入口在详情页「配置成员」；external 空间待管家领取后同样先配成员）。';
 const SPACE_W05_TITLE = '问题 / 版本 / 测试证据';
-const SPACE_W05_NOTE = '本区由协作策略（W05）驱动：完成判据、问题清单与代码版本将在策略接线后在此展示；当前如实留空占位，不以讨论内容冒充判据。';
+/* SPACE_W05_NOTE 策略区引言行（双端同词）；SPACE_W05_EMPTY 无循环事实空态；
+ * SPACE_W05_OFF 投影暂不可达兜底；SPACE_W05_*_STATES/_SEVERITIES/_EVIDENCE_*
+ * 记录态词典（W05-04 P04 策略区）。AC 展示红线：FINAL 前缀登记显示「待定版」
+ * 不冒充已交付（定版态显式）；agent 自报证据不粉饰为已证实；判据缺口如实全列
+ *（缺口清零也不等于自动完成——完成授权归操作区）。 */
+const SPACE_W05_NOTE = '本区展示协作策略（W05）循环事实：候选定版态、版本与证据四层、问题重开态与完成判据缺口；不以讨论内容冒充判据。';
+const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';
+const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';
+const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };
+const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };
+const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };
+const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };
+const SPACE_EVIDENCE_SOURCES = { agent_self_report: 'agent 自报', executor_receipt: '执行回执', protocol_receipt: '协议回执', host_observation: '服务端事实', human_confirmation: '人工核对' };
 const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';
 const SPACE_HUB_OFF_NOTE = '中心端空间能力由 W07 交付接线；本页为双端同构壳，当前不提供创建与操作入口，也不展示替代数据。本机空间请使用 node 控制台「协作空间」页。';
 const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];
@@ -1653,14 +1665,15 @@ function currentSpace() {
 async function fetchSpacePage() {
   const id = S.spaceId;
   if (!id || S.page !== 'spaces' || !S.authed) return;
-  const [sr, mr] = await Promise.all([
+  const [sr, mr, tr] = await Promise.all([
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id)).catch(() => null),
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/messages?since=' + (S.spacePage?.lastSeq || 0)).catch(() => null),
+    api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/strategy').catch(() => null),
   ]);
   if (!S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;   // 换空间/关页：旧应答作废
   if (sr && sr.code === 404) { toast('空间不存在'); location.hash = '#/spaces'; return; }
   if (!sr || sr.code !== 200 || !sr.data?.space) return;
-  if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0 };
+  if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, strategy: null };
   S.spacePage.space = sr.data.space;
   /* 消息增量并入（since 游标只读不唤醒；滚动裁剪窗口经 pruned_before_seq 如实标注）。 */
   if (mr && mr.code === 200 && Array.isArray(mr.data.messages)) {
@@ -1672,6 +1685,10 @@ async function fetchSpacePage() {
       S.spacePage.lastSeq = m.seq;
     }
   }
+  /* 策略投影（W05-04 P04 策略区）：整体替换快照（投影自带全量循环事实，无游标
+   * 语义）；读取失败如实置 off 态（SPACE_W05_OFF 兜底），不拿旧数据冒充新鲜。 */
+  S.spacePage.strategy = tr && tr.code === 200 && tr.data?.strategy
+    ? { loaded: true, data: tr.data.strategy } : { loaded: false, data: null };
   $('#space-detail-loading')?.remove();
   syncSpacePageZones();
 }
@@ -1731,7 +1748,7 @@ function spacePageZones(sp) {
     : `<h3 class="spaced">发言（主人）</h3>
     <div class="sayline spaced"><textarea id="space-say" rows="2" placeholder="以主人身份发言 · 只落账不触发任何执行（要成员执行请用「指名派发」）"></textarea>${button('发送', 'space-send', 'primary', 'type="button"')}</div>
     <p class="footer-note">普通发言零唤醒（N01）；发言归属主人。编排主体不能冒充主人——代成员发言经 API member 字段。</p>`,
-    w05: `<h3>${esc(SPACE_W05_TITLE)}</h3><p class="muted">${esc(SPACE_W05_NOTE)}</p>`,
+    w05: spaceW05Zone(pg.strategy),
     events: `<h3 class="spaced">执行与审计事件</h3>${(sp.events || []).length
     ? `<div class="table-wrap"><table><thead><tr><th>时间（UTC）</th><th>事件</th><th>主体</th><th>说明</th></tr></thead><tbody>
     ${(sp.events || []).slice().reverse().slice(0, 50).map(ev => `<tr><td><small>${esc(fmtUTC(ev.at) || '—')}</small></td><td><small><code>${esc(ev.kind)}</code></small></td><td><small>${esc(ev.actor || '—')}</small></td><td><small>${esc(ev.note || '')}</small></td></tr>`).join('')}</tbody></table></div>
@@ -1739,6 +1756,52 @@ function spacePageZones(sp) {
     : '<p class="muted">暂无事件。</p>'}`,
     actions: spaceActionsZone(sp),
   };
+}
+/* spaceW05Zone P04 策略区（W05-04）：策略投影分区渲染。st = S.spacePage.strategy：
+ * loaded=false 投影不可达兜底（SPACE_W05_OFF）；has_loop=false 如实空态（不编造）；
+ * 有事实渲染五组：阶段行 / 候选及定版态 / 版本与证据四层 / 问题及重开态 / 判据缺口
+ * 与停止建议。分区 diff 由 drawerZonesApply 承担（数据无变化不碰 DOM）。展示红线：
+ * FINAL 登记显示「待定版」不冒充已交付；自报证据显示未证实不粉饰；缺口清零也不
+ * 等于自动完成（完成授权归操作区）。表头词与 hub 壳同源（空间词典 shared block）。 */
+function spaceW05Zone(st) {
+  if (!st || !st.loaded) return `<p class="muted">${esc(SPACE_W05_OFF)}</p>`;
+  const d = st.data;
+  if (!d || !d.has_loop) return `<p class="muted">${esc(SPACE_W05_EMPTY)}</p>`;
+  const shortHash = h => { const s = String(h || ''); return s ? s.slice(0, 12) + '…' : '—'; };
+  const phaseLine = `<p class="muted small">阶段 ${esc(d.phase || '—（未初始化）')}${d.paused_from ? '（暂停前 ' + esc(d.paused_from) + '，恢复须回该阶段）' : ''}${d.current_revision ? ' · 当前版本 ' + esc(shortHash(d.current_revision)) : ''}${d.last_reviewed_hash ? ' · 最近复审 ' + esc(shortHash(d.last_reviewed_hash)) : ''}</p>`;
+  const cands = d.candidates || [];
+  const candTable = cands.length
+    ? `<div class="table-wrap"><table><thead><tr><th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th></tr></thead><tbody>
+    ${cands.map(c => `<tr><td title="${esc(c.final_text || '')}">${esc(c.summary || c.id)}</td><td><small>${esc(c.proposer || '—')}</small></td><td><small>${c.round ?? '—'}</small></td><td><small>${esc(SPACE_CAND_STATES[c.status] || c.status || '—')}</small></td><td><small>${c.seen_count || 1} 次</small></td></tr>`).join('')}
+    </tbody></table></div><p class="footer-note">FINAL 前缀发言登记为候选（登记≠交付）：定版/否决显式可见，交付判定归完成判据。</p>`
+    : '';
+  const evCell = ev => {
+    if (!ev) return '<small class="muted">缺失</small>';
+    const src = SPACE_EVIDENCE_SOURCES[ev.source] || ev.source || '—';
+    if (ev.verified && ev.source !== 'agent_self_report') return `<small>✓ 已证实（${esc(src)}）</small>`;
+    return `<small class="muted">未证实（${esc(src)}${ev.verified ? '·自报不算' : ''}）</small>`;
+  };
+  const revs = d.revisions || [];
+  const revTable = revs.length
+    ? `<div class="table-wrap"><table><thead><tr><th>版本</th><th>编写（轮次）</th><th>${esc(SPACE_EVIDENCE_LAYERS.cli_exit)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.protocol_parse)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.round_complete)}</th><th>${esc(SPACE_EVIDENCE_LAYERS.work_accept)}</th></tr></thead><tbody>
+    ${revs.map(r => { const cur = r.content_sha256 === d.current_revision; return `<tr><td>${esc(r.id)}${cur ? '<b>（当前）</b>' : ''}</td><td><small>${esc(r.author || '—')}（${r.author_round ?? 0}）</small></td><td>${evCell(r.test_cli)}</td><td>${evCell(r.test_protocol)}</td><td>${evCell(r.test_round)}</td><td>${evCell(r.test_accept)}</td></tr>`; }).join('')}
+    </tbody></table></div><p class="footer-note">证据四层分离逐版展示：agent 自报不算已证实；代码改变使旧复审失效（失效问题在问题表标「已失效」）。</p>`
+    : '';
+  const issues = d.issues || [];
+  const issueTable = issues.length
+    ? `<div class="table-wrap"><table><thead><tr><th>问题</th><th>级别</th><th>文件:行</th><th>有效状态</th><th>重报/修复</th></tr></thead><tbody>
+    ${issues.map(is => `<tr><td title="${esc(is.title || '')}">${esc(is.id)}</td><td><small>${esc(SPACE_SEVERITIES[is.severity] || is.severity)}</small></td><td><small>${esc(is.file || '—')}:${is.line ?? 0}</small></td><td><small>${esc(SPACE_ISSUE_STATES[is.state] || is.state || '—')}${is.blocking ? ' · 阻塞' : ''}</small></td><td><small>${is.occurrences || 1}/${(is.fixes || []).length}</small></td></tr>`).join('')}
+    </tbody></table></div>`
+    : '';
+  const gaps = d.gaps || [];
+  const gapsHtml = gaps.length
+    ? `<div class="notice warn spaced"><b>完成判据缺口 ${gaps.length} 项</b>（如实全列；缺口清零也不自动完成——完成授权归操作区）：${gaps.map(g => `<br>· [${esc(g.field)}] ${esc(g.detail)}`).join('')}</div>`
+    : '<p class="muted">完成判据缺口：无（判据面全满足；完成仍须显式操作）。</p>';
+  const stop = d.stop || {};
+  const stopHtml = stop.should_pause
+    ? `<div class="notice warn spaced"><b>停止建议：暂停保留进度</b>（恢复须显式；落账归操作区）${(stop.triggers || []).map(tg => `<br>· ${esc(tg.kind)}: ${esc(tg.detail)}`).join('')}</div>`
+    : '';
+  return phaseLine + candTable + revTable + issueTable + gapsHtml + stopHtml;
 }
 /* spaceActionsZone 操作区（按九态动态可用）：状态不允许的动作不出现（illegal_transition
  * 前置收敛为不渲染）；授权/判据类拒绝（403/409/503）保留入口——点了如实看到原因。

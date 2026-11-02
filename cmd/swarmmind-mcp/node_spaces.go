@@ -1,6 +1,7 @@
-// node_spaces.go node 空间六工具（W04-02，docs/tasks/v3/W04-spaces.md + SPEC 六.六
-// 豁免⑯收窄兑现）：投影本机空间面 /api/v1/spaces*——create/list/status/dispatch/
-// control/messages 六件。与 hub 面的边界（任务书既定豁免意图）：
+// node_spaces.go node 空间工具（W04-02 六件 + W05-04 策略面三件，docs/tasks/v3/
+// W04-spaces.md + W05-strategies.md + SPEC 六.六豁免⑯收窄兑现）：投影本机空间面
+// /api/v1/spaces*——create/list/status/dispatch/control/messages 六件 + record/
+// records/strategy 策略循环记录与投影三件。与 hub 面的边界（任务书既定豁免意图）：
 //   - 预算/策略/定版/归档（set_budget/policy/finalize/archive）为主人专属（豁免
 //     保留面）：control 工具对这四个动作显式拒绝（指路主人 REST/控制台），绝不
 //     静默透传一个必然 403 的调用；
@@ -476,7 +477,302 @@ func (b nodeBackend) toolSpaceMessages(args map[string]any) (string, error) {
 	return bl.String(), nil
 }
 
-// spaceToolDefs node 空间六工具清单（tools/list 装配；描述面向 agent 写「能做什么」，
+// spaceRecordToolArgs swarmmind_space_record 参数装配：kind 判别联合逐族映射
+// REST records 字段（端点层零第二套校验——参数缺失/词形错误由服务端 400 人话
+// 原话透传 nodeAPIErr）。kind 间同名不冲突：服务端按 kind 取用，冗余字段无害。
+func spaceRecordToolArgs(args map[string]any) map[string]any {
+	req := map[string]any{"kind": strings.TrimSpace(argString(args["kind"], args["kind"] != nil))}
+	for _, k := range []string{"member", "body", "op", "baseline", "content_sha256", "patch_sha256",
+		"author", "issue_id", "reviewer", "against_hash", "result", "version_hash", "note",
+		"severity", "file", "title", "found_in_version", "version", "layer", "source", "ref"} {
+		if v := strings.TrimSpace(argString(args[k], args[k] != nil)); v != "" {
+			req[k] = v
+		}
+	}
+	for _, k := range []string{"round", "author_round", "found_in_round", "line"} {
+		if n, ok := argNum(args, k); ok {
+			req[k] = int64(n)
+		}
+	}
+	if v, ok := args["verified"].(bool); ok {
+		req["verified"] = v
+	}
+	if raw, ok := args["dependencies"].([]any); ok && len(raw) > 0 {
+		deps := make([]map[string]any, 0, len(raw))
+		for _, v := range raw {
+			d, ok := v.(map[string]any)
+			if !ok {
+				continue
+			}
+			dd := map[string]any{}
+			for _, k := range []string{"kind", "ref", "sha256", "note"} {
+				if s := strings.TrimSpace(argString(d[k], d[k] != nil)); s != "" {
+					dd[k] = s
+				}
+			}
+			deps = append(deps, dd)
+		}
+		req["dependencies"] = deps
+	}
+	return req
+}
+
+// toolSpaceRecord swarmmind_space_record（node 面，W05-04）：策略循环记录登记
+// （candidate/review/issue/evidence 四族）。数据写入只是事实登记——不派发不推进
+// 循环不触发任何执行（执行唯一入口 swarmmind_space_dispatch）；校验在服务端引擎
+// （成员资格/hash 格式/自报不证实/发现版本须已登记），非法拒绝零登记。
+func (b nodeBackend) toolSpaceRecord(args map[string]any) (string, error) {
+	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
+	if sid == "" {
+		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
+	}
+	req := spaceRecordToolArgs(args)
+	kind, _ := req["kind"].(string)
+	if kind == "" {
+		return "", fmt.Errorf("kind 必填：candidate|review|issue|evidence（review 另需 op=revision|rereview|clean_review|claim_fix|reply）")
+	}
+	code, data, err := b.nodeAPI("POST", "/api/v1/spaces/"+sid+"/records", req, b.primeToken)
+	if err != nil {
+		return "", err
+	}
+	if code != 201 && code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var out struct {
+		Candidate *struct {
+			ID      string `json:"id"`
+			Summary string `json:"summary"`
+			Status  string `json:"status"`
+		} `json:"candidate,omitempty"`
+		Revision *struct {
+			ID            string `json:"id"`
+			ContentSHA256 string `json:"content_sha256"`
+		} `json:"revision,omitempty"`
+		Issue *struct {
+			ID   string `json:"id"`
+			File string `json:"file"`
+			Line int    `json:"line"`
+		} `json:"issue,omitempty"`
+		Created bool `json:"created"`
+		Dup     bool `json:"dup,omitempty"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	dupNote := ""
+	if code == 200 {
+		dupNote = "（幂等命中既有事实：候选同文去重计数 / 版本同 hash 同 ID，未产生第二份记录）\n"
+	}
+	switch {
+	case out.Candidate != nil:
+		return fmt.Sprintf("候选已登记：%s\n提出者：%s · 摘要：%s · 状态：%s（待定版——FINAL 登记不等于交付，定版由主人显式动作）\n%s数据写入只是事实登记，不触发执行；循环推进仍经显式派发。",
+			out.Candidate.ID, argString(args["member"], false), out.Candidate.Summary, out.Candidate.Status, dupNote), nil
+	case out.Revision != nil:
+		return fmt.Sprintf("版本已登记：%s（内容 %s…）\n新版本登记使旧复审结论失效（版本变更留痕）；证据须另行逐层登记（四层分离）。\n%s数据写入只是事实登记，不触发执行。",
+			out.Revision.ID, tailHash(out.Revision.ContentSHA256), dupNote), nil
+	case out.Issue != nil:
+		return fmt.Sprintf("问题已登记：%s（%s:%d）\n同 key 重报不换 ID；必须修未清零将阻塞完成判据。\n数据写入只是事实登记，不触发执行。", out.Issue.ID, out.Issue.File, out.Issue.Line), nil
+	default:
+		return fmt.Sprintf("记录已登记（%s）：事实入循环账，不触发执行、不推进阶段。\n%s", kind, dupNote), nil
+	}
+}
+
+// tailHash hash 尾段展示（12 位）。
+func tailHash(h string) string {
+	if len(h) > 12 {
+		return h[len(h)-12:]
+	}
+	return h
+}
+
+// toolSpaceRecords swarmmind_space_records（node 面，W05-04）：策略循环记录增量读
+//（since=已见最大 seq，只读不唤醒）。记录四族 candidate/review/issue/evidence；
+// 滚动裁剪区间以 pruned_before_seq 标注。循环状态全量投影见 swarmmind_space_strategy。
+func (b nodeBackend) toolSpaceRecords(args map[string]any) (string, error) {
+	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
+	if sid == "" {
+		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
+	}
+	path := "/api/v1/spaces/" + sid + "/records"
+	if since, ok := argNum(args, "since"); ok && since > 0 {
+		path += fmt.Sprintf("?since=%d", int64(since))
+	}
+	code, data, err := b.nodeAPI("GET", path, nil, b.primeToken)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var out struct {
+		Records []struct {
+			Seq  int64  `json:"seq"`
+			Kind string `json:"kind"`
+			Type string `json:"type,omitempty"`
+			Note string `json:"note"`
+		} `json:"records"`
+		PrunedBefore int64 `json:"pruned_before_seq"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	if len(out.Records) == 0 {
+		return fmt.Sprintf("空间 %s 无新记录（since 之后；裁剪上界 seq ≤ %d）。", sid, out.PrunedBefore), nil
+	}
+	var bl strings.Builder
+	fmt.Fprintf(&bl, "空间 %s 循环记录（since 之后 %d 条，升序）：", sid, len(out.Records))
+	for _, r := range out.Records {
+		family := r.Type
+		if family == "" {
+			family = "control"
+		}
+		fmt.Fprintf(&bl, "\n#%d [%s/%s] %s", r.Seq, family, r.Kind, truncateForStatus(r.Note))
+	}
+	if out.PrunedBefore > 0 {
+		fmt.Fprintf(&bl, "\n（更早记录已滚动裁剪：seq ≤ %d 不可再拉）", out.PrunedBefore)
+	}
+	bl.WriteString("\n记录只读不唤醒（读游标不触发执行）；候选/版本/问题全量状态用 swarmmind_space_strategy 查看。")
+	return bl.String(), nil
+}
+
+// spaceStrategyIssueLine 单问题人话行（strategy 工具渲染）。
+func spaceStrategyIssueLine(id, severity, file string, line int, state string, blocking bool) string {
+	sev := map[string]string{"must": "必须修", "should": "建议修", "info": "可不修"}[severity]
+	if sev == "" {
+		sev = severity
+	}
+	st := map[string]string{"open": "待复审", "confirmed_fixed": "已修复确认", "still_open": "仍未解", "stale": "已失效（版本变更）"}[state]
+	if st == "" {
+		st = state
+	}
+	mark := ""
+	if blocking {
+		mark = " ·阻塞"
+	}
+	return fmt.Sprintf("%s [%s] %s:%d · %s%s", id, sev, file, line, st, mark)
+}
+
+// toolSpaceStrategy swarmmind_space_strategy（node 面，W05-04）：策略投影只读——
+// 循环阶段/候选及定版态/问题及重开态/修订与证据缺口/停止建议。无策略数据的空间
+// 如实空态不编造。完成判据缺口如实展示（数据面事实，不等于可自动完成——完成授权
+// 仍归逐动作表）。
+func (b nodeBackend) toolSpaceStrategy(args map[string]any) (string, error) {
+	sid := strings.TrimSpace(argString(args["space_id"], args["space_id"] != nil))
+	if sid == "" {
+		return "", fmt.Errorf("space_id 必填（swarmmind_space_list 可查）")
+	}
+	code, data, err := b.nodeAPI("GET", "/api/v1/spaces/"+sid+"/strategy", nil, b.primeToken)
+	if err != nil {
+		return "", err
+	}
+	if code != 200 {
+		return "", nodeAPIErr(code, data)
+	}
+	var out struct {
+		Strategy struct {
+			HasLoop         bool   `json:"has_loop"`
+			Phase           string `json:"phase"`
+			PhaseValid      bool   `json:"phase_valid"`
+			PausedFrom      string `json:"paused_from,omitempty"`
+			CurrentRevision string `json:"current_revision,omitempty"`
+			Candidates      []struct {
+				ID      string `json:"id"`
+				Summary string `json:"summary"`
+				Status  string `json:"status"`
+			} `json:"candidates,omitempty"`
+			Revisions []struct {
+				ID            string `json:"id"`
+				ContentSHA256 string `json:"content_sha256"`
+			} `json:"revisions,omitempty"`
+			Issues []struct {
+				ID       string `json:"id"`
+				Severity string `json:"severity"`
+				File     string `json:"file"`
+				Line     int    `json:"line"`
+				State    string `json:"state"`
+				Blocking bool   `json:"blocking"`
+			} `json:"issues,omitempty"`
+			Gaps []struct {
+				Field  string `json:"field"`
+				Detail string `json:"detail"`
+			} `json:"gaps,omitempty"`
+			Stop struct {
+				ShouldPause bool `json:"should_pause"`
+				Triggers    []struct {
+					Kind   string `json:"kind"`
+					Detail string `json:"detail"`
+				} `json:"triggers,omitempty"`
+			} `json:"stop"`
+		} `json:"strategy"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", fmt.Errorf("应答解析失败：%v", err)
+	}
+	sp := out.Strategy
+	if !sp.HasLoop {
+		return fmt.Sprintf("空间 %s 暂无策略循环数据（候选/版本/问题均未登记——如实空态）：讨论发言经 swarmmind_space_messages，候选登记经 swarmmind_space_record。", sid), nil
+	}
+	var bl strings.Builder
+	phase := sp.Phase
+	if !sp.PhaseValid {
+		phase += "（未知词）"
+	}
+	fmt.Fprintf(&bl, "空间 %s 策略循环：阶段 %s", sid, phase)
+	if sp.PausedFrom != "" {
+		fmt.Fprintf(&bl, "（暂停前 %s，恢复须回该阶段）", sp.PausedFrom)
+	}
+	if sp.CurrentRevision != "" {
+		fmt.Fprintf(&bl, " · 当前版本 %s…", tailHash(sp.CurrentRevision))
+	}
+	bl.WriteString("\n")
+	if n := len(sp.Candidates); n > 0 {
+		fmt.Fprintf(&bl, "候选 %d 条：", n)
+		for i, c := range sp.Candidates {
+			if i > 0 {
+				bl.WriteString("、")
+			}
+			fmt.Fprintf(&bl, "%s[%s] %s", c.ID, c.Status, truncateForStatus(c.Summary))
+		}
+		bl.WriteString("\n（FINAL 登记不等于已交付——定版态如上，交付判定归完成判据）\n")
+	}
+	if n := len(sp.Revisions); n > 0 {
+		fmt.Fprintf(&bl, "版本 %d 个（末位=当前）：", n)
+		for i, r := range sp.Revisions {
+			if i > 0 {
+				bl.WriteString("、")
+			}
+			fmt.Fprintf(&bl, "%s(%s…)", r.ID, tailHash(r.ContentSHA256))
+		}
+		bl.WriteString("\n（证据四层逐版见 REST GET strategy；自报来源不算已证实）\n")
+	}
+	if n := len(sp.Issues); n > 0 {
+		fmt.Fprintf(&bl, "问题 %d 条：\n", n)
+		for _, is := range sp.Issues {
+			fmt.Fprintf(&bl, "  %s\n", spaceStrategyIssueLine(is.ID, is.Severity, is.File, is.Line, is.State, is.Blocking))
+		}
+	}
+	if n := len(sp.Gaps); n > 0 {
+		fmt.Fprintf(&bl, "完成判据缺口 %d 项（如实展示；完成授权仍归逐动作表，不因缺口清零自动完成）：\n", n)
+		for _, g := range sp.Gaps {
+			fmt.Fprintf(&bl, "  [%s] %s\n", g.Field, truncateForStatus(g.Detail))
+		}
+	} else {
+		bl.WriteString("完成判据缺口：无（判据面全满足；完成仍须显式 finish/finalize）\n")
+	}
+	if sp.Stop.ShouldPause {
+		bl.WriteString("停止建议：建议暂停保留进度（")
+		for i, tg := range sp.Stop.Triggers {
+			if i > 0 {
+				bl.WriteString("；")
+			}
+			fmt.Fprintf(&bl, "%s: %s", tg.Kind, truncateForStatus(tg.Detail))
+		}
+		bl.WriteString("）——落账归控制面（swarmmind_space_control pause），本投影不自动暂停。\n")
+	}
+	return bl.String(), nil
+}
+
+// spaceToolDefs node 空间工具清单（tools/list 装配；描述面向 agent 写「能做什么」，
 // 与 REST 面同语义——差异如实写进描述）。
 func spaceToolDefs() []toolDef {
 	return []toolDef{
@@ -515,6 +811,44 @@ func spaceToolDefs() []toolDef {
 		{Name: "swarmmind_space_messages", Description: "拉取协作空间消息（增量读）：since 传已见最大 seq 只返回之后的新消息，适合轮询补齐。消息只读不唤醒——发言与游标绝不触发任何执行；滚动窗口外更早消息不可再拉（响应标注裁剪位置）。派发结果与进度经 swarmmind_space_status 查看", InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID"),
 			"since":    toolNum("已见最大消息 seq（缺省 0=从头）"),
+		}, "space_id")},
+		{Name: "swarmmind_space_record", Description: "登记协作空间策略循环记录（数据写入只是事实登记，绝不等于执行——不派发不推进循环）：kind=candidate 登记成员 FINAL: 前缀候选结论（提出者须为空间成员，非法/越权拒绝不静默换人）；kind=review 按 op 登记版本（revision，内容/补丁 SHA-256）、复审结论（rereview：confirmed_fixed|still_open）、零发现复审（clean_review）、修复声明（claim_fix）、问题回应（reply）；kind=issue 登记审查问题（级别 must/should/info、文件:行、发现版本须已登记）；kind=evidence 登记测试执行证据（四层 cli_exit/protocol_parse/round_complete/work_accept；agent 自报来源标已证实直接拒绝）。新版本登记使旧复审结论失效", InputSchema: toolObj(map[string]any{
+			"space_id":         toolStr("空间 ID"),
+			"kind":             toolStr("记录族：candidate|review|issue|evidence"),
+			"op":               toolStr("review 族操作：revision|rereview|clean_review|claim_fix|reply"),
+			"member":           toolStr("candidate：提出者（空间成员名）"),
+			"body":             toolStr("candidate：FINAL: 前缀发言原文"),
+			"round":            toolNum("candidate：提出轮次"),
+			"baseline":         toolStr("review/revision：代码基线（commit/工作区锚）"),
+			"content_sha256":   toolStr("review/revision：内容 SHA-256 hex64"),
+			"patch_sha256":     toolStr("review/revision：补丁 SHA-256 hex64（整树交付可省）"),
+			"author":           toolStr("review/revision：编写成员"),
+			"author_round":     toolNum("review/revision、claim_fix：编写/返工轮次"),
+			"dependencies":     toolArr("review/revision：依赖产物引用（元素 kind/ref/sha256/note）"),
+			"issue_id":         toolStr("review/rereview|claim_fix|reply：目标问题 ID"),
+			"reviewer":         toolStr("review/rereview|clean_review、issue：审查/复审者（空间成员）"),
+			"against_hash":     toolStr("review/rereview|clean_review：复审针对版本 SHA-256 hex64"),
+			"result":           toolStr("review/rereview：confirmed_fixed|still_open"),
+			"version_hash":     toolStr("review/claim_fix：修复声明版本 SHA-256 hex64"),
+			"severity":         toolStr("issue：must|should|info"),
+			"file":             toolStr("issue：文件"),
+			"line":             toolNum("issue：行号"),
+			"title":            toolStr("issue：标题（同 key 重报不换 ID）"),
+			"found_in_version": toolStr("issue：发现版本 SHA-256 hex64（须已登记）"),
+			"found_in_round":   toolNum("issue：发现时编写轮次"),
+			"version":          toolStr("evidence：证据绑定版本 SHA-256 hex64（须已登记）"),
+			"layer":            toolStr("evidence：cli_exit|protocol_parse|round_complete|work_accept"),
+			"source":           toolStr("evidence：来源（agent_self_report 永不可证实；executor_receipt/protocol_receipt/host_observation/human_confirmation 可证实）"),
+			"verified":         toolBool("evidence：已证实标记（自报来源传 true 即拒绝）"),
+			"ref":              toolStr("evidence：回执号/命令 hash/人工主体"),
+			"note":             toolStr("备注（可选）"),
+		}, "space_id", "kind")},
+		{Name: "swarmmind_space_records", Description: "拉取协作空间策略循环记录（增量读）：since 传已见最大 seq 只返回之后的新记录，适合轮询补齐。记录四族 candidate/review/issue/evidence（控制留痕如阶段变更如实标注 control）；只读不唤醒——读游标绝不触发执行；滚动裁剪区间以 pruned_before_seq 标注。候选/版本/问题全量状态用 swarmmind_space_strategy", InputSchema: toolObj(map[string]any{
+			"space_id": toolStr("空间 ID"),
+			"since":    toolNum("已见最大记录 seq（缺省 0=从头）"),
+		}, "space_id")},
+		{Name: "swarmmind_space_strategy", Description: "查看协作空间策略循环投影（只读）：循环阶段与暂停前阶段、候选及定版态（FINAL 登记不等于已交付）、问题及重开态（重报已确认问题即回归重开）、当前版本与完成判据缺口清单（如实展示，不等于可自动完成）、停止建议（预算耗尽/修复阈值/验收争议——落账归控制面）。无策略数据的空间返回如实空态", InputSchema: toolObj(map[string]any{
+			"space_id": toolStr("空间 ID（swarmmind_space_list 可查）"),
 		}, "space_id")},
 	}
 }

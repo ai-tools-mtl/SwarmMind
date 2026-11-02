@@ -508,6 +508,9 @@ func run(cfgPath, dataDirOverride string) error {
 		PrimeAgent: cfg.PrimeAgent,
 		McpAccess:  mcpAccess,   // 编排授权开关（W02-01：prime_token 门控真相源）
 		Collab:     spacesStore, // 空间协作存储（W04-01，主人面 REST；六.六豁免⑯）
+		// 策略引擎（W05-04 端点面接线）：与 spacesStore Hooks 同一实例——set_phase
+		// 预检/落账留痕、start 循环引导、策略投影与 records 面同源判定。
+		Strategy: stratEngine,
 		// declare 钦定端点（方案 3.2.1 网页化）：写启动时 --config 原路径 +
 		// 回填本机监听（应答 mcp_config 的 SWARM_NODE_URL 数据源）。
 		DeclareConfigPath: cfgPath,

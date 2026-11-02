@@ -69,9 +69,42 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		"const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];",
 		"function spaceWaitReason(sp) {",
 		"function spaceBadge(s) {",
+		// W05-04 P04 策略区词典：记录态/证据四层/自报红线（双端同词）。
+		"const SPACE_W05_NOTE = '本区展示协作策略（W05）循环事实：候选定版态、版本与证据四层、问题重开态与完成判据缺口；不以讨论内容冒充判据。';",
+		"const SPACE_W05_EMPTY = '本空间暂无策略循环数据：候选/版本/问题均未登记（讨论发言与普通派发不产生循环事实）。';",
+		"const SPACE_W05_OFF = '策略投影暂不可达（本机策略面未装配或读取失败）：数据未加载，不以讨论内容冒充判据。';",
+		"const SPACE_CAND_STATES = { pending: '待定版', finalized: '已定版', dismissed: '已否决' };",
+		"const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确认', still_open: '仍未解', stale: '已失效（版本变更）' };",
+		"const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };",
+		"const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };",
+		"const SPACE_EVIDENCE_SOURCES = { agent_self_report: 'agent 自报', executor_receipt: '执行回执', protocol_receipt: '协议回执', host_observation: '服务端事实', human_confirmation: '人工核对' };",
 	} {
 		if !strings.Contains(blk, want) {
 			t.Errorf("空间词典 shared block 应含 %q", want)
+		}
+	}
+
+	// ---- W05-04 策略区接线锚点：node 真渲染 + hub 壳同表头未接线声明。 ----
+	// node：w05 区投影渲染（分区 diff 机制既有）+ strategy 投影拉取。
+	for _, want := range []string{
+		"function spaceW05Zone(st) {",
+		"w05: spaceW05Zone(pg.strategy),",
+		"'/strategy'",
+		"SPACE_EVIDENCE_SOURCES[ev.source]",
+		"不冒充已交付",
+	} {
+		if !strings.Contains(nodeJS, want) {
+			t.Errorf("node app.js 应含 %q（P04 策略区接线）", want)
+		}
+	}
+	// hub：w05 壳同表头（候选/版本/问题三表）+ 未接线声明；无数据面假入口。
+	for _, want := range []string{
+		"<th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th>",
+		"<th>问题</th><th>级别</th><th>文件:行</th><th>有效状态</th><th>重报/修复</th>",
+		"SPACE_EVIDENCE_LAYERS.cli_exit",
+	} {
+		if !strings.Contains(hubJSStr, want) {
+			t.Errorf("hub app.js 应含 %q（w05 壳同表头）", want)
 		}
 	}
 

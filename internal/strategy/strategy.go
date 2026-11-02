@@ -103,8 +103,11 @@ const (
 	TrailPhaseChanged      TrailKind = "phase_changed"
 )
 
-// TrailEvent 留痕事件（滚动保留最新 MaxTrailEvents 条）。
+// TrailEvent 留痕事件（滚动保留最新 MaxTrailEvents 条）。Seq 空间内单调递增
+// （W05-04 records 增量读游标：GET /records?since=已见最大 Seq；历史内存事实无
+// 序号，恢复/旧快照容忍缺省 0）。
 type TrailEvent struct {
+	Seq  int64     `json:"seq,omitempty"`
 	At   time.Time `json:"at"`
 	Kind TrailKind `json:"kind"`
 	Note string    `json:"note,omitempty"`
@@ -133,6 +136,9 @@ type SpaceLoop struct {
 	LastReviewedAt   time.Time `json:"last_reviewed_at,omitempty"`
 	// PausedFrom 暂停前的循环阶段（恢复目标校验；SetPhase 进 paused 记、出 paused 清）。
 	PausedFrom Phase `json:"paused_from,omitempty"`
+	// FactSeq 留痕事件单调序号高水位（每 appendTrail +1；records 增量读游标基准，
+	// 与 Trail.Seq 同源——滚动裁剪只丢事件不回拨序号）。
+	FactSeq int64 `json:"fact_seq,omitempty"`
 	// Trail 留痕事件（失效留痕等；滚动上限 MaxTrailEvents）。
 	Trail []TrailEvent `json:"trail,omitempty"`
 }
@@ -180,9 +186,11 @@ func (e *Engine) loop(spaceID string, create bool) *SpaceLoop {
 	return lp
 }
 
-// appendTrail 追加留痕事件（滚动裁剪最旧；调用方持写锁）。
+// appendTrail 追加留痕事件（滚动裁剪最旧；调用方持写锁）。Seq 取 FactSeq+1：
+// 裁剪只丢最旧事件，序号高水位单调不回拨（增量读游标不重放已见记录）。
 func (e *Engine) appendTrail(lp *SpaceLoop, kind TrailKind, note string) {
-	lp.Trail = append(lp.Trail, TrailEvent{At: e.now(), Kind: kind, Note: note})
+	lp.FactSeq++
+	lp.Trail = append(lp.Trail, TrailEvent{Seq: lp.FactSeq, At: e.now(), Kind: kind, Note: note})
 	if len(lp.Trail) > MaxTrailEvents {
 		lp.Trail = append(make([]TrailEvent, 0, MaxTrailEvents), lp.Trail[len(lp.Trail)-MaxTrailEvents:]...)
 	}
@@ -200,7 +208,8 @@ func (e *Engine) Snapshot(spaceID string) (SpaceLoop, bool) {
 		return SpaceLoop{}, false
 	}
 	out := SpaceLoop{SpaceID: lp.SpaceID, PausedFrom: lp.PausedFrom,
-		LastReviewedHash: lp.LastReviewedHash, LastReviewedAt: lp.LastReviewedAt}
+		LastReviewedHash: lp.LastReviewedHash, LastReviewedAt: lp.LastReviewedAt,
+		FactSeq: lp.FactSeq}
 	for _, c := range lp.Candidates {
 		out.Candidates = append(out.Candidates, cloneCandidate(c))
 	}
@@ -297,6 +306,18 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 			return errf(ErrInvalid, "零发现复审记录 hash 非法")
 		}
 	}
+	// 留痕序号（W05-04 records 游标基准）：高水位在位时事件序号须严格递增且不超
+	// 高水位；缺省（旧快照/无序号历史事实）容忍——序号是读面游标，不承担恢复正确性。
+	lastSeq := int64(0)
+	for i := range snap.Trail {
+		if snap.Trail[i].Seq == 0 {
+			continue
+		}
+		if snap.Trail[i].Seq <= lastSeq || snap.Trail[i].Seq > snap.FactSeq {
+			return errf(ErrInvalid, "留痕事件序号非法/倒挂（%d > 高水位 %d）", snap.Trail[i].Seq, snap.FactSeq)
+		}
+		lastSeq = snap.Trail[i].Seq
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, exists := e.loops[spaceID]; exists {
@@ -307,6 +328,7 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 		LastReviewedHash: snap.LastReviewedHash,
 		LastReviewedAt:   snap.LastReviewedAt,
 		PausedFrom:       snap.PausedFrom,
+		FactSeq:          snap.FactSeq,
 	}
 	for _, c := range snap.Candidates {
 		lp.Candidates = append(lp.Candidates, cloneCandidate(c))

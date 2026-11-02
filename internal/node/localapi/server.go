@@ -37,6 +37,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/notify"
 	"github.com/mtl802/swarmmind/internal/protocol"
+	"github.com/mtl802/swarmmind/internal/strategy"
 )
 
 // maxBodyBytes 请求体上限（与 hub 管理面同口径；提交体另有完整信封实测校验）。
@@ -87,6 +88,12 @@ type Config struct {
 	// 主人面 authLocal——六.六豁免⑯，MCP 工具随 W04-03 完整面同批）。nil =
 	// spaces 端点组 503 降级（spaces_unavailable）。
 	Collab *collab.Store
+	// Strategy 空间策略引擎（W05-02/03 internal/strategy；与 collab Options.Hooks
+	// 同一实例——装配点 cmd/node 先建 Engine 再双路注入）。承担：set_phase 端点面
+	// 预检（ValidatePhaseTransition）与引擎侧落账回写（SetPhase）、start 引导
+	//（BootstrapCycle+落账）、策略投影只读面（GET strategy/records）。nil = 策略
+	// 面（set_phase/records/strategy）503 strategy_unavailable 诚实降级。
+	Strategy *strategy.Engine
 	// DeclareConfigPath node.yaml 路径（declare 钦定 round-trip 写盘目标，与
 	// ConfigOps/SetupOps 同纪律写启动时 --config 原路径；空 = declare 端点 503）。
 	DeclareConfigPath string
@@ -322,6 +329,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/spaces/{id}/policy", s.authLocal(s.handleSpacePolicy))                          // 策略 sugar（W04-03：主人专属独立入口→Control policy）
 	mux.HandleFunc("POST /api/v1/spaces/{id}/finalize", s.authLocal(s.handleSpaceFinalize))                      // 定版 sugar（W04-03：主人专属独立入口→Control finalize）
 	mux.HandleFunc("POST /api/v1/spaces/{id}/archive", s.authLocal(s.handleSpaceArchive))                        // 归档 sugar（W04-03：主人专属独立入口→Control archive）
+	mux.HandleFunc("GET /api/v1/spaces/{id}/strategy", s.authRead(s.handleSpaceStrategy))                        // 策略投影只读（W05-04 P04 策略区：循环阶段/候选/问题/版本/证据缺口/停止建议）
+	mux.HandleFunc("POST /api/v1/spaces/{id}/records", s.authSpaceSubject(s.handleSpaceRecordPost))              // 策略循环记录登记（W05-04：candidate/review/issue/evidence；数据写入≠执行）
+	mux.HandleFunc("GET /api/v1/spaces/{id}/records", s.authRead(s.handleSpaceRecordsGet))                       // 策略循环记录增量读（since=已见最大 seq，游标只读）
 	console := nodeweb.Handler()
 	mux.Handle("GET /{$}", console)
 	mux.Handle("GET /app.js", console)

@@ -13,6 +13,15 @@
 //   - POST /api/v1/spaces/{id}/finalize        定版 sugar（主人专属独立入口→Control finalize）
 //   - POST /api/v1/spaces/{id}/archive         归档 sugar（主人专属独立入口→Control archive）
 //
+// W05-04 策略面（本文件 control 内接线 + spaces_records.go）：
+//   - POST /api/v1/spaces/{id}/control action=set_phase 经 strategy 预检后落账
+//     （判定在 strategy、落账在 collab——W05-03 分离边界的端点面兑现；start 实际
+//     生效后同源引导循环阶段 BootstrapCycle+ActSetPhase）；
+//   - GET  /api/v1/spaces/{id}/strategy       策略投影只读（P04 策略区数据源）；
+//   - POST /api/v1/spaces/{id}/records        策略循环记录登记（candidate/review/
+//     issue/evidence；数据写入≠执行——不派发不推进循环）；
+//   - GET  /api/v1/spaces/{id}/records?since= 记录增量读（留痕序号游标）。
+//
 // 鉴权分层（W04-02 豁免⑯收窄兑现）：写面（创建/控制/派发/发言）authSpaceSubject
 // ——local_token=主人（恒通）；prime_token=共享编排主体「prime」（经 W02-01
 // mcpaccess 门：显式启用才放行，403 mcp_disabled 人话指路）。逐动作授权在 collab
@@ -33,6 +42,7 @@ package localapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -40,6 +50,7 @@ import (
 	"github.com/mtl802/swarmmind/internal/collab"
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/protocol"
+	"github.com/mtl802/swarmmind/internal/strategy"
 )
 
 // spaceReady collab 存储装配守卫（未装配 503 诚实降级）。
@@ -150,7 +161,8 @@ func (s *Server) handleSpaceGet(w http.ResponseWriter, r *http.Request) {
 // expected_version 必填（乐观锁；takeover 另有 expected_term CAS，term 裁决先于
 // 版本复核）。恢复保护（W04-02）：存在在途/排队意图时 resume 须携 confirm=true
 // 显式确认（无在途直通）——「人工介入后不自动续跑」的放行由人显式给出。
-// set_phase 端点面显式拒绝（W05-03 终审必修2，见函数体内门注记）。
+// set_phase 端点面接线（W05-04）：先经 strategy.ValidatePhaseTransition 无副作用
+// 预检（18 边转换表+暂停恢复约束）后放行 Control 落账，见 setPhasePrecheck。
 func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj collab.Subject) {
 	if !s.spaceReady(w) {
 		return
@@ -160,20 +172,18 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 ControlRequest JSON: "+err.Error())
 		return
 	}
-	// set_phase 门（W05-03 终审必修2）：阶段转换合法性判定在 strategy.Engine
-	//（ValidatePhaseTransition/SetPhase——18 边转换表 + 暂停恢复约束），模型层
-	// Store.Control(ActSetPhase) 只做值基校验——本端点直通模型层会让 REST 可落
-	// 任意合法词形（含 drafting→completed 表外边、paused 恢复约束旁路）。装配层
-	// 接线（W05-04：端点先经 strategy 预检后放行）前一律 501 拒绝，先于一切校验
-	// 与事务——零副作用、不落回执、不占 request_id（同 request_id 改投其他动作
-	// 照常受理）；模型层动作保留（进程内装配序列经 Store.Control 使用，不受本门
-	// 影响；MCP swarmmind_space_control 动作词表本就不含 set_phase，不受影响）。
-	if req.Action == collab.ActSetPhase {
-		writeErr(w, http.StatusNotImplemented, "set_phase_not_wired",
-			"set_phase 须经策略判定面（strategy.ValidatePhaseTransition 预检）后由装配层落账：REST 直调在接线批次（W05-04）开放前一律拒绝；循环阶段当前由内置驱动序列维护，无需手工设置")
-		return
-	}
 	id := r.PathValue("id")
+	// set_phase 门（W05-04 接线，取代 W05-03 的 501 显式拒开）：判定在 strategy、
+	// 落账在 collab——REST 直调不再可能落表外边/旁路暂停恢复约束（预检拒绝先于
+	// 一切事务，零副作用不占 request_id）。
+	var setPhaseFrom strategy.Phase // 预检解析的来源阶段（落账后引擎留痕用）
+	if req.Action == collab.ActSetPhase {
+		from, ok := s.setPhasePrecheck(w, id, req)
+		if !ok {
+			return
+		}
+		setPhaseFrom = from
+	}
 	if req.Action == collab.ActResume && !req.Confirm && s.cfg.Collab.InFlightCount(id) > 0 {
 		writeErr(w, http.StatusConflict, collab.CodeExecutionInFlight,
 			"空间存在在途/排队执行意图：恢复须待收束，或携 confirm:true 显式确认继续（继续将按现有队列依次派发；预算/负责人/版本变化见空间详情）")
@@ -189,7 +199,130 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 	if req.Action == collab.ActResume && res.Applied && s.cfg.Service != nil {
 		s.cfg.Service.NotifySpaceResumed(id)
 	}
+	// 策略引擎跟随落账（W05-03 分离边界：引擎事实跟随落账结果，不预写）：
+	//   - start 实际生效 → BootstrapCycle 引导（幂等）+ ActSetPhase(drafting) 落账
+	//     ——「装配层在空间显式启动后调用」的既定契约，阶段面自此有真相可投影；
+	//   - set_phase 实际生效 → SetPhase 记引擎侧留痕与 PausedFrom（dup 重放命中
+	//     不回放留痕）。
+	if s.cfg.Strategy != nil && res.Applied {
+		switch req.Action {
+		case collab.ActStart:
+			s.bootstrapCycleAfterStart(id, subj)
+		case collab.ActSetPhase:
+			to := strategy.Phase(strings.TrimSpace(req.Phase))
+			if setPhaseFrom.Valid() && to.Valid() && setPhaseFrom != to {
+				if err := s.cfg.Strategy.SetPhase(id, setPhaseFrom, to); err != nil {
+					// 落账已成立而引擎留痕失败（预检与落账窗口内被并发变更——版本
+					// CAS 使其几乎不可能）：如实日志，不回滚不改判（collab 是阶段
+					// 真相，引擎事实是解释面）。
+					log.Printf("[spaces] set_phase 引擎留痕失败 space=%s %s→%s: %v", id, setPhaseFrom, to, err)
+				}
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": res, "dup": dup})
+}
+
+// setPhasePrecheck set_phase 端点面预检（W05-04 接线；无副作用，拒绝先于一切事务
+// ——不落回执、不占 request_id，同 request_id 改投他动作照常受理）。分层表述：
+//   - 400 invalid_request：非法词形（空/未知词/含非法字符——值基错误在预检即拒，
+//     不再透传模型层）；
+//   - 409 illegal_transition：不合法转换（阶段未初始化、当前阶段未知、表外边、
+//     暂停恢复约束——strategy.ValidatePhaseTransition 人话原样透出）；
+//   - 同值幂等（from == to）不预检直通模型层：collab 落账面承担运行面状态门槛与
+//     同值零变更（applied=false），与 archive 先例同形；
+//   - 404 not_found：空间不存在（读档即判，语义与模型层一致）；
+//   - 503 strategy_unavailable：策略引擎未装配（装配缺失诚实降级，不假放行）。
+//
+// 返回解析出的来源阶段（仅合法词形时有效；同值幂等路径也返回——调用方落账后留痕
+// 分支会因 from==to 自然跳过）。
+func (s *Server) setPhasePrecheck(w http.ResponseWriter, spaceID string, req collab.ControlRequest) (strategy.Phase, bool) {
+	if s.cfg.Strategy == nil {
+		writeErr(w, http.StatusServiceUnavailable, "strategy_unavailable",
+			"策略引擎未装配：set_phase 须经策略判定面预检后落账（本机未装配策略引擎；升级或装配后可用）")
+		return "", false
+	}
+	to := strategy.Phase(strings.TrimSpace(req.Phase))
+	if !to.Valid() {
+		writeErr(w, http.StatusBadRequest, "invalid_request",
+			"phase 词形非法："+humanPhaseError(req.Phase)+"；合法词形 drafting|frozen|review|rework|rereview|paused|completed（须为表内转换，先读 GET strategy 看当前阶段）")
+		return "", false
+	}
+	view, ok := s.cfg.Collab.SpaceView(spaceID)
+	if !ok {
+		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+spaceID)
+		return "", false
+	}
+	from := strategy.Phase(strings.TrimSpace(view.Phase))
+	if !from.Valid() {
+		if view.Phase == "" {
+			writeErr(w, http.StatusConflict, collab.CodeIllegalTransition,
+				"循环阶段未初始化：无从校验转换（显式启动 start 时由装配引导 drafting；引导后经表内边推进）")
+		} else {
+			writeErr(w, http.StatusConflict, collab.CodeIllegalTransition,
+				"当前阶段 "+strconv.Quote(view.Phase)+" 不是合法阶段词：阶段真相疑似异常，先人工核对空间状态（预检拒绝，未做任何变更）")
+		}
+		return "", false
+	}
+	if from == to {
+		return from, true // 同值幂等：交模型层落运行面门槛与零变更裁决
+	}
+	if err := s.cfg.Strategy.ValidatePhaseTransition(spaceID, from, to); err != nil {
+		writeErr(w, http.StatusConflict, collab.CodeIllegalTransition, stripStrategyPrefix(err.Error()))
+		return "", false
+	}
+	return from, true
+}
+
+// bootstrapCycleAfterStart start 实际生效后的循环引导（W05-03 契约「装配层在空间
+// 显式启动后调用」；幂等——已初始化零变更）：引导目标经同通道 ActSetPhase 落账，
+// 使阶段面与引擎事实同源成立。落账失败如实日志不回滚 start（阶段引导可重放：幂等
+// 引导 + 同值落账零变更）。
+func (s *Server) bootstrapCycleAfterStart(spaceID string, subj collab.Subject) {
+	view, ok := s.cfg.Collab.SpaceView(spaceID)
+	if !ok {
+		return
+	}
+	next, err := s.cfg.Strategy.BootstrapCycle(view)
+	if err != nil {
+		log.Printf("[spaces] start 后循环引导失败 space=%s: %v", spaceID, err)
+		return
+	}
+	if string(next) == view.Phase {
+		return // 已初始化（幂等命中）：无需落账
+	}
+	_, _, err = s.cfg.Collab.Control(spaceID, collab.ControlRequest{
+		RequestID:       "boot-" + spaceID + "-" + string(next),
+		Action:          collab.ActSetPhase,
+		ExpectedVersion: view.Version,
+		// Term 携当前任期：引导落账与 start 同主体同形态（driver 族授权逐动作
+		// 复核——external/builtin 驱动者形态须 term 匹配；owner-manual 不查 term）。
+		Term:  view.Leader.Term,
+		Phase: string(next),
+		Note:  "start 后循环阶段引导",
+	}, subj)
+	if err != nil {
+		log.Printf("[spaces] start 后阶段引导落账失败 space=%s →%s: %v", spaceID, next, err)
+	}
+}
+
+// humanPhaseError 非法词形人话（空值与脏值分开表述）。
+func humanPhaseError(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "phase 必填（目标循环阶段）"
+	}
+	return strconv.Quote(trimmed) + " 不是合法阶段词"
+}
+
+// stripStrategyPrefix 错误文案去包前缀（strategy: 已由错误码承担；人话正文直出）。
+func stripStrategyPrefix(msg string) string {
+	for _, p := range []string{"strategy: "} {
+		if len(msg) > len(p) && msg[:len(p)] == p {
+			return msg[len(p):]
+		}
+	}
+	return msg
 }
 
 // spaceDispatchRequest POST /api/v1/spaces/{id}/dispatches 请求体。
@@ -477,7 +610,10 @@ func writeSpaceErr(w http.ResponseWriter, err error) {
 		collab.CodeLeaseExpired, collab.CodeTermConflict, collab.CodeMemberInFlight,
 		collab.CodeExecutionInFlight, collab.CodeBudgetExhausted,
 		collab.CodeSessionBoundElsewhere, collab.CodeSpaceDispatchRequired,
-		collab.CodeMemberNotFound, collab.CodeNoMembers:
+		collab.CodeMemberNotFound, collab.CodeNoMembers,
+		collab.CodeCompletionNotSatisfied:
+		// completion_not_satisfied 409 语义（W04-01 RFC §四）：判据未满足=可补齐的
+		// 业务拒绝（W05-04 引擎接线后 REST 可达——缺口清单人话透出，非服务端故障）。
 		code = http.StatusConflict
 	case collab.CodeFinishPolicyUnavailable:
 		code = http.StatusServiceUnavailable
