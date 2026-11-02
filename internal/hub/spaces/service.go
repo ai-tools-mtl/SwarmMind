@@ -159,7 +159,12 @@ type Service struct {
 	convDone chan struct{}
 	// onConvDequeued 测试观测缝（包内测试注入；生产恒 nil）：worker 出队即信号
 	// ——测试据此确定性判定「队列项已被 worker 持有、正等空间锁落账」。
+	// 经 muConvSeam 读写（worker goroutine 读 / 测试 goroutine 写——race 纪律）。
+	muConvSeam     sync.Mutex
 	onConvDequeued func()
+	// advWG 锁外推进 goroutine 排空面（kickLocked 防御路径——codex 复审轮 3
+	// 必修 3：Close 在关库前等待其出临界）。
+	advWG sync.WaitGroup
 }
 
 // hubUnbind 待解除登记条目（key = sessionID；gen = 发起时的绑定代次——0 = 代次
@@ -240,6 +245,22 @@ func (s *Service) hookEntry(t protocol.Task) {
 	}
 }
 
+// setOnConvDequeued / signalDequeued 观测缝读写（muConvSeam 同锁——race 纪律）。
+func (s *Service) setOnConvDequeued(f func()) {
+	s.muConvSeam.Lock()
+	defer s.muConvSeam.Unlock()
+	s.onConvDequeued = f
+}
+
+func (s *Service) signalDequeued() {
+	s.muConvSeam.Lock()
+	f := s.onConvDequeued
+	s.muConvSeam.Unlock()
+	if f != nil {
+		f()
+	}
+}
+
 // convWorker 收敛异步 worker（codex 复审轮 2 核心机制 2）：消费终态回调队列执行
 // 收敛+停队落账；Close 停入队后排空队列余量再退出（排空面=「已接受执行按原契
 // 约收束」的关停半边——落账绝不因关库竞态丢失）。
@@ -248,17 +269,13 @@ func (s *Service) convWorker() {
 	for {
 		select {
 		case t := <-s.convCh:
-			if s.onConvDequeued != nil {
-				s.onConvDequeued()
-			}
+			s.signalDequeued()
 			s.convergeOnTaskTerminal(t)
 		case <-s.stop:
 			for { // 排空余量
 				select {
 				case t := <-s.convCh:
-					if s.onConvDequeued != nil {
-						s.onConvDequeued()
-					}
+					s.signalDequeued()
 					s.convergeOnTaskTerminal(t)
 				default:
 					return
@@ -286,6 +303,8 @@ func (s *Service) Close() error {
 		// 排空第二段：收敛 worker 排空队列余量（收敛+停队落账完成后才退出；
 		// convDone 即排空完成——落账绝不因关库竞态丢失）。
 		<-s.convDone
+		// 排空第三段：锁外推进 goroutine（kickLocked 防御路径）出临界。
+		s.advWG.Wait()
 		// 关库（最后）。
 		s.snapErr = s.snap.Close()
 		s.storeErr = s.Store.Close()
@@ -304,6 +323,9 @@ func Scope(spaceID string) string { return collab.HubScope(spaceID) }
 func (s *Service) nextBindGen(sessionID string) uint64 {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
+	if s.genSeq[sessionID] >= ^uint64(0) {
+		return ^uint64(0) // 饱和（codex 复审轮 3 建议②）：不回绕为 0——stale 判据保持单调
+	}
 	s.genSeq[sessionID]++
 	return s.genSeq[sessionID]
 }
@@ -469,72 +491,94 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	s.invalidateUnbind(mt.sessionID) // 新代绑定成立：旧代解除条目作废（代际语义）
 	s.muDispatch.Lock()
 	// 空间调度锁（登记段）：受理登记与控制变更（ControlSpace 同锁）串行。登记段
-	// 显式解锁后再进入 advanceSpace（其自含三段式锁面：准入→锁外 bind→重入锁
-	// 时间重核→提交——空间锁不可重入，持锁调用会自死锁，codex 复审轮 2 实测锚）。
+	// 统一出口解锁（codex 复审轮 3 必修 4——重放/冲突等全部提前返回路径必须
+	// 释放空间锁+muDispatch，否则后续派发永久阻塞）后，再进入 advanceSpace（其
+	// 自含三段式锁面：准入→锁外 bind→重入锁时间重核→提交——空间锁不可重入，
+	// 持锁调用会自死锁，codex 复审轮 2 实测锚）。
 	slm := s.lockSpace(req.SpaceID)
 	slm.Lock()
 	needUnbind := false // D-2：登记失败时的绑定残留补偿（成功登记/重放不清偿）
+	// 互斥段内重放重检（并发派发收敛：先落者为准，后来者按重放/冲突出回执）。
+	var (
+		replayIt    collab.DispatchIntent
+		replayDup   bool
+		replayErr   *Error
+		recorded    collab.DispatchIntent
+		recordDup   bool
+		recordErr   error
+		sessionGone bool
+	)
+	if it, ok := s.IntentByRequest(req.SpaceID, req.RequestID); ok {
+		if it.Member != req.Member {
+			replayErr = &Error{Code: collab.CodeRequestConflict,
+				Msg: "request_id 已被不同内容占用（已登记成员 " + it.Member + "）"}
+		} else {
+			replayIt, replayDup = it, true
+		}
+	} else {
+		// 轮号预留（受理期）：max(会话下一序号, 本会话在途意图最大 seq+1)——受理
+		// seq 严格递增不撞号（与 node M1 受理期预留同原则；派发互斥段内推导+
+		// 落意图即原子预留）。
+		sv, ok := s.core.GetSession(mt.sessionID)
+		if !ok {
+			sessionGone = true
+		} else {
+			seq := nextTurnSeqOf(sv)
+			if hw := s.intentSeqHighWater(mt.sessionID); hw >= seq {
+				seq = hw + 1
+			}
+			it, _, dup, err := s.RecordDispatch(req.SpaceID, collab.DispatchRequest{
+				RequestID:       req.RequestID,
+				Member:          req.Member,
+				SessionID:       mt.sessionID,
+				TurnSeq:         seq,
+				Term:            req.Term,
+				ExpectedVersion: req.ExpectedVersion,
+				Note:            req.Note,
+			}, subj)
+			if err != nil {
+				needUnbind = true // 登记失败：预检-事务窗绑定残留补偿
+				recordErr = err
+			} else {
+				recorded, recordDup = it, dup
+			}
+		}
+	}
+	// 统一出口：双锁释放 + 补偿旗标清偿（全部提前返回路径收口于此——必修 4）。
+	slm.Unlock()
+	s.muDispatch.Unlock()
 	compensate := func() {
 		if needUnbind {
-			// 绑定残留补偿（codex 必修D-2）：本次已 bind 的会话立即按代次条件
-			// 解除（代次协议结构性防删新登记）；失败入重试队列。人话日志留痕，
-			// 残留后续由 bind 幂等覆盖或解除重试收敛。
+			// 绑定残留补偿（codex 必修D-2）：本次已 bind 的会话立即按发起时代次
+			// 条件解除（代次协议结构性防删新登记）；失败入重试队列。人话日志
+			// 留痕，残留后续由 bind 幂等覆盖或解除重试收敛。
 			s.UnbindSession(mt.nodeID, mt.sessionID)
 		}
 	}
-	// 互斥段内重放重检（并发派发收敛：先落者为准，后来者按重放/冲突出回执）。
-	if it, ok := s.IntentByRequest(req.SpaceID, req.RequestID); ok {
-		if it.Member != req.Member {
-			return collab.DispatchIntent{}, false, &Error{Code: collab.CodeRequestConflict,
-				Msg: "request_id 已被不同内容占用（已登记成员 " + it.Member + "）"}
-		}
-		return it, true, nil
-	}
-	// 轮号预留（受理期）：max(会话下一序号, 本会话在途意图最大 seq+1)——受理 seq
-	// 严格递增不撞号（与 node M1 受理期预留同原则；派发互斥段内推导+落意图即
-	// 原子预留）。
-	sv, ok := s.core.GetSession(mt.sessionID)
-	if !ok {
-		return collab.DispatchIntent{}, false, &Error{Code: CodeSessionGone, Msg: "成员绑定会话不存在: " + mt.sessionID}
-	}
-	seq := nextTurnSeqOf(sv)
-	if hw := s.intentSeqHighWater(mt.sessionID); hw >= seq {
-		seq = hw + 1
-	}
-	it, _, dup, err := s.RecordDispatch(req.SpaceID, collab.DispatchRequest{
-		RequestID:       req.RequestID,
-		Member:          req.Member,
-		SessionID:       mt.sessionID,
-		TurnSeq:         seq,
-		Term:            req.Term,
-		ExpectedVersion: req.ExpectedVersion,
-		Note:            req.Note,
-	}, subj)
-	if err != nil {
-		needUnbind = true // 登记失败：预检-事务窗（成员移除/暂停/预算/版本）绑定残留补偿
-		slm.Unlock()
-		s.muDispatch.Unlock()
+	switch {
+	case replayErr != nil:
 		compensate()
-		return collab.DispatchIntent{}, false, err
+		return collab.DispatchIntent{}, false, replayErr
+	case sessionGone:
+		compensate()
+		return collab.DispatchIntent{}, false, &Error{Code: CodeSessionGone, Msg: "成员绑定会话不存在: " + mt.sessionID}
+	case recordErr != nil:
+		compensate()
+		return collab.DispatchIntent{}, false, recordErr
+	case replayDup:
+		return replayIt, true, nil
+	case recordDup:
+		return recorded, true, nil // 并发收敛：另一 goroutine 已受理
 	}
-	if dup {
-		slm.Unlock()
-		s.muDispatch.Unlock()
-		return it, true, nil // 并发收敛：另一 goroutine 已受理
-	}
-	// 登记段解锁（空间锁不可重入——advanceSpace 自含三段式锁面，持锁调用会
-	// 自死锁）；补偿旗标此时必为 false（登记已成立）。
-	slm.Unlock()
-	s.muDispatch.Unlock()
 	compensate()
 	// 投递准入（outbox 先登记后 send；锁面见 advanceSpace 三段式）。
 	s.advanceSpace(req.SpaceID)
 	// 返回前重读意图（attach/取消收束发生在投递段内——调用方看到当前态：
 	// accepted（带 TaskID）或确定性取消收束态，不回投递前快照）。
 	if cur, ok := s.IntentByRequest(req.SpaceID, req.RequestID); ok {
-		it = cur
+		recorded = cur
 	}
-	return it, false, nil
+	return recorded, false, nil
 }
 
 // memberTarget 成员寻址（W07-02 路由面）：成员名 = 开放目录词形
@@ -746,6 +790,8 @@ func (s *Service) UnbindSession(nodeID, sessionID string) {
 func (s *Service) unbindOnce(nodeID, sessionID string) bool {
 	gen := s.boundGenOf(sessionID)
 	if gen == 0 {
+		// 代次探针（gen=0 解除=node 零副作用回 current_gen——codex 复审轮 3
+		// 必修 1）：hub 重启后从登记事实重建，再携正确代次解除。
 		ack, err := s.core.SpaceUnbind(nodeID, sessionID, 0, 0)
 		if err != nil {
 			log.Printf("[hub] 中心空间解除探针未达 session=%s: %v", sessionID, err)
@@ -768,7 +814,7 @@ func (s *Service) unbindOnce(nodeID, sessionID string) bool {
 		log.Printf("[hub] 中心空间绑定已解除 session=%s gen=%d", sessionID, gen)
 		return true
 	}
-	// stale ack-noop：node 当前登记代次已前移——新代登记在位，旧代解除语义满足
+	// stale ack-noop（node 登记代次已前移于发起代次——新代登记在位）：语义满足
 	//（结构性：旧代解除删不掉新登记）；进程内事实同步清除（下次解除先探针）。
 	s.clearBound(sessionID)
 	log.Printf("[hub] 中心空间解除 ack-noop（node 登记代次 %d 已前移于本进程事实 %d，语义满足）session=%s",
@@ -1146,6 +1192,12 @@ func (s *Service) advanceSpace(spaceID string) {
 		return
 	}
 	if err := s.ensureBound(spaceID, cand); err != nil {
+		if errors.Is(err, core.ErrSpacesUnsupported) {
+			// 版本门确定性拒绝（撤声明后不可自愈）：意图取消收束（零外发零残留
+			//——bind 在门后未发生）；重声明后驱动者显式重新派发。
+			s.cancelIntent(spaceID, cand, "版本门拒绝（"+err.Error()+"）：意图取消收束")
+			return
+		}
 		log.Printf("[hub] 空间意图投递暂缓（绑定登记未达）space=%s intent=%s: %v（下次扫查重试）", spaceID, cand.RequestID, err)
 		return
 	}
@@ -1168,15 +1220,26 @@ func (s *Service) advanceSpace(spaceID string) {
 }
 
 // ensureBound 锁外绑定登记（意图维度便捷形；代次协议见 ensureBindSession）。
+// 版本门在此先行（codex 复审轮 3 必修 5——补绑定不得绕过 RequireSpacesCapable，
+// 撤声明后 sweep 补绑定零外发零残留），调用方对 ErrSpacesUnsupported 族按确定性
+// 取消收束；ensureBindSession 内部 stale 重同步重试前不再复核原操作有效性——
+// 重试后调用方的时间重核/事务复核承担（建议③）。
 func (s *Service) ensureBound(spaceID string, it collab.DispatchIntent) error {
+	nodeID, agent, ok := splitMemberName(it.Member)
+	if !ok {
+		return fmt.Errorf("成员词形非法（须 nodeID/agentName）: %s", it.Member)
+	}
+	if err := s.core.RequireSpacesCapable(nodeID, agent); err != nil {
+		return err // ErrSpacesUnsupported 族——调用方确定性取消收束
+	}
 	if s.boundGenOf(it.SessionID) != 0 {
 		return nil
 	}
-	nodeID := s.nodeIDOf(it)
-	if nodeID == "" {
+	nodeIDOfSession := s.nodeIDOf(it)
+	if nodeIDOfSession == "" {
 		return fmt.Errorf("意图目标 node 定位失败（会话注册表无 %s）", it.SessionID)
 	}
-	return s.ensureBindSession(nodeID, it.SessionID, Scope(spaceID))
+	return s.ensureBindSession(nodeIDOfSession, it.SessionID, Scope(spaceID))
 }
 
 // kickLocked 调度锁内推进（收敛 worker 路径：准入→提交无网络应答等待；bind 在
@@ -1189,10 +1252,19 @@ func (s *Service) kickLocked(spaceID string) {
 	}
 	if s.boundGenOf(cand.SessionID) == 0 {
 		// 理论不可达（收敛推进的候选必经 advanceSpace 锁外 bind 先行）——防御
-		// 交回全三段推进（锁内零网络纪律优先于路径优化）。
-		s.muUnbind.Lock()
-		s.muUnbind.Unlock()
-		go s.advanceSpace(spaceID)
+		// 交回全三段推进：关停门 + 排空面纳入（codex 复审轮 3 必修 3——推进
+		// goroutine 不在关停后失控写库）。锁内零网络纪律优先于路径优化。
+		s.muClose.Lock()
+		closed := s.closed
+		s.muClose.Unlock()
+		if closed {
+			return
+		}
+		s.advWG.Add(1)
+		go func() {
+			defer s.advWG.Done()
+			s.advanceSpace(spaceID)
+		}()
 		return
 	}
 	// 时间重核后提交（同 advanceSpace 第三段）。

@@ -37,13 +37,21 @@ const hubBindFileName = "hub_space_bindings.json"
 // HubBindEntry 单条绑定（key = session_id，body = 登记事实）。
 type HubBindEntry struct {
 	// Space 空间 scope（恒 hub:<id> 词形；写入前经 collab.IsHubScope 校验）。
+	// 墓碑条目（Revoked=true）Space 置空——仅保留代次高水位防旧代复活。
 	Space string `json:"space"`
 	// Generation 绑定代次（hub 单调分配；登记/解除的代次条件判据——结构性消除
-	// ABA/旧重试删新登记/并发补偿删他人绑定：比代次不比 scope）。
+	// ABA/旧重试删新登记/并发补偿删他人绑定：比代次不比 scope）。墓碑条目承载
+	// 已撤销最高代次（高水位）。
 	Generation uint64 `json:"generation"`
-	// BoundAt 最近登记时刻（UTC；同代幂等刷新时刻）。
+	// Revoked 墓碑标记（true = 该代次绑定已解除；登记条件判据对墓碑同样生效：
+	// 仅 gen > 墓碑高水位的登记才接受——codex 复审轮 3 必修 2）。
+	Revoked bool `json:"revoked,omitempty"`
+	// BoundAt 最近登记/解除时刻（UTC）。
 	BoundAt time.Time `json:"bound_at"`
 }
+
+// live 当前是否存在有效绑定（非墓碑）。
+func (e HubBindEntry) live() bool { return !e.Revoked && e.Space != "" }
 
 // HubBindings 中心空间绑定登记表：互斥串行 + 原子快照。零值不可用，须经
 // OpenHubBindings 构造（加载失败拒绝启动）。nil 指针（未装配）= 收件门与执行口
@@ -93,7 +101,7 @@ func (h *HubBindings) Get(sessionID string) (HubBindEntry, bool) {
 // 登记或代次不等（旧代解除/新代之后的 stale 解除）→ removed=false 零变更
 // （ack-noop——结构性保证「旧重试删不掉新登记、并发补偿删不掉他人绑定」）。落盘
 // 失败错误如实上抛——hub 收不到成功 ack 不视为已解除，重试面兜底。
-func (h *HubBindings) RemoveIfGen(sessionID string, generation uint64) (bool, HubBindEntry, error) {
+func (h *HubBindings) RemoveIfGen(sessionID string, generation uint64, now time.Time) (bool, HubBindEntry, error) {
 	if h == nil {
 		return false, HubBindEntry{}, errors.New("hubbind: 登记表未装配")
 	}
@@ -106,15 +114,19 @@ func (h *HubBindings) RemoveIfGen(sessionID string, generation uint64) (bool, Hu
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cur, ok := h.binds[sessionID]
-	if !ok {
-		return false, HubBindEntry{}, nil // ack-noop：未登记
+	if !ok || cur.Revoked {
+		return false, cur, nil // ack-noop：未登记/已是墓碑（分述日志由受理方输出）
 	}
 	if cur.Generation != generation {
 		return false, cur, nil // ack-noop：代次不等（分述日志由受理方输出）
 	}
+	// 墓碑语义（codex 复审轮 3 必修 2）：整条删除会丢失代次高水位——迟到的更低
+	// 代次 bind 将复活旧绑定。改写为墓碑行（保留已撤销最高代次），随登记事实
+	// 持久化；PutIfGenNewer 对 gen ≤ 高水位的登记一律拒绝。
 	next := make(map[string]HubBindEntry, len(h.binds))
 	for k, v := range h.binds {
 		if k == sessionID {
+			next[k] = HubBindEntry{Generation: generation, Revoked: true, BoundAt: now}
 			continue
 		}
 		next[k] = v
@@ -131,10 +143,11 @@ func (h *HubBindings) RemoveIfGen(sessionID string, generation uint64) (bool, Hu
 	return true, HubBindEntry{}, nil
 }
 
-// Space 会话的登记 scope（便捷形；未登记空串）。
+// Space 会话的登记 scope（便捷形；未登记/墓碑空串——墓碑仅承载代次高水位，
+// 不存在有效绑定）。
 func (h *HubBindings) Space(sessionID string) string {
 	e, ok := h.Get(sessionID)
-	if !ok {
+	if !ok || !e.live() {
 		return ""
 	}
 	return e.Space
@@ -162,11 +175,11 @@ func (h *HubBindings) PutIfGenNewer(sessionID, scope string, generation uint64, 
 	if ok {
 		switch {
 		case generation > cur.Generation:
-			// 新代：接受。
-		case generation == cur.Generation && cur.Space == scope:
+			// 新代（含墓碑高水位之上——解除后重绑复活）：接受。
+		case generation == cur.Generation && !cur.Revoked && cur.Space == scope:
 			return true, cur, nil // 同代同 scope：幂等接受（零落盘零变更）
 		default:
-			return false, cur, nil // stale 代次：拒绝（hub 重启后经 ack current_gen 重同步）
+			return false, cur, nil // stale 代次（含 ≤ 墓碑高水位的迟到 bind）：拒绝 ack-noop
 		}
 	}
 	next := make(map[string]HubBindEntry, len(h.binds)+1)
@@ -186,6 +199,17 @@ func (h *HubBindings) PutIfGenNewer(sessionID, scope string, generation uint64, 
 	return true, HubBindEntry{}, nil
 }
 
+// CurrentGen 会话的当前登记代次（登记/墓碑高水位均计；无登记 0——代次探针的
+// 数据面，codex 复审轮 3 必修 1：hub 重启后经探针从登记事实重建代次）。
+func (h *HubBindings) CurrentGen(sessionID string) uint64 {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.binds[sessionID].Generation
+}
+
 // handleSpaceBind space_bind 帧受理（W07-02 收件门受理面；hub→node 单向登记）：
 // 词形校验（恒 hub:<id>，本机空间不经中心登记）→ session 非空 → 持久登记 → 回
 // ack（ReplyTo=请求 mid，载荷原样回带供 hub 语义复核）。校验拒绝回 err 帧（hub
@@ -200,10 +224,19 @@ func (s *Service) handleSpaceBind(env *protocol.Envelope) {
 		return
 	}
 	if p.Space == "" {
-		// 解除登记（空 scope 语义；代次精确匹配——比代次不比 scope）：仅当当前
-		// 登记代次 == 请求代次才删除；未登记/代次不等 → ack-noop（分述日志；
-		// 结构性保证旧重试删不掉新登记、并发补偿删不掉他人绑定）。
-		removed, stale, err := s.hubBind.RemoveIfGen(p.SessionID, p.Generation)
+		// 解除登记（空 scope 语义；代次精确匹配——比代次不比 scope）。gen=0 =
+		// 代次探针（codex 复审轮 3 必修 1）：零副作用——无登记 → ack-noop
+		//（current_gen=0）；有登记（含墓碑高水位）→ ack 回带 current_gen，hub
+		// 据此重发携正确代次的解除，绝不误删。
+		if p.Generation == 0 {
+			curGen := s.hubBind.CurrentGen(p.SessionID)
+			log.Printf("[node] space_unbind 探针 session=%s current_gen=%d from=%s", p.SessionID, curGen, env.From)
+			p.Accepted = false
+			p.CurrentGen = curGen
+			s.sendBindReply(protocol.MsgSpaceBindAck, env.MessageID, p, nil)
+			return
+		}
+		removed, stale, err := s.hubBind.RemoveIfGen(p.SessionID, p.Generation, protocol.NowUTC())
 		if err != nil {
 			log.Printf("[node] space_unbind 失败 session=%s: %v", p.SessionID, err)
 			s.sendBindReply(protocol.MsgErr, env.MessageID, nil,
