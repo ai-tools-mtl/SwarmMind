@@ -25,16 +25,11 @@ var ErrSpacesUnsupported = fmt.Errorf("目标 node 未声明空间协作能力�
 // 未声明（含旧版 node 词形缺字段）/声明版本不受支持（v0 旧版、词形非法、空白）/
 // node 未注册/agent 不在能力表 → ("", false)。
 func (c *Core) SpacesCapability(nodeID, agentName string) (string, bool) {
-	rec, ok := c.st.View().Nodes[nodeID]
-	if !ok {
+	card, ok := c.cardByName(nodeID, agentName) // 目标卡选择单规则（与强制面同助手）
+	if !ok || !protocol.SupportedSpacesCap(card.Spaces) {
 		return "", false
 	}
-	for _, card := range rec.Agents {
-		if card.Name == agentName && protocol.SupportedSpacesCap(card.Spaces) {
-			return card.Spaces, true
-		}
-	}
-	return "", false
+	return card.Spaces, true
 }
 
 // SpacesCapable 目标 node/agent 是否声明且受支持空间特性（布尔便捷形，判定单源
@@ -46,34 +41,49 @@ func (c *Core) SpacesCapable(nodeID, agentName string) bool {
 
 // RequireSpacesCapable 版本门拒绝面（W07-02 远端派发/发言/控制投影下发前强制
 // 调用）：声明且受支持返回 nil；否则包 ErrSpacesUnsupported 人话拒绝，话术按
-// 声明态三分——未声明（空：旧版 node / 未装配）与合法词形旧版本（如 v0）指路
-// 升级 node，词形非法（garbage/空白）如实注记异常配置（不冒充「旧版本」）。
+// 声明态三分——未声明（空：旧版 node / 未装配）与合法词形非受支持版本（v0 旧版
+// 或 v2/v10 等本 hub 未支持的新词形）指路核对双方版本，词形非法（garbage/空白）
+// 如实注记异常配置（不冒充「旧版本」）。目标卡选择与 SpacesCapability 同规则
+// （slice 序首个同名命中——codex 三审必修：同名重复卡时三处判定必须同一张卡，
+// 否则查询判 true 强制门判 false 自相矛盾；注册入口重复名未拒时的确定性口径）。
 // 普通任务派发不调用本门——零牵连。
 func (c *Core) RequireSpacesCapable(nodeID, agentName string) error {
+	if _, ok := c.SpacesCapability(nodeID, agentName); ok {
+		return nil // 与查询面同卡同判定（单源 SupportedSpacesCap）
+	}
+	card, found := c.cardByName(nodeID, agentName)
+	if !found {
+		return fmt.Errorf("%w：node %s 能力 %q 未声明空间特性（spaces），中心空间操作不下发；请升级该 node 至装配空间协作的版本后重试",
+			ErrSpacesUnsupported, nodeID, agentName)
+	}
+	switch {
+	case card.Spaces == "":
+		// 未声明（旧版 node / 未装配 collab）：统一未声明话术（指路升级）。
+		return fmt.Errorf("%w：node %s 能力 %q 未声明空间特性（spaces），中心空间操作不下发；请升级该 node 至装配空间协作的版本后重试",
+			ErrSpacesUnsupported, nodeID, agentName)
+	case protocol.ValidSpacesCapWordform(card.Spaces):
+		return fmt.Errorf("%w：node %s 能力 %q 空间特性声明版本 %q 不受本 hub 支持（本 hub 支持 %s）：请核对双方版本（声明方过旧则升级 node；声明方更新则升级 hub）",
+			ErrSpacesUnsupported, nodeID, agentName, card.Spaces, protocol.SpacesCapV1)
+	default:
+		return fmt.Errorf("%w：node %s 能力 %q 空间特性声明 %q 词形非法（异常配置，疑似实现缺陷或人为篡改），中心空间操作不下发；请核对该 node 版本与配置",
+			ErrSpacesUnsupported, nodeID, agentName, card.Spaces)
+	}
+}
+
+// cardByName 目标能力卡定位（slice 序首个同名命中——与 SpacesCapability 的遍历
+// 停止规则同规则；未注册 node/无同名卡 → ("", false)）。抽公共助手消除「查询面
+// 与强制面各自遍历、同名重复卡时命中不同卡」的分歧行为。
+func (c *Core) cardByName(nodeID, agentName string) (protocol.AgentCard, bool) {
 	rec, ok := c.st.View().Nodes[nodeID]
-	if ok {
-		for _, card := range rec.Agents {
-			if card.Name != agentName {
-				continue
-			}
-			switch {
-			case protocol.SupportedSpacesCap(card.Spaces):
-				return nil
-			case card.Spaces == "":
-				// 未声明（旧版 node / 未装配 collab）：统一未声明话术（指路升级）。
-				return fmt.Errorf("%w：node %s 能力 %q 未声明空间特性（spaces），中心空间操作不下发；请升级该 node 至装配空间协作的版本后重试",
-					ErrSpacesUnsupported, nodeID, agentName)
-			case protocol.ValidSpacesCapWordform(card.Spaces):
-				return fmt.Errorf("%w：node %s 能力 %q 空间特性声明版本 %q 旧于本 hub 支持（%s），中心空间操作不下发；请升级该 node 后重试",
-					ErrSpacesUnsupported, nodeID, agentName, card.Spaces, protocol.SpacesCapV1)
-			default:
-				return fmt.Errorf("%w：node %s 能力 %q 空间特性声明 %q 词形非法（异常配置，疑似实现缺陷或人为篡改），中心空间操作不下发；请核对该 node 版本与配置",
-					ErrSpacesUnsupported, nodeID, agentName, card.Spaces)
-			}
+	if !ok {
+		return protocol.AgentCard{}, false
+	}
+	for _, card := range rec.Agents {
+		if card.Name == agentName {
+			return card, true
 		}
 	}
-	return fmt.Errorf("%w：node %s 能力 %q 未声明空间特性（spaces），中心空间操作不下发；请升级该 node 至装配空间协作的版本后重试",
-		ErrSpacesUnsupported, nodeID, agentName)
+	return protocol.AgentCard{}, false
 }
 
 // SpacesNodeSupport 节点级空间特性声明投影（GET /api/v1/capabilities 的 spaces
