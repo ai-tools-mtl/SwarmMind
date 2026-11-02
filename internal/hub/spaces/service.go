@@ -899,11 +899,14 @@ func (s *Service) unbindGenOnce(nodeID, sessionID string, gen *uint64) bool {
 	}
 	if ack.Accepted {
 		// 解除成立 → 墓碑（保留高水位防旧代 bind 复活；镜像 node RemoveIfGen）。
-		// 条目身份条件（codex 终审）：仅当缓存条目代次==本操作解除的代次才写墓
-		// 碑——缓存已被新代 bind 推进（gen 前移）时旧应答恢复不得用旧墓碑覆盖
-		// 新登记事实。
+		// 条目身份+高水位单调条件（codex 终审①收口）：仅当 无条目 / 条目代次==
+		// 本操作解除代次 / 墓碑且本操作代次更高（推进高水位）才写——活的新代登记
+		// 不被旧墓碑覆盖，墓碑高水位单调不回退（gen1 旧应答不得把 gen3 墓碑降为
+		// gen1——否则暂停的 gen2 noteBound 可通过比较复活成活绑定而 node 仍是
+		// gen3 墓碑）。
 		s.muBindGen.Lock()
-		if e, ok := s.bindGens[sessionID]; !ok || e.gen == *gen || e.revoked {
+		e, ok := s.bindGens[sessionID]
+		if !ok || e.gen == *gen || (e.revoked && e.gen < *gen) {
 			s.bindGens[sessionID] = bindGenEntry{gen: *gen, revoked: true}
 		}
 		s.muBindGen.Unlock()
