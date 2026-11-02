@@ -363,11 +363,17 @@ func (s *Service) noteBound(sessionID string, gen uint64) {
 // api 移除 diff 的移除前快照读取面（R2①）。
 func (s *Service) BoundGenOf(sessionID string) uint64 { return s.boundGenOf(sessionID) }
 
-// boundGenOf 本进程已成功登记的代次（0 = 未知——重启后未重建/未绑定过）。
+// boundGenOf 本进程当前活绑定的代次（0 = 无活绑定——未绑定过/重启未重建/已解
+// 除墓碑；codex 终审：墓碑返回 0 使 ensureBound 对已解除会话恢复补绑定自愈——
+// 墓碑代次仍保留在条目内供 noteBound 高水位判据，不外露）。
 func (s *Service) boundGenOf(sessionID string) uint64 {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
-	return s.bindGens[sessionID].gen
+	e := s.bindGens[sessionID]
+	if e.revoked {
+		return 0 // 墓碑=无活绑定：补绑定面据此自愈，高水位由条目保留
+	}
+	return e.gen
 }
 
 // clearBoundIfGen 代次条件清除（codex 复审轮 3 必修 R3）：仅当缓存当前代次 ==
@@ -892,9 +898,14 @@ func (s *Service) unbindGenOnce(nodeID, sessionID string, gen *uint64) bool {
 		return false
 	}
 	if ack.Accepted {
-		// 解除成立 → 墓碑（保留高水位防旧代 bind 复活；镜像 node RemoveIfGen）
+		// 解除成立 → 墓碑（保留高水位防旧代 bind 复活；镜像 node RemoveIfGen）。
+		// 条目身份条件（codex 终审）：仅当缓存条目代次==本操作解除的代次才写墓
+		// 碑——缓存已被新代 bind 推进（gen 前移）时旧应答恢复不得用旧墓碑覆盖
+		// 新登记事实。
 		s.muBindGen.Lock()
-		s.bindGens[sessionID] = bindGenEntry{gen: *gen, revoked: true}
+		if e, ok := s.bindGens[sessionID]; !ok || e.gen == *gen || e.revoked {
+			s.bindGens[sessionID] = bindGenEntry{gen: *gen, revoked: true}
+		}
 		s.muBindGen.Unlock()
 		log.Printf("[hub] 中心空间绑定已解除 session=%s gen=%d", sessionID, *gen)
 		return true
@@ -956,7 +967,15 @@ func (s *Service) retryUnbinds() {
 			s.muUnbind.Unlock()
 			continue // 留队下次扫查重试
 		}
-		// 解除成立/语义满足 → 按条目身份条件删除（codex 复审轮 3 原则 2 收口）。
+		// 解除成立/语义满足 → 学到的代次先持久回写条目（codex 终审：成功分支
+		// 原条目 gen=0 与学到的 ugen 不一致时按 ugen 删匹配不到=条目留队追逐——
+		// 条目身份校验后回写，再按回写后代次条件删除收口）。
+		s.muUnbind.Lock()
+		if cur, ok := s.pendingUnbinds[u.sessionID]; ok && cur.gen == u.gen && ugen != u.gen {
+			cur.gen = ugen
+			s.pendingUnbinds[u.sessionID] = cur
+		}
+		s.muUnbind.Unlock()
 		if s.deletePendingIfGen(u.sessionID, ugen) {
 			log.Printf("[hub] 中心空间绑定解除重试收口 session=%s gen=%d", u.sessionID, ugen)
 		}
