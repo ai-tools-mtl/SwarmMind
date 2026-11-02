@@ -165,7 +165,8 @@ func (e *Engine) ValidateSpeaker(space collab.SpaceView, counts map[string]int64
 // 状态变更无派发）：
 //  1. 全局停止判定优先（EvaluateStop 复用：消息/轮次/墙钟预算耗尽、验收争议
 //     ——讨论域无 issue，修复阈值天然不触发）；
-//  2. 候选定版收束（无 pending 且至少一条 finalized → Done，不再派发）；
+//  2. 候选定版收束（无 pending 且至少一条 finalized → Done，不再派发；收束状态
+//     读引擎内存候选索引——RestoreLoop 接线前跨重启不延续，见 discussionConverged）；
 //  3. 候选=成员名单 × 发言预算过滤；全员耗尽 → 暂停建议（成员预算触发 + 全局
 //     判据复查合并）；空间无成员 → 手选出口；
 //  4. 显式并发指名（ParallelSpeakers>1）：一次点名前 N 名有预算成员（成员序）；
@@ -246,6 +247,14 @@ func (e *Engine) PickSpeakers(space collab.SpaceView, counts map[string]int64, p
 // discussionConverged 候选定版收束判定（读引擎候选索引；调用方判定主链）：
 // 无 pending 且至少一条 finalized → 收束（定版 ≠ 完成交付）。零候选不收束
 // （讨论尚无结论，继续在预算内推进）。
+//
+// 跨重启边界（如实声明，不冒认）：候选索引（含定版状态）只存于 Engine 内存
+// SpaceLoop；本判定不从 collab 消息账本再推导——FINAL 发言登记候选是写时动作
+// （RegisterCandidate 仅在登记时建索引，账本不自动重建候选索引），进程重启后的
+// 新 Engine 实例 loops 为空 → 本判定恒 false，NextSpeaker 回到推进态照常派发。
+// 即：RestoreLoop 接线前，定版收束跨重启不延续（缺：装配层持久化 Snapshot 并在
+// 启动时 RestoreLoop 导入候选定版状态）。行为缺口由
+// TestNextSpeakerFinalizedNotCarriedAcrossRestart 锚定。
 func (e *Engine) discussionConverged(spaceID string) (bool, string) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

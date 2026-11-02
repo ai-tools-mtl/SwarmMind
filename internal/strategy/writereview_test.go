@@ -374,6 +374,66 @@ func TestW0503AnchorsRequireRegisteredRevision(t *testing.T) {
 	_ = st
 }
 
+// TestW0503AdvanceCycleInFlightNoDispatch 在途不产出分支直测：可行动阶段
+// （drafting、writer 在位、无版本不推进）+ InFlight=1 → 不指派不推进（Reason
+// 含「在途」——串行调度一次一棒，等轮终收敛，绝不叠投）；同视图 InFlight=0 →
+// 指派 writer（对照证明分支真分岔，禁恒真断言）。
+func TestW0503AdvanceCycleInFlightNoDispatch(t *testing.T) {
+	eng := newTestEngine(t)
+	clk := newFakeClock()
+	// 对照：无在途 → drafting 指派 alice 编写。
+	d := eng.AdvanceCycle(fixtureSpace("sp-wr-inflight", string(PhaseDrafting), 0), clk.Now())
+	if d.ShouldPause || d.Advance || d.NextActor != "alice" || d.ActorAction != ActorWrite {
+		t.Fatalf("无在途应指派 alice 编写（对照）：%+v", d)
+	}
+	// 在途：同一可行动视图 InFlight=1 → 零产出（等轮终收敛）。
+	inflight := fixtureSpace("sp-wr-inflight", string(PhaseDrafting), 1)
+	d = eng.AdvanceCycle(inflight, clk.Now())
+	if d.ShouldPause || d.Advance || d.NextActor != "" || d.ActorAction != "" {
+		t.Fatalf("在途不得产出下一行动或推进：%+v", d)
+	}
+	if !strings.Contains(d.Reason, "在途") {
+		t.Fatalf("Reason 须含「在途」：%s", d.Reason)
+	}
+}
+
+// TestW0503BootstrapCycleIdempotent BootstrapCycle 幂等返回直测：已初始化视图
+// （drafting）连续两次引导——两次同返回 Phase（drafting）、err==nil、引擎零状态
+// 变化（留痕不增长）；collab 阶段不动。对照：未初始化视图走引导分支建循环留痕
+// （证明幂等分支与引导分支真分岔）。
+func TestW0503BootstrapCycleIdempotent(t *testing.T) {
+	eng, st, _, id := wiredWriteReview(t)
+	v := spaceViewOf(st, id)
+	before, ok := eng.Snapshot(id)
+	if !ok || len(before.Trail) == 0 {
+		t.Fatalf("引导后应有循环事实与留痕: ok=%v trail=%d", ok, len(before.Trail))
+	}
+	first, err := eng.BootstrapCycle(v)
+	if err != nil || first != PhaseDrafting {
+		t.Fatalf("首次幂等调用应原样返回 drafting: phase=%s err=%v", string(first), err)
+	}
+	second, err := eng.BootstrapCycle(v)
+	if err != nil || second != first {
+		t.Fatalf("第二次幂等调用应同 Phase 零错误: phase=%s err=%v", string(second), err)
+	}
+	after, _ := eng.Snapshot(id)
+	if len(after.Trail) != len(before.Trail) {
+		t.Fatalf("幂等返回不得新增留痕：before=%d after=%d", len(before.Trail), len(after.Trail))
+	}
+	if got := phaseOf2(t, st, id); got != string(PhaseDrafting) {
+		t.Fatalf("幂等返回 collab 阶段不得变化: %q", got)
+	}
+	// 对照：未初始化视图 → 引导分支（返回 drafting 并建循环留痕）。
+	engRaw := newTestEngine(t)
+	p, err := engRaw.BootstrapCycle(fixtureSpace("sp-wr-boot-raw", "", 0))
+	if err != nil || p != PhaseDrafting {
+		t.Fatalf("未初始化视图应引导至 drafting: phase=%s err=%v", string(p), err)
+	}
+	if snap, ok := engRaw.Snapshot("sp-wr-boot-raw"); !ok || len(snap.Trail) == 0 {
+		t.Fatalf("引导分支应建循环事实并留痕: ok=%v trail=%d", ok, len(snap.Trail))
+	}
+}
+
 // TestW0503SeparationBoundary 分离边界：非法转换在 strategy 拒绝（落账前预检拦
 // 截——collab 不被调用）；collab 侧对值只做基校验不解释语义（本包把守转换表，
 // collab 把守授权/版本/状态——边界即「判定在 strategy、落账在 collab」）。

@@ -365,3 +365,50 @@ func TestDiscussionFullChainWithCollabStore(t *testing.T) {
 	}
 	_ = ver
 }
+
+// TestNextSpeakerFinalizedNotCarriedAcrossRestart 定版收束跨重启不延续（行为缺
+// 口锚定，doc 注记同源）：候选定版 → Done 收束后换新 Engine 实例（进程重启，内
+// 存循环态丢失；collab Store 与消息账本原样，FINAL 发言在案）——同一空间视图
+// NextSpeaker 不再判 Done，回到推进态照常点名派发。依据：候选索引（含定版状态）
+// 只存于引擎内存 SpaceLoop，Done 判定不从账本 FINAL 发言再推导（登记是写时动
+// 作）；RestoreLoop 接线前如实如此（恢复路径：装配层持久化 Snapshot + 启动时
+// RestoreLoop 导入）。
+func TestNextSpeakerFinalizedNotCarriedAcrossRestart(t *testing.T) {
+	eng := newTestEngine(t)
+	st, clk := newWiredStore(t, eng)
+	id, _ := wiredRunningSpace(t, st)
+	sel := &stubSelector{member: "bob"}
+
+	// 重启前：alice FINAL 发言落账 → 候选登记 → 主人定版 → Done 收束。
+	sp := mustSpace(t, st, id)
+	if _, _, err := st.RecordMessage(id, collab.MessageRequest{
+		RequestID: "m-final", ExpectedVersion: sp.Version, Member: "alice",
+		Text: "FINAL: 采用方案一",
+	}, intOwner); err != nil {
+		t.Fatalf("发言落账: %v", err)
+	}
+	cand, created, err := eng.RegisterCandidateVia(id, ChannelFinalText,
+		CandidateInput{Proposer: "alice", Body: "FINAL: 采用方案一", Round: 1, MsgSeq: 1})
+	if err != nil || !created {
+		t.Fatalf("候选登记: created=%v err=%v", created, err)
+	}
+	if _, err := eng.FinalizeCandidate(id, cand.ID, "owner"); err != nil {
+		t.Fatalf("FinalizeCandidate: %v", err)
+	}
+	v, _ := st.SpaceView(id)
+	if d := eng.NextSpeaker(v, clk.Now(), countsOf(), DiscussionPolicy{}, sel); !d.Done || len(d.Next) != 0 {
+		t.Fatalf("重启前定版应收束：%+v", d)
+	}
+
+	// 重启后：新 Engine 实例（内存循环态为空）+ 同一空间视图——账本里 FINAL 发
+	// 言在案但不自动重建候选索引 → 不判 Done，继续点名派发。
+	eng2 := newTestEngine(t)
+	if _, ok := eng2.Snapshot(id); ok {
+		t.Fatal("新 Engine 实例不得带旧循环事实（重启前提）")
+	}
+	d2 := eng2.NextSpeaker(v, clk.Now(), countsOf(), DiscussionPolicy{}, sel)
+	if d2.Done || d2.Pause != nil || d2.ManualNeeded != "" || len(d2.Next) != 1 {
+		t.Fatalf("RestoreLoop 接线前定版收束跨重启不延续——应回到推进态继续派发：%+v", d2)
+	}
+	wantNext(t, d2, "bob")
+}
