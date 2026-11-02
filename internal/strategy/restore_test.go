@@ -190,6 +190,7 @@ func TestRestoreLoopTrailSeqStrictness(t *testing.T) {
 		{"混序拒绝", mk([]int64{1, 0, 2}, 2), "混序"},
 		{"负高水位拒绝", mk(nil, -1), "负值"},
 		{"矛盾拒绝", mk([]int64{1, 2}, 0), "超高水位"},
+		{"全零高水位矛盾拒绝", mk([]int64{0, 0}, 7), "矛盾"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh, err := NewEngine(DefaultConfig())
@@ -204,14 +205,116 @@ func TestRestoreLoopTrailSeqStrictness(t *testing.T) {
 			}
 		})
 	}
-	// 旧格式容忍：全零 Trail + FactSeq==0。
+	// 旧格式容忍 + 就地迁移：全零 Trail + FactSeq==0 → 重编 1..n。
 	if err := eng.RestoreLoop(sp, mk([]int64{0, 0, 0}, 0)); err != nil {
 		t.Fatalf("旧格式全零应容忍: %v", err)
 	}
-	if _, ok := eng.Snapshot(sp); !ok {
+	snapM, ok := eng.Snapshot(sp)
+	if !ok {
 		t.Fatal("旧格式恢复后应有空间事实")
 	}
+	if snapM.FactSeq != 3 {
+		t.Fatalf("迁移应置 FactSeq=窗口长度: %d", snapM.FactSeq)
+	}
+	for i, ev := range snapM.Trail {
+		if ev.Seq != int64(i+1) {
+			t.Fatalf("迁移应按切片序重编 1..n: Trail[%d].Seq=%d", i, ev.Seq)
+		}
+	}
 	if _, pruned := eng.RecordsSince(sp, 0); pruned != 0 {
-		t.Fatalf("零序号最旧事件 prunedBefore 应为 0（负上界不透出）: %d", pruned)
+		t.Fatalf("迁移窗口最旧序号 1 prunedBefore 应为 0: %d", pruned)
+	}
+}
+
+// TestRestoreLoopLegacyMigration 旧格式迁移回归（终审必修6②，codex 反例闭环）：
+// [0,0]/FactSeq=0 恢复（迁移 1..2）→ 正常 appendTrail（SetPhase 留痕从 3 续）→
+// Snapshot 全序号连续严格递增（不再产出混序）→ 新引擎 RestoreLoop 成功（写入器的
+// 数据不被自己的读者拒收——原洞：恢复后追加产出 [0,0,1]/FactSeq=1 混序被再恢复
+// 拒「写入器损坏」自锁）；迁移后续号不撞；大 n 抽查（600 条零序号 > MaxTrailEvents
+// 裁剪窗——迁移对裁剪后窗口重编自洽：窗口内 1..600 连续、追加 601.. 续号、再裁剪
+// 后窗口与 FactSeq/RecordsSince 上界一致，快照对新引擎可恢复）。
+func TestRestoreLoopLegacyMigration(t *testing.T) {
+	eng := newTestEngine(t)
+	const sp = "sp-rs4"
+	legacy := SpaceLoop{SpaceID: sp}
+	legacy.Trail = append(legacy.Trail, TrailEvent{Kind: TrailPhaseChanged, Note: "旧事件一"}, TrailEvent{Kind: TrailPhaseChanged, Note: "旧事件二"})
+	if err := eng.RestoreLoop(sp, legacy); err != nil {
+		t.Fatalf("旧格式恢复应成功: %v", err)
+	}
+	// 正常追加：迁移后从 n+1=3 续号，不撞。
+	if err := eng.SetPhase(sp, PhaseDrafting, PhasePaused); err != nil {
+		t.Fatalf("SetPhase: %v", err)
+	}
+	snap, ok := eng.Snapshot(sp)
+	if !ok {
+		t.Fatal("快照缺失")
+	}
+	if snap.FactSeq != 3 || len(snap.Trail) != 3 {
+		t.Fatalf("迁移+追加后应 FactSeq=3/Trail=3: %d/%d", snap.FactSeq, len(snap.Trail))
+	}
+	for i := 1; i < len(snap.Trail); i++ {
+		if snap.Trail[i].Seq != snap.Trail[i-1].Seq+1 {
+			t.Fatalf("序号应连续严格递增（迁移+续号）: %+v", snap.Trail)
+		}
+	}
+	// 写入器的数据被自己的读者接受：新引擎恢复迁移产物成功。
+	eng2, err := NewEngine(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng2.RestoreLoop(sp, snap); err != nil {
+		t.Fatalf("迁移产物应可再恢复（不得产出混序自锁）: %v", err)
+	}
+	// 大 n 抽查：600 条零序号（> MaxTrailEvents=512 裁剪窗）。
+	const bigN = 600
+	eng3, err := NewEngine(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := SpaceLoop{SpaceID: sp}
+	for i := 0; i < bigN; i++ {
+		big.Trail = append(big.Trail, TrailEvent{Kind: TrailCandidateRestated, Note: "旧批量事件"})
+	}
+	if err := eng3.RestoreLoop(sp, big); err != nil {
+		t.Fatalf("大 n 旧格式恢复应成功: %v", err)
+	}
+	bigSnap, ok := eng3.Snapshot(sp)
+	if !ok || bigSnap.FactSeq != bigN || len(bigSnap.Trail) != bigN {
+		t.Fatalf("大 n 迁移应 FactSeq=%d/Trail=%d: %d/%d ok=%v", bigN, bigN, bigSnap.FactSeq, len(bigSnap.Trail), ok)
+	}
+	for i := 1; i < len(bigSnap.Trail); i++ {
+		if bigSnap.Trail[i].Seq != bigSnap.Trail[i-1].Seq+1 {
+			t.Fatalf("大 n 迁移窗口应连续 1..n: Trail[%d].Seq=%d", i, bigSnap.Trail[i].Seq)
+		}
+	}
+	// 续号越过裁剪窗：追加 3 条 → Seq 601..603，窗口裁至最新 512 条仍连续，FactSeq=603。
+	for i := 0; i < 3; i++ {
+		if err := eng3.SetPhase(sp, PhaseDrafting, PhasePaused); err != nil {
+			t.Fatalf("追加 %d: %v", i, err)
+		}
+		if err := eng3.SetPhase(sp, PhasePaused, PhaseDrafting); err != nil {
+			t.Fatalf("回拉 %d: %v", i, err)
+		}
+	}
+	after, ok := eng3.Snapshot(sp)
+	if !ok || after.FactSeq != bigN+6 || len(after.Trail) != MaxTrailEvents {
+		t.Fatalf("裁剪后应 FactSeq=%d/窗口=%d: %d/%d ok=%v", bigN+6, MaxTrailEvents, after.FactSeq, len(after.Trail), ok)
+	}
+	for i := 1; i < len(after.Trail); i++ {
+		if after.Trail[i].Seq != after.Trail[i-1].Seq+1 {
+			t.Fatalf("裁剪窗口应连续严格递增: Trail[%d].Seq=%d", i, after.Trail[i].Seq)
+		}
+	}
+	// 读者一致性：裁剪窗快照对新引擎可恢复；RecordsSince 上界=窗口最旧序号-1。
+	eng4, err := NewEngine(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng4.RestoreLoop(sp, after); err != nil {
+		t.Fatalf("裁剪窗快照应可恢复: %v", err)
+	}
+	_, pruned := eng4.RecordsSince(sp, 0)
+	if pruned != after.Trail[0].Seq-1 {
+		t.Fatalf("prunedBefore 应=窗口最旧序号-1: %d vs %d", pruned, after.Trail[0].Seq-1)
 	}
 }

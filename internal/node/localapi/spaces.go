@@ -108,6 +108,37 @@ func (s *Server) authSpaceSubject(next func(http.ResponseWriter, *http.Request, 
 	}
 }
 
+// reservedRequestIDPrefixes collab 全局回执表（Ops，全空间共享一表）的内部 opID
+// 命名空间（终审必修5 grep 实据枚举 internal/collab/ops.go 全部 .apply( 调用点 +
+// localapi 引导）：客户端可控 request_id 的写入口（create/control/dispatch/
+// messages 四入口）统一不得撞入——回执表跨空间共享，他空间撞号即可占住本空间
+// 内部动作的回执键（create 携 boot-S-drafting → S 的 start 引导 conflict → 阶段
+// 空卡死）。保留清单：
+//   - "boot-"     start 后循环阶段引导（localapi bootstrapCycleAfterStart，
+//     落 control:set_phase 族回执）
+//   - "converge:" 派发意图收敛（collab ConvergeIntent，converge:<rid>:<outcome>）
+//   - "attach:"   派发任务关联（collab AttachDispatchTask，attach:<rid>）
+//   - "syspause:" 系统自动暂停（collab SystemPause，syspause:<space>:…:v<t>）
+//   - "syspausex:"租约过期暂停（collab PauseExpired，syspausex:<space>:…）
+var reservedRequestIDPrefixes = []string{"boot-", "converge:", "attach:", "syspause:", "syspausex:"}
+
+// requestIDReserved 中央保留前缀门：id（去围边后）命中任一内部命名空间前缀 →
+// 400 reserved_request_id（人话列明保留清单）返回 true；未命中 false。调用方在
+// 解码后、一切校验与事务之前先过本门（零副作用不占回执）。四写入口统一复用，
+// 单点维护保留清单。
+func (s *Server) requestIDReserved(w http.ResponseWriter, id string) bool {
+	trimmed := strings.TrimSpace(id)
+	for _, p := range reservedRequestIDPrefixes {
+		if strings.HasPrefix(trimmed, p) {
+			writeErr(w, http.StatusBadRequest, "reserved_request_id",
+				"request_id 以系统保留前缀开头（内部命名空间："+strings.Join(reservedRequestIDPrefixes, " / ")+
+					"——回执表全局共享，撞号会占住内部动作回执使其冲突卡死）：请换用其他请求标识")
+			return true
+		}
+	}
+	return false
+}
+
 // handleSpaceCreate POST /api/v1/spaces：创建空间。request_id 缺省自动生成
 // （自动生成不承担重放回执）；显式提供时同键同文 200+dup 返回原空间、异文
 // 409 request_conflict（与 hub 提交幂等同心智）。编排主体仅可建 external 待领取
@@ -119,6 +150,9 @@ func (s *Server) handleSpaceCreate(w http.ResponseWriter, r *http.Request, subj 
 	var req collab.CreateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 CreateRequest JSON: "+err.Error())
+		return
+	}
+	if s.requestIDReserved(w, req.RequestID) {
 		return
 	}
 	sp, dup, err := s.cfg.Collab.CreateSpace(req, subj)
@@ -173,12 +207,11 @@ func (s *Server) handleSpaceControl(w http.ResponseWriter, r *http.Request, subj
 		return
 	}
 	id := r.PathValue("id")
-	// 内部保留前缀门（终审必修4①）："boot-" 命名空间归 start 后循环阶段引导的内部
-	// 请求标识——客户端撞号会占住回执使引导落账 conflict、重试永败、阶段空卡死。
-	// 显式 400 人话（MCP 面同理由服务端承担：工具透传本 400 人话即可）。
-	if strings.HasPrefix(req.RequestID, "boot-") {
-		writeErr(w, http.StatusBadRequest, "reserved_request_id",
-			"request_id 前缀 \"boot-\" 为系统保留（start 后循环阶段引导的内部请求标识）：请换用其他请求标识，避免与引导落账撞号互卡")
+	// 内部保留前缀门（终审必修4①/必修5 全入口收口）：中央 helper 统一拦 collab
+	// 全局回执表的内部 opID 命名空间（保留清单见 reservedRequestIDPrefixes）——
+	// 客户端撞号会占住回执使内部动作 conflict、重试永败。显式 400 人话（MCP 面
+	// 同理由服务端承担：工具透传本 400 人话即可）。
+	if s.requestIDReserved(w, req.RequestID) {
 		return
 	}
 	// set_phase 门（W05-04 接线，取代 W05-03 的 501 显式拒开）：判定在 strategy、
@@ -384,6 +417,12 @@ func (s *Server) handleSpaceDispatch(w http.ResponseWriter, r *http.Request, sub
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {member, expected_version, note?} JSON: "+err.Error())
 		return
 	}
+	// 保留前缀门（终审必修5 全入口收口）：派发 request_id 同享全局回执表，且收敛/
+	// 任务关联的内部键（converge:/attach:）由派发 request_id 派生——客户端撞号即
+	// 占内部回执。先于一切校验与事务零副作用。
+	if s.requestIDReserved(w, req.RequestID) {
+		return
+	}
 	if strings.TrimSpace(req.Member) == "" {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "member 必填（指名成员派发）")
 		return
@@ -462,6 +501,11 @@ func (s *Server) handleSpaceMessagePost(w http.ResponseWriter, r *http.Request, 
 	var req spaceMessageRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {text, member?, expected_version} JSON: "+err.Error())
+		return
+	}
+	// 保留前缀门（终审必修5 全入口收口）：消息 request_id 同享全局回执表。先于
+	// 一切校验与事务零副作用。
+	if s.requestIDReserved(w, req.RequestID) {
 		return
 	}
 	if strings.TrimSpace(req.Text) == "" {

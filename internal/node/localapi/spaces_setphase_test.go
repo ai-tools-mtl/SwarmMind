@@ -56,7 +56,7 @@ func newStrategySpaceSrvStore(t *testing.T) (*httptestServer, *strategy.Engine, 
 
 // trailView records 留痕读取视图（高水位 + note 拼接；终审建议2/必修2 断言辅助）。
 type trailView struct {
-	hw   int64  // 已见最大留痕 seq
+	hw    int64  // 已见最大留痕 seq
 	notes string // 「kind:note」逐行拼接（Contains 断言具体转换内容）
 }
 
@@ -321,12 +321,13 @@ func TestSetPhaseUninitializedAndUnavailable(t *testing.T) {
 }
 
 // TestSetPhaseReplayServedIdentical 重放两洞回归（终审必修2，codex 反例锚）：
-//  ① drafting→frozen(A)→review 后重放 A（原文原 ID 原版本）：返回原回执 200 dup
-//     非 409——预检裁决的是新转换，已服同文重放经 ServedIdentical 短路不被新状态
-//     卡死（回执先于预检）；
-//  ② dup 命中引擎零回放：重放不追加留痕（Seq 高水位不变）；review→rework(B)→
-//     paused 后重放 B：PausedFrom 不被清（投影 paused_from=rework 保持），引擎侧
-//     无 paused→rework 回放留痕，恢复 rework 仍合法受理。
+//
+//	① drafting→frozen(A)→review 后重放 A（原文原 ID 原版本）：返回原回执 200 dup
+//	   非 409——预检裁决的是新转换，已服同文重放经 ServedIdentical 短路不被新状态
+//	   卡死（回执先于预检）；
+//	② dup 命中引擎零回放：重放不追加留痕（Seq 高水位不变）；review→rework(B)→
+//	   paused 后重放 B：PausedFrom 不被清（投影 paused_from=rework 保持），引擎侧
+//	   无 paused→rework 回放留痕，恢复 rework 仍合法受理。
 func TestSetPhaseReplayServedIdentical(t *testing.T) {
 	srv, _ := newStrategySpaceSrv(t)
 	tok := "tok-local"
@@ -347,7 +348,7 @@ func TestSetPhaseReplayServedIdentical(t *testing.T) {
 	ver++ // start 后循环引导落账占一版（现版本 4）
 	setPhase := func(reqID string, v int64, phase string) (int, string) {
 		return spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+id+"/control",
-			`{"request_id":"` + reqID + `","action":"set_phase","expected_version":` + itoaVer(v) + `,"phase":"` + phase + `"}`)
+			`{"request_id":"`+reqID+`","action":"set_phase","expected_version":`+itoaVer(v)+`,"phase":"`+phase+`"}`)
 	}
 
 	// ① drafting→frozen（A）→ frozen→review（阶段推进后重放 A）。
@@ -525,6 +526,100 @@ func TestStartReservedRequestIDAndConverge(t *testing.T) {
 	}
 	if phase, cur := spacePhaseVersion(t, srv.Server, tok, id); phase != "drafting" || cur != ver {
 		t.Fatalf("收敛后重放零变更（drafting/%d）: %s/%d", ver, phase, cur)
+	}
+}
+
+// TestReservedRequestIDPrefixesAllEntries 保留前缀门全入口收口（终审必修5，codex
+// 反例回归）：collab 全局回执表跨空间共享，客户端可控 request_id 的全部写入口
+//（create/control/dispatch/messages）统一过中央保留前缀门——他空间以 boot-S-drafting
+// 建空间即可占住 S 的引导回执使 start 引导 conflict 阶段空卡死。断言：四入口携任
+// 一保留前缀 400 reserved_request_id（人话列明保留清单）零副作用；S 存在后他空间
+// create 携 boot-S-drafting → 400 拒绝 → S start 引导正常收敛 drafting。
+func TestReservedRequestIDPrefixesAllEntries(t *testing.T) {
+	srv, _, st := newStrategySpaceSrvStore(t)
+	tok := "tok-local"
+
+	// ① create 携保留前缀 → 400 零副作用（无空间落档）。
+	code, out := spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"request_id":"boot-any-drafting","goal":"g","mode":"manual"}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("create 携保留前缀应 400 reserved_request_id: %d %s", code, out)
+	}
+	if !strings.Contains(out, "boot-") || !strings.Contains(out, "converge:") {
+		t.Fatalf("400 人话应列明保留清单: %s", out)
+	}
+	spaces := func() int {
+		code, out := spaceDo(t, srv.Server, tok, http.MethodGet, "/api/v1/spaces", "")
+		if code != http.StatusOK {
+			t.Fatalf("列表应 200: %d %s", code, out)
+		}
+		var d struct {
+			Total int `json:"total"`
+		}
+		if err := json.Unmarshal([]byte(out), &d); err != nil {
+			t.Fatalf("列表解析: %v", err)
+		}
+		return d.Total
+	}
+	if n := spaces(); n != 0 {
+		t.Fatalf("400 须零副作用（无空间落档）: %d", n)
+	}
+
+	// ② 建 S 与目标空间（正常路径），S 只 ready 未 start（引导未发生）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"request_id":"rr-s","goal":"被撞号目标","mode":"manual","members":[{"name":"alice","role":"writer"}]}`)
+	if code != http.StatusCreated {
+		t.Fatalf("建 S 应 201: %d %s", code, out)
+	}
+	sid, ver := gjsonStr2(t, out, "space.id"), int64(1)
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/control",
+		`{"request_id":"rr-ready","action":"ready","expected_version":1}`)
+	if code != http.StatusOK {
+		t.Fatalf("ready 应 200: %d %s", code, out)
+	}
+	ver++
+	// codex 反例：他空间 create 携 boot-<S>-drafting（撞 S 引导回执键）→ 400。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces",
+		`{"request_id":"boot-`+sid+`-drafting","goal":"撞号空间","mode":"manual"}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("他空间撞引导回执键应 400: %d %s", code, out)
+	}
+	// ③ dispatch 携保留前缀（attach:/converge:——内部键由派发 request_id 派生）
+	// → 400 零副作用（无意图落账、在途 0）。
+	for _, pfx := range []string{"attach:x", "converge:x", "syspause:x"} {
+		code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/dispatches",
+			`{"request_id":"`+pfx+`","member":"alice","expected_version":`+itoaVer(ver)+`}`)
+		if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+			t.Fatalf("dispatch 携 %q 应 400: %d %s", pfx, code, out)
+		}
+	}
+	if n := st.InFlightCount(sid); n != 0 {
+		t.Fatalf("dispatch 400 须零副作用（在途 0）: %d", n)
+	}
+	// ④ message 携保留前缀 → 400 零副作用（无消息落账）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/messages",
+		`{"request_id":"syspausex:x","text":"撞号发言","expected_version":`+itoaVer(ver)+`}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("message 携保留前缀应 400: %d %s", code, out)
+	}
+	code, out = spaceDo(t, srv.Server, tok, http.MethodGet, "/api/v1/spaces/"+sid+"/messages", "")
+	if code != http.StatusOK || strings.Contains(out, `"text":"撞号发言"`) {
+		t.Fatalf("message 400 须零落账: %d %s", code, out)
+	}
+	// ⑤ control 保留前缀门仍有效（轮 2 用例回归锚）。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/control",
+		`{"request_id":"boot-`+sid+`-drafting","action":"set_phase","expected_version":`+itoaVer(ver)+`,"phase":"drafting"}`)
+	if code != http.StatusBadRequest || !strings.Contains(out, "reserved_request_id") {
+		t.Fatalf("control 携保留前缀应 400: %d %s", code, out)
+	}
+	// ⑥ 反例闭环：S start → 引导不被占号，正常收敛 drafting。
+	code, out = spaceDo(t, srv.Server, tok, http.MethodPost, "/api/v1/spaces/"+sid+"/control",
+		`{"request_id":"rr-start","action":"start","expected_version":`+itoaVer(ver)+`}`)
+	if code != http.StatusOK {
+		t.Fatalf("start 应 200: %d %s", code, out)
+	}
+	if phase, _ := spacePhaseVersion(t, srv.Server, tok, sid); phase != "drafting" {
+		t.Fatalf("start 引导应正常收敛 drafting（回执未被撞号占用）: %s", phase)
 	}
 }
 

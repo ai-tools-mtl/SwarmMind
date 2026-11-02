@@ -306,12 +306,13 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 			return errf(ErrInvalid, "零发现复审记录 hash 非法")
 		}
 	}
-	// 留痕序号（W05-04 records 游标基准；终审建议1收紧）：序号形态二值——
-	//   - 全零 Trail 且 FactSeq==0：旧格式（无序号历史事实）整体容忍——「读面游标
-	//     不承担恢复正确性」；
+	// 留痕序号（W05-04 records 游标基准；终审建议1收紧 + 必修6联合检查/迁移）：
+	//   - 全零 Trail 且 FactSeq==0：旧格式（无序号历史事实）——就地迁移升级（见下）；
 	//   - 全非零：严格递增且不超高水位（FactSeq==0 而存在非零序号=矛盾拒绝）；
 	//   - 混序（部分零部分非零）=写入器损坏，拒绝；FactSeq 负值拒绝（高水位非负
-	//     不变量）。
+	//     不变量）；全零 Trail 而 FactSeq>0 = 矛盾拒绝（旧格式写入器 FactSeq 恒 0、
+	//     新格式事件序号恒非零——任何合法写入器都产不出此形态；空 Trail 而
+	//     FactSeq>0 是合法态：滚动裁剪丢光事件但高水位不回拨，不在此列）。
 	if snap.FactSeq < 0 {
 		return errf(ErrInvalid, "留痕高水位 FactSeq %d 非法（负值）", snap.FactSeq)
 	}
@@ -334,6 +335,26 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 	}
 	if sawZeroSeq && sawNonZeroSeq {
 		return errf(ErrInvalid, "留痕序号混序（部分零部分非零）：写入器损坏，拒绝恢复")
+	}
+	if sawZeroSeq && !sawNonZeroSeq && snap.FactSeq > 0 {
+		return errf(ErrInvalid, "全零序号留痕与高水位 %d 矛盾（无合法写入器形态）", snap.FactSeq)
+	}
+	// 旧格式就地迁移（终审必修6②）：全零 Trail（且 FactSeq==0——上方矛盾门保证）
+	// 按切片顺序（=追加序）一次性重编 Seq=1..n、FactSeq=n 后再构建内存 loop——
+	// 此后 appendTrail 从 n+1 续号，Snapshot 永不再产出混序（正常写入器的数据不得
+	// 被自己的读者拒收——否则旧格式恢复→正常追加→快照混序→再恢复被拒的自锁）。
+	// 迁移语义：一次性（仅旧格式检出时触发）、幂等（迁移产物全非零，再恢复走正常
+	// 分支）、顺序保持（切片序即追加序，相对先后不变）。裁剪窗自洽：迁移只作用于
+	// 快照在案窗口（传入 Trail 即写入器可见窗口——appendTrail 裁剪只留最新段），
+	// 重编后窗口内连续严格递增、FactSeq=窗口长度，续号自 n+1 起与窗口无撞。
+	migratedTrail := snap.Trail
+	if sawZeroSeq && !sawNonZeroSeq && len(snap.Trail) > 0 {
+		migratedTrail = make([]TrailEvent, len(snap.Trail))
+		for i := range snap.Trail {
+			migratedTrail[i] = snap.Trail[i]
+			migratedTrail[i].Seq = int64(i + 1)
+		}
+		snap.FactSeq = int64(len(migratedTrail))
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -363,7 +384,7 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 		d := *snap.Dispute
 		lp.Dispute = &d
 	}
-	lp.Trail = append([]TrailEvent(nil), snap.Trail...)
+	lp.Trail = append([]TrailEvent(nil), migratedTrail...) // 旧格式为迁移重编后的窗口
 	e.loops[spaceID] = lp
 	return nil
 }
