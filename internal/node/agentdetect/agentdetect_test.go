@@ -21,12 +21,14 @@ const leakContent = "leak-canary-content-line-do-not-return"
 // 任务书 fixture 清单「无模型探针时零模型调用」）：全链检测（安装+配置+标记+投影）
 // 对探测目标的全部调用恰一次、argv 恰为单个 `--version`——检测层不存在任何模型
 // 调用路径（无 prompt、无补全、无会话），子进程纪律 argv 固定 [<command>,
-// "--version"] 由 fake 目标的调用留痕实证，不靠源码自证。
+// "--version"] 由 fake 目标的调用留痕实证，不靠源码自证。建议4③：留痕带 argc+
+// 参数列表（echo "argc=$# args=[$*]"），每次调用恰写一行——不再依赖 TrimSpace
+// 吞空行的旧口径，空行/多参数形态都会现形。
 func TestDetectOnlyRunsVersionArgv(t *testing.T) {
 	log := t.TempDir() + "/argv.log"
-	// fake 目标把每次被调用的参数逐行留痕后输出版本行（任何模型式调用——带
-	// prompt/文件参数的第二次调用——都会在留痕里现形）。
-	body := "printf '%s\\n' \"$@\" >> " + log + "\necho \"recording-cli 1.0\""
+	// fake 目标把每次被调用的参数计数与列表留痕后输出版本行（任何模型式调用——
+	// 带 prompt/文件参数的调用——argc 与参数列表都会在留痕里现形）。
+	body := "echo \"argc=$# args=[$*]\" >> " + log + "\necho \"recording-cli 1.0\""
 	cmd := writeScript(t, t.TempDir(), "recording-cli", body)
 	home := makeZcodeHome(t, `{"authToken":"`+leakSecret+`"}`)
 	s := New(Options{})
@@ -39,8 +41,8 @@ func TestDetectOnlyRunsVersionArgv(t *testing.T) {
 		t.Fatalf("调用留痕缺失（探测目标从未被运行）: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) != 1 || lines[0] != "--version" {
-		t.Fatalf("全链检测对目标的调用应恰一次且 argv 恰为 [--version]（零模型调用锚），实得 %q", lines)
+	if len(lines) != 1 || lines[0] != "argc=1 args=[--version]" {
+		t.Fatalf("全链检测对目标的调用应恰一次且 argv 恰为 [--version]（零模型调用锚，argc+参数留痕），实得 %q", lines)
 	}
 }
 

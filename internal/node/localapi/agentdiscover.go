@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -379,12 +380,12 @@ func (s *Server) recordDetect(rep agentdetect.Report, command, configHome string
 
 // agentDetectSummary GET /api/v1/local/agents 增量投影字段（加法；旧字段零变化）。
 type agentDetectSummary struct {
-	Installed        string             `json:"installed"`                    // pass|fail|not_checked
-	ConfigRecognized string             `json:"config_recognized"`            // 同上（codex 为粗检语义）
-	ExecutionReady   string             `json:"execution_ready"`              // 同上（pass 只代表前置检查过、模型未验证）
-	CallAllowed      string             `json:"call_allowed"`                 // 同上（本机调用授权当前值）
-	CheckedAt        *time.Time         `json:"checked_at,omitempty"`         // 四层最新检查时刻（UTC）；从未跑过缺省
-	NotCheckedReason string             `json:"not_checked_reason,omitempty"` // 未验证原因（含「从未发现过」如实说明）
+	Installed        string     `json:"installed"`                    // pass|fail|not_checked
+	ConfigRecognized string     `json:"config_recognized"`            // 同上（codex 为粗检语义）
+	ExecutionReady   string     `json:"execution_ready"`              // 同上（pass 只代表前置检查过、模型未验证）
+	CallAllowed      string     `json:"call_allowed"`                 // 同上（本机调用授权当前值）
+	CheckedAt        *time.Time `json:"checked_at,omitempty"`         // 四层最新检查时刻（UTC）；从未跑过缺省
+	NotCheckedReason string     `json:"not_checked_reason,omitempty"` // 未验证原因（含「从未发现过」如实说明）
 	// Layers 四层逐层明细（W06-04 加法）：每层独立的检查来源/检查时刻/未验证或失败
 	// 原因——配置识别≠登录成功≠执行就绪≠调用允许，各层原因不得合并成一句绿灯话术。
 	// 未发现过（无缓存）缺省。
@@ -497,39 +498,81 @@ func (s *Server) detectSummaryFor(p protocol.ExecProfile) agentDetectSummary {
 }
 
 // detectDriftFor 漂移复核（W06-04）：对比「上次检测输入快照/已记录路径事实」与
-// 当前实况。两类漂移：
-//  1. 登记面漂移——现配置的 command/config_home 与上次检测输入不一致（登记后在
-//     网页或手编改过而未重跑发现）：旧结论对应旧输入，如实注记；
-//  2. 路径事实漂移——上次检测记录的命令/宿主配置/登录标记路径，Lstat 实况与
-//     当时记录的存在性/类型不一致（登记后文件被动过/删过）：如实注记。
+// 当前实况。三类漂移，基准按层独立（必修2）：
+//  1. 登记面输入漂移——installed 层基准=ent.command、config 层基准=ent.configHome，
+//     各自非空且与现配置不一致时注记「对应旧输入」；空→非空且该层当时带实际结论
+//     的异常形态注记「新增输入无检测基准」（正常形态该层即 not_checked，如实呈现
+//     不额外注记）；
+//  2. 路径事实漂移——installed 层路径复核条件=ent.command 非空且等于现配置；
+//     config 层=ent.configHome 同理（上次未检测的层无基准，缺省不是漂移）；
+//  3. 登录标记漂移（同 config 层基准）——发现→不存在、链/末段链接状态变化；
+//     内容变化不覆盖（检测本来不读标记内容，复核同样不读——如实口径）；
+//     LoginMarkerCheck 只记录存在/链接两位，无类型位可比对。
+//
+// 符号链接口径与检测逐位对齐（必修1）：installed 命令路径的 PathRef.Symlink 是
+// 纯末段位；config/标记路径是复合位（末段链接 || 目录链链接）——复核经
+// agentdetect.CheckPathLinkState（与检测器布局链校验同一实现）折算当前复合位再
+// 比对，消除「本就是链上链接未变化」误报与「检测后目录被换成链接」漏报。
 //
 // 纯 Lstat（不跟随符号链接、不读内容、零子进程零模型调用）；只产出注记，绝不
 // 回写四层状态（重新检测须主人显式跑「发现本机 agent」，检测是主人授权行为）。
 func detectDriftFor(p protocol.ExecProfile, ent detectCacheEntry) *agentDetectDrift {
 	var notes []string
-	// ① 登记面输入漂移（仅比较双方非空的字段：上次未检测过的层无输入基准，缺省
-	// 不是漂移——未检测如实呈现，不冒认「缺了就是变了」）。
-	if ent.command != "" && ent.command != p.Command {
+	seen := map[string]bool{} // 同一路径只报一条（zcode 登录标记与配置同文件，去重噪音）
+	rep := ent.rep
+	// ① 登记面输入漂移（按层独立基准）。「新增输入无检测基准」只在异常形态
+	//（该层当时带实际结论 pass/fail）时防御性注记——正常形态空输入层即
+	// not_checked（含零值层），如实呈现不额外注记。
+	switch {
+	case ent.command == "" && p.Command != "" &&
+		(rep.Installed.Status == agentdetect.StatusPass || rep.Installed.Status == agentdetect.StatusFail):
+		notes = append(notes, "登记命令为新增输入、上次检测无此层基准：检测结果不含该层结论，需重新检测")
+	case ent.command != "" && ent.command != p.Command:
 		notes = append(notes, "登记命令已变化（上次检测 "+ent.command+" → 现配置 "+p.Command+"）：检测结果对应旧输入，需重新检测")
 	}
-	if ent.configHome != "" && ent.configHome != p.ConfigHome {
+	switch {
+	case ent.configHome == "" && p.ConfigHome != "" &&
+		(rep.ConfigRecognized.Status == agentdetect.StatusPass || rep.ConfigRecognized.Status == agentdetect.StatusFail):
+		notes = append(notes, "登记 config_home 为新增输入、上次检测无此层基准：检测结果不含该层结论，需重新检测")
+	case ent.configHome != "" && ent.configHome != p.ConfigHome:
 		notes = append(notes, "登记 config_home 已变化（上次检测 "+ent.configHome+" → 现配置 "+displayOrEmpty(p.ConfigHome)+"）：检测结果对应旧输入，需重新检测")
 	}
-	// ② 路径事实漂移：仅当输入基准一致时比对（旧输入的路径与现配置无关，比较
-	// 会产出误导性注记）。
-	if ent.command == p.Command && ent.configHome == p.ConfigHome {
-		rep := ent.rep
-		for _, lc := range []agentdetect.LayerCheck{rep.Installed, rep.ConfigRecognized} {
-			for _, ref := range lc.Paths {
-				if n := pathDriftNote(ref); n != "" {
-					notes = append(notes, n)
-				}
+	// ② 路径事实漂移：按层独立基准（上次检测过该层且输入未变才复核；旧输入的
+	// 路径与现配置无关，比较会产出误导性注记）。
+	if ent.command != "" && ent.command == p.Command {
+		for _, ref := range rep.Installed.Paths {
+			if n := leafPathDriftNote(ref, seen); n != "" {
+				notes = append(notes, n)
 			}
 		}
-		if rep.LoginMarker.Path != "" {
-			now := lstatRef(rep.LoginMarker.Path)
-			if rep.LoginMarker.Found && !now.Exists {
-				notes = append(notes, "登录态标记文件已不存在（上次检测发现）："+rep.LoginMarker.Path+"——执行就绪结论可能已失效，需重新检测")
+	}
+	if ent.configHome != "" && ent.configHome == p.ConfigHome {
+		home := filepath.Clean(ent.configHome) // 与检测器 Clean 入口同表示（识别时已 Clean）
+		for _, ref := range rep.ConfigRecognized.Paths {
+			if n := chainPathDriftNote(ref, home, seen); n != "" {
+				notes = append(notes, n)
+			}
+		}
+		// ③ 登录标记复核（建议1）：基准同 config 层；内容变化不覆盖（检测不读
+		// 标记内容，复核同样不读）；无类型位记录，只比存在与复合链接位（该位仅
+		// codex 记录——zcode 标记与配置同文件，其链接状态已由配置路径的复合位
+		// 复核覆盖，路径同物故先按路径去重，不比未记录的位）。
+		for _, ref := range rep.ConfigRecognized.Paths {
+			seen[ref.Path] = true // 标记与配置同路径（zcode）→ 配置复核已覆盖，不重复报
+		}
+		if mp := rep.LoginMarker.Path; mp != "" && !seen[mp] {
+			seen[mp] = true
+			segs := relSegments(home, mp)
+			if segs != nil {
+				st, _ := agentdetect.CheckPathLinkState(home, segs)
+				switch {
+				case rep.LoginMarker.Found && !st.LeafExists:
+					notes = append(notes, "登录态标记文件已不存在（上次检测发现）："+mp+"——执行就绪结论可能已失效，需重新检测")
+				case !rep.LoginMarker.Found && st.LeafExists && !st.ChainBroken:
+					notes = append(notes, "登录态标记现已出现（上次检测未发现）："+mp+"——执行就绪结论可能已变化，需重新检测")
+				case st.LeafExists && rep.LoginMarker.Symlink != (st.LeafSymlink || st.ChainSymlink):
+					notes = append(notes, "登录态标记路径符号链接状态已变化（目录链或末段）："+mp+"——需重新检测")
+				}
 			}
 		}
 	}
@@ -539,21 +582,70 @@ func detectDriftFor(p protocol.ExecProfile, ent detectCacheEntry) *agentDetectDr
 	return &agentDetectDrift{Drifted: true, Notes: notes}
 }
 
-// pathDriftNote 单路径事实漂移注记：上次检测记录的 PathRef 与当前 Lstat 实况逐位
-// 比对（存在性/符号链接/普通文件）；一致返回空串。
-func pathDriftNote(ref agentdetect.PathRef) string {
+// leafPathDriftNote 命令路径（纯末段口径）事实漂移注记：PathRef 与当前 Lstat
+// 逐位比对（存在性/末段符号链接/普通文件）；一致返回空串。
+func leafPathDriftNote(ref agentdetect.PathRef, seen map[string]bool) string {
+	if seen[ref.Path] {
+		return ""
+	}
 	now := lstatRef(ref.Path)
+	var n string
 	switch {
 	case ref.Exists && !now.Exists:
-		return "路径已不存在（上次检测时存在）：" + ref.Path + "——需重新检测"
+		n = "路径已不存在（上次检测时存在）：" + ref.Path + "——需重新检测"
 	case !ref.Exists && now.Exists:
-		return "路径现已存在（上次检测时不存在）：" + ref.Path + "——需重新检测"
+		n = "路径现已存在（上次检测时不存在）：" + ref.Path + "——需重新检测"
 	case ref.Exists && ref.Symlink != now.Symlink:
-		return "路径符号链接状态已变化：" + ref.Path + "——需重新检测"
+		n = "路径符号链接状态已变化：" + ref.Path + "——需重新检测"
 	case ref.Exists && ref.Regular != now.Regular:
-		return "路径文件类型已变化（普通文件/非普通文件）：" + ref.Path + "——需重新检测"
+		n = "路径文件类型已变化（普通文件/非普通文件）：" + ref.Path + "——需重新检测"
 	}
-	return ""
+	if n != "" {
+		seen[ref.Path] = true
+	}
+	return n
+}
+
+// chainPathDriftNote 配置层路径（复合链接口径）事实漂移注记：存在性/类型按末段
+// Lstat 比对；链接位经 agentdetect.CheckPathLinkState（与检测器布局链校验同一
+// 实现）折算当前复合位（末段||目录链）再比对——必修1 口径对齐。
+func chainPathDriftNote(ref agentdetect.PathRef, home string, seen map[string]bool) string {
+	if seen[ref.Path] {
+		return ""
+	}
+	now := lstatRef(ref.Path)
+	var n string
+	switch {
+	case ref.Exists != now.Exists:
+		n = "路径已不存在（上次检测时存在）：" + ref.Path + "——需重新检测"
+		if !ref.Exists && now.Exists {
+			n = "路径现已存在（上次检测时不存在）：" + ref.Path + "——需重新检测"
+		}
+	case ref.Exists && ref.Regular != now.Regular:
+		n = "路径文件类型已变化（普通文件/非普通文件）：" + ref.Path + "——需重新检测"
+	case ref.Exists:
+		if segs := relSegments(home, ref.Path); segs != nil {
+			st, _ := agentdetect.CheckPathLinkState(home, segs)
+			if ref.Symlink != (st.LeafSymlink || st.ChainSymlink) {
+				n = "配置路径符号链接状态已变化（目录链或末段）：" + ref.Path + "——需重新检测"
+			}
+		}
+	}
+	if n != "" {
+		seen[ref.Path] = true
+	}
+	return n
+}
+
+// relSegments root→path 的相对段分解（检测时路径由 joinLayout(home, segs) 构造，
+// 复核按同一切分还原；无法还原（异常/逃逸形态）返回 nil——调用方只做末段事实
+// 比对，不做链路折算）。
+func relSegments(home, path string) []string {
+	rel, err := filepath.Rel(home, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	return strings.Split(rel, string(filepath.Separator))
 }
 
 // lstatRef 当前时刻的路径事实（与 agentdetect 同口径：Lstat 不跟随符号链接，
@@ -613,7 +705,7 @@ func orchIdentityFor(profiles []protocol.ExecProfile) agentOrchIdentity {
 	switch {
 	case len(out.Declared) > 1:
 		out.Conflict = true
-		out.Note = "本机多份声明（" + strings.Join(out.Declared, "、") + "）并存：无唯一生效声明，本端不作「唯一管家已生效」呈现；全网恰一由 hub 汇聚判定，多声明冲突时回退名字识别（能力名含 " + legacyPrimeNameKey + "）并在 hub 控制台告警——请到声明开关取消多余声明"
+		out.Note = "本机多份声明（" + strings.Join(out.Declared, "、") + "）并存：无唯一生效声明，本端不作「唯一管家已生效」呈现；hub 汇聚全网声明——冲突时 hub 告警并回退名字识别（能力名含 " + legacyPrimeNameKey + "），本机派单则声明优先、旧名回退仅零声明态生效；请到声明开关取消多余声明"
 	case len(out.Declared) == 1:
 		out.Note = "本机恰一声明（" + out.Declared[0] + "）；全网是否恰一以 hub 目录为准（跨机冲突由 hub 告警）"
 		if len(fallback) > 0 {
@@ -631,15 +723,20 @@ func orchIdentityFor(profiles []protocol.ExecProfile) agentOrchIdentity {
 }
 
 // workspaceConflictsFor 同工作区多声明盘点（声明序稳定；恰一/零共用 = 空表）。
+// 比较口径（建议3）：比较键=filepath.Clean(workdir)——归一尾部分隔符与「.」段
+// （/work 与 /work/ 合并）；大小写不折算、符号链接不解析——不同写法指向同一真实
+// 目录的极端形态不合并（跨文件系统大小写语义不一，保持原样）；条目展示首见原始
+// 写法，口径在页面如实披露。
 func workspaceConflictsFor(profiles []protocol.ExecProfile) []workspaceConflictView {
 	idx := map[string]int{}
 	var out []workspaceConflictView
 	for _, p := range profiles {
-		if i, ok := idx[p.Workdir]; ok {
+		key := filepath.Clean(p.Workdir)
+		if i, ok := idx[key]; ok {
 			out[i].Agents = append(out[i].Agents, p.Name)
 			continue
 		}
-		idx[p.Workdir] = len(out)
+		idx[key] = len(out)
 		out = append(out, workspaceConflictView{Workdir: p.Workdir, Agents: []string{p.Name}})
 	}
 	conf := out[:0]

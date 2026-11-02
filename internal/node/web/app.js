@@ -3534,7 +3534,7 @@ function servicesPage() {
     ? `<div class="notice warn spaced"><b>智行管家声明冲突（本机多声明）</b>：${esc(S.orchIdentity.note)}</div>`
     : '';
   const wsNote = (S.workspaceConflicts || []).length
-    ? `<div class="notice spaced"><b>同工作区多声明</b>：${S.workspaceConflicts.map(c => `<code>${esc(c.workdir)}</code> ← ${c.agents.map(n => `<code>${esc(n)}</code>`).join('、')}`).join('；')}。多个声明共用同一工作区时，并发任务会在同一目录内执行、可能互相覆盖文件与产物——如需隔离请为各能力分开 workdir。</div>`
+    ? `<div class="notice spaced"><b>同工作区多声明</b>：${S.workspaceConflicts.map(c => `<code>${esc(c.workdir)}</code> ← ${c.agents.map(n => `<code>${esc(n)}</code>`).join('、')}`).join('；')}。多个声明共用同一工作区时，并发任务会在同一目录内执行、可能互相覆盖文件与产物——如需隔离请为各能力分开 workdir。（同区判定按路径规范形比较：尾分隔符与「.」段折算、区分大小写，符号链接不解析）</div>`
     : '';
   const head = `<div class="page-head"><div><h1>服务</h1>
     <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p>
@@ -3588,7 +3588,7 @@ function cfgSection() {
     <details><summary>兼容与历史说明（W06-04）</summary><p class="muted small">
     配置历史：本机<b>不留存</b>逐次保存的前值——「保存全部」即以当前表覆盖 node.yaml（round-trip 保留注释与未知字段），无历史文件，本页不编造历史；保存前的逐字段差异对比走「发现本机 agent → 登记预览」（实时算 old→new，零写盘）。有数据面支撑的变更记录只有开关覆盖：开放/管家声明经网页改动时记录来源与时刻（agents-state.json，重启保持），见各能力「配置详情」的开关记录行。
     </p><p class="muted small">
-    旧声明兼容：智行管家以能力卡<b>声明位</b>（orchestrator）为准；能力名含 <code>zcode-dev</code> 的旧名字约定只是零声明时的兼容回退识别，页面在能力卡与派单下拉明确标注「旧名约定识别（非声明）」，不冒认「唯一管家已生效」——本机多声明并存时服务页横幅与能力卡均呈现冲突警示，全网恰一以 hub 目录为准（跨机冲突由 hub 告警）。配置漂移：状态文件中已删能力的旧开关记录在启动加载时自动忽略（日志留痕），不阻塞 node。
+    旧声明兼容：智行管家以能力卡<b>声明位</b>（orchestrator）为准；能力名含 <code>zcode-dev</code> 的旧名字约定只是零声明时的兼容回退识别——本机派单在存在声明位时声明优先、回退不生效；hub 汇聚全网声明，全网冲突态由 hub 侧回退名字识别并告警（恰一以 hub 目录为准）。页面在能力卡与派单下拉明确标注「旧名约定识别（非声明）」，不冒认「唯一管家已生效」——本机多声明并存时服务页横幅与能力卡均呈现冲突警示。配置漂移：状态文件中已删能力的旧开关记录在启动加载时自动忽略（日志留痕），不阻塞 node。
     </p></details>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
@@ -3704,15 +3704,16 @@ function orchNote(a) {
   const name = 'orch-' + CSS.escape(a.name);
   if (a._pending) return `<div class="notice warn spaced" id="${name}">同步中…</div>`;
   if (a._synced === false) return `<div class="notice warn spaced" id="${name}"><b>本机已生效 · 待同步</b>：hub 暂不可达，重连注册后自动生效。</div>`;
-  if (S.orchIdentity?.conflict) return `<div class="notice warn spaced" id="${name}"><b>已声明 · 本机多声明并存</b>：此刻无唯一生效声明（多声明冲突时 hub 告警并回退名字识别）；请到其他声明能力的卡片取消声明，只保留一台。</div>`;
+  if (S.orchIdentity?.conflict) return `<div class="notice warn spaced" id="${name}"><b>已声明 · 本机多声明并存</b>：此刻无唯一生效声明。hub 汇聚全网声明：冲突时 hub 告警并回退名字识别；本机派单则声明优先，旧名回退仅在零声明态生效。请到其他声明能力的卡片取消声明，只保留一台。</div>`;
   return `<div class="notice ok spaced" id="${name}"><b>智行管家已声明</b>：复合目标将交由本能力拆解派发汇总（hub 汇聚全网声明，冲突时告警并回退名字识别）。</div>`;
 }
 /* nameFallbackBadge 旧名字约定候选徽标（W06-04）：未声明但能力名含 zcode-dev——
  * 来源是名字约定而非主人声明，必须标注。回退识别仅在零声明态生效（有声明位时
- * 声明优先，与 hub isPrimeDir 同语义），徽标措辞按条件事实表述。 */
+ * 本机派单声明优先，与 hub isPrimeDir 同语义；hub 全网冲突态由 hub 侧回退名字
+ * 识别并告警），徽标措辞分端如实。 */
 function nameFallbackBadge(a) {
   if (a.orchestrator || !(S.orchIdentity?.name_fallback || []).includes(a.name)) return '';
-  return ` <span class="badge" title="能力名含 zcode-dev：零声明态下派单侧按旧名字约定将其识别为智行管家（兼容回退，非主人声明）；存在声明位时声明优先、回退不生效。钦定管家即随能力表上报正式声明">旧名约定候选（非声明）</span>`;
+  return ` <span class="badge" title="能力名含 zcode-dev：零声明态下派单侧按旧名字约定识别为智行管家（兼容回退，非主人声明）；本机存在声明位时声明优先、回退不生效（hub 全网冲突态由 hub 侧回退名字识别并告警）。钦定管家即随能力表上报正式声明">旧名约定候选（非声明）</span>`;
 }
 
 /* ---------- 能力卡检测徽标（W06-02 四值投影，加法） ----------

@@ -180,6 +180,37 @@ func joinLayout(home string, segments []string) string {
 	return filepath.Join(append([]string{home}, segments...)...)
 }
 
+// PathLinkState 路径链接/存在状态快照（W06-04 漂移复核消费；与检测记录语义逐位
+// 对齐——见 CheckPathLinkState）。
+type PathLinkState struct {
+	LeafExists   bool // 末段 Lstat 存在（不跟随；中间段链接可穿透解析，与检测时末段 Lstat 行为一致）
+	LeafSymlink  bool // 末段本体为符号链接
+	LeafRegular  bool // 末段为普通文件
+	ChainSymlink bool // root→末段目录链上存在符号链接（root 本体或中间段；与布局链校验 viaSymlink 同口径）
+	ChainBroken  bool // 目录链校验未过（链接/缺失/非目录任一）
+}
+
+// CheckPathLinkState 以 root + 相对段复核路径当前的链接/存在状态——布局链校验
+// 与 recognizeConfig/checkLoginMarker 使用同一实现（layoutChainIssue），供漂移复核
+// 把「当前实况」折算成与检测时 PathRef 记录完全同义的语义位。
+//
+// 关键口径（W06-04 必修1）：config/登录标记路径的 PathRef.Symlink 是复合位——
+// readRegularFileCapped 记录 ref.Symlink = 末段 Lstat 链接 || 目录链链接（链上有
+// 链接即置位）；installed 命令路径是纯末段位。复核方必须按同口径折算（复合位 =
+// LeafSymlink || ChainSymlink），不得用末段 Lstat 直接比对，否则「本就是链上链接
+// 未变化」误报、「检测后目录被换成链接」漏报。
+func CheckPathLinkState(root string, segments []string) (st PathLinkState, issue string) {
+	iss, viaLink := layoutChainIssue(root, segments)
+	leaf := lstatPath(joinLayout(root, segments))
+	return PathLinkState{
+		LeafExists:   leaf.Exists,
+		LeafSymlink:  leaf.Symlink,
+		LeafRegular:  leaf.Regular,
+		ChainSymlink: viaLink,
+		ChainBroken:  iss != "",
+	}, iss
+}
+
 // layoutChainIssue 布局目录链逐段校验（联审必修项 1：防中间目录符号链接穿透
 // ——只对末段 Lstat 时，os.Open 会跟随中间目录链接，`.zcode → 外部目录` 会
 // 误判 pass 且 symlink=false）。config_home 本体与其下 segments 的前 len-1 个
