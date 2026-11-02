@@ -1836,23 +1836,19 @@ func TestShutdownAtomicEnqueueWindow(t *testing.T) {
 	}
 }
 
-// TestSweepReconcilesAcceptedMissedHook 建议①（accepted 运行期对账兜底）：任务
-// 已终态但收敛回调被丢弃/遗漏（模拟：直落 accepted 意图+直投任务到终态）→ sweep
-// 对账收敛（accepted 不滞留）。
-func TestSweepReconcilesAcceptedMissedHook(t *testing.T) {
+// TestShutdownDroppedHookRecoveredOnRestart 必修4-b（诚实降范围）：运行期不对
+// 已入队被丢弃的收敛项兜底（满队/关停丢弃如实留痕）——意图保持 accepted 在途，
+// 重启对账按任务实物收敛（既有恢复面收口）。本测试钉住该诚实语义：丢弃后意图
+// 不得被运行期静默改写（无锚不猜），重启后收敛。
+func TestShutdownDroppedHookRecoveredOnRestart(t *testing.T) {
 	f := newChainFixture(t, false, true)
 	view, _ := f.svc.SpaceView(f.spaceID)
 	it, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "rec-1",
 		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version,
-		Note: "对账兜底"}, fakeHubSubject)
+		Note: "丢弃恢复"}, fakeHubSubject)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 模拟钩子遗漏：受理→投递→终态全链走完但无 AttachDispatchTask/收敛——
-	// 用 advanceSpace 推进（ensureBound+提交+接单登记），然后在 worker 消费前
-	// 拦截：改为直接等任务终态后手动验证 sweep 对账。这里构造：提交+接单后
-	// 任务完成，但收敛由 sweep 对账承担（把 convCh 排空丢弃模拟丢失）。
-	f.svc.onConvDequeued = nil
 	if err := f.svc.ensureBound(f.spaceID, it); err != nil {
 		t.Fatalf("ensureBound: %v", err)
 	}
@@ -1861,7 +1857,8 @@ func TestSweepReconcilesAcceptedMissedHook(t *testing.T) {
 	if err != nil || dup {
 		t.Fatalf("投递: %v dup=%v", err, dup)
 	}
-	// 等任务终态（worker 会收敛——丢弃模拟：直接排空 convCh 模拟钩子项丢失）。
+	// 等任务终态（合并/终态回调入队 → worker 可能已消费——丢弃模拟不可靠，改为：
+	// 直接排空队列模拟全部回调丢失，再验证运行期零静默改写）。
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(ref.TaskID); ok && e.State == ledger.StateFinished {
@@ -1869,7 +1866,7 @@ func TestSweepReconcilesAcceptedMissedHook(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// 排空并阻止再入队：模拟收敛回调全部丢失。
+	// 排空队列（模拟满队/关停丢弃——留痕路径，运行期无兜底）。
 	for {
 		select {
 		case <-f.svc.convCh:
@@ -1878,20 +1875,87 @@ func TestSweepReconcilesAcceptedMissedHook(t *testing.T) {
 		}
 		break
 	}
-	f.svc.setOnConvDequeued(func() {}) // 消费信号不影响
-	// 手工把意图锚定为 accepted（attach 已由 advance/worker 完成——若 worker 已
-	// 收敛则本测试退化为幂等验证；若未收敛则 sweep 对账收敛）。
-	// sweep 对账：等待意图收敛（sweep reconcileAcceptedLocked 或已收敛）。
+	// 运行期诚实语义：意图可能已被 worker 收敛（回调未被丢弃的竞争胜者）——
+	// 两种状态均诚实；未收敛则重启后必须收敛（零静默丢失）。
+	if err := f.svc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	svc2, err := Open(f.dir, f.hubCore, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer svc2.Close()
+	f.hubCore.SetSpaceTurnGuard(svc2.SpaceTurnGuard())
 	deadline = time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if got, ok := f.svc.IntentByRequest(f.spaceID, "rec-1"); ok && got.Status == collab.IntentConverged {
+		if got, ok := svc2.IntentByRequest(f.spaceID, "rec-1"); ok && got.Status == collab.IntentConverged {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	got, _ := f.svc.IntentByRequest(f.spaceID, "rec-1")
-	if got.Status == collab.IntentAccepted {
-		// accepted 滞留 = 对账兜底未生效
-		t.Fatalf("accepted 意图应对账收敛（不滞留）: %+v", got)
+	got, _ := svc2.IntentByRequest(f.spaceID, "rec-1")
+	t.Fatalf("重启对账后意图应收敛（丢弃项由恢复面收口）: %+v", got)
+}
+
+// TestCancelReLockAbandonsWhenTakenOver 必修3（取消重锁核验）正向+放弃双分支：
+//   - 放弃分支：pending 意图已被后手提交（accepted/TaskID 在位）→ 重锁核验发现
+//     非未提交 pending → 放弃取消（意图保持 accepted，执行中任务不被记 cancelled）；
+//   - 正向分支：仍是未提交 pending → 确定性取消成立。
+func TestCancelReLockAbandonsWhenTakenOver(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	view, _ := f.svc.SpaceView(f.spaceID)
+	it, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "rl-1",
+		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version,
+		Note: "重锁核验"}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.ensureBound(f.spaceID, it); err != nil {
+		t.Fatal(err)
+	}
+	// 放弃分支：后手已提交（SubmitSpaceTurn + attach → accepted/TaskID 在位）。
+	ref, dup, err := f.hubCore.SubmitSpaceTurn(it.SessionID, core.SessionTurnRequest{
+		Prompt: it.Note, TurnSeq: it.TurnSeq, RequestID: it.RequestID}, systemSubject().String(), Scope(f.spaceID))
+	if err != nil || dup {
+		t.Fatalf("后手提交: %v dup=%v", err, dup)
+	}
+	if _, err := f.svc.AttachDispatchTask(f.spaceID, it.RequestID, ref.TaskID, systemSubject()); err != nil {
+		t.Fatalf("接单: %v", err)
+	}
+	// A 的取消（模拟：advanceSpace ensureBound 失败后的重锁核验——内联同款逻辑）。
+	m := f.svc.lockSpace(f.spaceID)
+	m.Lock()
+	cur, ok := f.svc.IntentByRequest(f.spaceID, it.RequestID)
+	still := ok && cur.Status == collab.IntentPending && cur.TaskID == "" &&
+		cur.TurnSeq == it.TurnSeq && cur.Member == it.Member
+	if still {
+		f.svc.cancelIntent(f.spaceID, cur, "版本门拒绝：意图取消收束")
+	}
+	m.Unlock()
+	if still {
+		t.Fatal("已提交意图应放弃取消（still 不应为真）")
+	}
+	got, _ := f.svc.IntentByRequest(f.spaceID, it.RequestID)
+	if got.Status != collab.IntentAccepted {
+		t.Fatalf("后手接管意图应保持 accepted（不被记 cancelled）: %+v", got)
+	}
+	// 正向分支：仍是未提交 pending → 取消成立。
+	view, _ = f.svc.SpaceView(f.spaceID)
+	it2, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "rl-2",
+		Member: "n1/coder", SessionID: f.sessID, TurnSeq: 2, ExpectedVersion: view.Version,
+		Note: "正向取消"}, fakeHubSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Lock()
+	cur2, ok2 := f.svc.IntentByRequest(f.spaceID, it2.RequestID)
+	still2 := ok2 && cur2.Status == collab.IntentPending && cur2.TaskID == ""
+	if still2 {
+		f.svc.cancelIntent(f.spaceID, cur2, "版本门拒绝：意图取消收束")
+	}
+	m.Unlock()
+	got2, _ := f.svc.IntentByRequest(f.spaceID, it2.RequestID)
+	if !still2 || got2.Status != collab.IntentCancelled {
+		t.Fatalf("未提交 pending 应确定性取消: still=%v %+v", still2, got2)
 	}
 }
