@@ -342,6 +342,9 @@ func (s *Service) resyncBindGen(sessionID string, current uint64) {
 func (s *Service) noteBound(sessionID string, gen uint64) {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
+	if cur := s.bindGens[sessionID]; cur > gen {
+		return // 旧应答迟到回写旧代次不覆盖新登记（codex 复审轮 3 原则 3）
+	}
 	s.bindGens[sessionID] = gen
 }
 
@@ -383,7 +386,7 @@ func (s *Service) deletePendingIfGen(sessionID string, gen uint64) bool {
 // 携代次，stale ack-noop 经 ack.CurrentGen 重同步后重试一次；进程内已知已 bind
 // 即跳过——同代幂等由 node 承担兜底）。
 // 返回 (gen, owned, err)：owned=true 仅当**本请求经 PutIfGenNewer 新建了该代次**
-//（持有按此代次解除的权利）；owned=false = 复用既有绑定（gen 仅供日志/幂等覆盖
+// （持有按此代次解除的权利）；owned=false = 复用既有绑定（gen 仅供日志/幂等覆盖
 // 判定，**不授予解除权**——复用路径 CAS 失败不得补偿解除，绑定归属原操作，
 // codex 复审轮 3 必修 R1）。
 func (s *Service) ensureBindSession(nodeID, sessionID, scope string) (gen uint64, owned bool, err error) {
@@ -513,7 +516,9 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	if err != nil {
 		return collab.DispatchIntent{}, false, bindError(err)
 	}
-	s.invalidateUnbind(mt.sessionID) // 新代绑定成立：旧代解除条目作废（代际语义）
+	if boundOwned {
+		s.invalidateUnbind(mt.sessionID, boundGen) // 新代绑定成立：旧代解除条目作废（代际语义；owned=false 禁触——R3）
+	}
 	s.muDispatch.Lock()
 	// 空间调度锁（登记段）：受理登记与控制变更（ControlSpace 同锁）串行。登记段
 	// 统一出口解锁（codex 复审轮 3 必修 4——重放/冲突等全部提前返回路径必须
@@ -572,32 +577,34 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	// 统一出口：双锁释放 + 补偿旗标清偿（全部提前返回路径收口于此——必修 4）。
 	slm.Unlock()
 	s.muDispatch.Unlock()
-	compensate := func() {
-		if needUnbind && boundOwned {
-			// 绑定残留补偿（codex 必修D-2 + 复审轮 3 必修 R1）：仅**本请求新建
-			// 代次**（owned）才有按该代次解除的权利；复用既有绑定的失败路径不
-			// 补偿（绑定归属原操作，语义上本就该保留）。失败入重试队列，人话
-			// 日志留痕。
-			s.UnbindSessionGen(mt.nodeID, mt.sessionID, boundGen)
-		}
-	}
+	// 补偿门（codex 复审轮 3 原则 1——compensateBindIfOwned 核验代次未接管 +
+	// session 无在途任务后才解除；needUnbind 旗标传递给门控函数）。
 	switch {
 	case replayErr != nil:
-		compensate()
+		if needUnbind {
+			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+		}
 		return collab.DispatchIntent{}, false, replayErr
 	case sessionGone:
-		compensate()
+		if needUnbind {
+			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+		}
 		return collab.DispatchIntent{}, false, &Error{Code: CodeSessionGone, Msg: "成员绑定会话不存在: " + mt.sessionID}
 	case recordErr != nil:
-		compensate()
+		if needUnbind {
+			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+		}
 		return collab.DispatchIntent{}, false, recordErr
 	case replayDup:
 		return replayIt, true, nil
 	case recordDup:
 		return recorded, true, nil // 并发收敛：另一 goroutine 已受理
 	}
-	compensate()
 	// 投递准入（outbox 先登记后 send；锁面见 advanceSpace 三段式）。
+	// 成功路径不调用 compensateBindIfOwned——dispatch 已成立，无需补偿解除
+	//（旧代码在成功路径无条件调用，任务完成→turn 终态→检查②通过→误删
+	// 刚创建的绑定，导致 node 收件门后续拒所有轮——codex 复审轮 3 全仓
+	// 负载实证 4 test FAIL 的根因）。
 	s.advanceSpace(req.SpaceID)
 	// 返回前重读意图（attach/取消收束发生在投递段内——调用方看到当前态：
 	// accepted（带 TaskID）或确定性取消收束态，不回投递前快照）。
@@ -864,15 +871,13 @@ func (s *Service) unbindGenOnce(nodeID, sessionID string, gen *uint64) bool {
 // invalidateUnbind 解除登记代际作废（codex 复审必修D-1）：同 session 新 bind
 // 成立即作废旧代解除条目——旧重试不再下发（node 条件删除为第二道防线）。绑定
 // 成功路径（Dispatch/补绑定）调用。
-func (s *Service) invalidateUnbind(sessionID string) {
+func (s *Service) invalidateUnbind(sessionID string, newGen uint64) {
 	s.muUnbind.Lock()
-	if _, ok := s.pendingUnbinds[sessionID]; ok {
+	defer s.muUnbind.Unlock()
+	if cur, ok := s.pendingUnbinds[sessionID]; ok && cur.gen < newGen {
 		delete(s.pendingUnbinds, sessionID)
-		s.muUnbind.Unlock()
-		log.Printf("[hub] 旧代解除登记已作废（session 重新绑定成立）session=%s", sessionID)
-		return
+		log.Printf("[hub] 旧代解除登记已作废（session 新代 gen=%d 绑定成立）session=%s old_gen=%d", newGen, sessionID, cur.gen)
 	}
-	s.muUnbind.Unlock()
 }
 
 // KickSpace 显式推进单空间投递（api resume 面接线——node NotifySpaceResumed 同
@@ -1294,6 +1299,29 @@ func (s *Service) ensureBound(spaceID string, it collab.DispatchIntent) error {
 	}
 	_, _, err := s.ensureBindSession(nodeIDOfSession, it.SessionID, Scope(spaceID))
 	return err
+}
+
+// compensateBindIfOwned 补偿门（codex 复审轮 3 原则 1——所有权随成功借用转移）：
+// 仅当 ① 本代次未被接管（缓存当前代次 == 本操作代次——新 bind 推进缓存即放弃）
+// 且 ② session 无其他在途意图/任务（hub 会话注册表：非终态轮存在即绑定正服务
+// 后续意图——跳过补偿，残留由 fail-closed 自愈/后续 bind 幂等覆盖，既有登记边
+// 界）才执行代次解除。任一不满足即放弃 + 人话日志留痕。
+func (s *Service) compensateBindIfOwned(spaceID, nodeID, sessionID string, gen uint64, requestID string) {
+	if cur := s.boundGenOf(sessionID); cur != gen {
+		log.Printf("[hub] spaces: 补偿跳过（代次已被接管 cur=%d != gen=%d）session=%s request=%s——绑定归属后续操作", cur, gen, sessionID, requestID)
+		return
+	}
+	if sv, ok := s.core.GetSession(sessionID); ok {
+		for _, tv := range sv.Turns {
+			switch tv.Status {
+			case store.TurnStatusPending, store.TurnStatusAwaitingNode, store.TurnStatusRunning:
+				log.Printf("[hub] spaces: 补偿跳过（绑定正服务在途任务 session=%s turn=%d status=%s request=%s）——残留由 fail-closed 自愈/后续 bind 幂等覆盖",
+					sessionID, tv.Seq, tv.Status, requestID)
+				return
+			}
+		}
+	}
+	s.UnbindSessionGen(nodeID, sessionID, gen)
 }
 
 // kickLocked 调度锁内推进（收敛 worker 路径：准入→提交无网络应答等待；bind 在

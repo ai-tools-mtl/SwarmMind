@@ -39,6 +39,11 @@ import (
 // fakeHubSubject 测试主人主体（manual 空间创建者/驱动者）。
 var fakeHubSubject = collab.Subject{Name: "owner", Class: collab.ClassOwner}
 
+// testWaitBudget 条件等待窗预算（2026-11-03 全仓并行负载采证：5s 在 28 包并行
+// CPU 超订下偶发不够——多跳链（取消栅栏→node 合并→结果回写→钩子入队→worker）
+// 超窗假红；放宽到 15s，条件等待语义不变（超时仍 Fatal，非固定睡眠）。
+const testWaitBudget = 15 * time.Second
+
 // fakePrimeSubject 测试编排主体（external 领取/驱动）。
 var fakePrimeSubject = collab.Subject{Name: "pat:tester", Class: collab.ClassOrchestrate}
 
@@ -108,7 +113,7 @@ func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 	t.Cleanup(func() { _ = f.hubStore.Close() })
 	bus := transport.NewBus()
 	f.hubCore, err = core.New(core.Config{Store: f.hubStore, Transport: bus.Endpoint("hub"),
-		SpaceBindTimeout: 2 * time.Second, SweepInterval: o.sweepInterval, TerminalRetention: retentionPtr(o.terminalRetention)})
+		SpaceBindTimeout: 30 * time.Second, SweepInterval: o.sweepInterval, TerminalRetention: retentionPtr(o.terminalRetention)})
 	if err != nil {
 		t.Fatalf("hub core: %v", err)
 	}
@@ -229,7 +234,7 @@ func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 // 终态钩子/扫查推进，轮询只做断言同步）。
 func (f *chainFixture) waitIntentStatus(reqID string, want collab.IntentStatus) collab.DispatchIntent {
 	t := f.t
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if it, ok := f.svc.IntentByRequest(f.spaceID, reqID); ok && it.Status == want {
 			return it
@@ -471,7 +476,7 @@ func TestOldTermRejectedNewDispatch(t *testing.T) {
 // waitIntentStatusIn 指定空间的意图状态轮询（多空间断言用）。
 func (f *chainFixture) waitIntentStatusIn(spaceID, requestID string, want collab.IntentStatus) {
 	t := f.t
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if it, ok := f.svc.IntentByRequest(spaceID, requestID); ok && it.Status == want {
 			return
@@ -513,7 +518,7 @@ func TestRecoveryKeepsInFlightOnRestart(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	// 等任务进入 node 账本终态前态（accepted/started——barrier 阻塞执行中）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -554,7 +559,7 @@ func TestHubCancelConvergesOnMergedResult(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	// 等 node 执行进入阻塞态（accepted 之后）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -573,7 +578,7 @@ func TestHubCancelConvergesOnMergedResult(t *testing.T) {
 	// 两次先后写库——轮询侧「见 cancelled 即断言 paused」会在两次写库窗口观测到
 	// cancelled+running 假象（race 负载下窗口放大，集成者门禁偶红）；改为
 	// cancelled+paused 合并条件同见才通过（同一钩子链终态，恒可达）。
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		got, ok := f.svc.IntentByRequest(f.spaceID, "d-cancel-1")
 		sp, spok := f.svc.Space(f.spaceID)
@@ -667,7 +672,7 @@ func TestCloseDrainsInFlightCallbacks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -700,7 +705,7 @@ func TestCloseDrainsInFlightCallbacks(t *testing.T) {
 	}
 	// 等合并已真实触发（node 取消结果合并回写 ⇒ Result 非 nil——fireTaskMerged/
 	// hookEntry 已同步返回入队）。
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWaitBudget)
 	merged := false
 	for time.Now().Before(deadline) {
 		if tk, ok := f.hubCore.GetTask(it.TaskID); ok && tk.Result != nil {
@@ -724,7 +729,7 @@ func TestCloseDrainsInFlightCallbacks(t *testing.T) {
 	// Close：排空面等 worker（worker 在屏障后排队等锁）——不得在屏障期内返回。
 	closeErr := make(chan error, 1)
 	go func() { closeErr <- f.svc.Close() }()
-	deadline = time.Now().Add(150 * time.Millisecond)
+	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case cerr := <-closeErr:
@@ -865,7 +870,7 @@ func TestBSerialOneStick(t *testing.T) {
 	}
 	// 棒 1 收敛 → 钩子推进棒 2（离开 pending）。
 	f.releaseBarrier()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "b-m2"); ok && got.Status != collab.IntentPending {
 			return // accepted（node 执行）或已收敛（agent 不在内核表如实 failed）——离开排队即达意
@@ -903,7 +908,7 @@ func TestBPauseBlocksAdvanceAndResumeReleases(t *testing.T) {
 	}
 	// 棒 1 收敛（kick 被运行态门拦下）。
 	f.releaseBarrier()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "p-m1"); ok && got.Status == collab.IntentConverged {
 			break
@@ -911,7 +916,7 @@ func TestBPauseBlocksAdvanceAndResumeReleases(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	// 棒 2 跨多个扫查节拍保持 pending 未投递（pause 后 sweep 零投递——反例闭合）。
-	sweeps := 6 * sweepInterval
+	sweeps := 20 * sweepInterval
 	deadline = time.Now().Add(sweeps + time.Second)
 	for time.Now().Before(deadline) {
 		got, ok := f.svc.IntentByRequest(f.spaceID, "p-m2")
@@ -936,7 +941,7 @@ func TestBPauseBlocksAdvanceAndResumeReleases(t *testing.T) {
 		ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "p-m2"); ok && got.Status != collab.IntentPending {
 			return
@@ -993,7 +998,7 @@ func TestBLeaseExpiryCancelsPending(t *testing.T) {
 		t.Fatalf("棒 2: %v", err)
 	}
 	// 租约 1s 过期 → sweep 前置检查 PauseExpired：棒 2（pending）取消收束 + 空间暂停。
-	deadline := time.Now().Add(6 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		got, ok := f.svc.IntentByRequest(sp.ID, "l-m2")
 		spNow, _ := f.svc.Space(sp.ID)
@@ -1028,7 +1033,7 @@ func TestCSweepGateAfterWithdraw(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sweep 推进 → 出口版本门 → 取消收束（重试永不成功——确定性）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "c-1"); ok && got.Status == collab.IntentCancelled {
 			if got, _ := f.svc.IntentByRequest(f.spaceID, "c-1"); !strings.Contains(got.Note, "版本门") {
@@ -1145,7 +1150,7 @@ func TestEOldPlainTurnRequestConflict(t *testing.T) {
 	// 经 GET dispatches/{request_id} 轮询可见。
 	_, _, _ = f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder2", RequestID: "R",
 		ExpectedVersion: ver, Note: "新轮原文（与旧轮异文）"}, fakeHubSubject)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "R"); ok {
 			if got.Status != collab.IntentCancelled {
@@ -1182,7 +1187,7 @@ func TestCloseRealHookPathDrainOrRecovery(t *testing.T) {
 		t.Fatalf("Dispatch: %v", err)
 	}
 	// 等 node 执行进入阻塞态（accepted 之后——合并结果尚未产生）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -1272,7 +1277,7 @@ func TestBControlSpaceSerializesAdvance(t *testing.T) {
 		applied <- err
 	}()
 	// 锁被占住：pause 不得落地（互斥语义确定性——观察窗内检查）。
-	deadline := time.Now().Add(150 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
 	seen := false
 	for time.Now().Before(deadline) {
 		sp, _ := f.svc.Space(f.spaceID)
@@ -1355,7 +1360,7 @@ func TestBConvergePauseAtomicBlocksAdvance(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 等棒 1 进入 node（barrier 阻塞在途）→ 取消 → 合并收敛 + 系统暂停（同锁区）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it1.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -1366,7 +1371,7 @@ func TestBConvergePauseAtomicBlocksAdvance(t *testing.T) {
 		t.Fatalf("CancelTask: %v", err)
 	}
 	// 终态确定性：棒 1 cancelled + 空间 paused + 棒 2 保持 pending 未投递。
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		got1, _ := f.svc.IntentByRequest(f.spaceID, "ba-m1")
 		sp, _ := f.svc.Space(f.spaceID)
@@ -1456,7 +1461,7 @@ func TestD2CompensateOnRecordDispatchFailure(t *testing.T) {
 		dispErr <- err
 	}()
 	// 等派发完成 bind（进入锁等待）——不可直察，用绑定登记事实同步（确定性）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if f.binds.Space(f.sessID) == Scope(f.spaceID) {
 			break
@@ -1523,7 +1528,7 @@ func TestETurnFactFourStates(t *testing.T) {
 	}
 	// 推进 e-none（串行门清空：执行完成收敛——无 barrier 直接跑完）。
 	f.svc.KickSpace(f.spaceID)
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "e-none"); ok && got.Status == collab.IntentConverged {
 			break
@@ -1577,7 +1582,7 @@ func TestECleanedTaskPendingNeedsReview(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	f.releaseBarrier()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	cleaned := false
 	for time.Now().Before(deadline) {
 		if _, ok := f.hubCore.GetTask(ref.TaskID); !ok {
@@ -1631,7 +1636,7 @@ func TestHCloseWaitsConvergePauseLanding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(it.TaskID); ok && e.State != ledger.StateAccepted {
 			break
@@ -1644,7 +1649,7 @@ func TestHCloseWaitsConvergePauseLanding(t *testing.T) {
 		t.Fatalf("CancelTask: %v", err)
 	}
 	// 等收敛落账可见（钩子已进入两落账区——停队落账与之同锁区串行）。
-	deadline = time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(testWaitBudget)
 	seenCancelled := false
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "h-1"); ok && got.Status == collab.IntentCancelled {
@@ -1786,7 +1791,7 @@ func TestCWithdrawDeclarationStaysPendingZeroOutbound(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.svc.KickSpace(f.spaceID) // 推进 → ensureBound 版本门先行 → 确定性取消
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if got, ok := f.svc.IntentByRequest(f.spaceID, "c5-1"); ok && got.Status == collab.IntentCancelled {
 			if !strings.Contains(got.Note, "版本门") {
@@ -1859,7 +1864,7 @@ func TestShutdownDroppedHookRecoveredOnRestart(t *testing.T) {
 	}
 	// 等任务终态（合并/终态回调入队 → worker 可能已消费——丢弃模拟不可靠，改为：
 	// 直接排空队列模拟全部回调丢失，再验证运行期零静默改写）。
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testWaitBudget)
 	for time.Now().Before(deadline) {
 		if e, ok := f.nodeLed.Get(ref.TaskID); ok && e.State == ledger.StateFinished {
 			break
@@ -2069,5 +2074,155 @@ func TestR2ProbePinsLearnedGen(t *testing.T) {
 	}
 	if got := f.binds.Space(f.sessID); got != "" {
 		t.Fatalf("学到的代次解除应删除: %q", got)
+	}
+}
+
+// ---------- codex 复审轮 3 原则 1-3 实际调用链交错测试（受控屏障确定性） ----------
+
+// TestCompensateOwnershipInterleaved 原则 1 实际调用链交错（创建者失败/借用者成功）：
+//   - 主分支：A Dispatch 创建 gen=1 → 空间锁屏障停泊 → B 借用 gen=1 记账 + 提交
+//     会话轮（在途）→ 窗内 pause 版本推进 → 放锁 → A RecordDispatch 失败 →
+//     compensateBindIfOwned 检测在途 turn → 跳过补偿 → 绑定保留（B 不断线）；
+//   - 对照组：无借用者/无在途 turn → 同构造补偿生效 → 绑定清除。
+func TestCompensateOwnershipInterleaved(t *testing.T) {
+	t.Run("借用者执行时跳过补偿", func(t *testing.T) {
+		f := newChainFixture(t, true, true) // barrier：B 的任务阻塞在途
+		// 受控屏障：占住空间调度锁（A 停在 bind 后/RecordDispatch 前）。
+		m := f.svc.lockSpace(f.spaceID)
+		m.Lock()
+		// A 的 Dispatch（goroutine）：ensureBindSession 创建 gen=1 后阻塞在空间锁。
+		dispErr := make(chan error, 1)
+		go func() {
+			view, _ := f.svc.SpaceView(f.spaceID)
+			_, _, err := f.svc.Dispatch(DispatchRequest{SpaceID: f.spaceID, Member: "n1/coder",
+				RequestID: "A-1", ExpectedVersion: view.Version, Note: "A 的请求"}, fakeHubSubject)
+			dispErr <- err
+		}()
+		// 等 A 的 bind 完成（node 登记在案 = ensureBindSession 已过）。
+		deadline := time.Now().Add(testWaitBudget)
+		for time.Now().Before(deadline) {
+			if f.binds.Space(f.sessID) == Scope(f.spaceID) {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if f.binds.Space(f.sessID) != Scope(f.spaceID) {
+			t.Fatal("前置：A 的 bind 应已登记")
+		}
+		// B 借用同 session 记账成功（直调 collab 层——绕过 Dispatch/space lock）。
+		view, _ := f.svc.SpaceView(f.spaceID)
+		itB, _, _, err := f.svc.RecordDispatch(f.spaceID, collab.DispatchRequest{RequestID: "B-1",
+			Member: "n1/coder", SessionID: f.sessID, TurnSeq: 1, ExpectedVersion: view.Version,
+			Note: "借用者"}, fakeHubSubject)
+		if err != nil {
+			t.Fatalf("B RecordDispatch: %v", err)
+		}
+		// B 经 core 提交会话轮 → session 有在途 turn（非终态）。
+		refB, dup, err := f.hubCore.SubmitSpaceTurn(f.sessID, core.SessionTurnRequest{
+			Prompt: itB.Note, TurnSeq: itB.TurnSeq, RequestID: itB.RequestID},
+			systemSubject().String(), Scope(f.spaceID))
+		if err != nil || dup {
+			t.Fatalf("B SubmitSpaceTurn: %v dup=%v", err, dup)
+		}
+		if _, err := f.svc.AttachDispatchTask(f.spaceID, itB.RequestID, refB.TaskID, systemSubject()); err != nil {
+			t.Fatalf("B attach: %v", err)
+		}
+		// 窗内 pause（直调 collab Control——绕空间锁）：版本推进 + 空间暂停。
+		view, _ = f.svc.SpaceView(f.spaceID)
+		if _, _, err := f.svc.Control(f.spaceID, collab.ControlRequest{RequestID: "pause-win",
+			Action: collab.ActPause, ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
+			t.Fatalf("窗内 pause: %v", err)
+		}
+		// 放屏障 → A 走 RecordDispatch（CAS 失败）→ compensateBindIfOwned。
+		m.Unlock()
+		if err := <-dispErr; err == nil {
+			t.Fatal("A RecordDispatch 应失败（版本 CAS）")
+		}
+		// 断言：补偿跳过（session 有在途 turn）→ node 绑定保留（B 不断线）。
+		if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) {
+			t.Fatalf("借用者在途时补偿应跳过（绑定保留）: %q", got)
+		}
+	})
+
+	t.Run("无借用者时补偿生效", func(t *testing.T) {
+		f := newChainFixture(t, false, true) // 无 barrier：无在途任务
+		// 创建者直调 ensureBindSession → gen=1 owned=true。
+		gen, owned, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+		if err != nil || !owned {
+			t.Fatalf("前置 bind: gen=%d owned=%v err=%v", gen, owned, err)
+		}
+		// 直调 pause 推进版本（无借用者——session 无在途 turn）。
+		view, _ := f.svc.SpaceView(f.spaceID)
+		if _, _, err := f.svc.Control(f.spaceID, collab.ControlRequest{RequestID: "cg-pause",
+			Action: collab.ActPause, ExpectedVersion: view.Version}, fakeHubSubject); err != nil {
+			t.Fatal(err)
+		}
+		// 补偿门：无在途 turn → 不跳过 → 解除成立。
+		f.svc.compensateBindIfOwned(f.spaceID, "n1", f.sessID, gen, "cg-1")
+		if got := f.binds.Space(f.sessID); got != "" {
+			t.Fatalf("无借用者时补偿应生效（绑定清除）: %q", got)
+		}
+	})
+}
+
+// TestProbeLearnedGenPersistToQueue 原则 2 实际调用链（探针-重试-队列身份）：
+// 直调 UnbindSessionGen(node, sid, 0) —— 探针成功学到 gen=1 并当场解除（无队列），
+// 证明探针零副作用+正确学习。然后直调 UnbindSessionGen(node-missing, sid, 0) 使
+// 探针不可达 → 入队 gen=0。node 登记事实 gen=2 → retryUnbinds 探针学 current_gen=2
+// → 解除 gen=2 成立 → 条件删除（学到的 gen=2 匹配条目回写后 gen=2）→ 收口。
+func TestProbeLearnedGenPersistToQueue(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// node 登记事实 gen=1：gen=0 探针零副作用学 current_gen=1（registry 完好）。
+	if ack, err := f.hubCore.SpaceBind("n1", protocol.SpaceBindPayload{Space: Scope(f.spaceID), SessionID: f.sessID, Generation: 1}, 2*time.Second); err != nil || !ack.Accepted {
+		t.Fatal(err)
+	}
+	ack, err := f.hubCore.SpaceUnbind("n1", f.sessID, 0, 2*time.Second)
+	if err != nil || ack.Accepted || ack.CurrentGen != 1 {
+		t.Fatalf("探针: err=%v ack=%+v", err, ack)
+	}
+	if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) {
+		t.Fatalf("探针不得误删: %q", got)
+	}
+	// 探针后携学到的代次解除 → 删除（实际调用链 UnbindSessionGen → unbindGenOnce）。
+	f.svc.UnbindSessionGen("n1", f.sessID, 1)
+	if got := f.binds.Space(f.sessID); got != "" {
+		t.Fatalf("学到的代次解除应删除: %q", got)
+	}
+	// 不可达 node 的解除入队 gen=0 → retryUnbinds 探针不可达留队（不追逐）。
+	f.svc.UnbindSessionGen("n-missing", "s-queue-test", 0)
+	if left := f.svc.PendingUnbindSessions(); len(left) != 1 {
+		t.Fatalf("不可达解除应入队: %v", left)
+	}
+	// retryUnbinds 对不可达 node：探针不可达 → 留队（不追逐不丢弃）。
+	f.svc.retryUnbinds()
+	if left := f.svc.PendingUnbindSessions(); len(left) != 1 {
+		t.Fatalf("不可达解除应留队: %v", left)
+	}
+}
+
+// TestLateNoteBoundNoOverwrite 原则 3 实际调用链（旧应答迟到回写不覆盖新登记）：
+// noteBound(gen=2) 后模拟旧应答迟到 noteBound(gen=1) → 缓存保持 gen=2；
+// invalidateUnbind(newGen=2) 对 gen=1 条目不删。
+func TestLateNoteBoundNoOverwrite(t *testing.T) {
+	f := newChainFixture(t, false, true)
+	// 新代：noteBound gen=2。
+	f.svc.noteBound(f.sessID, 2)
+	// 旧应答迟到：noteBound gen=1 → 不覆盖（缓存保持 gen=2）。
+	f.svc.noteBound(f.sessID, 1)
+	if got := f.svc.boundGenOf(f.sessID); got != 2 {
+		t.Fatalf("旧应答迟到不得覆盖新登记: got gen=%d want 2", got)
+	}
+	// invalidateUnbind(oldGen=1) 对 gen=2 条目不删。
+	f.svc.invalidateUnbind(f.sessID, 1)
+	if left := f.svc.PendingUnbindSessions(); len(left) != 0 {
+		t.Fatalf("invalidateUnbind 旧代不应误删新代条目: %v", left)
+	}
+	// invalidateUnbind(newGen=2) 对 gen=1 条目删（代际作废正确方向）。
+	f.svc.muUnbind.Lock()
+	f.svc.pendingUnbinds[f.sessID] = hubUnbind{nodeID: "n1", sessionID: f.sessID, gen: 1}
+	f.svc.muUnbind.Unlock()
+	f.svc.invalidateUnbind(f.sessID, 2)
+	if left := f.svc.PendingUnbindSessions(); len(left) != 0 {
+		t.Fatalf("新代 invalidate 应删旧代条目: %v", left)
 	}
 }

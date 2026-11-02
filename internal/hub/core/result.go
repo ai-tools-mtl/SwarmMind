@@ -102,14 +102,27 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 		}
 		if t.Status.Terminal() {
 			switch {
-			case t.Status == protocol.StatusCancelled && t.Result == nil && toStatus == protocol.StatusCancelled:
-				// 收敛表 cancelled 分支：hub 先取消（无结果），node 的取消结果后到——
-				// 合并真实执行数据，终态不回退（仍为 cancelled）
+			case t.Status == protocol.StatusCancelled && t.Result == nil:
+				// nil 占位升级（codex 复审轮 3 必修②——集成者指令）：hub 先取消
+				// （Result nil 占位=「不猜」），node 的真实执行结果后到——无论状态
+				// （completed/failed/cancelled）均可升级 nil 占位一次。旧限定
+				// toStatus == cancelled 在负载下节点返回非 cancelled 结果（如
+				// gate 拒绝 failed）即触发 result_conflict 拒收 → 合并钩子永不
+				// 触发 → 意图永久留途（codex 实证）。终态取 toStatus（真实事实）。
 				nt := t.Clone()
 				res := p.Result.Clone()
 				nt.Result = &res
+				nt.Status = toStatus
 				nt.UpdatedAt = c.now()
 				st.Tasks[nt.ID] = nt
+				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
+				writebackWorkTerminal(st, &nt, nt.UpdatedAt)
+				writebackSessionTurn(st, &nt, nt.UpdatedAt)
+				writebackCancelReceipt(st, &nt, nt.UpdatedAt)
+				if t.Status == protocol.StatusSubmitted {
+					mailbox.Remove(st, nt.TargetNode, nt.ID)
+				}
+				depRev = reevaluateDependents(st, nt.IdemKey)
 				accepted = &nt
 				merged = true
 			case sameTerminalResult(t.Result, p.Result):
