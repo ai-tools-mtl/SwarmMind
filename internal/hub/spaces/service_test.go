@@ -2127,6 +2127,14 @@ func TestCompensateOwnershipInterleaved(t *testing.T) {
 		if _, err := f.svc.AttachDispatchTask(f.spaceID, itB.RequestID, refB.TaskID, systemSubject()); err != nil {
 			t.Fatalf("B attach: %v", err)
 		}
+		// 原则 1：RecordDispatch 成功 → 绑定已被借用。实际 Dispatch 方法在锁定
+		// 段内设 borrowed=true——此处直调 collab 层后手动同步标志以模拟真实状态。
+		f.svc.muBindGen.Lock()
+		if entry, ok := f.svc.bindGens[f.sessID]; ok && !entry.revoked {
+			entry.borrowed = true
+			f.svc.bindGens[f.sessID] = entry
+		}
+		f.svc.muBindGen.Unlock()
 		// 窗内 pause（直调 collab Control——绕空间锁）：版本推进 + 空间暂停。
 		view, _ = f.svc.SpaceView(f.spaceID)
 		if _, _, err := f.svc.Control(f.spaceID, collab.ControlRequest{RequestID: "pause-win",
@@ -2158,7 +2166,7 @@ func TestCompensateOwnershipInterleaved(t *testing.T) {
 			t.Fatal(err)
 		}
 		// 补偿门：无在途 turn → 不跳过 → 解除成立。
-		f.svc.compensateBindIfOwned(f.spaceID, "n1", f.sessID, gen, "cg-1")
+		f.svc.compensateBindIfOwned("n1", f.sessID, gen)
 		if got := f.binds.Space(f.sessID); got != "" {
 			t.Fatalf("无借用者时补偿应生效（绑定清除）: %q", got)
 		}

@@ -116,7 +116,17 @@ func (c *Core) handleTaskResult(env *protocol.Envelope) {
 				nt.UpdatedAt = c.now()
 				st.Tasks[nt.ID] = nt
 				releaseWorkdirLock(st, nt.TargetNode, nt.ID)
-				writebackWorkTerminal(st, &nt, nt.UpdatedAt)
+				// 工作单回写的尝试身份守卫（codex 复审 W07-02 必修：合并路径的
+				// 迟到取消结果不得覆写**更新的同步骤尝试已落终态**的步骤/工作单
+				// 事实——尝试 A 取消迟到、B 重派已 done，A 的合并到达不得把步骤
+				// 从 done 打回 blocked；此语义仅限合并分支——正常结果路径保持
+				// 「最后事实为准」（TestWorkRecoverOrderingAfterWindow 既有口径）。
+				// 旧尝试自身 Outcome 永远可写。已被 newer 终态接管的守卫细节：
+				// newer 尝试 Outcome != submitted 即视为已落终态事实。
+				mergeSuperseded := workMergeSupersededByNewerTerminal(st, &nt)
+				if !mergeSuperseded {
+					writebackWorkTerminal(st, &nt, nt.UpdatedAt)
+				}
 				writebackSessionTurn(st, &nt, nt.UpdatedAt)
 				writebackCancelReceipt(st, &nt, nt.UpdatedAt)
 				if t.Status == protocol.StatusSubmitted {

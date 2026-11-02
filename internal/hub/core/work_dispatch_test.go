@@ -608,7 +608,7 @@ func TestWorkTerminalWriteback(t *testing.T) {
 }
 
 // TestWorkNeedsReviewBlocksDownstreamNoRerun W2 验收 5：needs_review 阻断下游
-//（沿任务级 DependsOn 现有门控），且 hub 零自动重跑；人工再派允许（决策在 Prime）。
+// （沿任务级 DependsOn 现有门控），且 hub 零自动重跑；人工再派允许（决策在 Prime）。
 func TestWorkNeedsReviewBlocksDownstreamNoRerun(t *testing.T) {
 	f, node, wid := newWorkHub(t, "prime-1")
 
@@ -1043,4 +1043,63 @@ func reopenHubWithClock(t *testing.T, dir string, clock *fakeClock) (*store.Stor
 		t.Fatalf("重构造 core: %v", err)
 	}
 	return st, c
+}
+
+// TestWritebackLatestAttemptGuard 迟到合并结果不得覆写新尝试的步骤事实（codex
+// 复审 W07-02 必修——尝试 A 取消迟到、B 重派同步骤已 done，A 的结果到达若无条件
+// 回写会把步骤从 done 打回 blocked）：A/B 同步骤两次派发 → B 完成（步骤 done）→
+// A 构造取消 nil 占位后合并真实取消事实 → 尝试 A outcome=cancelled 记录（该尝试
+// 自身事实永远可写）而**步骤保持 done、工作单不被打回 blocked**。
+func TestWritebackLatestAttemptGuard(t *testing.T) {
+	f, node, wid := newWorkHub(t, "prime-1")
+	ackA, err := f.core.Submit(workBindReq(wid, "prime-1", 1, "kA"), "")
+	if err != nil {
+		t.Fatalf("派发尝试 A: %v", err)
+	}
+	ackB, err := f.core.Submit(workBindReq(wid, "prime-1", 1, "kB"), "")
+	if err != nil {
+		t.Fatalf("重派尝试 B: %v", err)
+	}
+	// B 完成（最新尝试）：步骤 done。
+	node.result(ackB.TaskID, completeRes())
+	w := workOf(f, wid)
+	if w.Steps[0].Status != store.StepStatusDone {
+		t.Fatalf("前置：B 完成后步骤应 done: %s", w.Steps[0].Status)
+	}
+	// A 构造取消 nil 占位（hub 侧「不猜」首写）→ 合并真实取消事实（writeback 路径）。
+	if err := f.st.Update(func(st *store.State) error {
+		tk := st.Tasks[ackA.TaskID]
+		tk.Status = protocol.StatusCancelled
+		tk.Result = nil
+		st.Tasks[ackA.TaskID] = tk
+		return nil
+	}); err != nil {
+		t.Fatalf("构造 A nil 占位: %v", err)
+	}
+	// 真实合并流：node 经仲裁送真实取消结果 → nil 占位升级分支（守卫所在）触发。
+	res := completeRes()
+	res.Status = protocol.ResultCancelled
+	node.result(ackA.TaskID, res)
+	after := workOf(f, wid)
+	if after.Steps[0].Status != store.StepStatusDone {
+		t.Fatalf("旧尝试迟到结果不得覆写新尝试步骤事实: #1 → %s", after.Steps[0].Status)
+	}
+	if after.Status == store.WorkStatusBlocked {
+		t.Fatalf("旧尝试取消不得把工作单打回 blocked: %s", after.Status)
+	}
+	found := false
+	for i := range after.Attempts {
+		if after.Attempts[i].TaskID == ackA.TaskID {
+			found = true
+			if after.Attempts[i].Outcome != store.AttemptOutcomeCancelled {
+				t.Fatalf("尝试 A 自身 outcome 应记 cancelled: %s", after.Attempts[i].Outcome)
+			}
+		}
+		if after.Attempts[i].TaskID == ackB.TaskID && after.Attempts[i].Outcome != store.AttemptOutcomeDone {
+			t.Fatalf("尝试 B outcome 不得被改写: %s", after.Attempts[i].Outcome)
+		}
+	}
+	if !found {
+		t.Fatal("尝试 A 应在工作单内")
+	}
 }

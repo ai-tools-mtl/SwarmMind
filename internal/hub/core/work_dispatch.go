@@ -73,7 +73,7 @@ type WorkTakeoverRequest struct {
 }
 
 // TakeoverWork 原子接管：单事务 CAS——expected_term ≠ 落库 PrimeTerm 即拒绝
-//（同刻两接管者仅一方成功，后至者 conflict）；expected==current==new 为相同
+// （同刻两接管者仅一方成功，后至者 conflict）；expected==current==new 为相同
 // 操作重放，返回 dup=true、零写入零事件（RFC「相同操作重放不新增尝试」）；
 // 成功则改写 PrimeTerm 并落 takeover 事件。终态单（done/abandoned）拒绝。
 //
@@ -256,13 +256,13 @@ func lookupAttemptEvidence(st *store.State, req protocol.TaskSubmitRequest) (inf
 // bindWorkSubmit 绑定派发（Submit 落库事务内调用）：分配新尝试 + 回写步骤/work
 // 状态 + attempt_recorded 事件 + 任务体盖章（WorkRef/WorkStep/AttemptRef），
 // 全部在调用方的同一事务内。尝试去重证据查重已拆分为独立的只读操作
-//（lookupAttemptEvidence，审查#1/#2），由提交链先于本函数执行——事务内重检在
+// （lookupAttemptEvidence，审查#1/#2），由提交链先于本函数执行——事务内重检在
 // 依赖准入/容量检查之前、预检在 idem 查重之后（回执补拉不因依赖被清理或预算
 // 满挡住），本函数只做派发准入与原子绑定写入。
 //
 // 事件主体（AGENTS「审计/事件主体禁止采信请求自报」）：principal 取提交链
 // 服务端已验证身份（审查#4：由调用方独立传入——REST 提交=鉴权中间件解析主体
-//（admin 会话/PAT 令牌名），node 帧提交=会话 node_id，直连 core 内部调用为空；
+// （admin 会话/PAT 令牌名），node 帧提交=会话 node_id，直连 core 内部调用为空；
 // 不取 task.SubmittedBy——REST 侧该值固定 admin，会丢失 PAT 主体）；by 为自报
 // 任期 prime_term（归属标签非身份证明，RFC 六.2）。
 //
@@ -341,6 +341,62 @@ func workStepBlockedHere(prevStepStatus string) bool {
 	return prevStepStatus == store.StepStatusFailed || prevStepStatus == store.StepStatusNeedsReview
 }
 
+// workMergeSupersededByNewerTerminal 合并分支的尝试身份守卫（codex 复审
+// W07-02 必修）：nil 占位升级的迟到合并结果，若同步骤存在**更新的已落终态**
+// 尝试（Seq 更大且 Outcome != submitted），则该结果对步骤/工作单事实已过期
+// ——只记本尝试自身 Outcome（尝试事实永远可写），步骤/工作单保持新尝试状态
+// （不得把 done 打回 blocked）。返回是否已被接管（true=调用方跳过
+// writebackWorkTerminal）。仅限合并分支调用——正常结果路径保持「最后事实为
+// 准」（TestWorkRecoverOrderingAfterWindow 既有口径）。
+func workMergeSupersededByNewerTerminal(st *store.State, t *protocol.Task) bool {
+	if t.WorkRef == "" {
+		return false
+	}
+	w, ok := st.Works[t.WorkRef]
+	if !ok {
+		return false
+	}
+	var attemptSeq int64
+	found := false
+	for i := range w.Attempts {
+		if w.Attempts[i].TaskID == t.ID {
+			attemptSeq, found = w.Attempts[i].Seq, true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+	for i := range w.Attempts {
+		if w.Attempts[i].StepSeq != attemptStepSeq(&w, attemptSeq) {
+			continue
+		}
+		if w.Attempts[i].Seq > attemptSeq && w.Attempts[i].Outcome != store.AttemptOutcomeSubmitted {
+			// 新尝试终态事实在位：迟到合并结果只记自身 Outcome。
+			for j := range w.Attempts {
+				if w.Attempts[j].TaskID == t.ID {
+					outcome, _ := terminalWorkMapping(t.Status)
+					w.Attempts[j].Outcome = outcome
+					break
+				}
+			}
+			st.Works[w.ID] = w
+			return true
+		}
+	}
+	return false
+}
+
+// attemptStepSeq 定位代次所属步骤（attemptSeq 无对应条目=防御返回 0）。
+func attemptStepSeq(w *store.Work, attemptSeq int64) int64 {
+	for i := range w.Attempts {
+		if w.Attempts[i].Seq == attemptSeq {
+			return w.Attempts[i].StepSeq
+		}
+	}
+	return 0
+}
+
 // writebackWorkTerminal 任务首落终态的同一事务内回写工作单事实（result/cancel/
 // sweep 三终态路径共用）：attempt.outcome + step.status + work.status（非 done
 // 终局即 blocked）+ step_updated 事件。t.WorkRef 为空即未绑定 no-op；找不到
@@ -406,12 +462,12 @@ func terminalWorkMapping(s protocol.TaskStatus) (outcome, stepStatus string) {
 // 回写与任务终态同事务（原子，无窗口），本扫描为防御纵深——补齐「任务已终态
 // 而尝试仍 submitted」的历史/中断窗口（旧版本数据、快照手工修补等）。任务未
 // 终态的 submitted 尝试为合法在途，跳过；任务已清理的 submitted 尝试跳过
-//（清理必以终态+保留期为前提，回写先于清理，不可达时防御不臆补）。
+// （清理必以终态+保留期为前提，回写先于清理，不可达时防御不臆补）。
 //
 // 覆盖规则（审查#6）：同 Work 多个待回填尝试按**任务终态落盘时间**排序依次
 // 补写（同刻按尝试序），步骤/工作单状态以最后补写的事实为准——与活路径单写
 // 事务串行化的 last-writer-wins 同序，登记序补写会以旧尝试事实覆盖新终局
-//（旧尝试 failed 把已 done 步骤改回 failed）。
+// （旧尝试 failed 把已 done 步骤改回 failed）。
 func (c *Core) recoverWorks() {
 	err := c.st.Update(func(st *store.State) error {
 		for id, w := range st.Works {

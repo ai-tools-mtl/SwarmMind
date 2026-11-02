@@ -132,7 +132,7 @@ type Service struct {
 	// 登记/并发补偿删他人绑定——比代次不比 scope。
 	muBindGen sync.Mutex
 	genSeq    map[string]uint64
-	bindGens  map[string]uint64
+	bindGens  map[string]bindGenEntry
 
 	// 每空间调度互斥（codex 复审必修B-残）：贯穿「准入→提交」与「收敛→暂停」
 	// 两落账的一致同步边界——advanceLocked（投递推进）/convergeOnTaskTerminal
@@ -167,6 +167,17 @@ type Service struct {
 	advWG sync.WaitGroup
 }
 
+// bindGenEntry hub 侧绑定代次缓存条目（key = sessionID；codex 复审轮 3 原则 1
+// ——所有权随成功借用转移：borrowed 标志使创建者补偿原子化）。
+type bindGenEntry struct {
+	// gen 当前绑定代次（live）或已撤销高水位（revoked）。
+	gen uint64
+	// borrowed 已被后续请求借用（ensureBindSession 缓存命中即置位——原子）。
+	borrowed bool
+	// revoked 已解除（unbindGenOnce 成功即置位——保留高水位防旧代复活）。
+	revoked bool
+}
+
 // hubUnbind 待解除登记条目（key = sessionID；gen = 发起时的绑定代次——0 = 代次
 // 未知，重试时先经代次探针重建）。
 type hubUnbind struct {
@@ -199,7 +210,7 @@ func Open(dataDir string, c *core.Core, opt Options) (*Service, error) {
 	s := &Service{Store: st, core: c, snap: snap, stop: make(chan struct{}), done: make(chan struct{}),
 		closeDone: make(chan struct{}), pendingUnbinds: map[string]hubUnbind{}, spaceLocks: map[string]*sync.Mutex{},
 		convCh: make(chan protocol.Task, 256), convDone: make(chan struct{}),
-		genSeq: map[string]uint64{}, bindGens: map[string]uint64{}}
+		genSeq: map[string]uint64{}, bindGens: map[string]bindGenEntry{}}
 	// 双钩子统一经 hookEntry 入口（关停位检查 + 无阻塞入队——收敛异步 worker 化，
 	// codex 复审轮 2 核心机制 2：fireTerminal 只入队不落账，结构性消解调度锁
 	// 同步重入与帧回调内等 ack 两死锁面）。
@@ -342,10 +353,10 @@ func (s *Service) resyncBindGen(sessionID string, current uint64) {
 func (s *Service) noteBound(sessionID string, gen uint64) {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
-	if cur := s.bindGens[sessionID]; cur > gen {
+	if cur := s.bindGens[sessionID]; cur.gen > gen {
 		return // 旧应答迟到回写旧代次不覆盖新登记（codex 复审轮 3 原则 3）
 	}
-	s.bindGens[sessionID] = gen
+	s.bindGens[sessionID] = bindGenEntry{gen: gen}
 }
 
 // BoundGenOf 本进程已成功登记的代次（0 = 未知——重启后未重建/未绑定过）；
@@ -356,16 +367,19 @@ func (s *Service) BoundGenOf(sessionID string) uint64 { return s.boundGenOf(sess
 func (s *Service) boundGenOf(sessionID string) uint64 {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
-	return s.bindGens[sessionID]
+	return s.bindGens[sessionID].gen
 }
 
 // clearBoundIfGen 代次条件清除（codex 复审轮 3 必修 R3）：仅当缓存当前代次 ==
 // 本操作代次才清除——否则条目属新操作（新 bind 已推进缓存），保留。零值 gen =
 // 探针/未知形态：仅缓存为空/零值时等价 no-op。
+// clearBoundIfGen 代次条件清除（codex 复审轮 3 必修 R3 + 原则 3——尊重撤销高
+// 水位）：仅当缓存当前代次 == 本操作代次且非墓碑才清除。墓碑（revoked）条目
+// 保留高水位防旧代 bind 复活。
 func (s *Service) clearBoundIfGen(sessionID string, gen uint64) {
 	s.muBindGen.Lock()
 	defer s.muBindGen.Unlock()
-	if s.bindGens[sessionID] == gen {
+	if e, ok := s.bindGens[sessionID]; ok && !e.revoked && e.gen == gen {
 		delete(s.bindGens, sessionID)
 	}
 }
@@ -390,17 +404,31 @@ func (s *Service) deletePendingIfGen(sessionID string, gen uint64) bool {
 // 判定，**不授予解除权**——复用路径 CAS 失败不得补偿解除，绑定归属原操作，
 // codex 复审轮 3 必修 R1）。
 func (s *Service) ensureBindSession(nodeID, sessionID, scope string) (gen uint64, owned bool, err error) {
-	if s.boundGenOf(sessionID) != 0 {
-		return s.boundGenOf(sessionID), false, nil // 复用既有绑定：无解除权
+	// 缓存命中 → 原子置 borrowed=true（codex 复审轮 3 原则 1——所有权随成功借
+	// 用转移：B 借用后 A 不得补偿删 B 正在用的绑定）。
+	s.muBindGen.Lock()
+	if entry, ok := s.bindGens[sessionID]; ok && !entry.revoked {
+		entry.borrowed = true
+		s.bindGens[sessionID] = entry
+		s.muBindGen.Unlock()
+		return entry.gen, false, nil // 复用既有绑定：无解除权
 	}
-	gen = s.nextBindGen(sessionID)
+	// 无缓存或墓碑 → 分配新代次（超越墓碑高水位）。
+	// 分配新代次（muBindGen 已持——直接推进，不调 nextBindGen 避免 double-lock）
+	if s.genSeq[sessionID] >= ^uint64(0) {
+		s.muBindGen.Unlock()
+		return 0, false, fmt.Errorf("代次饱和（uint64 上限）session=%s", sessionID)
+	}
+	s.genSeq[sessionID]++
+	gen = s.genSeq[sessionID]
+	s.muBindGen.Unlock()
+
+	// bind（锁外网络等待——锁内零网络纪律）。
 	ack, err := s.core.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: scope, SessionID: sessionID, Generation: gen}, 0)
 	if err != nil {
 		return 0, false, err
 	}
 	if !ack.Accepted {
-		// stale（重启后 hub 计数落后于 node 登记事实）：重同步后重试一次。
-		//（重试后操作有效性由调用方时间重核/事务复核承担——建议③）
 		s.resyncBindGen(sessionID, ack.CurrentGen)
 		gen = s.nextBindGen(sessionID)
 		ack, err = s.core.SpaceBind(nodeID, protocol.SpaceBindPayload{Space: scope, SessionID: sessionID, Generation: gen}, 0)
@@ -571,6 +599,14 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 				recordErr = err
 			} else {
 				recorded, recordDup = it, dup
+				// RecordDispatch 成功 → 绑定已被借用（codex 复审轮 3 原则 1——
+				// 所有权随成功借用转移：借用后创建者不得补偿删 B 正在用的绑定）。
+				s.muBindGen.Lock()
+				if entry, ok := s.bindGens[mt.sessionID]; ok && entry.gen == boundGen && !entry.revoked {
+					entry.borrowed = true
+					s.bindGens[mt.sessionID] = entry
+				}
+				s.muBindGen.Unlock()
 			}
 		}
 	}
@@ -582,17 +618,17 @@ func (s *Service) Dispatch(req DispatchRequest, subj collab.Subject) (collab.Dis
 	switch {
 	case replayErr != nil:
 		if needUnbind {
-			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+			s.compensateBindIfOwned(mt.nodeID, mt.sessionID, boundGen)
 		}
 		return collab.DispatchIntent{}, false, replayErr
 	case sessionGone:
 		if needUnbind {
-			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+			s.compensateBindIfOwned(mt.nodeID, mt.sessionID, boundGen)
 		}
 		return collab.DispatchIntent{}, false, &Error{Code: CodeSessionGone, Msg: "成员绑定会话不存在: " + mt.sessionID}
 	case recordErr != nil:
 		if needUnbind {
-			s.compensateBindIfOwned(req.SpaceID, mt.nodeID, mt.sessionID, boundGen, req.RequestID)
+			s.compensateBindIfOwned(mt.nodeID, mt.sessionID, boundGen)
 		}
 		return collab.DispatchIntent{}, false, recordErr
 	case replayDup:
@@ -856,12 +892,15 @@ func (s *Service) unbindGenOnce(nodeID, sessionID string, gen *uint64) bool {
 		return false
 	}
 	if ack.Accepted {
-		s.clearBoundIfGen(sessionID, *gen) // 条件清除（R3）：仅缓存仍属本代次才清
+		// 解除成立 → 墓碑（保留高水位防旧代 bind 复活；镜像 node RemoveIfGen）
+		s.muBindGen.Lock()
+		s.bindGens[sessionID] = bindGenEntry{gen: *gen, revoked: true}
+		s.muBindGen.Unlock()
 		log.Printf("[hub] 中心空间绑定已解除 session=%s gen=%d", sessionID, *gen)
 		return true
 	}
 	// stale ack-noop（node 登记代次已前移于发起代次——新代登记在位）：语义满足
-	//（结构性：旧代解除删不掉新登记）即收口不追逐；缓存条件清除（R3）。
+	//（结构性：旧代解除删不掉新登记）即收口不追逐。
 	s.clearBoundIfGen(sessionID, *gen)
 	log.Printf("[hub] 中心空间解除 ack-noop（node 登记代次 %d 已前移于本进程事实 %d，语义满足）session=%s",
 		ack.CurrentGen, *gen, sessionID)
@@ -905,13 +944,21 @@ func (s *Service) retryUnbinds() {
 	}
 	s.muUnbind.Unlock()
 	for _, u := range pending {
-		// 按**保存的原代次**重试（codex 复审轮 3 必修 R2②——重试按已学代次，
-		// 不追逐当前值）。出队按条目身份条件删除（R3：条目被新操作替换则保留）。
-		if !s.unbindGenOnce(u.nodeID, u.sessionID, &u.gen) {
+		ugen := u.gen
+		if !s.unbindGenOnce(u.nodeID, u.sessionID, &ugen) {
+			// 探针学到的代次持久回写队列条目（codex 复审轮 3 原则 2——条目身份
+			// 校验：确认条目未被替换后回写学到的代次，重试按已学代次不追逐）。
+			s.muUnbind.Lock()
+			if cur, ok := s.pendingUnbinds[u.sessionID]; ok && cur.gen == u.gen && ugen != u.gen {
+				cur.gen = ugen
+				s.pendingUnbinds[u.sessionID] = cur
+			}
+			s.muUnbind.Unlock()
 			continue // 留队下次扫查重试
 		}
-		if s.deletePendingIfGen(u.sessionID, u.gen) {
-			log.Printf("[hub] 中心空间绑定解除重试收口 session=%s gen=%d", u.sessionID, u.gen)
+		// 解除成立/语义满足 → 按条目身份条件删除（codex 复审轮 3 原则 2 收口）。
+		if s.deletePendingIfGen(u.sessionID, ugen) {
+			log.Printf("[hub] 中心空间绑定解除重试收口 session=%s gen=%d", u.sessionID, ugen)
 		}
 	}
 }
@@ -1306,21 +1353,25 @@ func (s *Service) ensureBound(spaceID string, it collab.DispatchIntent) error {
 // 且 ② session 无其他在途意图/任务（hub 会话注册表：非终态轮存在即绑定正服务
 // 后续意图——跳过补偿，残留由 fail-closed 自愈/后续 bind 幂等覆盖，既有登记边
 // 界）才执行代次解除。任一不满足即放弃 + 人话日志留痕。
-func (s *Service) compensateBindIfOwned(spaceID, nodeID, sessionID string, gen uint64, requestID string) {
-	if cur := s.boundGenOf(sessionID); cur != gen {
-		log.Printf("[hub] spaces: 补偿跳过（代次已被接管 cur=%d != gen=%d）session=%s request=%s——绑定归属后续操作", cur, gen, sessionID, requestID)
+// compensateBindIfOwned 补偿门（codex 复审轮 3 原则 1 + 集成者方案 A 确定性所
+// 有权——muBindGen 单锁内原子判定；检查轮行启发式已删除：codex 判「读缓存/查
+// 轮行/发解绑非原子交接」，borrowed 标志使所有权交接原子化——借用成功即不可被
+// 创建者补偿）。
+// 仅当 ① gen 匹配 ② !borrowed（无后续借用）③ !revoked（未撤销）才执行代次解除。
+// 借用绑定记账失败的残留 = 既有登记边界（fail-closed+后续 bind 幂等覆盖）。
+func (s *Service) compensateBindIfOwned(nodeID, sessionID string, gen uint64) {
+	s.muBindGen.Lock()
+	entry, ok := s.bindGens[sessionID]
+	if !ok || entry.gen != gen || entry.borrowed || entry.revoked {
+		s.muBindGen.Unlock()
+		log.Printf("[hub] spaces: 补偿跳过（代次已被借用/接管/撤销）session=%s gen=%d borrowed=%v revoked=%v",
+			sessionID, gen, entry.borrowed, entry.revoked)
 		return
 	}
-	if sv, ok := s.core.GetSession(sessionID); ok {
-		for _, tv := range sv.Turns {
-			switch tv.Status {
-			case store.TurnStatusPending, store.TurnStatusAwaitingNode, store.TurnStatusRunning:
-				log.Printf("[hub] spaces: 补偿跳过（绑定正服务在途任务 session=%s turn=%d status=%s request=%s）——残留由 fail-closed 自愈/后续 bind 幂等覆盖",
-					sessionID, tv.Seq, tv.Status, requestID)
-				return
-			}
-		}
-	}
+	// 原子夺取解除权：从缓存移除（后续 ensureBindSession 会新建更高代次）。
+	delete(s.bindGens, sessionID)
+	s.muBindGen.Unlock()
+	// 代次解除（锁外网络等待）。
 	s.UnbindSessionGen(nodeID, sessionID, gen)
 }
 
