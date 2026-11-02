@@ -1,0 +1,32 @@
+{
+  "node_id": "n-old-legacy",
+  "register_token": "rt-legacy",
+  "agents": [
+    {
+      "name": "old-coder",
+      "kind": "cli",
+      "description": "旧版 node 能力卡（spaces/orchestrator/session_adapter 字段引入前的二进制快照词形）",
+      "input_mode": "prompt_text",
+      "output_mode": "answer+artifacts",
+      "interactive": false,
+      "permission_mode": "workspace-write",
+      "protocol_ver": 1,
+      "workspace_id": "a1b2c3d4e5f60718",
+      "exposed": true,
+      "allow_args": true,
+      "stdin_to_arg": false
+    },
+    {
+      "name": "old-runner",
+      "kind": "cli",
+      "input_mode": "prompt_text",
+      "output_mode": "answer+artifacts",
+      "interactive": false,
+      "permission_mode": "read-only",
+      "protocol_ver": 1,
+      "exposed": true,
+      "allow_args": false,
+      "stdin_to_arg": false
+    }
+  ]
+}

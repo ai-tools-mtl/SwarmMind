@@ -31,7 +31,27 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			"groups":           s.cfg.Groups != nil,
 			"dispatch_suggest": s.cfg.Decision != nil, // 派发建议（P5.1 D1；nil 时端点 200+null 降级，此处如实标未装配）
 			"notify":           s.cfg.Notify != nil,
-			"spaces":           false, // 未实现（规划中），如实标注不虚构
+			"spaces":           false, // 中心空间服务未装配（W07-02 接线前如实 false 不虚构；节点侧声明见下方 spaces 投影）
 		},
+		// 空间能力投影（W07-01，加法键既有应答零变化）：当前中心与目标 node 的
+		// 支持情况——features.spaces 是 hub 侧服务装配态；nodes 按节点能力表
+		// （AgentCard.Spaces 声明）如实投影哪些 node 可承载空间成员线程。本投影
+		// 只表「可承载/可派发」，不表示任何一端私有会话历史可读（恒 false，
+		// 隐私投影边界）。
+		"spaces": s.spacesProjection(),
 	})
+}
+
+// spacesProjection 空间支持投影（W07-01）：hub 侧装配态（W07-02 前恒 false）+
+// 节点级声明投影（Core 未装配时节点表为空 map，如实无数据）。
+func (s *Server) spacesProjection() map[string]any {
+	nodes := map[string]bool{}
+	if s.cfg.Core != nil {
+		nodes = s.cfg.Core.SpacesNodeSupport()
+	}
+	return map[string]any{
+		"hub":                      false, // 中心空间服务未装配（W07-02 接线前如实 false——禁空壳承诺）
+		"nodes":                    nodes,
+		"private_history_readable": false, // 支持情况不表示私有历史可读（恒 false）
+	}
 }

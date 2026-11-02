@@ -151,6 +151,11 @@ const (
 	// 任务 spawn 前输入准备失败——上游产物缺失/SHA 不符/超限/准备超时；任务
 	// 不进入执行，accepted 直达 failed，error 文案注明上游任务与文件定位）。
 	CodeInputPrepareFailed = "input_prepare_failed"
+	// CodeSpacesUnsupported 空间特性版本门拒绝（W07-01）：目标 node 能力卡未
+	// 声明空间协作能力（AgentCard.Spaces 空——旧版 node 或未装配 collab），或
+	// 收到无法解析的空间来源轮（SessionTurnRef.Space 词形/绑定不符）。hub 侧
+	// 门槛与 node 侧收件校验共用同码；人话附指路升级，普通任务路径不涉本码。
+	CodeSpacesUnsupported = "spaces_unsupported"
 )
 
 // 管理面/本地 API 附加错误码：hub 侧中继与连接状态（非协议帧码，HTTP 错误体用）。

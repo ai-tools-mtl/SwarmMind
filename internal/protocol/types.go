@@ -69,6 +69,14 @@ type AgentCard struct {
 	// 同口径拒绝并指路升级）。混跑兼容：旧 hub 解码丢弃未知字段（目录不展示，
 	// 会话面不可用——能力发现降级，任务面不受影响）。
 	SessionAdapter string `json:"session_adapter,omitempty"`
+	// Spaces 空间协作能力声明（W07-01，docs/tasks/v3/W07-hub-routing.md 版本门）：
+	// SpacesCapV1 = 该能力所在 node 装配了空间协作存储（collab，与 node
+	// capabilities 面spaces 标记同源装配），可承载空间成员线程；空 = 未装配或
+	// 旧版 node（缺字段解码零值）。hub 对未声明 node 的空间类下发（W07-02 远端
+	// 派发 adapter 的门槛数据源）明确拒绝并指路升级，绝不把旧 node 当有新特性；
+	// 普通任务路径不读本字段零牵连。声明只表「可承载成员线程」——不表示该
+	// node 私有会话历史可读（隐私投影边界，SPEC 六.五 W07 节）。
+	Spaces string `json:"spaces,omitempty"`
 }
 
 // ExecProfile 本机执行配置（永不离开本机；SPEC 4.9）。
@@ -115,6 +123,11 @@ type ExecProfile struct {
 	// TimeoutSec 语义；进程环境由装配方按 SPEC 五给干净基线）。
 	SessionAdapter string `json:"session_adapter,omitempty"`
 }
+
+// SpacesCapV1 空间协作能力声明版本（AgentCard.Spaces 取值，W07-01）：node 装配
+// collab 存储即对全部能力卡声明本值；hub 门槛按「声明版本 ≥ 所需版本」判定，
+// 空串 = 未声明（旧版 node / 未装配）一律拒绝空间类下发。
+const SpacesCapV1 = "v1"
 
 // TaskInput 任务输入（SPEC 4.9）。
 type TaskInput struct {
@@ -334,6 +347,14 @@ type SessionTurnRef struct {
 	// 取消轮的受理序号，node 侧 sessionop.CancelTurn 的目标；cancel 任务自身
 	// 不占轮次号——TurnSeq 恒 0）。加法字段：旧帧缺省 0，解析零迁移。
 	CancelTurnSeq int64 `json:"cancel_turn_seq,omitempty"`
+	// Space 空间来源标记（W07-01 加法字段）：非空 = 该轮是空间驱动派发，值为
+	// 空间 scope（hub:<id> 中心空间 / 本机空间 ID sp-…，collab.ValidScopeClaim
+	// 词形）。node 执行前校验来源：scope 词形未知、或与会话的空间绑定不符（含
+	// 未装配空间协作存储的旧版 node）一律明确拒绝，绝不把空间轮当普通会话轮
+	// 静默执行；空 = 普通会话轮，既有链路零变化。混跑兼容：旧 hub 不产生本
+	// 字段（解码零值），旧 node 解码丢弃未知字段——hub 侧版本门（能力卡
+	// Spaces 声明核对）负责不在派发前把空间轮下发给旧 node，两侧防线独立。
+	Space string `json:"space,omitempty"`
 }
 
 // TaskSubmitRequest 任务提交请求（SPEC 4.9；HTTP 管理面与 node 间 task_submit 共用）。

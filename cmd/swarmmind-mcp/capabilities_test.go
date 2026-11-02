@@ -301,6 +301,11 @@ func TestSubprocessStdioCapabilitiesHub(t *testing.T) {
 		!bytes.Contains(resp.Result, []byte("不替代 tools/list")) {
 		t.Fatalf("tools/call capabilities 应答不符: %s", resp.Result)
 	}
+	// 空间支持投影（W07-01）：中心未装配如实 + 隐私边界随行人话（真端到端链）
+	if !bytes.Contains(resp.Result, []byte("空间协作：中心服务未装配")) ||
+		!bytes.Contains(resp.Result, []byte("不表示任何一端私有会话历史可读")) {
+		t.Fatalf("capabilities 应答缺空间投影/隐私边界行: %s", resp.Result)
+	}
 	if bytes.Contains(resp.Result, []byte(pat)) {
 		t.Fatalf("stdio 应答不得含 PAT 明文: %s", resp.Result)
 	}

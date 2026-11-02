@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "entries": {
+    "t-w07legacy0001": {
+      "task": {
+        "id": "t-w07legacy0001",
+        "trace_id": "tr-w07legacy01",
+        "target_node": "n1",
+        "target_agent": "coder",
+        "input": { "args": [], "stdin": "旧版账本条目（SessionTurnRef.Space 字段引入前落盘词形）" },
+        "submitted_by": "admin",
+        "status": "completed",
+        "created_at": "2026-10-20T00:00:00Z",
+        "updated_at": "2026-10-20T00:01:00Z",
+        "expire_at": "2026-10-27T00:00:00Z",
+        "session": { "session_id": "s-w07legacy000001", "turn_seq": 1, "op": "create", "cwd": "/tmp/w07-legacy-ws" }
+      },
+      "state": "finished",
+      "origin": "hub",
+      "result": {
+        "status": "completed",
+        "exit_code": 0,
+        "final_answer": "旧轮完成",
+        "stdout_tail": "",
+        "stderr_tail": "",
+        "artifacts": []
+      },
+      "result_acked": true,
+      "first_acked_at": "2026-10-20T00:01:00Z",
+      "closed": false
+    }
+  },
+  "session_turn_hw": { "s-w07legacy000001": 1 }
+}

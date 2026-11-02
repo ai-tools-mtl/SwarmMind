@@ -324,6 +324,12 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("初始化空间协作存储失败: %w", err)
 	}
 	defer spacesStore.Close()
+	// 空间协作能力声明（W07-01 版本门）：collab 装配成功即对能力表盖章
+	// AgentCard.Spaces（register/card_update 同源，经 agentState.Cards()）——
+	// hub 据此判断本 node 可承载空间成员线程；未装配（下方未执行）能力卡不
+	// 声明，hub 对空间类下发明确拒绝并指路升级。声明只表「可承载成员线程」，
+	// 不表示本机私有会话历史可读。
+	agentState.SetSpacesCapability(protocol.SpacesCapV1)
 
 	// 外连客户端仅组网态装配（方案 3.1：setup/standalone 不连 hub）。service
 	// 三态都需要一个 transport：无 hub 端点的孤端点充当「本机黑洞汇」——出站帧

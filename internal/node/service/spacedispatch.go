@@ -360,6 +360,7 @@ func (s *Service) submitSpaceIntent(spaceID string, it collab.DispatchIntent) {
 			TurnSeq:   seq,
 			Op:        op,
 			Cwd:       cwd,
+			Space:     spaceID, // W07-01 空间来源标记：本机派发轮自带 scope，收件门据此核对绑定
 		},
 	}
 	if s.sessionOps != nil {

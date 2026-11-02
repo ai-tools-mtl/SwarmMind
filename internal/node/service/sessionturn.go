@@ -268,6 +268,30 @@ func (s *Service) runSessionTurnExec(ctx context.Context, task protocol.Task) (p
 	if s.sessions == nil {
 		return failed(sessionErrUnsupported, "本机未装配会话内核（agent 未声明 session_adapter 或 node 版本过旧）")
 	}
+	// 空间来源轮收件门（W07-01 版本门，node 侧第二道防线）：携 Space scope 的
+	// 轮是空间驱动派发，不是普通会话轮——
+	//   - 词形未知（collab.ValidScopeClaim 不认）→ 拒绝（任意字符串冒充 scope
+	//     一律不猜）；
+	//   - 本机未装配空间协作存储（collab nil，旧版 node / spaces 未启用）→
+	//     spaces_unsupported 明确拒绝并指路升级，绝不静默按普通轮执行；
+	//   - 已装配但 scope 与会话的空间绑定不符（会话未绑空间 / 绑定的是别的
+	//     空间）→ fail-closed 拒绝：W07-02 远端派发 adapter 接线时扩展受理面
+	//     （登记中心空间成员映射后放行），本批只交付拒绝面。
+	// 空 Space = 普通会话轮，既有链路零变化（含旧 hub 帧——解码零值）。
+	if ref.Space != "" {
+		if !collab.ValidScopeClaim(ref.Space) {
+			return failed(protocol.CodeSpacesUnsupported,
+				fmt.Sprintf("空间来源标记 %q 词形非法（须为 hub:<id> 或本机空间 ID），拒绝执行", ref.Space))
+		}
+		if s.collab == nil {
+			return failed(protocol.CodeSpacesUnsupported,
+				"该轮声明空间来源但本机未装配空间协作存储（node 旧版本或 spaces 未启用）：拒绝执行，请升级 node 后重试")
+		}
+		if owner, bound := s.collab.SessionOwnerSpace(ref.SessionID); !bound || owner != ref.Space {
+			return failed(protocol.CodeSpacesUnsupported,
+				fmt.Sprintf("空间来源 %q 与会话 %s 的空间绑定不符（绑定空间 %q）：拒绝旁路执行", ref.Space, ref.SessionID, owner))
+		}
+	}
 	if ref.PermissionMode != "" && sessionPermissionDenylist[ref.PermissionMode] {
 		return failed(sessionErrPermission, fmt.Sprintf("权限模式 %q 为全权档位，平台拒绝执行（提权须本机主人显式改配）", ref.PermissionMode))
 	}

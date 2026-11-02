@@ -57,6 +57,19 @@ type AgentState struct {
 	orchOverride map[string]agentOrchRecord // 统筹声明覆盖（2026-10-28 客户端声明制）
 	path         string
 	tmp          string
+	// spacesCap 空间协作能力声明版本（W07-01：node 级能力，装配 collab 存储
+	// 即非空——cmd/node 在 spacesStore 打开后经 SetSpacesCapability 注入，
+	// 与 capabilities 端点 spaces 标记同源；空 = 未装配，能力卡不声明）。
+	spacesCap string
+}
+
+// SetSpacesCapability 注入空间协作能力声明版本（W07-01）：非空时 Cards() 对
+// 全部能力卡盖章 AgentCard.Spaces（register/card_update 同源）。装配期一次性
+// 调用（collab.Open 成功后、连接 hub 前）；重复调用以最后一次为准。
+func (s *AgentState) SetSpacesCapability(version string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spacesCap = version
 }
 
 // OpenAgentState 打开（或创建）本机 agent 状态：加载 data_dir/agents-state.json，
@@ -118,9 +131,21 @@ func (s *AgentState) Effective() []protocol.ExecProfile {
 	return out
 }
 
-// Cards 由 effective 视图生成对外能力表（register/card_update 同源）。
+// Cards 由 effective 视图生成对外能力表（register/card_update 同源）。W07-01：
+// 空间协作能力已装配（spacesCap 非空）时对全部能力卡盖章 AgentCard.Spaces——
+// 空间是 node 级能力（collab 存储整机一份），声明随每张卡上报，hub 门槛按
+// 「目标能力的卡声明」核对即等于 node 级核对。
 func (s *AgentState) Cards() []protocol.AgentCard {
-	return service.CardsFromProfiles(s.Effective())
+	cards := service.CardsFromProfiles(s.Effective())
+	s.mu.Lock()
+	cap := s.spacesCap
+	s.mu.Unlock()
+	if cap != "" {
+		for i := range cards {
+			cards[i].Spaces = cap
+		}
+	}
+	return cards
 }
 
 // SetExposed 变更开关：先写后见——构造新覆盖集并落盘，成功后才发布内存。

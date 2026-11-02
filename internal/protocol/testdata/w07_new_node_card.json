@@ -1,0 +1,17 @@
+{
+  "name": "new-coder",
+  "kind": "cli",
+  "description": "新 node 能力卡（W07-01 全量字段词形）",
+  "input_mode": "prompt_text",
+  "output_mode": "answer+artifacts",
+  "interactive": false,
+  "permission_mode": "workspace-write",
+  "protocol_ver": 1,
+  "workspace_id": "f00dcafe00000001",
+  "exposed": true,
+  "allow_args": true,
+  "stdin_to_arg": true,
+  "orchestrator": false,
+  "session_adapter": "codex",
+  "spaces": "v1"
+}

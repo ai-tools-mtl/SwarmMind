@@ -24,6 +24,19 @@ type capView struct {
 	Version  string          `json:"version"`
 	Scope    string          `json:"scope"`
 	Features map[string]bool `json:"features"`
+	// Spaces 空间支持投影（W07-01 加法键，hub 面专属——node 面无此键走
+	// features.spaces 装配标记，渲染器对 nil 如实跳过不虚构）。
+	Spaces *capSpacesView `json:"spaces,omitempty"`
+}
+
+// capSpacesView hub 应答 spaces 投影形态（W07-01）。
+type capSpacesView struct {
+	// Hub 中心空间服务装配态（W07-02 接线前恒 false 如实）。
+	Hub bool `json:"hub"`
+	// Nodes 节点级声明投影（nodeID → 能力卡是否声明空间特性）。
+	Nodes map[string]bool `json:"nodes"`
+	// PrivateHistoryReadable 支持情况不表示私有历史可读（恒 false）。
+	PrivateHistoryReadable bool `json:"private_history_readable"`
 }
 
 // capScopeText 调用范围人话（按 server 身份展开——端点 scope 是短词，工具输出把
@@ -95,6 +108,24 @@ func renderCapabilities(data []byte) (string, error) {
 				st = "可用"
 			}
 			fmt.Fprintf(&b, "- %s：%s\n", name, st)
+		}
+	}
+	// 空间支持投影（W07-01，hub 面专属键）：中心装配态 + 节点级声明，支持情
+	// 况不表示私有历史可读（隐私投影边界随行人话，防「能派发=能翻历史」误读）。
+	if v.Spaces != nil {
+		declared := 0
+		for _, ok := range v.Spaces.Nodes {
+			if ok {
+				declared++
+			}
+		}
+		state := "未装配（空间操作暂不可用，空间面升级后开放）"
+		if v.Spaces.Hub {
+			state = "已装配"
+		}
+		fmt.Fprintf(&b, "空间协作：中心服务%s；已声明空间特性的节点 %d/%d\n", state, declared, len(v.Spaces.Nodes))
+		if !v.Spaces.PrivateHistoryReadable {
+			b.WriteString("（支持情况只表可承载与可派发，不表示任何一端私有会话历史可读）\n")
 		}
 	}
 	b.WriteString("工具面提示：以上为服务端能力元信息，不替代 tools/list——本连接实际可用的工具以 tools/list 发现结果为准。")
