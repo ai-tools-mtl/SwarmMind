@@ -94,12 +94,20 @@ type chainOpts struct {
 	capable           bool
 	sweepInterval     time.Duration // hub core Sweep（0 = 不启动）
 	terminalRetention time.Duration // 任务终态保留（0 = 协议默认；极短值做清理反例）
+	// spacesSweep 中心空间服务兜底扫查节拍覆盖（W09 工作块 C 绑定族矩阵注入位；
+	// 0 = 默认 50ms 不变）。矩阵测试植队列条目/钉帧序时须关扫查（>测试时长），
+	// 否则 sweepLoop 的 retryUnbinds 与测试编排竞速收口队列条目——确定性要求。
+	spacesSweep time.Duration
 }
 
 func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 	t.Helper()
 	oldSweep := sweepInterval
-	sweepInterval = 50 * time.Millisecond
+	sw := 50 * time.Millisecond
+	if o.spacesSweep > 0 {
+		sw = o.spacesSweep // 矩阵注入位（默认路径逐字节不变）
+	}
+	sweepInterval = sw
 	t.Cleanup(func() { sweepInterval = oldSweep })
 
 	dir := t.TempDir()
