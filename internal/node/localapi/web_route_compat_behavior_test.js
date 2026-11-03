@@ -162,6 +162,14 @@ async function __hs_run(scenario) {
       '导航第 02 位应呈现「资源」（W08-03 迁移后）');
     __rc_assert(!html.includes('<span class="navnum">02</span>服务</button>'),
       '导航不应再呈现旧词「服务」');
+      // 全导航按钮级扫描（codex 复审建议：额外插入 03 位旧词按钮也须 FAIL——
+      // 逐按钮绑定路由/序号/文字，整导航区旧词零呈现，非仅 02 位精确 HTML）。
+      // 全导航按钮级扫描（codex 复审建议：额外插入 03 位旧词按钮也须 FAIL——
+      // 任意 navnum 位旧词零呈现——正则扫 #app 全区按钮形，非仅 02 位精确 HTML）。
+      const navBtnRe = new RegExp('<span class="navnum">\\d+</span>(服务)</button>');
+      __rc_assert(!navBtnRe.test(html), '导航按钮残留旧词「服务」（任意位次）');
+      const resBtnRe = new RegExp("<span class=\"navnum\">0?2</span>" + "资源</button>");
+      __rc_assert(resBtnRe.test(html) && html.includes('data-go="services"'), '资源项应呈现序号 02 文字「资源」且绑定路由 services');
     await __rc_nav('#/services');
     __rc_assert(S.page === 'services', '#/services 深链应存活（路由词不迁移），got ' + S.page);
     return 'PASS nav-renders-resource-entry';
