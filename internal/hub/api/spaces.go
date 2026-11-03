@@ -10,6 +10,8 @@
 //   - POST /api/v1/spaces/{id}/dispatches       指名派发（远端 adapter：版本门+绑定登记+
 //     既有 session Task 通道，202 受理）
 //   - GET  /api/v1/spaces/{id}/dispatches/{request_id}  派发/意图查询（轮终投影）
+//   - POST /api/v1/spaces/{id}/intents/{request_id}/resolve 留待核对人工裁决收束
+//     （W09-B，主人专属豁免⑯同族：accept=核验通过收束/reject=否决收束）
 //   - POST /api/v1/spaces/{id}/messages         发言（零唤醒记账+消息账本）
 //   - GET  /api/v1/spaces/{id}/messages?since=  增量读（游标只读不唤醒，N01）
 //   - POST /api/v1/spaces/{id}/budget           预算 sugar（主人专属→Control set_budget）
@@ -200,10 +202,22 @@ func scopeMap(list []collab.Space) map[string]string {
 
 // spaceDiag 空间诊断投影（W08-02 执行/问题诊断面，P09 数据源；与 node 面
 // internal/node/localapi spaceDiag 同形同语义——两端各自 join 本端轮终事实源）。
-// 全部为既有事实的只读 join 投影，零影子状态。
+// 全部为既有事实的只读 join 投影，零影子状态。awaiting_review_intents（W09-B
+// 留待核对释放入口数据源）为 accepted 形态的留待核对意图清单（可裁决集）——
+// awaiting_review 计数还含 pending 崩溃窗形态（不可裁决），两者口径差如实保留。
 type spaceDiag struct {
-	InFlight       int `json:"in_flight"`                 // 在途/排队意图数（= space.in_flight 同源）
-	AwaitingReview int `json:"awaiting_review,omitempty"` // 留待核对未收敛数（轮终不确定 + 执行证据缺失两类）
+	InFlight              int                `json:"in_flight"`                         // 在途/排队意图数（= space.in_flight 同源）
+	AwaitingReview        int                `json:"awaiting_review,omitempty"`         // 留待核对未收敛数（轮终不确定 + 执行证据缺失两类）
+	AwaitingReviewIntents []spaceAwaitIntent `json:"awaiting_review_intents,omitempty"` // 可裁决留待核对意图（accepted 形态；hub 管理面数据源）
+}
+
+// spaceAwaitIntent 可裁决留待核对意图行（服务端 join 投影；reason：
+// needs_review=轮终不确定、task_gone=证据缺失（任务已过保留期清理））。
+type spaceAwaitIntent struct {
+	RequestID string `json:"request_id"`
+	Member    string `json:"member,omitempty"`
+	TaskID    string `json:"task_id,omitempty"`
+	Reason    string `json:"reason"`
 }
 
 // hubSpaceDiagOf 计算中心空间诊断投影（与 spaces 服务重启对账分类同源）：
@@ -225,6 +239,13 @@ func (s *Server) hubSpaceDiagOf(id string, view collab.SpaceView) spaceDiag {
 			t, ok := s.cfg.Core.GetTask(it.TaskID)
 			if !ok || t.Status == protocol.StatusNeedsReview {
 				d.AwaitingReview++
+				reason := "needs_review"
+				if !ok {
+					reason = "task_gone" // 任务行已过保留期清理（证据缺失）
+				}
+				d.AwaitingReviewIntents = append(d.AwaitingReviewIntents, spaceAwaitIntent{
+					RequestID: it.RequestID, Member: it.Member, TaskID: it.TaskID, Reason: reason,
+				})
 			}
 		case it.Status == collab.IntentPending && it.SessionID != "":
 			tr, ok := s.cfg.Core.SessionTurnByRequest(it.SessionID, it.RequestID)
@@ -233,7 +254,7 @@ func (s *Server) hubSpaceDiagOf(id string, view collab.SpaceView) spaceDiag {
 			}
 			t, ok := s.cfg.Core.GetTask(tr.TaskID)
 			if !ok || t.Status == protocol.StatusNeedsReview {
-				d.AwaitingReview++
+				d.AwaitingReview++ // pending 崩溃窗形态计入计数；不在可裁决清单（resolve 准入仅 accepted）
 			}
 		}
 	}
@@ -586,6 +607,63 @@ func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// spaceIntentResolveRequest POST /api/v1/spaces/{id}/intents/{request_id}/resolve
+// 请求体（W09-B 留待核对人工裁决）：verdict 必填 accept|reject；note 可选（裁决
+// 说明，落意图注记）。无身份字段——主体恒由服务端鉴权层解析（审计红线）。
+type spaceIntentResolveRequest struct {
+	Verdict string `json:"verdict"`
+	Note    string `json:"note,omitempty"`
+}
+
+// authSpaceResolveOwner 留待核对人工裁决主人专属门（豁免⑯同族——人工核验裁决
+// 不开放编排面：agent 不能代人工核验、更不能自证不确定轮次的结果；与 budget/
+// policy/finalize/archive/candidates finalize|dismiss 同界。文案为裁决面专属词形，
+// 不复用 authSpaceOwner 既有文案——既有端点应答零漂移）。有效 PAT 显式 403
+// （认证已过、授权拒绝——错误呈现纪律），admin 会话放行并以服务端主体
+// （hubOwnerSubject=owner:admin）下传。
+func (s *Server) authSpaceResolveOwner(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+			if s.tokens != nil {
+				if _, ok := s.tokens.verify(strings.TrimPrefix(h, "Bearer ")); ok {
+					writeErr(w, http.StatusForbidden, collab.CodeForbidden,
+						"该裁决为主人专属人工动作（留待核对意图的人工核验/否决收束不开放编排面——agent 不能代人工核验或自证结果）：请由主人登录 hub 控制台执行")
+					return
+				}
+			}
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "令牌无效或已撤销")
+			return
+		}
+		if rr := s.adminSession(w, r); rr != nil {
+			next(w, rr)
+		}
+	}
+}
+
+// handleSpaceIntentResolve POST /api/v1/spaces/{id}/intents/{request_id}/resolve：
+// 留待核对意图人工裁决收束（W09-B，采证 O3 释放入口）。accept=人工核验通过收束
+// （复用 spaces 服务 ConvergeIntent 既有收敛原语——禁第二套收敛实现）；
+// reject=人工否决收束（accepted→cancelled+注记，不重发不转投）。准入边界与幂等
+// （dup 门同五入口口径）在 spaces.ResolveIntent 单源；错误投影同派发面
+// （invalid 400 / execution_in_flight·illegal_transition·request_conflict 409 /
+// forbidden 403）。响应 `{"dispatch": intent, "dup": bool}` 恒 200。
+func (s *Server) handleSpaceIntentResolve(w http.ResponseWriter, r *http.Request) {
+	if !s.spaceReady(w) {
+		return
+	}
+	var req spaceIntentResolveRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid_request", "请求体须为 {verdict, note?} JSON: "+err.Error())
+		return
+	}
+	it, dup, err := s.cfg.Spaces.ResolveIntent(r.PathValue("id"), r.PathValue("request_id"), req.Verdict, req.Note, hubOwnerSubject())
+	if err != nil {
+		writeSpaceDispatchErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dispatch": it, "dup": dup})
 }
 
 // spaceMessageRequest POST /api/v1/spaces/{id}/messages 请求体（与 node 面同形）。

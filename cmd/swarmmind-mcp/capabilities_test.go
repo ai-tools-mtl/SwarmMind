@@ -280,8 +280,8 @@ func TestSubprocessStdioCapabilitiesHub(t *testing.T) {
 	if err := json.Unmarshal(resp.Result, &listRes); err != nil {
 		t.Fatalf("tools/list 应答解析失败: %v", err)
 	}
-	if len(listRes.Tools) != 33 {
-		t.Fatalf("hub 模式应 33 工具（W07-02 空间九件装配后 24+9）, got %d", len(listRes.Tools))
+	if len(listRes.Tools) != 34 {
+		t.Fatalf("hub 模式应 34 工具（W07-02 空间九件 24+9 + W09-B 留待核对裁决 1）, got %d", len(listRes.Tools))
 	}
 	hasCap := false
 	for _, td := range listRes.Tools {

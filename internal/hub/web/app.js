@@ -3726,6 +3726,7 @@ function spacePageZones(sp) {
     <tr><td>在途执行</td><td><small>${(sp.in_flight || 0) ? `<b>${sp.in_flight}</b> 个在途/排队意图${(pg.diag?.awaiting_review || 0) > 0 ? ' · <span class="sst-unverified badge">' + esc(SPACE_AWAITING_REVIEW_HINT(pg.diag.awaiting_review)) + '</span>' : ''}` : '无'}</small></td></tr>
     <tr><td>等待原因</td><td><small>${wait ? esc(wait) : '—'}</small></td></tr>
     </tbody></table></div>
+    ${spaceAwaitZone(pg)}
     <p class="footer-note">租约由服务端时钟裁决（本页按本机钟呈现仅供预判）；过期不能续约复活，接管由主人显式确认。刷新/退出不更换负责人。</p>`,
     msgs: `<h3>讨论消息${(pg.msgs || []).length ? `（${pg.msgs.length}）` : ''}</h3>${(pg.msgs || []).length
     ? `<div class="msgbox"><ol class="msgline">${pg.msgs.map(spaceMsgHtml).join('')}</ol></div>${pg.prunedSeq ? `<p class="footer-note">更早消息已滚动裁剪（窗口起点 seq ${pg.prunedSeq}）；since 游标只对窗口内消息有效。</p>` : ''}`
@@ -3908,6 +3909,68 @@ function spaceCandAct(arg) {
       toast(word + '被拒绝：' + (r ? errLine(r.data) : '网络异常（结果未知，请刷新后核对候选状态，勿盲目重试）'));
     }
   });
+}
+/* ---------- 留待核对人工裁决（W09-B，hub 管理动作——node 页无空间管理面，
+ * SPEC 六.五白名单登记差异；不进空间词典 shared block——hub 专属词典） ---------- */
+/* SPACE_RESOLVE_WORDS 裁决按钮词 + SPACE_RESOLVE_REASONS 形态词（accept=人工核验
+ * 通过收束 / reject=人工否决取消收束；reason 数据源 spaceDiag.awaiting_review_
+ * intents 服务端 join 投影——前端不自算状态）。 */
+const SPACE_RESOLVE_WORDS = { accept: '核验通过（收束）', reject: '否决（取消收束）' };
+const SPACE_RESOLVE_REASONS = { needs_review: '轮终不确定', task_gone: '证据缺失（任务已清理）' };
+/* spaceAwaitZone 留待核对意图行（调度条分区随行；仅可裁决的 accepted 形态出列
+ * ——服务端 diag 清单口径）。无行零占位；行内 accept/reject 按钮（主人管理会话
+ * 专属，PAT 编排主体服务端 403）。 */
+function spaceAwaitZone(pg) {
+  const rows = (pg && pg.diag && pg.diag.awaiting_review_intents) || [];
+  if (!rows.length) return '';
+  return `<h3 class="spaced">留待核对（人工裁决）</h3>
+  <div class="table-wrap"><table><thead><tr><th>意图</th><th>成员</th><th>任务</th><th>形态</th><th>裁决</th></tr></thead><tbody>
+  ${rows.map(r => `<tr><td title="${esc(r.request_id || '')}">${esc(spShortId(r.request_id || ''))}</td><td><small>${esc(r.member || '—')}</small></td><td><small title="${esc(r.task_id || '')}">${esc(r.task_id ? spShortId(r.task_id) : '—')}</small></td><td><small>${esc(SPACE_RESOLVE_REASONS[r.reason] || r.reason || '—')}</small></td><td><small>${button(SPACE_RESOLVE_WORDS.accept, 'space-resolve', 'primary', 'data-rid="' + esc(r.request_id || '') + '" data-verdict="accept" type="button"')} ${button(SPACE_RESOLVE_WORDS.reject, 'space-resolve', 'danger', 'data-rid="' + esc(r.request_id || '') + '" data-verdict="reject" type="button"')}</small></td></tr>`).join('')}
+  </tbody></table></div>
+  <p class="footer-note">留待核对 = 轮终不确定或证据缺失（按纪律不自动收敛重跑）：核验通过收束（accept）或否决取消收束（reject，不重发不转投——重派请再显式派发）；裁决后串行门解锁，同空间排队中的下一棒照常推进。本动作为主人管理会话专属（PAT 编排主体调用服务端 403）。</p>`;
+}
+/* spaceIntentResolve 裁决弹层（slim modal，与 token 删除/取消任务同族形态）：
+ * note 草稿只存弹层 DOM（不进分区模板串——D22 同款纪律）；确认走
+ * space-resolve-confirm 直更按钮，失败层不关（note 保留可改再试）。arg =
+ * "verdict:rid"。 */
+function spaceIntentResolve(arg) {
+  const sp = currentSpace();
+  if (!sp) { toast('空间信息不可得'); return; }
+  const [verdict, rid] = String(arg || '').split(':');
+  if (!SPACE_RESOLVE_WORDS[verdict] || !rid) return;
+  const what = verdict === 'accept'
+    ? '人工核验通过：该轮按完成收束（意图 converged）；串行门解锁，同空间排队中的下一棒照常推进。不改写成员侧任务实物（裁决只落空间账）。'
+    : '人工否决：该轮取消收束（意图 cancelled，不重发不转投——重派请再显式派发）；串行门同样解锁。';
+  openLayerPlain(`${modalHead(SPACE_RESOLVE_WORDS[verdict] + ' · 留待核对 · ' + esc(spShortId(rid)))}
+  <p class="muted">${esc(what)}</p>
+  <div class="sayline spaced"><textarea id="resolve-note" rows="2" placeholder="裁决说明（可选，落意图注记与审计事件）"></textarea></div>
+  <div class="actions spaced">${button('确认' + SPACE_RESOLVE_WORDS[verdict], 'space-resolve-confirm', verdict === 'accept' ? 'primary' : 'danger', 'data-verdict="' + esc(verdict) + '" data-rid="' + esc(rid) + '" type="button"')}${button('再想想', 'close', 'link')}</div>`, true);
+}
+/* spaceResolveConfirm 裁决提交（POST intents/{rid}/resolve；200 收束关层刷新，
+ * 409/403 人话原话透出层保留——错误呈现纪律）。 */
+async function spaceResolveConfirm(btn) {
+  const sp = currentSpace();
+  const rid = btn.dataset.rid || '';
+  const verdict = btn.dataset.verdict || '';
+  if (!sp || !rid || !SPACE_RESOLVE_WORDS[verdict]) return;
+  const key = 'space-resolve:' + verdict + ':' + rid;
+  if (S.busy.has(key)) return;
+  S.busy.add(key);
+  busyBtn(btn, '提交中…');
+  try {
+    const note = ($('#resolve-note')?.value || '').trim();
+    const r = await api('POST', `/api/v1/spaces/${encodeURIComponent(sp.id)}/intents/${encodeURIComponent(rid)}/resolve`, { verdict, note }).catch(() => null);
+    if (r && r.code === 200) {
+      closeLayer(true);
+      toast(r.data?.dup ? '已收束（同裁决幂等命中，未重复变更）' : verdict === 'accept' ? '已核验通过收束（串行门解锁，排队棒照常推进）' : '已否决收束（不重发不转投）');
+      spaceActRefresh(sp.id);
+    } else {
+      toast('裁决被拒绝：' + (r ? errLine(r.data) : '网络异常（结果未知，请刷新后核对意图状态，勿盲目重试）'));
+    }
+  } finally {
+    S.busy.delete(key);
+    idleBtn(btn);
+  }
 }
 /* spaceSend 详情页发言（管理会话）：compose 分区模板零状态——busy 直更按钮，成功
  * 直清输入框，分区模板自始至终不被输入触碰（D22）。 */
@@ -5600,6 +5663,8 @@ const ACT = {
     spaceAct(sp, b.dataset.sact || '');
   },
   'space-cand': b => spaceCandAct((b.dataset.cverb || '') + ':' + (b.dataset.cid || '')),   // 主人候选定版/否决；参数经 data-cverb/data-cid（hub act 词形约定：键名精确+参数走 data-*）
+  'space-resolve': b => spaceIntentResolve((b.dataset.verdict || '') + ':' + (b.dataset.rid || '')),   // 留待核对人工裁决（W09-B 主人管理动作；参数经 data-verdict/data-rid 同词形约定）
+  'space-resolve-confirm': b => spaceResolveConfirm(b),   // 裁决提交（note 弹层直读；失败层保留可改再试）
   'sp-row-add': () => {
     const box = spaceRowsBox();
     box.rows.push({ name: '', session: '' });

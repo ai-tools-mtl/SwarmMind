@@ -454,6 +454,8 @@ func tools() []toolDef {
 	// 预算/策略/定版/归档/候选定版否决为主人专属不受理（control 显式拒收，豁免⑯）。
 	// 定义与实现见 node_spaces.go（共享）与 hub_spaces.go（hub 装配点）。
 	t = append(t, hubSpaceToolDefs()...)
+	// 留待核对人工裁决（W09-B，hub 模式专属追加件——不入共享九件清单，词典零分叉）。
+	t = append(t, hubSpaceIntentResolveToolDef())
 	// swarmmind_capabilities（W02-02，两模式装配；清单末位追加——元信息不替代 tools/list）。
 	t = append(t, capToolDef())
 	return t
@@ -2716,6 +2718,8 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 		text, err = toolHubSpaceRecords(args)
 	case "swarmmind_space_strategy":
 		text, err = toolHubSpaceStrategy(args)
+	case "swarmmind_space_intent_resolve":
+		text, err = toolHubSpaceIntentResolve(args)
 	case "swarmmind_session_create":
 		text, err = toolSessionCreate(args)
 	case "swarmmind_session_send":

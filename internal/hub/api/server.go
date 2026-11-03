@@ -189,6 +189,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/spaces/{id}/control", s.authSpaceSubject(s.handleSpaceControl))
 	mux.HandleFunc("POST /api/v1/spaces/{id}/dispatches", s.authSpaceSubject(s.handleSpaceDispatch))
 	mux.HandleFunc("GET /api/v1/spaces/{id}/dispatches/{request_id}", s.auth(s.handleSpaceDispatchGet))
+	mux.HandleFunc("POST /api/v1/spaces/{id}/intents/{request_id}/resolve", s.authSpaceResolveOwner(s.handleSpaceIntentResolve)) // 留待核对人工裁决（W09-B，主人专属豁免⑯同族）
 	mux.HandleFunc("POST /api/v1/spaces/{id}/messages", s.authSpaceSubject(s.handleSpaceMessagePost))
 	mux.HandleFunc("GET /api/v1/spaces/{id}/messages", s.auth(s.handleSpaceMessagesGet))
 	mux.HandleFunc("POST /api/v1/spaces/{id}/budget", s.authSpaceOwner(s.handleSpaceBudget))

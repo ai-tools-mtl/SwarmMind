@@ -27,7 +27,8 @@ import (
 )
 
 // spacesRESTFixture 真 hub api + spaces 服务基座（membus 黑洞传输——REST 契约面
-// 不投递任务；派发全链见 spaces 包 service_test）。
+// 不投递任务；派发全链见 spaces 包 service_test）。bus 保留引用供 resolve 契约
+// 测试（W09-B）在 n1 端点挂最小应答器/注入结果帧——真 handleTaskResult 仲裁链。
 type spacesRESTFixture struct {
 	t       *testing.T
 	srv     *httptest.Server
@@ -35,6 +36,7 @@ type spacesRESTFixture struct {
 	pat     string // PAT（编排主体）
 	svc     *spaces.Service
 	core    *core.Core
+	bus     *transport.Bus
 	cookies map[string]string
 }
 
@@ -46,11 +48,13 @@ func newSpacesRESTFixture(t *testing.T) *spacesRESTFixture {
 		t.Fatalf("store: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	hubCore, err := core.New(core.Config{Store: st, Transport: transport.NewBus().Endpoint("hub"), SweepInterval: 0})
+	bus := transport.NewBus()
+	hubCore, err := core.New(core.Config{Store: st, Transport: bus.Endpoint("hub"), SweepInterval: 0})
 	if err != nil {
 		t.Fatalf("core: %v", err)
 	}
 	t.Cleanup(func() { _ = hubCore.Close() })
+	bus.Endpoint("hub").Subscribe(hubCore.HandleFrame)
 	stratEngine, err := strategy.NewEngine(strategy.DefaultConfig())
 	if err != nil {
 		t.Fatalf("strategy: %v", err)
@@ -69,7 +73,7 @@ func newSpacesRESTFixture(t *testing.T) *spacesRESTFixture {
 	})
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
-	f := &spacesRESTFixture{t: t, srv: ts, admin: adminToken, svc: svc, core: hubCore, cookies: map[string]string{}}
+	f := &spacesRESTFixture{t: t, srv: ts, admin: adminToken, svc: svc, core: hubCore, bus: bus, cookies: map[string]string{}}
 	f.pat = f.createPAT()
 	return f
 }

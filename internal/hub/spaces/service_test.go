@@ -57,6 +57,7 @@ type chainFixture struct {
 	nodeSvc  *service.Service
 	nodeLed  *ledger.Ledger
 	binds    *service.HubBindings
+	bus      *transport.Bus // 测试注入面（W09-B resolve：n1 端点直接注入结果帧走真仲裁链）
 	nodeCwd  string
 	sessID   string
 	spaceID  string
@@ -112,6 +113,7 @@ func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 	}
 	t.Cleanup(func() { _ = f.hubStore.Close() })
 	bus := transport.NewBus()
+	f.bus = bus
 	f.hubCore, err = core.New(core.Config{Store: f.hubStore, Transport: bus.Endpoint("hub"),
 		SpaceBindTimeout: 30 * time.Second, SweepInterval: o.sweepInterval, TerminalRetention: retentionPtr(o.terminalRetention)})
 	if err != nil {
@@ -138,10 +140,21 @@ func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 		f.barrier = filepath.Join(dir, "go.barrier")
 		env = append(env, "FAKE_WAIT_FILE="+f.barrier)
 	}
-	specs := map[string]sessionx.AgentSpec{"coder": {
-		Adapter: protocol.SessionAdapterCodex, Command: fake,
-		PermissionMode: "workspace-write", TimeoutSec: 30, Env: env,
-	}}
+	specs := map[string]sessionx.AgentSpec{
+		"coder": {
+			Adapter: protocol.SessionAdapterCodex, Command: fake,
+			PermissionMode: "workspace-write", TimeoutSec: 30, Env: env,
+		},
+		// coder2 第二成员（W09-B resolve 全链：裁决后排队棒经独立会话真实执行
+		// ——同会话在首轮 needs_review 行 NativeIDOk=false 下续轮按 create 分类，
+		// 内核已发布即撞「平台会话 ID 已存在」——平台既有轮语义，非本块面；
+		// 独立会话让「串行门解锁→下一棒真实执行完成」锚全链诚实）。
+		"coder2": {
+			Adapter: protocol.SessionAdapterCodex, Command: fake,
+			PermissionMode: "workspace-write", TimeoutSec: 30,
+			Env: []string{"PATH=/usr/bin:/bin", "FAKE_KIND=" + protocol.SessionAdapterCodex, "FAKE_THREAD_ID=thr-chain-2"},
+		},
+	}
 	mgr, err := sessionx.NewManager(filepath.Join(dataDir, "kernel"), specs, sessionx.Options{})
 	if err != nil {
 		t.Fatalf("sessionx: %v", err)
@@ -184,7 +197,9 @@ func newChainFixtureO(t *testing.T, o chainOpts) *chainFixture {
 	coderCard := protocol.AgentCard{Name: "coder", Kind: protocol.AgentKindCLI, InputMode: "prompt_text",
 		OutputMode: "answer+artifacts", PermissionMode: "workspace-write", ProtocolVer: 1, Exposed: true,
 		SessionAdapter: protocol.SessionAdapterCodex, Spaces: spacesCap}
-	if err := f.hubCore.RegisterNode("n1", []protocol.AgentCard{coderCard}); err != nil {
+	coder2Card := coderCard
+	coder2Card.Name = "coder2"
+	if err := f.hubCore.RegisterNode("n1", []protocol.AgentCard{coderCard, coder2Card}); err != nil {
 		t.Fatal(err)
 	}
 	f.hubCore.SetOnline("n1", true)

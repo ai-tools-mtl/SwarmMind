@@ -1253,6 +1253,107 @@ func (s *Service) convergeIntentByTaskFact(it collab.DispatchIntent, via string)
 	}
 }
 
+// ---------- 人工裁决（留待核对释放入口，W09 工作块 B / STAGE-C 采证 O3） ----------
+
+// 人工裁决词形（ResolveIntent verdict 参数；REST/MCP 同词单源）。
+const (
+	VerdictAccept = "accept" // 人工核验通过收束（该轮按 done 事实收束——复用既有收敛原语）
+	VerdictReject = "reject" // 人工否决收束（accepted→cancelled+注记；不重发不转投）
+)
+
+// ResolveIntent 留待核对意图的人工裁决收束（驱动者显式释放入口；O3「无限期滞留」
+// 的闭合面——人核验后显式放行，仍然零自动）：
+//   - accept：人工核验通过收束——复用 ConvergeIntent 既有收敛原语（与
+//     classifyTaskFact done 收敛路径同一落账函数，禁第二套收敛实现），意图
+//     accepted→converged + 人工核验注记；不改写 node 侧任务实物（事实不可篡改，
+//     裁决只落 hub 侧意图/留痕）；
+//   - reject：人工否决收束——accepted→cancelled + 注记；不重发不转投（重派由
+//     驱动者显式 Dispatch）。
+//
+// 准入边界（宁窄勿宽）：仅「留待核对」态可裁决——意图 accepted 且
+//   ① 任务实物终态 needs_review（轮终不确定），或
+//   ② 任务证据缺失（意图无任务锚，或任务行已过保留期清理）。
+// 任务仍在途非终态 → 409 execution_in_flight 指路既有取消路径（防冒认在途）；
+// 任务已按实物落 definitive 终态（completed/failed/cancelled）→ 409（收敛钩子/
+// 重启对账按实物收敛的窗，非人工裁决对象）；pending/未知意图 → 409。已按同裁决
+// 收束 → 幂等命中（dup=true 原样返回，零重复变更——dup 门同既有五入口口径）；
+// 已按异裁决收束 → 409 request_conflict（同键异文，不可改写收束结论）。
+//
+// 授权：collab 模型层裁决（ConvergeIntent 仅 owner/system 主体——hub 面经
+// authSpaceResolveOwner 主人专属门传入服务端解析的 owner 主体；编排主体 403）。
+// 留痕：事件主体由 ConvergeIntent 以服务端主体独立字段落账（禁请求自报）；意图
+// Note 记人工裁决词与调用方 note。
+//
+// 串行门：解锁靠意图真实收敛（ConvergeIntent 落账即 accepted 在途消失）——本
+// 方法不触碰 admissionLocked/串行门判定本身；收敛成功后在同一空间调度锁区内
+// kickLocked 推进同空间下一棒（与 convergeOnTaskTerminal worker 同一推进原语；
+// paused 空间由准入运行态门拦下）。
+func (s *Service) ResolveIntent(spaceID, requestID, verdict, note string, subj collab.Subject) (collab.DispatchIntent, bool, error) {
+	switch verdict {
+	case VerdictAccept, VerdictReject:
+	default:
+		return collab.DispatchIntent{}, false, &Error{Code: "invalid",
+			Msg: "verdict 须为 accept|reject（accept=人工核验通过收束；reject=人工否决收束），得 " + verdict}
+	}
+	// 空间调度锁（codex 复审必修B-残②同锁区）：裁决核验与收敛落账、推进同锁
+	// ——与收敛钩子/Dispatch/advanceSpace 串行，不存在「核验后意图被他手收敛/
+	// 接管」窗（ConvergeIntent 事务内再兜底）。
+	m := s.lockSpace(spaceID)
+	m.Lock()
+	defer m.Unlock()
+	it, ok := s.IntentByRequest(spaceID, requestID)
+	if !ok {
+		return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图不存在（request_id 未受理或已滚动出空间）: %s", collab.ErrIllegalTransition, requestID)
+	}
+	outcome := string(collab.IntentConverged)
+	word := "人工核验通过（accept）"
+	if verdict == VerdictReject {
+		outcome = string(collab.IntentCancelled)
+		word = "人工否决收束（reject）"
+	}
+	// dup 门（已收束意图不再做实物核验——收束即终局）：同裁决重放原样返回；
+	// 异裁决按 request_conflict 拒绝（同键异文，五入口同规）。
+	if !it.Status.InFlight() {
+		if collab.IntentStatus(outcome) == it.Status {
+			return it, true, nil
+		}
+		return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 已按 %s 收束，人工裁决 %s 异文不可改写", collab.ErrRequestConflict, requestID, it.Status, verdict)
+	}
+	if it.Status != collab.IntentAccepted {
+		// pending（排队待投递/崩溃窗）：不在裁决面——未投递意图由恢复对账取消收
+		// 束（「不自动重跑」）、投递窗由扫查推进；人工裁决绝不把未投递冒认成已执行。
+		return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 处于 %s（未接单），不在留待核对裁决面", collab.ErrIllegalTransition, requestID, it.Status)
+	}
+	// 留待核对实物核验（复用既有任务事实读面，零影子状态）：证据缺失（无任务
+	// 锚/任务行已清理）或 needs_review 终态 → 可裁决；非终态 → 指路既有取消路径；
+	// definitive 终态 → 钩子/对账窗，拒绝人工改写。
+	if t, ok := s.core.GetTask(it.TaskID); it.TaskID != "" && ok {
+		switch {
+		case t.Status == protocol.StatusNeedsReview:
+			// 轮终不确定：可裁决。
+		case !t.Status.Terminal():
+			return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 关联任务 %s 仍在执行中（%s）：人工裁决拒绝（防冒认在途），请走既有取消路径 POST /api/v1/tasks/%s/cancel",
+				collab.ErrExecutionInFlight, requestID, it.TaskID, t.Status, it.TaskID)
+		default:
+			return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 关联任务 %s 已按实物落终态（%s）：收敛钩子/重启对账按实物收敛，非留待核对裁决对象",
+				collab.ErrIllegalTransition, requestID, it.TaskID, t.Status)
+		}
+	}
+	fullNote := word
+	if trimmed := strings.TrimSpace(note); trimmed != "" {
+		fullNote += "：" + trimmed
+	}
+	got, err := s.ConvergeIntent(spaceID, requestID, outcome, it.TaskID, fullNote, subj)
+	if err != nil {
+		return collab.DispatchIntent{}, false, err // 落账失败原样上抛（授权/状态/存储——零标志位半截面）
+	}
+	log.Printf("[hub] 中心空间意图人工裁决收束 space=%s intent=%s verdict=%s → %s by=%s", spaceID, requestID, verdict, outcome, subj.String())
+	// 串行门已因真实收敛解锁：同锁区推进同空间下一棒（kickLocked 自含时间重核
+	// 与关停门；未绑定会话的候选交回全三段推进）。
+	s.kickLocked(spaceID)
+	return got, false, nil
+}
+
 // ---------- 兜底扫查 ----------
 
 // sweepLoop 周期扫查（仅扫有在途意图的空间）：pending 意图补投递（轮行实物补接

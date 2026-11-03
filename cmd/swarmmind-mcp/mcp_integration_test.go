@@ -388,6 +388,8 @@ func TestHubToolListRegression(t *testing.T) {
 		"swarmmind_space_create", "swarmmind_space_list", "swarmmind_space_status",
 		"swarmmind_space_dispatch", "swarmmind_space_control", "swarmmind_space_messages",
 		"swarmmind_space_record", "swarmmind_space_records", "swarmmind_space_strategy",
+		// 留待核对人工裁决（W09-B，hub 模式专属追加件——不入共享九件词典面）
+		"swarmmind_space_intent_resolve",
 		"swarmmind_capabilities"}
 	got := []string{}
 	for _, td := range (hubBackend{}).tools() {
