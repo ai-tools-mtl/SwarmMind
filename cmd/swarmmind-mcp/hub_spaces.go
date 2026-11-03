@@ -78,7 +78,7 @@ func hubSpaceIntentResolveToolDef() toolDef {
 			"space_id":   toolStr("空间 ID"),
 			"request_id": toolStr("留待核对意图的受理请求 ID（GET dispatches/{request_id} 或空间详情 diag 可查）"),
 			"verdict":    toolStr("裁决：accept（人工核验通过收束）| reject（人工否决取消收束）"),
-			"note":       toolStr("裁决说明（可选；落意图注记——审计事件由服务端主体记收束结论 accept→converged / reject→cancelled）"),
+			"note":       toolStr("裁决说明（可选；落意图注记——审计事件按既有留痕形态记服务端主体，收束结论以意图终态承载）"),
 		}, "space_id", "request_id", "verdict"),
 	}
 }

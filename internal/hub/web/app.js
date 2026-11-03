@@ -3931,8 +3931,8 @@ function spaceAwaitZone(pg) {
 }
 /* spaceIntentResolve 裁决弹层（slim modal，与 token 删除/取消任务同族形态）：
  * note 草稿只存弹层 DOM（不进分区模板串——D22 同款纪律）；确认走
- * space-resolve-confirm 直更按钮，失败层不关（note 保留可改再试）。arg =
- * "verdict:rid"。 */
+ * space-resolve-confirm 直更按钮，失败层不关（note 保留可改再试）。
+ * verdict/rid 两参直传（request_id 可含冒号——W09-B codex 复审必修）。 */
 function spaceIntentResolve(verdict, rid) {
   const sp = currentSpace();
   if (!sp) { toast('空间信息不可得'); return; }
@@ -3946,7 +3946,7 @@ function spaceIntentResolve(verdict, rid) {
     : '人工否决：该轮取消收束（意图 cancelled，不重发不转投——重派请再显式派发）；串行门同样解锁。';
   openLayerPlain(`${modalHead(SPACE_RESOLVE_WORDS[verdict] + ' · 留待核对 · ' + esc(spShortId(rid)))}
   <p class="muted">${esc(what)}</p>
-  <div class="sayline spaced"><textarea id="resolve-note" rows="2" placeholder="裁决说明（可选，落意图注记；审计事件由服务端主体记收束结论）"></textarea></div>
+  <div class="sayline spaced"><textarea id="resolve-note" rows="2" placeholder="裁决说明（可选，落意图注记；审计事件记服务端主体，收束结论以意图终态承载）"></textarea></div>
   <div class="actions spaced">${button('确认' + SPACE_RESOLVE_WORDS[verdict], 'space-resolve-confirm', verdict === 'accept' ? 'primary' : 'danger', 'data-verdict="' + esc(verdict) + '" data-rid="' + esc(rid) + '" type="button"')}${button('再想想', 'close', 'link')}</div>`, true);
 }
 /* spaceResolveConfirm 裁决提交（POST intents/{rid}/resolve；200 收束关层刷新，

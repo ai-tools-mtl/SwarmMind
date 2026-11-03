@@ -13,6 +13,7 @@ package strategy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -540,8 +541,18 @@ func TestNoEmptyLoopOnLookupMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 各查找拒绝路径（目标项不存在——空间未载入）。
+	// 各查找拒绝路径（目标项不存在——空间未载入）。hash 形参数据用合法 hex64 +
+	// 证据 Source 用合法枚举（W09-A codex R2 建议1：非法形态会在进「空间不存在」
+	// 分支前被参数校验拦下——ErrEvidenceInvalid/ErrFixInvalid，测试测不到本轮修
+	// 复的分支）；版本锚定类断言到 revision_not_found（零副作用分支的真实出口）。
 	const h = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	notRevFound := func(err error, what string) {
+		t.Helper()
+		var se *Error
+		if !errors.As(err, &se) || se.Code != "revision_not_found" {
+			t.Fatalf("%s 应 revision_not_found（走到零副作用分支）: %v", what, err)
+		}
+	}
 	if err := eng.ReplyIssue("sp-x", "issue-1", "回应"); err == nil {
 		t.Fatal("未知问题应拒绝")
 	}
@@ -551,12 +562,11 @@ func TestNoEmptyLoopOnLookupMiss(t *testing.T) {
 	if _, err := eng.FinalizeCandidate("sp-x", "cand-1", "admin"); err == nil {
 		t.Fatal("未知候选应拒绝")
 	}
-	if err := eng.RecordEvidence("sp-x", h, LayerCLIExit, Evidence{Verified: true, Source: "cli", Ref: "ref-1"}); err == nil {
-		t.Fatal("未知版本证据登记应拒绝")
-	}
-	if err := eng.RecordCleanReview("sp-x", "admin", h, "n"); err == nil {
-		t.Fatal("未知版本零发现复审应拒绝")
-	}
+	notRevFound(eng.RecordEvidence("sp-x", h, LayerCLIExit, Evidence{Verified: true, Source: SourceExecutorReceipt, Ref: "ref-1"}), "未知版本证据登记")
+	_, issueErr := eng.RecordIssue("sp-x", IssueInput{Reviewer: "r", Severity: SeverityMust, File: "f.go", Line: 1, Title: "标题", FoundInHash: h})
+	notRevFound(issueErr, "未知版本问题登记")
+	notRevFound(eng.RecordReReview("sp-x", "issue-1", ReReviewInput{Reviewer: "r", AgainstHash: h, Result: ReReviewConfirmed}), "未知版本复审")
+	notRevFound(eng.RecordCleanReview("sp-x", "admin", h, "n"), "未知版本零发现复审")
 	// 验收争议解除（本无争议）＝零变更零副作用。
 	eng.SetAcceptanceDispute("sp-x", false, "")
 	if got := eng.LoopIDs(); len(got) != 0 {
@@ -570,9 +580,12 @@ func TestNoEmptyLoopOnLookupMiss(t *testing.T) {
 }
 
 // TestSnapshotsAllSingleLockConsistency SnapshotsAll 一致快照压力（W09-A codex
-// 复审必修1 结构锚）：并发写入与落盘交错下（-race 抖动），落盘文件内容必须恒为
-// 内存某时点的完整合法形态——分阶段断言不可行，以压力+race 抖动 + 静默后文件与
-// 引擎状态逐字节等价收口（分段取照的 A₀+B₁ 组合形态由单读锁结构性排除）。
+// 复审必修1 结构锚）：并发写入与落盘交错下（-race 抖动），每份落盘文件必须可
+// 解析、version 合法且全量通过 RestoreLoop 校验（撕裂/半截/非法组合形态即崩），
+// 静默后文件与引擎状态逐字节等价。覆盖边界如实声明（W09-A codex R2 建议2）：
+// 分段取照的 A₀+B₁ 组合形态由 SnapshotsAll **单读锁结构性排除**（代码读验为据
+// ——同一 RLock 临界区覆盖枚举+组包），本测试是回归锚与 race 抖动面，不冒充
+// 反例复现；组合形态反例已由 R1 读码推演闭合。
 func TestSnapshotsAllSingleLockConsistency(t *testing.T) {
 	dir := t.TempDir()
 	cfg := DefaultConfig()
@@ -605,10 +618,37 @@ func TestSnapshotsAllSingleLockConsistency(t *testing.T) {
 			}
 		}
 	}()
+	// 持续回载校验（R2 建议2 落点）：并发期间每份落盘文件必须可解析+全量通过
+	// RestoreLoop 校验——撕裂/半截/组合非法即 FAIL（reload 失败=文件承载了不满足
+	// 恢复契约的内容）。
+	reloadFail := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			chk, err := NewEngine(DefaultConfig())
+			if err != nil {
+				reloadFail <- err
+				return
+			}
+			if err := LoadLoops(dir, chk); err != nil {
+				reloadFail <- err
+				return
+			}
+		}
+	}()
 	for g := 0; g < spaces; g++ {
 		<-done
 	}
 	close(stop)
+	select {
+	case err := <-reloadFail:
+		t.Fatalf("并发期落盘文件未通过回载校验: %v", err)
+	default:
+	}
 	// 静默后：文件与引擎当前状态逐字节等价（SaveLoops 幂等重写同文）。
 	if err := SaveLoops(dir, eng); err != nil {
 		t.Fatalf("落盘: %v", err)

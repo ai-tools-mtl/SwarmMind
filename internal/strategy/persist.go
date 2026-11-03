@@ -128,6 +128,8 @@ func atomicWriteLoops(path string, b []byte) error {
 			log.Printf("strategy: 循环事实目录 fsync 失败（尽力而为，rename 已完成）: %v", serr)
 		}
 		_ = d.Close()
+	} else {
+		log.Printf("strategy: 循环事实目录打开失败（目录 fsync 跳过，rename 已完成）: %v", derr)
 	}
 	return nil
 }
