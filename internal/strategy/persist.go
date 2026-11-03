@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -66,26 +67,17 @@ func NewPersistedEngine(dir string, cfg Config, logf func(format string, args ..
 	return eng, nil
 }
 
-// SaveLoops 引擎全部已载入循环事实全量快照落盘（原子写 0600；LoopIDs 枚举 + 逐
-// 空间 Snapshot 组包，loops 按空间 ID 排序——文件内容确定性）。可在 OnPersist 回
-// 调（写锁释放后）或测试中直接调用。
+// SaveLoops 引擎全部已载入循环事实全量快照落盘（原子写 0600；SnapshotsAll 单读
+// 锁一致组包——枚举与逐空间取照同临界区，并发变更下文件恒为内存某时点的完整合
+// 法形态；loops 按空间 ID 排序——文件内容确定性）。可在 OnPersist 回调（写锁释
+// 放后）或测试中直接调用。
 func SaveLoops(dir string, eng *Engine) error {
 	if eng == nil {
 		return fmt.Errorf("strategy: SaveLoops 引擎为空")
 	}
 	loopsStoreMu.Lock()
 	defer loopsStoreMu.Unlock()
-	ids := eng.LoopIDs()
-	doc := loopStoreFile{Version: loopStoreVersion, Loops: make([]SpaceLoop, 0, len(ids))}
-	for _, id := range ids {
-		snap, ok := eng.Snapshot(id)
-		if !ok {
-			// 枚举与逐空间快照之间的窗口（理论上不出现——loops 只增不删）：该空
-			// 间本轮缺席，下次变更补写；不构造空条目冒充事实。
-			continue
-		}
-		doc.Loops = append(doc.Loops, snap)
-	}
+	doc := loopStoreFile{Version: loopStoreVersion, Loops: eng.SnapshotsAll()}
 	b, err := json.MarshalIndent(&doc, "", "  ")
 	if err != nil {
 		return fmt.Errorf("strategy: 循环事实序列化失败: %w", err)
@@ -99,7 +91,8 @@ func SaveLoops(dir string, eng *Engine) error {
 
 // atomicWriteLoops 原子写（固定独占 tmp + fsync + rename + 目录 fsync 尽力而为；
 // 0600）。形态对照 collab Store.persist：上次落盘崩溃残留的 tmp 清掉重试一次
-// （磁盘旧正本未动，安全）。
+// （磁盘旧正本未动，安全）；目录 fsync 失败记日志可观测（同 collab 口径——rename
+// 已完成，正本已在位，不回滚不报错）。
 func atomicWriteLoops(path string, b []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -131,7 +124,9 @@ func atomicWriteLoops(path string, b []byte) error {
 		return fmt.Errorf("rename 落盘失败: %w", err)
 	}
 	if d, derr := os.Open(filepath.Dir(path)); derr == nil {
-		_ = d.Sync() // 目录 fsync 尽力而为：rename 已完成，正本已在位
+		if serr := d.Sync(); serr != nil {
+			log.Printf("strategy: 循环事实目录 fsync 失败（尽力而为，rename 已完成）: %v", serr)
+		}
 		_ = d.Close()
 	}
 	return nil

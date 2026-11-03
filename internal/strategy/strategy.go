@@ -194,7 +194,10 @@ func (e *Engine) notifyPersist() {
 	}
 }
 
-// loop 取（或建）空间循环事实（调用方持写锁）。
+// loop 取（或建）空间循环事实（调用方持写锁）。create=true 仅允许用于「建后随即
+// 落事实」的路径（建而必填——空条目禁止残留：W09-A 复审必修3，查找锚定类写路径
+// 一律先按 e.loops 直取 nil 判定返回，零副作用；否则「建而不通知」会让 LoopIDs
+// 与落盘文件失配）。失败/无操作路径不得触达 create。
 func (e *Engine) loop(spaceID string, create bool) *SpaceLoop {
 	if lp, ok := e.loops[spaceID]; ok {
 		return lp
@@ -224,6 +227,12 @@ func (e *Engine) appendTrail(lp *SpaceLoop, kind TrailKind, note string) {
 func (e *Engine) Snapshot(spaceID string) (SpaceLoop, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	return e.snapshotLocked(spaceID)
+}
+
+// snapshotLocked 单空间快照（调用方持读/写锁；Snapshot 与 SnapshotsAll 共用组包体
+// ——深拷贝出包语义见 Snapshot）。
+func (e *Engine) snapshotLocked(spaceID string) (SpaceLoop, bool) {
 	lp, ok := e.loops[spaceID]
 	if !ok {
 		return SpaceLoop{}, false
@@ -260,6 +269,29 @@ func (e *Engine) LoopIDs() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// SnapshotsAll 全部已载入循环事实的一致快照（W09-A codex 复审必修1：枚举与逐空
+// 间取照必须在**同一读锁临界区**内完成——LoopIDs+逐空间 Snapshot 的分段取照会
+// 在并发变更下写出内存从未存在过的组合形态，如 A₀+B₁）。落盘组包唯一入口
+// （SaveLoops 专用）；展示/对账读面继续用 Snapshot/LoopIDs。
+func (e *Engine) SnapshotsAll() []SpaceLoop {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	ids := make([]string, 0, len(e.loops))
+	for id := range e.loops {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]SpaceLoop, 0, len(ids))
+	for _, id := range ids {
+		snap, ok := e.snapshotLocked(id)
+		if !ok {
+			continue // 防御位（同锁内枚举与取照不可能失配）
+		}
+		out = append(out, snap)
+	}
+	return out
 }
 
 // RestoreLoop 恢复单空间循环事实（终审建议4：进程重启恢复入口；Snapshot 深拷贝
@@ -438,21 +470,25 @@ func (e *Engine) SetAcceptanceDispute(spaceID string, disputed bool, note string
 }
 
 // setAcceptanceDispute SetAcceptanceDispute 的锁内实现（返回是否实际变更 loops）。
+// 零变更/零副作用路径不建条目（W09-A 复审必修3：解除时本无争议＝不动账，含未
+// 载入空间——「建而不通知」会让 LoopIDs 与落盘文件失配）。
 func (e *Engine) setAcceptanceDispute(spaceID string, disputed bool, note string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	lp := e.loop(spaceID, true)
+	lp := e.loops[spaceID]
 	if disputed {
+		if lp == nil {
+			lp = e.loop(spaceID, true)
+		}
 		lp.Dispute = &DisputeRecord{Disputed: true, Note: note, At: e.now()}
 		e.appendTrail(lp, TrailDisputeSet, note)
 		return true
 	}
-	if lp.Dispute != nil && lp.Dispute.Disputed {
+	if lp != nil && lp.Dispute != nil && lp.Dispute.Disputed {
 		e.appendTrail(lp, TrailDisputeCleared, note)
 		lp.Dispute = nil
 		return true
 	}
-	lp.Dispute = nil
 	return false
 }
 

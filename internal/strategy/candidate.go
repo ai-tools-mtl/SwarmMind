@@ -238,7 +238,12 @@ func (e *Engine) transitionCandidate(spaceID, id string, to CandidateStatus, by 
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	lp := e.loop(spaceID, true)
+	// 未载入 ⇒ 候选必不存在（W09-A 复审必修3：查找拒绝零副作用——不得先建空
+	// loop 再返回 NotFound，「建而不通知」会让 LoopIDs 与落盘文件失配）。
+	lp := e.loops[spaceID]
+	if lp == nil {
+		return Candidate{}, false, ErrCandidateNotFound
+	}
 	for i := range lp.Candidates {
 		if lp.Candidates[i].ID == id {
 			if lp.Candidates[i].Status == to {

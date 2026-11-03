@@ -230,16 +230,23 @@ func TestOnPersistNilZeroBehavior(t *testing.T) {
 
 // TestOnPersistFiresAfterWriteUnlock 死锁红线探针：OnPersist 回调内取读锁
 // （Snapshot）——触发点若在写锁内同步回调则 RWMutex 自死锁，5s 超时即判失败。
+// 回调必须在 NewEngine **构造前**装入 Config（引擎按值拷贝配置——构造后改 cfg
+// 不生效，探针会假绿：W09-A codex 复审必修2）；并显式断言回调确已触发（通知被
+// 整体摘除时同样判负——探针必须双向有效）。
 func TestOnPersistFiresAfterWriteUnlock(t *testing.T) {
+	var eng *Engine
+	fired := make(chan struct{}, 8)
 	cfg := DefaultConfig()
-	eng, err := NewEngine(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg.OnPersist = func() {
 		eng.Snapshot("sp-dl") // 读锁组包：写锁内同步回调 = 死锁面
 		eng.LoopIDs()
+		fired <- struct{}{}
 	}
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng = e
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -251,6 +258,11 @@ func TestOnPersistFiresAfterWriteUnlock(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("OnPersist 在写锁内同步触发 → 回调取读锁自死锁（红线：触发点必须在 e.mu 写锁释放之后）")
+	}
+	select {
+	case <-fired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnPersist 回调未触发（探针未安装或通知被摘除——探针假绿防线）")
 	}
 }
 
@@ -305,7 +317,7 @@ func TestPersistFileRoundTrip(t *testing.T) {
 		t.Fatalf("持久化文件缺失（变更即同步写）: %v", err)
 	}
 	var doc struct {
-		Version int             `json:"version"`
+		Version int               `json:"version"`
 		Loops   []json.RawMessage `json:"loops"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -516,5 +528,110 @@ func TestSaveLoopsConcurrentConverges(t *testing.T) {
 		if got := len(eng2.PendingCandidates(sp)); got != perG {
 			t.Fatalf("%s 恢复候选应 %d 条: %d", sp, perG, got)
 		}
+	}
+}
+
+// TestNoEmptyLoopOnLookupMiss 零建 loop 契约回归（W09-A codex 复审必修3）：
+// 查找锚定写路径的失败/无操作分支不得创建空循环条目——「建而不通知」会让
+// LoopIDs 与落盘文件失配（空引擎 LoopIDs 已含该空间、重启后条目消失）。
+func TestNoEmptyLoopOnLookupMiss(t *testing.T) {
+	cfg := DefaultConfig()
+	eng, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 各查找拒绝路径（目标项不存在——空间未载入）。
+	const h = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if err := eng.ReplyIssue("sp-x", "issue-1", "回应"); err == nil {
+		t.Fatal("未知问题应拒绝")
+	}
+	if err := eng.ClaimFix("sp-x", "issue-1", h, 0, ""); err == nil {
+		t.Fatal("未知问题修复声明应拒绝")
+	}
+	if _, err := eng.FinalizeCandidate("sp-x", "cand-1", "admin"); err == nil {
+		t.Fatal("未知候选应拒绝")
+	}
+	if err := eng.RecordEvidence("sp-x", h, LayerCLIExit, Evidence{Verified: true, Source: "cli", Ref: "ref-1"}); err == nil {
+		t.Fatal("未知版本证据登记应拒绝")
+	}
+	if err := eng.RecordCleanReview("sp-x", "admin", h, "n"); err == nil {
+		t.Fatal("未知版本零发现复审应拒绝")
+	}
+	// 验收争议解除（本无争议）＝零变更零副作用。
+	eng.SetAcceptanceDispute("sp-x", false, "")
+	if got := eng.LoopIDs(); len(got) != 0 {
+		t.Fatalf("查找拒绝/无操作路径不得创建空循环条目，LoopIDs=%v", got)
+	}
+	// 真实落事实路径照常建条目并通知（对照面）。
+	eng.SetAcceptanceDispute("sp-y", true, "验收存疑")
+	if got := eng.LoopIDs(); len(got) != 1 || got[0] != "sp-y" {
+		t.Fatalf("争议登记应建条目，LoopIDs=%v", got)
+	}
+}
+
+// TestSnapshotsAllSingleLockConsistency SnapshotsAll 一致快照压力（W09-A codex
+// 复审必修1 结构锚）：并发写入与落盘交错下（-race 抖动），落盘文件内容必须恒为
+// 内存某时点的完整合法形态——分阶段断言不可行，以压力+race 抖动 + 静默后文件与
+// 引擎状态逐字节等价收口（分段取照的 A₀+B₁ 组合形态由单读锁结构性排除）。
+func TestSnapshotsAllSingleLockConsistency(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	var eng *Engine
+	cfg.OnPersist = func() { _ = SaveLoops(dir, eng) }
+	e, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng = e
+	const spaces = 4
+	done := make(chan struct{})
+	for g := 0; g < spaces; g++ {
+		sp := fmt.Sprintf("sp-c%d", g)
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for i := 0; i < 30; i++ {
+				eng.SetAcceptanceDispute(sp, i%2 == 0, "压测")
+			}
+		}()
+	}
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_ = SaveLoops(dir, eng)
+			}
+		}
+	}()
+	for g := 0; g < spaces; g++ {
+		<-done
+	}
+	close(stop)
+	// 静默后：文件与引擎当前状态逐字节等价（SaveLoops 幂等重写同文）。
+	if err := SaveLoops(dir, eng); err != nil {
+		t.Fatalf("落盘: %v", err)
+	}
+	b1, err := os.ReadFile(filepath.Join(dir, LoopStoreFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng2, err := NewEngine(DefaultConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadLoops(dir, eng2); err != nil {
+		t.Fatalf("恢复: %v", err)
+	}
+	if err := SaveLoops(dir, eng2); err != nil {
+		t.Fatalf("重写: %v", err)
+	}
+	b2, err := os.ReadFile(filepath.Join(dir, LoopStoreFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b1) != string(b2) {
+		t.Fatal("落盘→恢复→再落盘应逐字节等价（一致快照契约）")
 	}
 }
