@@ -1,0 +1,32 @@
+{
+  "name": "detect-coder",
+  "kind": "cli",
+  "description": "新 node 能力卡（W07-03 检测摘要投影词形）",
+  "input_mode": "prompt_text",
+  "output_mode": "answer+artifacts",
+  "interactive": false,
+  "permission_mode": "workspace-write",
+  "protocol_ver": 1,
+  "workspace_id": "f00dcafe00000002",
+  "exposed": true,
+  "allow_args": false,
+  "stdin_to_arg": true,
+  "orchestrator": false,
+  "session_adapter": "codex",
+  "spaces": "v1",
+  "detect": {
+    "installed": "pass",
+    "config_recognized": "pass",
+    "execution_ready": "fail",
+    "call_allowed": "pass",
+    "checked_at": "2026-11-03T08:30:00Z",
+    "not_checked_reason": "",
+    "layers": {
+      "installed": { "status": "pass", "checked_at": "2026-11-03T08:30:00Z" },
+      "config_recognized": { "status": "pass", "checked_at": "2026-11-03T08:30:00Z" },
+      "execution_ready": { "status": "fail", "checked_at": "2026-11-03T08:30:00Z", "reason": "未发现登录态标记：auth.json 不存在（未发现 codex 登录态标记）" },
+      "call_allowed": { "status": "pass", "checked_at": "2026-11-03T08:30:00Z" }
+    },
+    "drift": { "drifted": true, "note": "登记面输入或路径基础事实与上次检测不一致：四层状态仍为上次检测值，需在该机器重新检测（明细见该机 node 控制台「能力配置 → 发现本机 agent」）" }
+  }
+}

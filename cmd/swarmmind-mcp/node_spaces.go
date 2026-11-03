@@ -864,7 +864,13 @@ func spaceToolDefs(face spaceFace) []toolDef {
 	d := func(s string) string { return s }
 	if face.Hub {
 		hubNote = "（hub 中心空间：scope 固定 hub:<id>——成员为全网开放目录能力「nodeID/agentName」，派发经既有 session Task 通道路由到成员所在 node 执行；跨机调度，同空间串行一次一棒）"
-		d = func(s string) string { return s + hubNote }
+		// 范围词面替换（W07-03 一致核查收口：词典同源下「只范围选择差异」——同一
+		// 描述词形在 hub 面不得残留「本机」范围词；主人本体=hub 管理会话）。
+		d = func(s string) string {
+			s = strings.ReplaceAll(s, "本机协作空间", "中心协作空间")
+			s = strings.ReplaceAll(s, "本机主人", "中心主人（管理会话）")
+			return s + hubNote
+		}
 	}
 	return []toolDef{
 		{Name: "swarmmind_space_create", Description: d("创建协作空间（编排主体仅 external 待领取空间，成员可空）：围绕一个目标建立固定成员线程的持续协作单元。返回空间 ID；后续流程：takeover 领取 → configure_members 配置成员 → start 显式启动 → swarmmind_space_dispatch 指名派发。request_id 可选幂等（同键同文返原空间）。一次性任务不需要空间，直接 swarmmind_submit"), InputSchema: toolObj(map[string]any{

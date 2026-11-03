@@ -176,6 +176,12 @@ func (s *Server) handleAgentsDiscover(w http.ResponseWriter, r *http.Request) {
 	if len(results) == 0 {
 		note = "无候选：零扫描（本端点只探测显式给出的候选，不做磁盘/PATH 扫描）。" + note
 	}
+	// 检测摘要随卡补上报（W07-03，Loop 7 同通道尽力执行）：发现写入检测缓存=卡
+	// 内容变化——带最新摘要的卡即时补报 hub；离线失败静默（注册重连携全量收敛，
+	// 同 AgentState.Sync 口径）。
+	if s.cfg.CardsReporter != nil && s.cfg.Agents != nil {
+		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "note": note})
 }
 
@@ -273,6 +279,12 @@ func (s *Server) handleRegistrationPreview(w http.ResponseWriter, r *http.Reques
 		Call:       callProjectionFor(registered),
 	})
 	s.recordDetect(rep, next.Command, next.ConfigHome)
+	// 检测摘要随卡补上报（W07-03，Loop 7 同通道尽力执行）：登记预览写入检测缓存
+	// =卡内容变化——带最新摘要的卡即时补报 hub；离线失败静默（注册重连携全量收敛，
+	// 同 AgentState.Sync 口径）。
+	if s.cfg.CardsReporter != nil && s.cfg.Agents != nil {
+		_ = s.cfg.CardsReporter(s.cfg.Agents.Cards())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"diff":       diff,
 		"detect":     rep,
@@ -580,6 +592,128 @@ func detectDriftFor(p protocol.ExecProfile, ent detectCacheEntry) *agentDetectDr
 		return &agentDetectDrift{Drifted: false}
 	}
 	return &agentDetectDrift{Drifted: true, Notes: notes}
+}
+
+// ---------- 能力卡检测摘要投影（W07-03，hub P05 目录数据源） ----------
+
+// CardDetectSummaries 全表检测摘要投影（能力卡盖章数据源；AgentState.Cards 经
+// SetDetectProvider 注入本方法调用——单卡片装配点盖章，register/card_update 同源）。
+// 未发现过的能力不出现在 map（卡上 Detect 保持 nil → hub 如实「未上报」，不冒认）。
+func (s *Server) CardDetectSummaries() map[string]protocol.CardDetectSummary {
+	out := map[string]protocol.CardDetectSummary{}
+	for _, p := range s.previewBaseline() {
+		if cs, ok := s.cardDetectFor(p); ok {
+			out[p.Name] = cs
+		}
+	}
+	return out
+}
+
+// cardDetectFor 单能力卡检测摘要（detectCache 只读；never 写缓存）。脱敏边界：
+// 逐层 reason 原样透传仅当不含本机路径——config 识别层 fail 的原因是 cfgErr 文案
+//（内含引用路径），换为固定脱敏人话；drift 明细注记含本机路径，一律折叠为
+// 「drifted + 固定指路」——差异明细留在该机器 node 控制台（隐私投影同界：凭据与
+// HOME 内容永不出本机，路径不出本机）。
+func (s *Server) cardDetectFor(p protocol.ExecProfile) (protocol.CardDetectSummary, bool) {
+	s.detectMu.Lock()
+	ent, ok := s.detectCache[p.Name]
+	s.detectMu.Unlock()
+	if !ok {
+		return protocol.CardDetectSummary{}, false
+	}
+	rep := ent.rep
+	cs := protocol.CardDetectSummary{
+		Installed:        string(rep.Installed.Status),
+		ConfigRecognized: string(rep.ConfigRecognized.Status),
+		ExecutionReady:   string(rep.ExecutionReady.Status),
+		CallAllowed:      string(rep.CallAllowed.Status),
+	}
+	var latest time.Time
+	for _, lc := range []agentdetect.LayerCheck{rep.Installed, rep.ConfigRecognized, rep.ExecutionReady, rep.CallAllowed} {
+		if lc.CheckedAt.After(latest) {
+			latest = lc.CheckedAt
+		}
+	}
+	if !latest.IsZero() {
+		at := latest.UTC()
+		cs.CheckedAt = &at
+	}
+	var miss []string
+	for _, tc := range []struct {
+		k  string
+		lc agentdetect.LayerCheck
+	}{
+		{"installed", rep.Installed}, {"config_recognized", rep.ConfigRecognized},
+		{"execution_ready", rep.ExecutionReady}, {"call_allowed", rep.CallAllowed},
+	} {
+		if tc.lc.Status == agentdetect.StatusNotChecked && tc.lc.Reason != "" {
+			miss = append(miss, tc.k+": "+tc.lc.Reason)
+		}
+	}
+	if len(miss) > 0 {
+		cs.NotCheckedReason = strings.Join(miss, "；")
+	}
+	cs.Layers = &protocol.CardDetectLayers{
+		Installed:        cardSanitizedInstalledLayer(rep.Installed),
+		ConfigRecognized: cardSanitizedConfigLayer(rep.ConfigRecognized),
+		ExecutionReady:   cardSanitizedReadyLayer(rep.ExecutionReady),
+		CallAllowed:      cardLayerOf(rep.CallAllowed),
+	}
+	if dr := detectDriftFor(p, ent); dr != nil {
+		note := ""
+		if dr.Drifted {
+			note = "登记面输入或路径基础事实与上次检测不一致：四层状态仍为上次检测值，需在该机器重新检测（明细见该机 node 控制台「能力配置 → 发现本机 agent」）"
+		}
+		cs.Drift = &protocol.CardDetectDrift{Drifted: dr.Drifted, Note: note}
+	}
+	return cs, true
+}
+
+// cardLayerOf 单层投影（UTC 时刻纪律；reason 原样——call_allowed 的 reason 词表
+// 不含本机绝对路径，见 agentdetect 包内文案源）。
+func cardLayerOf(lc agentdetect.LayerCheck) protocol.CardDetectLayer {
+	v := protocol.CardDetectLayer{Status: string(lc.Status), Reason: lc.Reason}
+	if !lc.CheckedAt.IsZero() {
+		at := lc.CheckedAt.UTC()
+		v.CheckedAt = &at
+	}
+	return v
+}
+
+// cardSanitizedInstalledLayer 安装层投影：fail 态 reason 含探测启动失败原文
+//（os/exec StartErr 典型内含命令绝对路径——fork/exec /Users/…: no such file），
+// 换固定脱敏人话（版本输出走 VersionRaw 字段不进 reason，非零/超限 reason 为
+// 固定格式无路径；pass/not_checked 原样透传）。集成者门禁补漏：cardLayerOf 原
+// 注释「installed 词表无路径」不成立。
+func cardSanitizedInstalledLayer(lc agentdetect.LayerCheck) protocol.CardDetectLayer {
+	v := cardLayerOf(lc)
+	if lc.Status == agentdetect.StatusFail {
+		v.Reason = "命令探测未通过（失败细节属本机真相：详见该机器 node 控制台检测面）"
+	}
+	return v
+}
+
+// cardSanitizedConfigLayer 配置识别层投影：fail 态 reason（cfgErr 文案）内含引用
+// 路径，换固定脱敏人话——路径事实属本机真相，中心面只表事实类别与指路
+//（not_checked/pass 的 reason 词表无路径，原样透传）。
+func cardSanitizedConfigLayer(lc agentdetect.LayerCheck) protocol.CardDetectLayer {
+	v := cardLayerOf(lc)
+	if lc.Status == agentdetect.StatusFail {
+		v.Reason = "宿主配置结构未识别（引用路径与差异明细属本机真相：详见该机器 node 控制台检测面）"
+	}
+	return v
+}
+
+// cardSanitizedReadyLayer 执行就绪层投影：fail 态 reason 聚合安装/配置/登录标记
+// 三源失败事实——其中配置链与登录标记链的失败文案内含本机绝对路径
+//（layoutChainIssue 词表），一律换固定脱敏人话（pass/not_checked 的 reason 词表
+// 无路径，原样透传；not_checked 聚合只收前层 not_checked 原因，同为无路径词表）。
+func cardSanitizedReadyLayer(lc agentdetect.LayerCheck) protocol.CardDetectLayer {
+	v := cardLayerOf(lc)
+	if lc.Status == agentdetect.StatusFail {
+		v.Reason = "执行就绪未通过（安装证据/配置结构/登录态标记至少一层未过；含本机路径的逐层明细留该机器 node 控制台检测面）"
+	}
+	return v
 }
 
 // leafPathDriftNote 命令路径（纯末段口径）事实漂移注记：PathRef 与当前 Lstat

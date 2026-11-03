@@ -215,3 +215,92 @@ func TestW07SpacesFieldsOmitEmptyWireForm(t *testing.T) {
 
 // jsonContains 子串判定（测试可读性薄封装）。
 func jsonContains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// legacyAgentCardW0604 W07-03 前的 AgentCard 结构快照（含 spaces，无 detect）。
+// 仅测试内声明，实证旧 hub 解码携 detect 摘要新卡的容忍面——不参与任何生产编码。
+type legacyAgentCardW0604 struct {
+	Name           string    `json:"name"`
+	Kind           AgentKind `json:"kind"`
+	InputMode      string    `json:"input_mode"`
+	OutputMode     string    `json:"output_mode"`
+	Interactive    bool      `json:"interactive"`
+	PermissionMode string    `json:"permission_mode"`
+	ProtocolVer    int       `json:"protocol_ver"`
+	WorkspaceID    string    `json:"workspace_id,omitempty"`
+	Exposed        bool      `json:"exposed"`
+	AllowArgs      bool      `json:"allow_args"`
+	StdinToArg     bool      `json:"stdin_to_arg"`
+	Orchestrator   bool      `json:"orchestrator,omitempty"`
+	SessionAdapter string    `json:"session_adapter,omitempty"`
+	Spaces         string    `json:"spaces,omitempty"`
+}
+
+// TestW0703DetectCardBothWays W07-03 检测摘要投影双向混跑 fixture（落盘真实
+// JSON：testdata/w07_03_detect_card.json）——
+//   - 新 node × W07-03 前 hub：携 detect 摘要卡解码进旧词形（legacyAgentCardW0604）
+//     ——未知字段 detect 丢弃不报错，既有字段完好（旧 hub 目录无检测列，能力发现
+//     降级，任务/会话/空间面零影响）；
+//   - 旧 node × 新 hub：无 detect 键的卡（w07_new_node_card.json）解码进新结构
+//     Detect 保持 nil——hub 目录如实「未上报」，不冒认已检测；
+//   - 新词形 omitempty 往返：Detect=nil 不落线；非 nil 逐位保真（含逐层与漂移面）。
+func TestW0703DetectCardBothWays(t *testing.T) {
+	// 新 node × 旧 hub：detect 丢弃、既有字段完好。
+	b := loadW07Fixture(t, "w07_03_detect_card.json")
+	var old legacyAgentCardW0604
+	if err := json.Unmarshal(b, &old); err != nil {
+		t.Fatalf("旧词形解码携 detect 新卡应容忍未知字段: %v", err)
+	}
+	if old.Name != "detect-coder" || old.Spaces != SpacesCapV1 || old.SessionAdapter != SessionAdapterCodex {
+		t.Fatalf("旧词形解码后既有字段漂移: %+v", old)
+	}
+	// 新词形完整保真：四层 + 逐层 + 漂移面逐位。
+	var nc AgentCard
+	if err := json.Unmarshal(b, &nc); err != nil {
+		t.Fatalf("新 schema 解码失败: %v", err)
+	}
+	if nc.Detect == nil {
+		t.Fatal("新 schema 应保留 detect 摘要")
+	}
+	d := nc.Detect
+	if d.Installed != "pass" || d.ConfigRecognized != "pass" || d.ExecutionReady != "fail" || d.CallAllowed != "pass" {
+		t.Fatalf("四层状态失真: %+v", d)
+	}
+	if d.Layers == nil || d.Layers.ExecutionReady.Status != "fail" || d.Layers.ExecutionReady.Reason == "" {
+		t.Fatalf("逐层明细失真: %+v", d.Layers)
+	}
+	if d.Drift == nil || !d.Drift.Drifted || d.Drift.Note == "" {
+		t.Fatalf("漂移面失真: %+v", d.Drift)
+	}
+	if d.CheckedAt == nil || d.CheckedAt.IsZero() {
+		t.Fatalf("checked_at 应在位（UTC）: %+v", d.CheckedAt)
+	}
+	// 旧 node × 新 hub：无 detect 键 → nil（hub 如实「未上报」）。
+	ob := loadW07Fixture(t, "w07_new_node_card.json")
+	var oc AgentCard
+	if err := json.Unmarshal(ob, &oc); err != nil {
+		t.Fatalf("新 schema 解码旧卡失败: %v", err)
+	}
+	if oc.Detect != nil {
+		t.Fatalf("无 detect 键不得解码出摘要（不冒认已检测）: %+v", oc.Detect)
+	}
+	// omitempty 往返：nil 不落线；非 nil 逐位保真。
+	c0 := AgentCard{Name: "a", Kind: AgentKindCLI, InputMode: "prompt_text", OutputMode: "answer+artifacts", PermissionMode: "rw", ProtocolVer: 1, Exposed: true}
+	b0, err := json.Marshal(c0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jsonContains(string(b0), "detect") {
+		t.Fatalf("未上报 detect 不得落线（omitempty）: %s", b0)
+	}
+	b1, err := json.Marshal(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back AgentCard
+	if err := json.Unmarshal(b1, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Detect == nil || back.Detect.Installed != "pass" || back.Detect.ExecutionReady != "fail" {
+		t.Fatalf("detect 摘要往返失真: %+v", back.Detect)
+	}
+}

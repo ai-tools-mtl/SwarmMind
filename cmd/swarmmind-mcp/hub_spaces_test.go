@@ -182,3 +182,54 @@ func loginHub(t *testing.T, url, adminToken string) string {
 	t.Fatal("无会话 cookie")
 	return ""
 }
+
+// TestSpaceToolDefsFaceConsistency 空间工具双面词典一致核查（W07-03 工作块3：
+// 「tools/list 双模式一致性 + 词典/指引互引一致」的回归锁）——
+//   - 双面九件同名同序（同一组工具，禁止第二套词典面）；
+//   - hub 面描述：scope 注记在场、无「本机」范围词残留（范围词已面替换）、
+//     主人词形为中心管理会话口径；
+//   - node 面描述：不含 hub scope 注记（面注记不串端）。
+func TestSpaceToolDefsFaceConsistency(t *testing.T) {
+	nodeDefs := spaceToolDefs(spaceFaceNode)
+	hubDefs := hubSpaceToolDefs()
+	if len(nodeDefs) != len(hubDefs) {
+		t.Fatalf("双面工具数不一致: node=%d hub=%d", len(nodeDefs), len(hubDefs))
+	}
+	for i := range nodeDefs {
+		if nodeDefs[i].Name != hubDefs[i].Name {
+			t.Fatalf("双面工具名/序不一致 @%d: node=%s hub=%s", i, nodeDefs[i].Name, hubDefs[i].Name)
+		}
+		hd := hubDefs[i].Description
+		if !strings.Contains(hd, "hub 中心空间：scope 固定 hub:<id>") {
+			t.Errorf("%s hub 面描述应附 scope 注记", hubDefs[i].Name)
+		}
+		if strings.Contains(hd, "本机协作空间") || strings.Contains(hd, "本机主人") {
+			t.Errorf("%s hub 面描述残留「本机」范围词（应为「中心」面词形）: %s", hubDefs[i].Name, hd)
+		}
+		nd := nodeDefs[i].Description
+		if strings.Contains(nd, "hub 中心空间：scope 固定") {
+			t.Errorf("%s node 面描述不得携带 hub 注记（面注记串端）", nodeDefs[i].Name)
+		}
+		if strings.Contains(nd, "中心协作空间") {
+			t.Errorf("%s node 面描述不得使用「中心」范围词（node 面=本机）", nodeDefs[i].Name)
+		}
+	}
+	// 指引互引：hub instructions 声明会话四工具与空间九工具面（与 node 面同构的
+	// 范围语义指引）；工具名引用 ⊆ 实际装配集（禁引不存在的工具）。
+	init := (hubBackend{}).initResult()
+	inst, _ := init["instructions"].(string)
+	for _, want := range []string{"session_create/send/list/status", "space_create/list/status/dispatch/control/messages"} {
+		if !strings.Contains(inst, want) {
+			t.Errorf("hub instructions 应含 %s 指引", want)
+		}
+	}
+	names := map[string]bool{}
+	for _, td := range hubDefs {
+		names[td.Name] = true
+	}
+	for _, ref := range []string{"swarmmind_session_create", "swarmmind_space_create", "swarmmind_space_dispatch"} {
+		if strings.Contains(inst, ref) && !names[ref] {
+			t.Errorf("instructions 引用未装配工具 %s", ref)
+		}
+	}
+}

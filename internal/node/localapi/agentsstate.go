@@ -61,6 +61,11 @@ type AgentState struct {
 	// 即非空——cmd/node 在 spacesStore 打开后经 SetSpacesCapability 注入，
 	// 与 capabilities 端点 spaces 标记同源；空 = 未装配，能力卡不声明）。
 	spacesCap string
+	// detectProvider 检测摘要投影源（W07-03：能力名 → 卡检测摘要；cmd/node 在
+	// localapi Server 构造后经 SetDetectProvider 注入 Server.cardDetectSummaries
+	// ——检测缓存在 Server 内，卡装配点在本状态，经回调单源贯通）。nil = 不盖章
+	// （standalone 无 hub 或装配遗漏：卡无 detect 字段，hub 如实「未上报」）。
+	detectProvider func() map[string]protocol.CardDetectSummary
 }
 
 // SetSpacesCapability 注入空间协作能力声明版本（W07-01）：非空时 Cards() 对
@@ -70,6 +75,16 @@ func (s *AgentState) SetSpacesCapability(version string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.spacesCap = version
+}
+
+// SetDetectProvider 注入检测摘要投影源（W07-03）：Cards() 按能力名盖章
+// AgentCard.Detect（register/card_update 同源；发现/登记预览后的补上报经
+// CardsReporter 同通道）。装配期一次性调用（localapi Server 构造后、连接 hub 前）；
+// 重复调用以最后一次为准，nil 显式撤除。
+func (s *AgentState) SetDetectProvider(provider func() map[string]protocol.CardDetectSummary) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.detectProvider = provider
 }
 
 // OpenAgentState 打开（或创建）本机 agent 状态：加载 data_dir/agents-state.json，
@@ -134,15 +149,27 @@ func (s *AgentState) Effective() []protocol.ExecProfile {
 // Cards 由 effective 视图生成对外能力表（register/card_update 同源）。W07-01：
 // 空间协作能力已装配（spacesCap 非空）时对全部能力卡盖章 AgentCard.Spaces——
 // 空间是 node 级能力（collab 存储整机一份），声明随每张卡上报，hub 门槛按
-// 「目标能力的卡声明」核对即等于 node 级核对。
+// 「目标能力的卡声明」核对即等于 node 级核对。W07-03：检测摘要投影源在位时按
+// 能力名盖章 AgentCard.Detect（单卡装配点盖章，hub 目录 P05 检测摘要数据源；
+// 未发现过的能力卡不盖章——hub 如实「未上报」不冒认已检测）。
 func (s *AgentState) Cards() []protocol.AgentCard {
 	cards := service.CardsFromProfiles(s.Effective())
 	s.mu.Lock()
 	cap := s.spacesCap
+	provider := s.detectProvider
 	s.mu.Unlock()
 	if cap != "" {
 		for i := range cards {
 			cards[i].Spaces = cap
+		}
+	}
+	if provider != nil {
+		summaries := provider()
+		for i := range cards {
+			if cs, ok := summaries[cards[i].Name]; ok {
+				c := cs   // 循环变量副本：各卡独立持引用（map 值复用安全）
+				cards[i].Detect = &c
+			}
 		}
 	}
 	return cards

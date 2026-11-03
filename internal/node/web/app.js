@@ -464,8 +464,10 @@ function drawerZonesApply(root, zones, cache, names = DRAWER_ZONES) {
 /* ===== 空间词典 shared block begin（双端同步维护：本块在 node/hub 两端 app.js
  * 逐字节一致，internal/node/localapi/web_spaces_sync_test.go 抽块比对锁一致性——
  * 改本块必须两端同改同验。W04-03 P03/P04 协作空间：九态/调度方式/完成授权/意图
- * /动作词/空态词典同源（SPEC 六.五 文案层单一出处；hub 端空间后端 W07 接线前为
- * 如实壳，词典先行同文防漂移；徽标色阶复用 sst-* 既有语义色，零新增样式规则）。） ===== */
+ * /动作词/空态词典同源（SPEC 六.五 文案层单一出处；W07-03 起两端真实数据面均在
+ * 位——SPACE_HUB_OFF/SPACE_HUB_OFF_NOTE 转为 hub 中心空间服务未装配（503
+ * spaces_unavailable）的诚实降级词，两端同文备用；徽标色阶复用 sst-* 既有语义色，
+ * 零新增样式规则）。） ===== */
 const SPACE_STATES = {
   pending_config: '待配置', pending_leader: '待管家领取', ready: '可运行（待启动）',
   running: '运行中', paused: '已暂停', blocked: '受阻', needs_review: '待核对',
@@ -505,8 +507,8 @@ const SPACE_ISSUE_STATES = { open: '待复审', confirmed_fixed: '已修复确�
 const SPACE_SEVERITIES = { must: '必须修', should: '建议修', info: '可不修' };
 const SPACE_EVIDENCE_LAYERS = { cli_exit: 'CLI 退出0', protocol_parse: '协议解析', round_complete: '轮完成', work_accept: '工作验收' };
 const SPACE_EVIDENCE_SOURCES = { agent_self_report: 'agent 自报', executor_receipt: '执行回执', protocol_receipt: '协议回执', host_observation: '服务端事实', human_confirmation: '人工核对' };
-const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';
-const SPACE_HUB_OFF_NOTE = '中心端空间能力由 W07 交付接线；本页为双端同构壳，当前不提供创建与操作入口，也不展示替代数据。本机空间请使用 node 控制台「协作空间」页。';
+const SPACE_HUB_OFF = '中心空间服务未装配';
+const SPACE_HUB_OFF_NOTE = '当前 hub 未启用中心空间协作（spaces_unavailable）：升级或装配后，这里提供建空间、跨机成员线程与显式派发；装配前本页不提供创建与操作入口，也不展示替代数据。';
 const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];
 /* spaceWaitReason 等待原因合成（暂停原因+等待原因双源；P03 列表与 P04 调度条同源）。 */
 function spaceWaitReason(sp) {

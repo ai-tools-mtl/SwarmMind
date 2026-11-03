@@ -65,7 +65,7 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		"renew: '续约', finish: '申请完成', finalize_done: '定版（完成）', finalize_abandoned: '放弃（定版）',",
 		"archive: '归档', budget: '调整预算', policy: '调整策略',",
 		"const SPACE_EMPTY_LIST = '还没有协作空间';",
-		"const SPACE_HUB_OFF = '中心端协作空间后端未接线（规划 W07）';",
+		"const SPACE_HUB_OFF = '中心空间服务未装配';",
 		"const SPACE_ZONES = ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions'];",
 		"function spaceWaitReason(sp) {",
 		"function spaceBadge(s) {",
@@ -86,7 +86,7 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		}
 	}
 
-	// ---- W05-04 策略区接线锚点：node 真渲染 + hub 壳同表头未接线声明。 ----
+	// ---- W05-04 策略区接线锚点：node 真渲染 + hub 真渲染（W07-03 起双端同面）。
 	// node：w05 区投影渲染（分区 diff 机制既有）+ strategy 投影拉取 + 候选定版/否决
 	// 主人产品面（W05-04 裁决修复：pending 行按钮走 SPACE_CAND_ACTIONS 词典，主人
 	// 专属端点，编排主体服务端 403 人话指路）。
@@ -105,14 +105,22 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 			t.Errorf("node app.js 应含 %q（P04 策略区接线）", want)
 		}
 	}
-	// hub：w05 壳同表头（候选/版本/问题三表）+ 未接线声明；无数据面假入口。
+	// hub：w05 真渲染同表头（候选/版本/问题三表）+ 策略投影拉取（W07-03 可用化：
+	// 数据源 GET /spaces/{id}/strategy；候选定版/否决主人产品面 hub 同构，参数经
+	// data-cverb/data-cid——hub act 词形约定：键名精确+参数走 data-*）。
 	for _, want := range []string{
 		"<th>候选</th><th>提出者</th><th>轮次</th><th>状态</th><th>重申</th>",
 		"<th>问题</th><th>级别</th><th>文件:行</th><th>有效状态</th><th>重报/修复</th>",
 		"SPACE_EVIDENCE_LAYERS.cli_exit",
+		"function spaceW05Zone(st) {",
+		"'/strategy'",
+		"function spaceCandAct(arg) {",
+		"'space-cand'",
+		"data-cverb=\"finalize\"",
+		"data-cid=\"' + esc(c.id) + '\"",
 	} {
 		if !strings.Contains(hubJSStr, want) {
-			t.Errorf("hub app.js 应含 %q（w05 壳同表头）", want)
+			t.Errorf("hub app.js 应含 %q（w05 真渲染接线 W07-03）", want)
 		}
 	}
 
@@ -128,29 +136,35 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 			t.Errorf("node app.js 应含 %q（P03/P04 接线）", want)
 		}
 	}
-	// hub：壳如实不可用（无假入口）——无创建按钮、未接线声明可见。
+	// hub：W07-03 可用化——真实数据面接线锚点（列表/详情/增量/策略三源 + 503
+	// 未装配专态词典兜底 + 中心范围如实注记）。
 	for _, want := range []string{
 		"['spaces', '协作空间']",
 		"SPACE_HUB_OFF",
+		"function loadSpaces() {",
+		"'GET', '/api/v1/spaces'",
+		"async function fetchSpacePage() {",
+		"/messages?since=",
+		"'POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`",
+		"/candidates/${encodeURIComponent(cid)}/",
+		"return S.spaceId ? spaceDetailPageView() : spaceListPageView();",
+		`id="space-detail"`,
+		`data-act="space-back"`,
+		// 中心范围如实注记（范围差异：scope 固定 hub:<id>；成员线程=hub 注册表会话；
+		// 操作主体=hub 管理会话 owner:admin；PAT 主人专属动作 403 如实）。
+		"' · 范围 ' + esc(pg.scope)",
+		"中心空间固定范围",
+		"hub 注册表会话",
+		"owner:admin",
+		"403",
 	} {
 		if !strings.Contains(hubJSStr, want) {
-			t.Errorf("hub app.js 应含 %q（P03 壳接线）", want)
+			t.Errorf("hub app.js 应含 %q（P03/P04 可用化接线 W07-03）", want)
 		}
 	}
-	for _, ban := range []string{
-		`'space-new'`,    // 假创建入口禁令（hub 后端 W07 前不提供）
-		`'space-send'`,   // 假发言入口禁令
-		`'space-act:'`,   // 假控制动作入口禁令
-		`'sp-submit'`,    // 假弹层提交禁令
-		`'space-cand:'`,  // 假候选定版/否决入口禁令（裁决修复1：hub 中心后端未接线不加按钮——词典先行同文，按钮不越端）
-	} {
-		if strings.Contains(hubJSStr, ban) {
-			t.Errorf("hub app.js 不应含 %q（后端未接线不得提供假操作入口）", ban)
-		}
-	}
-	// node 端必须有真实操作入口（与 hub 禁令互为对照——防两端都抄成壳）。锚点为
-	// button(act) 调用参数与动作分发字面量（data-act 属性由 button() 运行时拼装，
-	// 不以渲染产物形态出现在源码）。
+	// node 端必须有真实操作入口（与 hub 真实入口互为对照——防任何一端抄成壳）。
+	// 锚点为 button(act) 调用参数与动作分发字面量（data-act 属性由 button() 运行时
+	// 拼装，不以渲染产物形态出现在源码）。
 	for _, want := range []string{
 		`button('新建空间', 'space-new', 'primary')`,
 		`button('发送', 'space-send', 'primary', 'type="button"')`,

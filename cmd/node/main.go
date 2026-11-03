@@ -568,6 +568,10 @@ func run(cfgPath, dataDirOverride string) error {
 		localCfg.LastRegisteredAt = client.LastRegisteredAt
 	}
 	localSrv := localapi.New(localCfg)
+	// 检测摘要投影接线（W07-03）：卡装配点（AgentState）与检测缓存（Server）分属
+	// 两对象，经回调单源贯通——Cards() 按能力名盖章 AgentCard.Detect（组网模式
+	// 随 register/card_update 上报 hub；standalone 无 reporter，仅本机目录消费面）。
+	agentState.SetDetectProvider(localSrv.CardDetectSummaries)
 	localLn, err := net.Listen("tcp", cfg.LocalListen)
 	if err != nil {
 		return fmt.Errorf("本地 API 监听 %s 失败: %w", cfg.LocalListen, err)

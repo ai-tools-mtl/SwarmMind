@@ -77,6 +77,59 @@ type AgentCard struct {
 	// 普通任务路径不读本字段零牵连。声明只表「可承载成员线程」——不表示该
 	// node 私有会话历史可读（隐私投影边界，SPEC 六.五 W07 节）。
 	Spaces string `json:"spaces,omitempty"`
+	// Detect 本机检测摘要投影（W07-03，hub 目录页 P05「检测与开放状态」数据源；
+	// W06-04 登记的「hub 侧 detect 摘要投影归 W07/C 阶段」兑现）。nil = 未上报
+	// （本机未执行过发现、或旧版 node 缺字段解码零值）——hub 如实呈现「未上报」，
+	// 绝不冒认已检测。内容为 node 检测投影的单向上报快照（card 组装/上报时刻）：
+	// 四层状态与检查时刻 + 漂移标记；原因字段经 node 侧脱敏（不含本机绝对路径，
+	// 凭据与 HOME 内容永不出本机——SPEC 4.9 双卡分离同界）。检测/修复动作
+	// （重新检测、登记）是各机器主人本机专属（六.六豁免⑫），hub 只读投影、
+	// 不发明远程扫描；快照过期性以 checked_at 如实标注，修复指路该机器 node 控制台。
+	Detect *CardDetectSummary `json:"detect,omitempty"`
+}
+
+// CardDetectSummary 能力卡检测摘要投影（W07-03 加法词形；与 node 本地面
+// GET /api/v1/local/agents 的 detect 摘要同源语义，drift 明细经脱敏折叠）。
+// 纯数据结构零行为——检测真相与解释留在 node 本地面，本结构只是上报面。
+type CardDetectSummary struct {
+	// Installed / ConfigRecognized / ExecutionReady / CallAllowed 四层状态三值：
+	// pass|fail|not_checked（与 node 本地面同词表；not_checked 如实呈现不推断）。
+	Installed        string `json:"installed"`
+	ConfigRecognized string `json:"config_recognized"`
+	ExecutionReady   string `json:"execution_ready"`
+	CallAllowed      string `json:"call_allowed"`
+	// CheckedAt 四层最新检查时刻（UTC）；从未检测缺省。
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	// NotCheckedReason 未验证原因聚合（人话；node 侧已保证不含本机绝对路径）。
+	NotCheckedReason string `json:"not_checked_reason,omitempty"`
+	// Layers 逐层明细（status/checked_at/reason；无 source——检查来源词表属
+	// node 本地面细节，中心面不承载）。nil = 旧版 node 摘要（无逐层形态）。
+	Layers *CardDetectLayers `json:"layers,omitempty"`
+	// Drift 漂移标记（W06-04 漂移复核的上报面）：Drifted=true 时 Note 为人话
+	// 聚合注记——具体差异（含本机路径）留在该机器 node 控制台，中心面只表
+	// 「需重新检测」事实与指路。nil = 本批形态未上报漂移面。
+	Drift *CardDetectDrift `json:"drift,omitempty"`
+}
+
+// CardDetectLayer 单层投影明细（status 三值 + 检查时刻 + 脱敏原因）。
+type CardDetectLayer struct {
+	Status    string     `json:"status"`
+	CheckedAt *time.Time `json:"checked_at,omitempty"`
+	Reason    string     `json:"reason,omitempty"`
+}
+
+// CardDetectLayers 四层逐层容器。
+type CardDetectLayers struct {
+	Installed        CardDetectLayer `json:"installed"`
+	ConfigRecognized CardDetectLayer `json:"config_recognized"`
+	ExecutionReady   CardDetectLayer `json:"execution_ready"`
+	CallAllowed      CardDetectLayer `json:"call_allowed"`
+}
+
+// CardDetectDrift 漂移上报面：只表事实与指路，不带本机路径明细。
+type CardDetectDrift struct {
+	Drifted bool   `json:"drifted"`
+	Note    string `json:"note,omitempty"`
 }
 
 // ExecProfile 本机执行配置（永不离开本机；SPEC 4.9）。

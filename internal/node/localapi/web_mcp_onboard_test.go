@@ -118,10 +118,18 @@ func TestWebMcpOnboardHubStructure(t *testing.T) {
 		"SWARM_HUB_TOKEN",
 		"mcpServers",    // 顶层布局（与节点端模板同形）
 		"[mcp_servers.", // codex TOML 形态
+		// W07-03 装配注记与动作解析修复锚点：
+		"tools/list 实际发现为准", // 工具面随版本演进如实（不硬编码清单/数量、不宣称两面完全对等）
+		"不提供本机 agent/管家安装", // hub 无 agent/管家也可运行（页面不要求 hub 本机装 CLI）
+		`'mcpob-ask-confirm', 'link', 'data-layer="'`, // 用户确认按钮经 data-layer 传参（旧冒号词形 data-act="mcpob-ask-confirm:v1" 在 hub 精确分发表下永不命中——死按钮修复的回归锚）
 	} {
 		if !strings.Contains(hubJS, want) {
 			t.Errorf("hub app.js 应含 %q（P07 hub 形态结构锁）", want)
 		}
+	}
+	// 死按钮禁令：冒号词形 act 在 hub 精确分发（ACT[dataset.act] 全键匹配）下不可达。
+	if strings.Contains(hubJS, `'mcpob-ask-confirm:' + l`) {
+		t.Error("hub app.js 不应再生成冒号词形 mcpob-ask-confirm:<layer>（精确分发表不可达=死按钮）")
 	}
 	// 零自动写硬规：hub 页不得调用宿主配置写端点（写宿主配置属调用机本机动作）。
 	for _, ban := range []string{
