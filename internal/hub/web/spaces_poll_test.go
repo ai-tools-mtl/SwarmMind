@@ -18,6 +18,7 @@ import (
 //     轮询恢复后列表自动就绪；
 //   - detail-no-rollback（必修2）：详情页请求序号守卫——R2(v2) 先落、R1(v1) 后到
 //     不回退；A→B→A 中旧 A 应答放行也不回退；同空间双在途 v5→v4 不回退。
+//
 // harness（桩+驱动）与场景：spaces_poll_behavior_test.js，runner 复用
 // consoleHarnessRunner（同目录 dispatch_test.go）。node 不可得的环境自动 skip。
 func TestConsoleSpacesPollGuards(t *testing.T) {
@@ -26,12 +27,13 @@ func TestConsoleSpacesPollGuards(t *testing.T) {
 		t.Skip("node 不可得：行为断言跳过")
 	}
 	scenarios := []string{
-		"poll-picks-up-remote-change",       // 必修1：真实 pollTick 接线（他端建/归档可见）
-		"first-load-failure-self-heals",     // 必修1：首载失败轮询自恢复
-		"non200-same-shape-not-committed",   // 必修1 复审回归：500 同形响应七资源均不提交
-		"relogin-rebuilds-state",            // 必修2 复审回归：登出清理指纹/seq，重登重建状态与入口；503 不假亮
-		"detail-no-rollback",                // 必修2：详情乱序不回退（A→B→A/同空间双在途）
-		"message-cursor-advances",           // 建议修B：since 游标增量推进
+		"poll-picks-up-remote-change",     // 必修1：真实 pollTick 接线（他端建/归档可见）
+		"first-load-failure-self-heals",   // 必修1：首载失败轮询自恢复
+		"non200-same-shape-not-committed", // 必修1 复审回归：500 同形响应七资源均不提交
+		"relogin-rebuilds-state",          // 必修2 复审回归：登出清理指纹（seq 保持单调），重登重建状态与入口；503 不假亮
+		"logout-pending-old-request",      // 必修2 终审：登出时挂起旧请求跨会话——seq 单调不归零，OLD 不得覆盖 NEW（codex 终审反例全程）
+		"detail-no-rollback",              // 必修2：详情乱序不回退（A→B→A/同空间双在途）
+		"message-cursor-advances",         // 建议修B：since 游标增量推进
 	}
 	dir := t.TempDir()
 	runner := filepath.Join(dir, "runner.mjs")
@@ -67,7 +69,7 @@ func TestConsoleSpacesWiringSources(t *testing.T) {
 	app := readRepo(t, "app.js")
 	for _, want := range []string{
 		`loadResource('spaces', '/api/v1/spaces'`, // 必修1：loadAll 第七资源
-		`code === 503`,                            // 未装配业务专态走成功提交（非陈旧失败）
+		`code === 503`, // 未装配业务专态走成功提交（非陈旧失败）
 		`commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime); commit('works', works); commit('sessions', sessions); commit('spaces', spaces);`,
 		`S.spacesUnsupported = value.unavailable;`, // 专态随提交管道落态
 		`works: 0, sessions: 0, spaces: 0 }`,       // seq 表初始化含 spaces 键（++undefined=NaN 会使 seq 校验恒真静默丢提交——实锤过真页面假绿的键缺失回归锚）

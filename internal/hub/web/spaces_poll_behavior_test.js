@@ -92,6 +92,19 @@ function __sp_spacesHook() {
     return __sp_ok({});
   };
 }
+/* __sp_spacesQueueHook 列表端点手动队列（logout-pending 场景：GET /api/v1/spaces
+ * 挂起等手动放行——跨登出挂起旧请求的最小构造）；其余路径即时 ok。 */
+function __sp_spacesQueueHook() {
+  __sp_hook = rec => {
+    if (rec.method === 'GET' && rec.path === '/api/v1/spaces') {
+      let resolve;
+      const p = new Promise(r => { resolve = r; });
+      __sp_waiters.push({ path: rec.path, resolve });
+      return p.then(body => __sp_ok(body));
+    }
+    return __sp_ok({});
+  };
+}
 /* __sp_detailHook 详情三源路由：sr（详情）按路径挂手动放行队列（乱序控制），
  * mr/tr 即时应答。 */
 const __sp_waiters = [];
@@ -110,6 +123,14 @@ function __sp_detailHook() {
 }
 /* __sp_respond_at 按队列位放行应答（同路径多请求在途时以位次区分先后——乱序
  * 控制的最小必要精度）；__sp_waiters 保持挂起序（即请求发起序）。 */
+function __sp_respond_path(path, nth, body) {
+  const hits = [];
+  for (let i = 0; i < __sp_waiters.length; i++) {
+    if (__sp_waiters[i].path === path) hits.push(i);
+  }
+  if (nth < 0 || nth >= hits.length) throw new Error('路径应答位越界 ' + nth + '（' + path + ' 在队=' + hits.length + '）');
+  return __sp_respond_at(hits[nth], body);
+}
 function __sp_respond_at(i, body) {
   if (i < 0 || i >= __sp_waiters.length) throw new Error('应答位越界 ' + i + '（在队=' + __sp_waiters.length + '）');
   const [w] = __sp_waiters.splice(i, 1);   // splice 返回被移除元素的单元素数组
@@ -204,8 +225,11 @@ async function __hs_run(scenario) {
     __sp_clickLogout();
     await __sp_settle();
     if (S.authed !== false) throw new Error('登出未生效');
-    if (S.spaces.length || S.resSnap.spaces !== '' || S.seq.spaces !== 0) {
-      throw new Error('登出未同步清理空间状态/指纹/seq');
+    if (S.spaces.length || S.resSnap.spaces !== '') {
+      throw new Error('登出未同步清理空间状态/指纹');
+    }
+    if (S.seq.spaces === 0) {
+      throw new Error('seq 被归零=序号复用窗（codex 终审必修：旧会话挂起请求 seq 与新会话匹配 → OLD 覆盖 NEW）');
     }
     // 重登（真实传输表残留原样保留——mountSpaces 不重置）：相同列表应答必须重建。
     S.authed = true;
@@ -317,6 +341,35 @@ async function __hs_run(scenario) {
     await r4; await __sp_settle();
     if (S.spacePage.space.version !== 5) throw new Error('后到旧应答回退（version=5→' + S.spacePage.space.version + '）');
     return 'PASS detail-no-rollback';
+  }
+
+  if (scenario === 'logout-pending-old-request') {
+    // codex 终审必修全程：旧会话列表请求挂起（手动队列不应答）→ 真实登出
+    //（状态/指纹清、seq 保持单调不归零）→ 重登 → 新请求先提交 NEW → 旧请求
+    // 应答后到 → seq 单调不匹配 → NEW 不被 OLD 覆盖。
+    __sp_mountSpaces();
+    __sp_spacesQueueHook();            // 列表请求挂起队列（手动放行）
+    const rOld = loadAll();            // 旧会话请求挂起（队列位 0）
+    await __sp_settle();
+    __sp_clickLogout();                // 真实登出：状态/指纹清、seq 单调保留
+    await __sp_settle();
+    if (S.authed !== false) throw new Error('登出未生效');
+    if (S.resSnap.spaces !== '') throw new Error('指纹未清');
+    if (S.seq.spaces === 0) throw new Error('seq 被归零=序号复用窗');
+    // 重登：真实传输表残留（旧请求仍挂起），新请求队列位 1。
+    S.authed = true;
+    __sp_mountSpaces(false);
+    const rNew = loadAll();            // 新会话请求挂起（队列位 1）
+    await __sp_settle();
+    __sp_respond_path('/api/v1/spaces', 1, { spaces: [__sp_sp('sp1', '新会话目标')], total: 1 });  // 新请求先返
+    await rNew; await __sp_settle();    paintSpacesView();   // 本场景不经 pollTick，重绘手动触发（数据断言与重绘分离）
+    if (!__sp_list('space-list-zone').includes('新会话目标')) throw new Error('新会话 NEW 未提交');
+    __sp_respond_path('/api/v1/spaces', 0, { spaces: [__sp_sp('sp1', '旧会话目标')], total: 1 });  // 旧请求后到
+    await rOld; await __sp_settle();
+    paintSpacesView();
+    if (!__sp_list('space-list-zone').includes('新会话目标')) throw new Error('旧请求覆盖了新会话列表（OLD 覆盖 NEW——序号复用窗未闭）');
+    if (__sp_list('space-list-zone').includes('旧会话目标')) throw new Error('列表含旧会话数据');
+    return 'PASS logout-pending-old-request';
   }
   throw new Error('未知场景 ' + scenario);
 }

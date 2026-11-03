@@ -932,9 +932,11 @@ function sessionExpired() {
   /* 空间页状态随会话边界重置（W07-03；草稿留 S.sp/S.spOps 不跨登录恢复）。 */
   S.spaces = []; S.spacesLoaded = false; S.spacesUnsupported = false; S.spacesError = '';
   S.spacePage = null; S.spaceModal = false; S.spOps = null;
-  // 指纹/seq 随状态一并失效（必修2）：resSnap 残留会让重登后相同列表应答被指纹
-  // 门控提前返回跳过状态回填（列表永不恢复、503 旗标翻转出假入口）。
-  S.resSnap.spaces = ''; S.seq.spaces = 0;
+  // 指纹随状态一并失效（必修2）：resSnap 残留会让重登后相同列表应答被指纹
+  // 门控提前返回跳过状态回填（列表永不恢复、503 旗标翻转出假入口）。**S.seq
+  // 不归零**（codex 终审必修：归零使旧会话挂起请求 seq=1 与新会话 seq=1 匹配
+  // ——OLD 覆盖 NEW；seq 保持单调，旧请求永不匹配新会话请求）。
+  S.resSnap.spaces = '';
   S.f = blankFilters();   // 筛选不跨会话（TASK-nav-filter A2：登出重置同步覆盖）
   S.drafts = {}; S.busy.clear();   // 草稿与忙态不跨会话（FE-08）；渲染走 closeLayer 生命周期（render 登录分支）
   S.chanSummary = null; S.chanExtAll = 0;   // 渠道计数随会话边界重置（P0-4），下次登录重拉
@@ -5941,7 +5943,7 @@ function bindEvents() {
       S.mcpOnboard = null;   // MCP 接入子页会话（含用户确认记录）不跨登录残留（W03-04）
       S.spaces = []; S.spacesLoaded = false; S.spacesUnsupported = false; S.spacesError = '';   // 空间页状态不跨登录残留（W07-03；草稿留 S.sp/S.spOps）
       S.spacePage = null; S.spaceModal = false; S.spOps = null;
-      S.resSnap.spaces = ''; S.seq.spaces = 0;   // 指纹/seq 随状态一并失效（必修2：同 sessionExpired 口径——残留指纹会让重登后回填被跳过）
+      S.resSnap.spaces = '';   // 指纹随状态一并失效（必修2；S.seq 不归零保持单调——同 sessionExpired 口径，codex 终审必修）
       S.f = blankFilters();   // 筛选不跨会话（TASK-nav-filter A2：登出重置同步覆盖）
       S.drafts = {}; S.busy.clear();   // 草稿不跨会话（FE-08）；在途操作随登出作废
       closeBellPanel();
