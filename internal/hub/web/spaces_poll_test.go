@@ -25,7 +25,14 @@ func TestConsoleSpacesPollGuards(t *testing.T) {
 	if err != nil {
 		t.Skip("node 不可得：行为断言跳过")
 	}
-	scenarios := []string{"poll-picks-up-remote-change", "first-load-failure-self-heals", "detail-no-rollback"}
+	scenarios := []string{
+		"poll-picks-up-remote-change",       // 必修1：真实 pollTick 接线（他端建/归档可见）
+		"first-load-failure-self-heals",     // 必修1：首载失败轮询自恢复
+		"non200-same-shape-not-committed",   // 必修1 复审回归：500 同形响应七资源均不提交
+		"relogin-rebuilds-state",            // 必修2 复审回归：登出清理指纹/seq，重登重建状态与入口；503 不假亮
+		"detail-no-rollback",                // 必修2：详情乱序不回退（A→B→A/同空间双在途）
+		"message-cursor-advances",           // 建议修B：since 游标增量推进
+	}
 	dir := t.TempDir()
 	runner := filepath.Join(dir, "runner.mjs")
 	if err := os.WriteFile(runner, []byte(consoleHarnessRunner), 0o600); err != nil {

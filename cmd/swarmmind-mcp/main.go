@@ -191,10 +191,10 @@ func (hubBackend) initResult() map[string]any {
 			capDiscoverHint +
 			// 会话/空间面指引（W07-03 一致核查收口：与 node 面 instructions 同构——
 			// 差异只写范围语义，不隐藏两端工具面差异，以 tools/list 实际发现为准）。
-			"会话四工具（session_create/send/list/status）投影中心会话面：会话建在目标节点" +
+			"会话四工具（swarmmind_session_create/swarmmind_session_send/swarmmind_session_list/swarmmind_session_status）投影中心会话面：会话建在目标节点" +
 			"（node_id+agent+cwd 寻址，权限模式断言制），原生线程由执行节点掌握，平台 ID 即会话寻址；" +
 			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归中心管理会话/控制台）。" +
-			"空间九工具（space_create/list/status/dispatch/control/messages + record/records/strategy）投影中心空间面：" +
+			"空间九工具（swarmmind_space_create/swarmmind_space_list/swarmmind_space_status/swarmmind_space_dispatch/swarmmind_space_control/swarmmind_space_messages + swarmmind_space_record/swarmmind_space_records/swarmmind_space_strategy）投影中心空间面：" +
 			"scope 固定 hub:<id>、成员为全网开放目录能力（nodeID/agentName），编排主体可领取待领取空间、配置成员、" +
 			"显式启动并指名派发（同空间串行一次一棒，结果落账不自动触发下一轮）；预算/策略/定版/归档/候选定版否决" +
 			"为主人专属（中心范围=管理会话，编排凭据 403）；消息与策略记录只读/登记不唤醒——记录写入不等于执行。",
@@ -232,9 +232,9 @@ func (nodeBackend) initResult() map[string]any {
 			"调用权与管家角色解耦，未启用时编排返回 403 mcp_disabled，由主人在控制台启用，无需钦定管家）。" +
 			capDiscoverHint +
 			"派单目标只能是本机 agent（node 本地 API 边界锁），跨机派单请经 hub 管理面。" +
-			"会话四工具（session_create/send/list/status）投影本机 agent 会话面：会话固定建在本机，" +
+			"会话四工具（swarmmind_session_create/swarmmind_session_send/swarmmind_session_list/swarmmind_session_status）投影本机 agent 会话面：会话固定建在本机，" +
 			"unverified 轮仅代表执行成立、工作结果未经证实；不含取消/关闭（终局干预归本机主人）。" +
-			"空间工具（space_create/list/status/dispatch/control/messages + record/records/strategy，W04-02+W05-04）投影本机协作空间面：" +
+			"空间工具（swarmmind_space_create/swarmmind_space_list/swarmmind_space_status/swarmmind_space_dispatch/swarmmind_space_control/swarmmind_space_messages + swarmmind_space_record/swarmmind_space_records/swarmmind_space_strategy，W04-02+W05-04）投影本机协作空间面：" +
 			"编排主体可领取待领取空间、配置成员、显式启动并指名派发（同空间串行，结果落账不自动触发下一轮）；" +
 			"预算/策略/定版/归档为主人专属（control 工具不受理）；消息与策略记录只读/登记不唤醒——记录写入不等于执行。",
 	}

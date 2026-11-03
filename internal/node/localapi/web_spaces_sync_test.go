@@ -92,6 +92,8 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 	// 专属端点，编排主体服务端 403 人话指路）。
 	for _, want := range []string{
 		"function spaceW05Zone(st) {",
+		"let spacePageReqSeq = 0",
+		"seqAtReq !== spacePageReqSeq || S.sessionEpoch !== epochAtReq",   // 必修2：node 端守卫同构源码锚（node web 无 JS 测试包，行为反例由 hub 侧同构 harness 覆盖）
 		"w05: spaceW05Zone(pg.strategy),",
 		"'/strategy'",
 		"SPACE_EVIDENCE_SOURCES[ev.source]",
@@ -143,7 +145,8 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 		"SPACE_HUB_OFF",
 		"loadResource('spaces', '/api/v1/spaces'",   // 必修1：列表经 loadAll 统一轮询链（独立 loadSpaces 退役）
 		"async function fetchSpacePage() {",
-		"spacePageReqSeq",   // 必修2：详情取数请求序号守卫
+		"spacePageReqSeq",   // 必修2：详情取数请求序号守卫（双端同构；hub 行为反例见 spaces_poll_test.go）
+		"let spacePageReqSeq = 0",
 		"/messages?since=",
 		"'POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`",
 		"/candidates/${encodeURIComponent(cid)}/",

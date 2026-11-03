@@ -228,9 +228,14 @@ func TestSpaceToolDefsFaceConsistency(t *testing.T) {
 	// 必须 ∈ hub 实际装配全集（hubBackend{}.tools()）——引用未装配工具即假指引。
 	init := (hubBackend{}).initResult()
 	inst, _ := init["instructions"].(string)
-	for _, want := range []string{"session_create/send/list/status", "space_create/list/status/dispatch/control/messages"} {
+	// 建议 A 收紧后指引引用已逐个展开为全名（简写形式会绕过下方 ⊆ 装配集正则
+	// 核查）——锚点同步为展开词形。
+	for _, want := range []string{
+		"swarmmind_session_create/swarmmind_session_send/swarmmind_session_list/swarmmind_session_status",
+		"swarmmind_space_create/swarmmind_space_list/swarmmind_space_status/swarmmind_space_dispatch/swarmmind_space_control/swarmmind_space_messages",
+	} {
 		if !strings.Contains(inst, want) {
-			t.Errorf("hub instructions 应含 %s 指引", want)
+			t.Errorf("hub instructions 应含 %s 指引（展开全名词形）", want)
 		}
 	}
 	assembled := map[string]bool{}
