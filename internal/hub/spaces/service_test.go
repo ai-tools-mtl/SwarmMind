@@ -95,7 +95,8 @@ type chainOpts struct {
 	sweepInterval     time.Duration // hub core Sweep（0 = 不启动）
 	terminalRetention time.Duration // 任务终态保留（0 = 协议默认；极短值做清理反例）
 	// spacesSweep 中心空间服务兜底扫查节拍覆盖（W09 工作块 C 绑定族矩阵注入位；
-	// 0 = 默认 50ms 不变）。矩阵测试植队列条目/钉帧序时须关扫查（>测试时长），
+	// 0 = 默认行为不变 50ms——「逐字节不变」仅适用生产码，fixture 源码有本注入位
+	// diff）。矩阵测试植队列条目/钉帧序时须关扫查（>测试时长），
 	// 否则 sweepLoop 的 retryUnbinds 与测试编排竞速收口队列条目——确定性要求。
 	spacesSweep time.Duration
 }

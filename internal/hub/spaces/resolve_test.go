@@ -68,8 +68,8 @@ func injectNeedsReview(t *testing.T, f *chainFixture, taskID string) {
 // node 侧执行并等其完成收尾（真结果回 hub 被 result_conflict 拒收——保留先到
 // needs_review，node 停止重传账本 Closed）：后续还要向同一会话提交新轮的用例
 // （accept/reject 的排队棒锚）以此为前提——needs_review 轮行恒 NativeIDOk=false
-//（hub writebackSessionTurn 强制），同会话续轮恒按 create 分类、内核已发布即撞
-//「平台会话 ID 已存在」（平台既有轮语义，非本块面）——排队棒改走第二成员独立
+// （hub writebackSessionTurn 强制），同会话续轮恒按 create 分类、内核已发布即撞
+// 「平台会话 ID 已存在」（平台既有轮语义，非本块面）——排队棒改走第二成员独立
 // 会话（addSecondMember），不依赖本等待；无排队棒的用例传 false 免除无关等待。
 func makeAwaitingReview(t *testing.T, f *chainFixture, rid string, waitNodeDone bool) collab.DispatchIntent {
 	t.Helper()
@@ -115,7 +115,7 @@ func makeAwaitingReview(t *testing.T, f *chainFixture, rid string, waitNodeDone 
 }
 
 // addSecondMember 追加第二成员 n1/coder2（独立会话）：pause → configure_members
-//（在途成员保留原绑定——添加不受 member_in_flight 门限制）→ resume（confirm——
+// （在途成员保留原绑定——添加不受 member_in_flight 门限制）→ resume（confirm——
 // 留待核对意图在途需显式确认）。排队棒经独立会话真实执行（同会话续轮在
 // needs_review 行下按 create 分类撞内核已发布——见 makeAwaitingReview 注）。
 func addSecondMember(t *testing.T, f *chainFixture, sessionID string) {

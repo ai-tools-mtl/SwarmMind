@@ -6,21 +6,24 @@
 //     node RemoveIfGen 代次精确匹配 hubbind.go RemoveIfGen——矩阵验证）；
 //   - 场景 2 自动补偿并发换绑：unbindGenOnce 探针钉代次（学到的 CurrentGen =
 //     确定性目标，不追逐）+ 并发 ensureBindSession stale 重同步窗
-//    （gen1 stale 拒 → resync → 新代越墓碑/越 live 登记两序）；
+//     （gen1 stale 拒 → resync → 新代越墓碑/越 live 登记两序）；
 //   - 场景 3 迟到回写完备隔离：旧代次会话的迟到回写（bind ack 回写/
 //     解除 ack 墓碑回写/结果与取消 writeback 收敛）在新代次绑定下零触碰
 //     （noteBound 高水位判据 + 墓碑回写身份判据 + 收敛锚 session+seq）。
 //
 // 方法纪律（任务书红线）：交错点全部用确定性协调面钉序——
-//   ① bindFrameGate：membus 同步分发的 handler wrapper（Subscribe 单 handler
-//     语义，wrapper 末步原样调原 handler，行为零变化），匹配帧携调用 goroutine
-//     停泊于门直至放行——node 入站门钉「解除帧 vs 换绑帧」的 node 登记序，
-//     hub 入站门钉「ack 抵达 vs hub 侧回写」的消费序；
-//   ② 空间调度锁屏障（lockSpace——TestD2/TestCloseDrains 既有口径）；
-//   ③ onConvDequeued 出队观测缝（worker 持有收敛项、停泊锁外的确定性信号）；
-//   ④ 条件等待（testWaitBudget 预算，非固定 sleep）。零 sleep 碰运气。
-//   矩阵全绿 = W07-02 方案 A 结构（bindGenEntry/代次条件解除/墓碑单调）已覆盖
-//   本三场景——不造洞、不推测性改码；实测出洞才修（落既有协议结构内）。
+//
+//	① bindFrameGate：membus 同步分发的 handler wrapper（Subscribe 单 handler
+//	  语义，wrapper 末步原样调原 handler，行为零变化），匹配帧携调用 goroutine
+//	  停泊于门直至放行——node 入站门钉「解除帧 vs 换绑帧」的 node 登记序，
+//	  hub 入站门钉「ack 抵达 vs hub 侧回写」的消费序；
+//	② 空间调度锁屏障（lockSpace——TestD2/TestCloseDrains 既有口径）；
+//	③ onConvDequeued 出队观测缝（worker 持有收敛项、停泊锁外的确定性信号）；
+//	④ 条件等待（testWaitBudget 预算，非固定 sleep）。零 sleep 碰运气。
+//	矩阵 13 cell（3+4+6）：W07-02 方案 A 结构（bindGenEntry/代次条件解除/墓碑
+//	单调）覆盖原有 11 cell 实测未破；S3.1b/S3.2b 为 codex R2 实测出的真窗闭环——
+//	生产修复一处（noteBound 咨询 genSeq 分配高水位，补偿删缓存后低代迟到回写
+//	不复活——分裂面闭合），墓碑低水位推进分支补确定性 cell。
 package spaces
 
 import (
@@ -306,6 +309,12 @@ func TestBindMatrixS1UnbindRebind(t *testing.T) {
 		if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) || f.binds.CurrentGen(f.sessID) != 2 {
 			t.Fatalf("gen 匹配门：旧代补偿不得触碰新代绑定: %q gen=%d", got, f.binds.CurrentGen(f.sessID))
 		}
+		// hub 缓存面断言（W09-C codex R2 必修①：变异反例——摘 entry.gen != gen 判据
+		// 会经 :1513 误删 gen2 缓存，node 断言照绿）：gen 门拦截后缓存必须保持
+		// {2,live}（删除即缓路面缺口——后续 ensureBound 会走补绑定链）。
+		if e, ok := f.bindCacheOf(f.sessID); !ok || e.gen != 2 || e.revoked || e.borrowed {
+			t.Fatalf("gen 匹配门：缓存应保持 {2,live}: %+v ok=%v", e, ok)
+		}
 		// 门⓪ 空条目：无缓存条目（未绑定过的 session）→ 跳过零副作用。
 		f.svc.compensateBindIfOwned("n1", "s-none", 7)
 		if _, ok := f.bindCacheOf("s-none"); ok {
@@ -478,7 +487,7 @@ func TestBindMatrixS2ProbeVsRebind(t *testing.T) {
 // ---------- 场景 3：迟到回写完备隔离 ----------
 
 // TestBindMatrixS3LateWritebackIsolation 场景 3 矩阵：旧代次会话的迟到回写
-//（bind ack 回写/解除 ack 墓碑回写/结果与取消 writeback）在新代次绑定下零触碰。
+// （bind ack 回写/解除 ack 墓碑回写/结果与取消 writeback）在新代次绑定下零触碰。
 func TestBindMatrixS3LateWritebackIsolation(t *testing.T) {
 	t.Run("S3.1 旧代bind_ack迟到_noteBound高水位判据_旧代解除权被gen门约束", func(t *testing.T) {
 		f := newMatrixFixture(t, false)
@@ -504,8 +513,10 @@ func TestBindMatrixS3LateWritebackIsolation(t *testing.T) {
 		if err != nil || !ownedB || genB != 2 {
 			t.Fatalf("换绑 gen2: gen=%d owned=%v err=%v", genB, ownedB, err)
 		}
-		// 放行迟到 ack：noteBound(1) 高水位判据（cur.gen=2 > 1）跳过——旧代回写
-		// 不覆盖新登记。
+		// 放行迟到 ack：noteBound(1) 双层高水位判据（条目 cur.gen=2 > 1 为第一层；
+		// genSeq 分配高水位=2 为第二层——W09-C R3 基线注记：M1「单摘条目门」的
+		// 变异咬合在 genSeq 门引入前的 41a4b70 基线成立，当前提交单摘条目门时
+		// S3.1 仍被 genSeq 门拦下，须两层同摘方破）跳过——旧代回写不覆盖新登记。
 		gate.release()
 		ra := <-resA
 		if ra.err != nil || ra.gen != 1 || !ra.owned {
@@ -561,6 +572,149 @@ func TestBindMatrixS3LateWritebackIsolation(t *testing.T) {
 		}
 		if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) || f.binds.CurrentGen(f.sessID) != 2 {
 			t.Fatalf("新代绑定应完好: space=%q gen=%d", got, f.binds.CurrentGen(f.sessID))
+		}
+		f.requireNoPendingUnbind()
+	})
+
+	t.Run("S3.1b 补偿删缓存后低代迟到回写不复活_genSeq高水位咨询_新派发新代自愈", func(t *testing.T) {
+		// W09-C codex R2 必修②反例闭环：A/B/C 三派发交错（版本预检→暂停→CAS 失败
+		// 补偿→恢复）可达的真实生产窗——补偿 delete-claim 删缓存后，迟到的低代
+		// bind ack（缓存空）无 genSeq 咨询时会把 {1,live} 写回，与 node 侧新代墓碑
+		// 形成「hub live 旧代 / node 墓碑新代」分裂面：ensureBound 缓存命中跳过
+		// 补绑定 → 后续派发在 node 执行口全拒（会话派发失效）。确定性收缩形态：
+		// 直接以 noteBound(1) 代「迟到的低代 ack 回写」这一写动作（传输延迟即门
+		// 语义，写面同一函数）。
+		f := newMatrixFixture(t, false)
+		type bindRes struct {
+			gen   uint64
+			owned bool
+			err   error
+		}
+		// 门A：钉「gen1 bind ack」——gen1 已落 node、hub 回写未及（缓存空）。
+		gateA := newBindFrameGate(func(p protocol.SpaceBindPayload) bool {
+			return p.Space == Scope(f.spaceID) && p.Generation == 1 && p.SessionID == f.sessID
+		})
+		gateA.installHub(f)
+		t.Cleanup(gateA.release)
+		resA := make(chan bindRes, 1)
+		go func() {
+			g, owned, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+			resA <- bindRes{g, owned, err}
+		}()
+		gateA.waitArrived(t)
+		// 换绑 gen2（缓存空 → 新代；node 2 > live gen1 接受）——ack 直通（门A 只钉
+		// gen1）→ {2,live}，genSeq=2。
+		g2, owned2, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+		if err != nil || !owned2 || g2 != 2 {
+			t.Fatalf("换绑 gen2: gen=%d owned=%v err=%v", g2, owned2, err)
+		}
+		gateA.release()
+		ra := <-resA
+		if ra.err != nil || ra.gen != 1 || !ra.owned {
+			t.Fatalf("gen1 应 (1,true,nil): %+v", ra)
+		}
+		// 门B（重订阅——Subscribe 单 handler 后装顶替先装，门A wrapper 内已停泊
+		// goroutine 持自身闭包不受影响）：钉「补偿解除 ack gen2」。
+		gateB := newBindFrameGate(func(p protocol.SpaceBindPayload) bool {
+			return p.Space == "" && p.Generation == 2 && p.SessionID == f.sessID
+		})
+		gateB.installHub(f)
+		t.Cleanup(gateB.release)
+		done := make(chan struct{}, 1)
+		go func() {
+			f.svc.compensateBindIfOwned("n1", f.sessID, g2)
+			close(done)
+		}()
+		gateB.waitArrived(t) // claim 删缓存（genSeq=2 保留）→ node 墓碑2 → ack 停泊
+		if _, ok := f.bindCacheOf(f.sessID); ok {
+			t.Fatal("前置：补偿 claim 应已删缓存（genSeq 保留 2）")
+		}
+		// 反例窗：迟到的低代 bind ack（gen1）在缓存空时回写——genSeq 高水位咨询
+		// 必须拦下（缓存不得出现 {1,live}；否则分裂面成立）。
+		f.svc.noteBound(f.sessID, 1)
+		if e, ok := f.bindCacheOf(f.sessID); ok {
+			t.Fatalf("低代迟到回写不得复活（genSeq 高水位=2）: %+v ok=%v", e, ok)
+		}
+		// 新派发自愈：缓存空 → 分配 gen3（> 墓碑2）→ node PutIfGenNewer 接受。
+		g3, owned3, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+		if err != nil || !owned3 || g3 != 3 {
+			t.Fatalf("自愈换绑 gen3: gen=%d owned=%v err=%v", g3, owned3, err)
+		}
+		// 放行解除 ack2：Accepted 分支墓碑回写判据对 {3,live} 全不中 → 跳过零触碰。
+		gateB.release()
+		waitSignal(t, done, "compensateBindIfOwned 完成")
+		if e, ok := f.bindCacheOf(f.sessID); !ok || e.revoked || e.gen != 3 {
+			t.Fatalf("解除 ack2 回写不得触碰新代: %+v ok=%v", e, ok)
+		}
+		if got := f.binds.Space(f.sessID); got != Scope(f.spaceID) || f.binds.CurrentGen(f.sessID) != 3 {
+			t.Fatalf("node 应保持 gen3: space=%q gen=%d", got, f.binds.CurrentGen(f.sessID))
+		}
+		f.requireNoPendingUnbind()
+	})
+
+	t.Run("S3.2b 低墓碑推进_两代解除ack逆序消费_墓碑单调前进真分支", func(t *testing.T) {
+		// W09-C codex R2 必修③反例闭环：`e.revoked && e.gen < *gen`（service.go
+		// 墓碑回写判据第三支）并非防御性不可达——P/Q 两派发先后登记失败各自补偿
+		// （cache 删除+node 解除），解除 ack 逆序消费：ack1 先落（缓存空 → !ok 分支
+		// 写 {1,revoked}），ack2 后落 → 命中第三支推进墓碑 {2,revoked}。node 侧
+		// RemoveIfGen 代次精确匹配不改写既有墓碑，hub 侧高水位推进由本分支承担。
+		f := newMatrixFixture(t, false)
+		g1, owned1, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+		if err != nil || !owned1 {
+			t.Fatalf("bind gen1: %v", err)
+		}
+		// 双 ack 逆序消费的实现口径：Subscribe 单 handler（后装顶替先装）——门1
+		// 先装钉停 ack1，门2 重装后 bind2/解除 ack2 走门2 wrapper；门1 wrapper 内
+		// 已停泊 goroutine 持自身闭包，release 后仍直呼 hubCore.HandleFrame 落账。
+		gate1 := newBindFrameGate(func(p protocol.SpaceBindPayload) bool {
+			return p.Space == "" && p.Generation == 1 && p.SessionID == f.sessID
+		})
+		gate1.installHub(f)
+		t.Cleanup(gate1.release)
+		done1 := make(chan struct{}, 1)
+		go func() {
+			f.svc.compensateBindIfOwned("n1", f.sessID, g1)
+			close(done1)
+		}()
+		gate1.waitArrived(t) // P：claim 删缓存 → node 墓碑1 → 解除 ack1 停泊
+		if _, ok := f.bindCacheOf(f.sessID); ok {
+			t.Fatal("前置 P：补偿 claim 应已删缓存")
+		}
+		// Q：缓存空 → gen2（> node 墓碑1，PutIfGenNewer 接受）→ {2,live}；
+		// 随即补偿 gen2（claim 删缓存 → node 墓碑2 → 解除 ack2 停泊门2）。
+		// 先重装门2（钉解除 ack gen2）——此后 bind2 ack（Space=scope）按谓词直通。
+		gate2 := newBindFrameGate(func(p protocol.SpaceBindPayload) bool {
+			return p.Space == "" && p.Generation == 2 && p.SessionID == f.sessID
+		})
+		gate2.installHub(f)
+		t.Cleanup(gate2.release)
+		g2, owned2, err := f.svc.ensureBindSession("n1", f.sessID, Scope(f.spaceID))
+		if err != nil || !owned2 || g2 != 2 {
+			t.Fatalf("Q bind gen2: %v", err)
+		}
+		done2 := make(chan struct{}, 1)
+		go func() {
+			f.svc.compensateBindIfOwned("n1", f.sessID, g2)
+			close(done2)
+		}()
+		gate2.waitArrived(t)
+		if _, ok := f.bindCacheOf(f.sessID); ok {
+			t.Fatal("前置 Q：补偿 claim 应已删缓存")
+		}
+		// 先消费 ack1：缓存空 → Accepted 分支 !ok 形态写 {1,revoked}。
+		gate1.release()
+		waitSignal(t, done1, "补偿 gen1 完成")
+		if e, ok := f.bindCacheOf(f.sessID); !ok || !e.revoked || e.gen != 1 {
+			t.Fatalf("ack1 应落墓碑 {1,revoked}: %+v ok=%v", e, ok)
+		}
+		// 后消费 ack2：命中 e.revoked && e.gen(1) < 2 → 推进 {2,revoked}（真分支）。
+		gate2.release()
+		waitSignal(t, done2, "补偿 gen2 完成")
+		if e, ok := f.bindCacheOf(f.sessID); !ok || !e.revoked || e.gen != 2 {
+			t.Fatalf("ack2 应推进墓碑 {2,revoked}（低墓碑推进真分支）: %+v ok=%v", e, ok)
+		}
+		if got := f.binds.CurrentGen(f.sessID); got != 2 {
+			t.Fatalf("node 墓碑高水位应单调保留 2: %d", got)
 		}
 		f.requireNoPendingUnbind()
 	})

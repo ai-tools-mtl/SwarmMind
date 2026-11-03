@@ -356,6 +356,13 @@ func (s *Service) noteBound(sessionID string, gen uint64) {
 	if cur := s.bindGens[sessionID]; cur.gen > gen {
 		return // 旧应答迟到回写旧代次不覆盖新登记（codex 复审轮 3 原则 3）
 	}
+	if gen < s.genSeq[sessionID] {
+		return // 低于分配高水位的迟到回写不复活（W09-C codex 必修，矩阵 S3.1b）：
+		// 补偿 delete-claim 删缓存后 genSeq 仍记得曾分配过更高代次——若无此判据，
+		// 迟到低代 bind ack 会在缓存空时把旧代写成 {live}，与 node 侧新代墓碑形成
+		// 分裂面（ensureBound 缓存命中跳过补绑定 → 后续派发在 node 执行口全拒）。
+		// 缓存保持空 → ensureBindSession 分配更高新代次（> 墓碑高水位）自愈。
+	}
 	s.bindGens[sessionID] = bindGenEntry{gen: gen}
 }
 
