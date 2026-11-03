@@ -192,10 +192,43 @@ type spaceDiag struct {
 	AwaitingReview int `json:"awaiting_review,omitempty"`
 }
 
+// dispatchTurnFact 意图 → 账本轮事实认领（W08-02 codex 必修2 三态口径——防轮号
+// 复用误挂）：
+//  1. TaskID 在位（accepted/已收敛带任务）→ 按 TaskID 精确定位；任务清理=无事实，
+//     **不回退 session+seq**——收敛后同会话同号轮被新意图复用时，按号查到的是
+//     别人的轮（codex overlay 反例：旧意图挂上新轮 completed 答复）；
+//  2. TaskID 空 + 在途 pending（受理→投递崩溃窗）→ 按 session+seq+空间来源
+//     三重核验认领（来源标记与投递链 SessionTurnRef.Space 同源；受理期轮号预留
+//     为在途意图独占——spaceIntentSeqHighWater 同一口径——三重全等的轮行只能是
+//     本意图自己的投递产物）；
+//  3. TaskID 空 + 非在途（未投递即取消收束）→ 如实无轮事实，**不认领后到轮**
+//     （取消对账「无实物才取消收束」，其后同号轮属复用者，与本意图无关）。
+func (s *Server) dispatchTurnFact(spaceID string, it collab.DispatchIntent) (ledger.Entry, bool) {
+	if s.cfg.Ledger == nil || it.SessionID == "" {
+		return ledger.Entry{}, false
+	}
+	if it.TaskID != "" {
+		return s.cfg.Ledger.Get(it.TaskID)
+	}
+	if !it.Status.InFlight() {
+		return ledger.Entry{}, false
+	}
+	e, ok := ledgerTurnOf(s.cfg.Ledger, it.SessionID, it.TurnSeq)
+	if !ok || e.Task.Session == nil {
+		return ledger.Entry{}, false
+	}
+	sr := e.Task.Session
+	if sr.SessionID != it.SessionID || sr.TurnSeq != it.TurnSeq || sr.Space != spaceID {
+		return ledger.Entry{}, false // 来源标记不符=撞号嫌疑，不认领
+	}
+	return e, true
+}
+
 // spaceDiagOf 计算空间诊断投影（node 面：意图 × 账本轮终 join；hub 面同形函数
 // 见 internal/hub/api/spaces.go——两端各自 join 本端轮终事实源，语义逐条同规）。
-// 轮终不确定判定：账本轮已 finished 且 Result.Status=needs_review（重启对账与
-// 活路径同款「留待核对」分类的查询侧投影）。
+// 轮终不确定判定：认领到的账本轮已 finished 且 Result.Status=needs_review（重启
+// 对账与活路径同款「留待核对」分类的查询侧投影）；轮认领经 dispatchTurnFact
+// 三态口径（必修2——防轮号复用误挂）。
 func (s *Server) spaceDiagOf(id string, view collab.SpaceView) spaceDiag {
 	d := spaceDiag{InFlight: view.InFlight}
 	if d.InFlight == 0 || s.cfg.Ledger == nil {
@@ -205,7 +238,7 @@ func (s *Server) spaceDiagOf(id string, view collab.SpaceView) spaceDiag {
 		if !it.Status.InFlight() {
 			continue
 		}
-		e, ok := ledgerTurnOf(s.cfg.Ledger, it.SessionID, it.TurnSeq)
+		e, ok := s.dispatchTurnFact(id, it)
 		if !ok || e.State != ledger.StateFinished || e.Result == nil {
 			continue
 		}
@@ -538,26 +571,23 @@ func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) 
 		binding["registered"] = true
 	}
 	body["binding"] = binding
-	// 轮终 join：账本轮事实按 session+seq 定位（与 service.findLedgerTurn 同款键
-	// ——pending 意图 TaskID 未在位（受理→投递窗/未投递）同样可查轮事实；诊断
-	// join 不依赖 TaskID 在位，W08-02）。
+	// 轮终 join：经 dispatchTurnFact 三态认领（必修2——TaskID 精确/pending 崩溃窗
+	// 三重核验/未投递取消不认领后到轮，防轮号复用误挂）。
 	var (
 		turnFound bool
 		review    bool
 	)
-	if it.SessionID != "" && s.cfg.Ledger != nil {
-		if e, ok := ledgerTurnOf(s.cfg.Ledger, it.SessionID, it.TurnSeq); ok {
-			turnFound = true
-			turn := map[string]any{"task_id": e.Task.ID, "state": e.State}
-			if e.Result != nil {
-				turn["status"] = e.Result.Status
-				turn["error"] = e.Result.Error
-				turn["final_answer"] = e.Result.FinalAnswer
-				review = it.Status.InFlight() && e.State == ledger.StateFinished &&
-					e.Result.Status == protocol.ResultNeedsReview
-			}
-			body["turn"] = turn
+	if e, ok := s.dispatchTurnFact(spaceID, it); ok {
+		turnFound = true
+		turn := map[string]any{"task_id": e.Task.ID, "state": e.State}
+		if e.Result != nil {
+			turn["status"] = e.Result.Status
+			turn["error"] = e.Result.Error
+			turn["final_answer"] = e.Result.FinalAnswer
+			review = it.Status.InFlight() && e.State == ledger.StateFinished &&
+				e.Result.Status == protocol.ResultNeedsReview
 		}
+		body["turn"] = turn
 	}
 	if it.TaskID != "" && !turnFound {
 		body["task_gone"] = true // 任务已过保留期清理（历史缺口注记，W08-02）

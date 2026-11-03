@@ -92,6 +92,7 @@ hub `data_dir`：
 | 文件 | 内容 | 备注 |
 |---|---|---|
 | `hub_state.db`（连同 `-wal`/`-shm`，或经 `.backup` 合一） | 任务、节点目录、事件账本等全部状态 | 运行中备份必须走 `.backup` 快照，见「热拷陷阱」 |
+| `hub_spaces.db`（连同 `-wal`/`-shm`，或经 `.backup` 合一） | 中心空间协作状态（W07-02 起独立单文件 WAL 库；中心空间服务装配后出现，未装配无此文件） | 与主库同一热拷陷阱：运行中备份必须走 `.backup` 快照；脚本按 WAL 库集合逐一覆盖 |
 | `hub_cert.pem` / `hub_key.pem` | TLS 证书与私钥 | 私钥敏感；证书丢失后重启会再生新证书，触发 node TOFU 拒连（见下文） |
 | `admin_token` | 管理面登录令牌 | 敏感；文件令牌，缺失或不足 32 字节时启动会再生成新令牌并写启动日志，旧令牌全部失效 |
 | `api_tokens.json` | PAT 存储（哈希、明文前缀、撤销状态） | 敏感；独立于文件令牌持久化，不受令牌再生成影响，丢失后全部 PAT 失效，需在管理台逐个重新签发 |
@@ -123,13 +124,14 @@ scripts/backup.sh --data-dir "<hub data_dir>" --config "<hub.yaml 路径>" --out
 scripts/backup.sh --data-dir "<node data_dir>" --config "<node.yaml 路径>" --no-home --no-logs --out "<备份目录>"
 ```
 
-脚本行为：停机判定 = 对 `data_dir/lock` 非阻塞抢锁并**全程持有至脚本退出**（探测即持锁，备份期间实例无法启动）；锁文件缺失且 db 存在属异常态，按「运行中」保守处理。目标已停止 → 全量拷贝（db 三件套同拷）；目标运行中且装有 `sqlite3` → db 走 `.backup` 一致快照并 `quick_check` 校验，其余文件照拷；目标运行中且没有 `sqlite3` → 报错退出，不产出任何备份。直拷路径绝不触碰运行中的 db：备份期间新出现 `hub_state.db` / `ledger.json`（实例启动窗口竞态）会拒绝交付。备份目录已存在、显式 `--config` 缺失、`--config` 平铺同名冲突均报错退出；中途失败或被 INT/TERM/HUP 中断自动删除半成品目录，不留可误信的残缺产物。
+脚本行为：停机判定 = 对 `data_dir/lock` 非阻塞抢锁并**全程持有至脚本退出**（探测即持锁，备份期间实例无法启动）；锁文件缺失且任一 WAL 库存在属异常态，按「运行中」保守处理。目标已停止 → 全量拷贝（WAL 库三件套同拷）；目标运行中且装有 `sqlite3` → WAL 库（`hub_state.db` 与 `hub_spaces.db`，源目录实际存在者）逐一走 `.backup` 一致快照并 `quick_check` 校验，其余文件照拷；目标运行中且没有 `sqlite3` → 报错退出，不产出任何备份。直拷路径绝不触碰运行中的库：备份期间新出现任一 WAL 库 / `ledger.json`（实例启动窗口竞态）会拒绝交付。备份目录已存在、显式 `--config` 缺失、`--config` 平铺同名冲突均报错退出；中途失败或被 INT/TERM/HUP 中断自动删除半成品目录，不留可误信的残缺产物。
 
 手动等价命令（停机，全量）：
 
 ```bash
 mkdir -p "<备份目录>" && chmod 700 "<备份目录>"
 cp "<data_dir>"/hub_state.db* "<备份目录>"/        # 停止后三件套一起拷
+cp "<data_dir>"/hub_spaces.db* "<备份目录>"/ 2>/dev/null || true   # 中心空间库（装配后存在；三件套同拷）
 cp "<data_dir>/hub_cert.pem" "<data_dir>/hub_key.pem" "<data_dir>/admin_token" \
    "<data_dir>/api_tokens.json" "<data_dir>/account.json" \
    "<data_dir>/notify_channels.json" "<data_dir>/groups.json" "<备份目录>"/
@@ -144,13 +146,14 @@ umask 077 && mkdir -p "<备份目录>" && chmod 700 "<备份目录>"   # 产物�
 # 进入备份目录执行，快照文件名不含特殊字符：路径含撇号/空格时直接可用
 # （sqlite3 点命令参数内联含撇号路径会解析错乱）
 ( cd "<备份目录>" && sqlite3 "<data_dir>/hub_state.db" ".backup hub_state.db" )
+( cd "<备份目录>" && sqlite3 "<data_dir>/hub_spaces.db" ".backup hub_spaces.db" )   # 中心空间库（装配后存在）
 # 其余文件与配置同上照拷（含收尾 chmod 600 "<备份目录>"/*）；
 # .backup 已合并 -wal 数据，不要把运行中的 -wal/-shm 一并拷走
 ```
 
-### 热拷陷阱：直接 cp 运行中的 hub_state.db
+### 热拷陷阱：直接 cp 运行中的 WAL 库
 
-库是 WAL 模式：已提交事务先进 `-wal`，checkpoint 回写主库之前，主库文件里没有这些数据。对运行中的 hub 单拷主库文件：
+库是 WAL 模式：已提交事务先进 `-wal`，checkpoint 回写主库之前，主库文件里没有这些数据。对运行中的 hub 单拷任一 WAL 库文件（`hub_state.db` / `hub_spaces.db` 同陷阱）：
 
 | 做法 | 结果 |
 |---|---|

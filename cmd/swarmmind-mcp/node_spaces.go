@@ -317,10 +317,11 @@ func spaceToolStatus(api spaceAPICaller, face spaceFace, args map[string]any) (s
 	if sp.Archived {
 		bl.WriteString("已归档（列表收纳态）：详情/记录/消息照常可查，材料与原生线程保留。\n")
 	}
-	// 诊断注记（W08-02，spaceDiag 投影随行）：轮终不确定（needs_review）的在途
-	// 意图按纪律留待核对未收敛——禁止基于未核对轮次下结论的同源提醒。
+	// 诊断注记（W08-02，spaceDiag 投影随行）：按纪律留待核对未收敛的在途意图
+	// 计数——覆盖轮终不确定（needs_review）与执行证据缺失（任务已过保留期清理
+	// 不可核验）两类（必修4：不冒认具体轮终态），禁止基于未核对轮次下结论。
 	if out.Diag.AwaitingReview > 0 {
-		fmt.Fprintf(&bl, "诊断：%d 个在途意图的执行轮终为 needs_review（结果不确定，按纪律留待核对、不自动收敛重跑）——核对前禁止基于这些轮次下结论。\n", out.Diag.AwaitingReview)
+		fmt.Fprintf(&bl, "诊断：%d 个在途意图留待核对（轮终不确定或执行证据缺失——按纪律不自动收敛重跑，待人工核对）——核对前禁止基于这些轮次下结论。\n", out.Diag.AwaitingReview)
 	}
 	return bl.String(), nil
 }
@@ -912,7 +913,7 @@ func spaceToolDefs(face spaceFace) []toolDef {
 		{Name: "swarmmind_space_list", Description: d("列出本机协作空间：ID、目标、状态（待配置/待领取/可运行/运行/暂停/受阻/待核对/终态）、负责人与任期、在途数、暂停原因。发现可领取（待领取）或可续派的空间。已归档空间默认不列出（include_archived=true 显式包含；归档只是列表收纳，按 ID 照常可查详情）"), InputSchema: toolObj(map[string]any{
 			"include_archived": toolBool("true 时同时列出已归档空间（缺省隐藏——归档只做列表收纳，详情/记录不受影响）"),
 		})},
-		{Name: "swarmmind_space_status", Description: d("查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）+ 诊断注记（轮终不确定留待核对的在途意图数——needs_review 不自动收敛）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论"), InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_status", Description: d("查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）+ 诊断注记（留待核对的在途意图数——轮终不确定或执行证据缺失，不自动收敛待人工核对）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID（swarmmind_space_list 可查）"),
 		}, "space_id")},
 		{Name: "swarmmind_space_dispatch", Description: d("向协作空间指名成员派发一轮执行（编排主体唯一执行入口；须当前驱动者形态——领取空间后持任期）。返回意图受理回执（202 异步，空间串行调度：同空间一次一棒，跨空间并行）；request_id 可选幂等（重放不重复执行不重复扣预算）。结果落账不自动触发下一轮——继续推进须再次显式派发"), InputSchema: toolObj(map[string]any{

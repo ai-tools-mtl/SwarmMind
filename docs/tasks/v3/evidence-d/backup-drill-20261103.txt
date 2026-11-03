@@ -1,55 +1,64 @@
-# W08-02 backup.sh 真实演练留证 2026-11-03T03:13:42Z（drill root=/tmp/w0802-backup-drill.aYDFBY）
-# 口径：停机备份/运行中在线快照/全新目录恢复核对/node 形态目录；不承诺网页在线恢复。
+# W08-02 backup.sh 真实演练留证（修复轮重跑·扩 hub_spaces.db 覆盖）2026-11-03T03:56:16Z（drill root=/tmp/w0802-backup-drill2.UvQMq9）
+# 口径：WAL 库集合=hub_state.db+hub_spaces.db 两库逐一覆盖；停机/在线/恢复/node 形态；不承诺网页在线恢复。
 
 wal
-## 源库行数（含 wal 未合并行）
-3
+wal
+## 源库行数（主库 3 / 空间库 2，各含 wal 未合并行）
+admin_token
+hub_spaces.db
+hub_spaces.db-shm
+hub_spaces.db-wal
+hub_state.db
+hub_state.db-shm
+hub_state.db-wal
+ledger.json
 
-## 场景 A：停机备份
+## 场景 A：停机备份（两库三件套同拷）
 [backup] 模式：停机全量拷贝（本脚本已持 data_dir 锁，备份期间实例无法启动）
-[backup] 源：/tmp/w0802-backup-drill.aYDFBY/hub-data
-[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-stopped （共 6 个文件）
+[backup] 源：/tmp/w0802-backup-drill2.UvQMq9/hub-data
+[backup] 备份完成：/tmp/w0802-backup-drill2.UvQMq9/backup-stopped （共 9 个文件）
 [backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
 [backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
-t-drill-001
-t-drill-002
-t-drill-003
-ok
+主库：3 rows quick_check=ok
+空间库：2 rows quick_check=ok
 
-## 场景 B：运行中备份（python 代持 lock 模拟运行实例）
-backup.sh: 提示：/tmp/w0802-backup-drill.aYDFBY/hub-data 疑似运行中，db 走 sqlite3 在线快照。在线备份次于停机备份，条件允许请停机后重跑。
-[backup] 模式：在线快照（目标运行中，db 经 sqlite3 .backup 合并 wal）
-[backup] 源：/tmp/w0802-backup-drill.aYDFBY/hub-data
-[backup] db 快照完成且 quick_check=ok
-[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-online （共 4 个文件）
+## 场景 B：运行中备份（python 代持 lock 模拟运行实例 → 两库逐一 .backup）
+backup.sh: 提示：/tmp/w0802-backup-drill2.UvQMq9/hub-data 疑似运行中，WAL 库（hub_state.db / hub_spaces.db）逐一走 sqlite3 在线快照。在线备份次于停机备份，条件允许请停机后重跑。
+[backup] 模式：在线快照（目标运行中，WAL 库逐一经 sqlite3 .backup 合并 wal：hub_state.db+hub_spaces.db）
+[backup] 源：/tmp/w0802-backup-drill2.UvQMq9/hub-data
+[backup] hub_state.db 快照完成且 quick_check=ok
+[backup] hub_spaces.db 快照完成且 quick_check=ok
+[backup] 备份完成：/tmp/w0802-backup-drill2.UvQMq9/backup-online （共 5 个文件）
 [backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
 [backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
-在线快照交付文件数（交付时自包含，无 wal/shm 副作用）：
-       4
-/tmp/w0802-backup-drill.aYDFBY/backup-online/admin_token
-/tmp/w0802-backup-drill.aYDFBY/backup-online/hub.yaml
-/tmp/w0802-backup-drill.aYDFBY/backup-online/hub_state.db
-/tmp/w0802-backup-drill.aYDFBY/backup-online/ledger.json
-3
+在线快照交付文件（自包含，无 wal/shm 副作用）：
+admin_token
+hub.yaml
+hub_spaces.db
+hub_state.db
+ledger.json
+主库 quick_check=ok rows=3
+空间库 quick_check=ok rows=2
 
-## 场景 C：全新临时目录恢复核对（先停写者→拷贝→quick_check→ID/哈希）
-ok
-t-drill-001 t-drill-002 t-drill-003 
-source-dump-sha256=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
-restore-dump-sha256=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
-哈希一致：恢复库与源库逻辑内容逐行等价
+## 场景 C：全新临时目录恢复核对（两库；先停写者→拷贝→quick_check→ID/哈希）
+恢复后主库行 ID：t-drill-001 t-drill-002 t-drill-003 
+恢复后空间库行 ID：sp-drill0001 sp-drill0002 
+hub_state.db source=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
+hub_state.db restore=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
+hub_state.db 哈希一致：恢复库与源库逻辑内容逐行等价
+hub_spaces.db source=f41853ffd93cd87898b1aa9aaae5613a7bf0860a6b94f56154a94b22190f65fe
+hub_spaces.db restore=f41853ffd93cd87898b1aa9aaae5613a7bf0860a6b94f56154a94b22190f65fe
+hub_spaces.db 哈希一致：恢复库与源库逻辑内容逐行等价
 恢复=纯手工文件操作，不拉起任何进程、不自动执行任何新轮次
 
-## 场景 D：node 形态目录（JSON 账本，无 db）停机备份
+## 场景 D：node 形态目录（无 WAL 库——集合空命中行为不变）停机备份
 [backup] 模式：停机全量拷贝（本脚本已持 data_dir 锁，备份期间实例无法启动）
-[backup] 源：/tmp/w0802-backup-drill.aYDFBY/node-data
-[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-node （共 5 个文件）
+[backup] 源：/tmp/w0802-backup-drill2.UvQMq9/node-data
+[backup] 备份完成：/tmp/w0802-backup-drill2.UvQMq9/backup-node （共 3 个文件）
 [backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
 [backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
-cancels.json
 ledger.json
 node.yaml
-prime_token
 spaces.json
 
-## 结论：四场景全部真实执行通过；产物含凭据（0700/0600）；恢复步骤人工（无网页在线恢复接口）
+## 结论：WAL 库集合两库全覆盖（在线快照逐一 .backup+quick_check、恢复逐行等价）；node 目录零 WAL 库行为不变；产物含凭据（0700/0600）；恢复步骤人工（无网页在线恢复接口）

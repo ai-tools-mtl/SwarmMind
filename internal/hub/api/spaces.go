@@ -203,24 +203,38 @@ func scopeMap(list []collab.Space) map[string]string {
 // 全部为既有事实的只读 join 投影，零影子状态。
 type spaceDiag struct {
 	InFlight       int `json:"in_flight"`                 // 在途/排队意图数（= space.in_flight 同源）
-	AwaitingReview int `json:"awaiting_review,omitempty"` // 轮终不确定（unverified=needs_review 投影）、留待核对未收敛数
+	AwaitingReview int `json:"awaiting_review,omitempty"` // 留待核对未收敛数（轮终不确定 + 执行证据缺失两类）
 }
 
-// hubSpaceDiagOf 计算中心空间诊断投影（意图 × 任务行实物 join——与 spaces 服务
-// 重启对账分类同源：accepted 意图的任务行 needs_review 终态、或任务行已过保留期
-// 清理（执行事实不可核验 turnFactMissing），都按纪律留待核对未收敛即计入）。
+// hubSpaceDiagOf 计算中心空间诊断投影（与 spaces 服务重启对账分类同源）：
+//   - accepted：按意图登记的任务行实物判定——needs_review 终态（轮终不确定）、
+//     任务行已过保留期清理（执行证据缺失，turnFactMissing 同源）都按纪律留待
+//     核对未收敛即计入；
+//   - pending 崩溃窗（轮行已落库、Attach 未落）：按 request_id 锚精确取本意图
+//     轮行（镜像 intentTurnFact/turnFactMissing——codex 必修3），轮行在案而任务
+//     已清理=证据缺失留待核对；任务 needs_review 终态同规；无轮行=未投递，
+//     不计入（取消收束语义另行处理，不冒认）。
 func (s *Server) hubSpaceDiagOf(id string, view collab.SpaceView) spaceDiag {
 	d := spaceDiag{InFlight: view.InFlight}
 	if d.InFlight == 0 || s.cfg.Core == nil {
 		return d
 	}
 	for _, it := range s.cfg.Spaces.Intents(id) {
-		if it.Status != collab.IntentAccepted || it.TaskID == "" {
-			continue
-		}
-		t, ok := s.cfg.Core.GetTask(it.TaskID)
-		if !ok || t.Status == protocol.StatusNeedsReview {
-			d.AwaitingReview++
+		switch {
+		case it.Status == collab.IntentAccepted && it.TaskID != "":
+			t, ok := s.cfg.Core.GetTask(it.TaskID)
+			if !ok || t.Status == protocol.StatusNeedsReview {
+				d.AwaitingReview++
+			}
+		case it.Status == collab.IntentPending && it.SessionID != "":
+			tr, ok := s.cfg.Core.SessionTurnByRequest(it.SessionID, it.RequestID)
+			if !ok || tr.Seq != it.TurnSeq {
+				continue // 未投递（无轮行）：不算留待核对
+			}
+			t, ok := s.cfg.Core.GetTask(tr.TaskID)
+			if !ok || t.Status == protocol.StatusNeedsReview {
+				d.AwaitingReview++
+			}
 		}
 	}
 	return d
@@ -508,9 +522,11 @@ func (s *Server) handleSpaceDispatch(w http.ResponseWriter, r *http.Request, sub
 // 同形同语义，全为既有事实投影零影子状态）：
 //   - `task_gone`：关联任务已过保留期清理（轮行 TaskGone 投影）——历史缺口如实
 //     可见，轮次注记仍在（会话轮账本不随任务清理失联）；
-//   - `awaiting_review`：accepted 意图的任务行 needs_review 终态、或任务行已过
-//     保留期清理（执行事实不可核验）——按纪律留待核对未收敛（与 spaces 服务重启
-//     对账分类同源）；
+//   - `awaiting_review`：留待核对未收敛（与 spaces 服务重启对账分类同源）——
+//     accepted 意图的任务行 needs_review 终态（轮终不确定）、任务行已过保留期
+//     清理（执行证据缺失），或 pending 崩溃窗轮行在案而任务已清理（必修3，
+//     intentTurnFact/turnFactMissing 镜像——按 request_id 锚精确取本意图轮行，
+//     hub 轮行 RequestID 单调不复用无撞号面）；
 //   - `binding`：成员会话绑定登记态（session_id + generation——中心绑定代次投影，
 //     gen>0=已登记；0=未登记/已解除）。
 func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) {
@@ -530,15 +546,26 @@ func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) 
 		gen = s.cfg.Spaces.BoundGenOf(it.SessionID)
 	}
 	body["binding"] = map[string]any{"session_id": it.SessionID, "generation": gen}
-	// 任务事实注记（与 hubSpaceDiagOf 同源判定——accepted 意图按任务行实物）：
-	// 任务行已过保留期清理=历史缺口（task_gone）且执行事实不可核验（留待核对）；
-	// needs_review 终态=留待核对（不自动收敛重跑）。
+	// 任务事实注记（与 hubSpaceDiagOf 同源判定）：
+	//   - accepted：按意图登记的任务行实物——任务行已过保留期清理=历史缺口
+	//    （task_gone）且执行证据缺失（留待核对）；needs_review 终态=轮终不确定
+	//    （留待核对，不自动收敛重跑）；
+	//   - pending 崩溃窗（轮行已落库、Attach 未落，codex 必修3）：按 request_id 锚
+	//    精确取本意图轮行（镜像 spaces 服务 intentTurnFact/turnFactMissing）——
+	//    轮行在案而任务已清理=证据缺失留待核对，如实注记不冒认。
 	if it.Status == collab.IntentAccepted && it.TaskID != "" && s.cfg.Core != nil {
 		if t, ok := s.cfg.Core.GetTask(it.TaskID); !ok {
 			body["task_gone"] = true       // 任务已过保留期清理（历史缺口注记）
-			body["awaiting_review"] = true // 执行事实不可核验=留待核对
+			body["awaiting_review"] = true // 执行证据缺失=留待核对
 		} else if t.Status == protocol.StatusNeedsReview {
 			body["awaiting_review"] = true // 轮终不确定=留待核对（不自动收敛重跑）
+		}
+	}
+	if it.Status == collab.IntentPending && it.SessionID != "" && s.cfg.Core != nil {
+		if tr, ok := s.cfg.Core.SessionTurnByRequest(it.SessionID, it.RequestID); ok && tr.Seq == it.TurnSeq {
+			if _, ok := s.cfg.Core.GetTask(tr.TaskID); !ok {
+				body["awaiting_review"] = true // 轮行在案+任务已清理=证据缺失留待核对
+			}
 		}
 	}
 	if it.SessionID != "" && s.cfg.Core != nil {

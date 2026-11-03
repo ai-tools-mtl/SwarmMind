@@ -15,6 +15,7 @@ package group
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -104,6 +105,31 @@ func TestW08AC20LegacyGroupsFixtureIsolation(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Fatalf("超 24h 群消息应裁空: %d", len(msgs))
+	}
+
+	// 滚动裁剪触发（codex 建议）：活跃群连发 201 条（kind=user 不占发言预算）→
+	// 窗口只保最新 200 条、最旧一条被裁（首个 seq 不可再取——窗口起点缺口口径）。
+	live, err := gst.CreateGroup("W08 滚动裁剪夹具", "owner", []string{"coder"})
+	if err != nil {
+		t.Fatalf("建活跃群: %v", err)
+	}
+	for i := 1; i <= MaxGroupMessages+1; i++ {
+		if _, err := gst.PostMessage(live.ID, "owner", "user", "滚动裁剪夹具消息 "+string(rune('A'+i%26))+strconv.Itoa(i)); err != nil {
+			t.Fatalf("发言 #%d: %v", i, err)
+		}
+	}
+	msgs, pruned, err := gst.ListMessages(live.ID, 0)
+	if err != nil {
+		t.Fatalf("读活跃群消息: %v", err)
+	}
+	if len(msgs) != MaxGroupMessages {
+		t.Fatalf("滚动窗口应恰保 200 条: %d", len(msgs))
+	}
+	if msgs[0].Seq != 2 || msgs[len(msgs)-1].Seq != MaxGroupMessages+1 {
+		t.Fatalf("窗口应为 seq 2..201（最旧 seq 1 被裁）: head=%d tail=%d", msgs[0].Seq, msgs[len(msgs)-1].Seq)
+	}
+	if pruned != 1 {
+		t.Fatalf("从 0 起读 pruned_before_seq 应=1（已裁区间上界——seq 1 不可再取，游标缺口如实标注）: %d", pruned)
 	}
 
 	// 物理隔离实证：Group 清理只动 groups.json——spaces.json 逐字节不动。

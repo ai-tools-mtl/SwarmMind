@@ -119,6 +119,13 @@ func TestW08AC16CleanupRestartSpaceMaterialsSurvive(t *testing.T) {
 	if len(sp2Msgs) != len(gen1Msgs) || len(sp2Msgs) == 0 {
 		t.Fatalf("讨论消息应保留: %d != %d", len(sp2Msgs), len(gen1Msgs))
 	}
+	// 内容逐条等价（非仅数量——决定正文是活跃空间材料的实体）。
+	for i := range gen1Msgs {
+		if sp2Msgs[i].Text != gen1Msgs[i].Text || sp2Msgs[i].Seq != gen1Msgs[i].Seq {
+			t.Fatalf("讨论消息内容应逐条等价: #%d %q/%d != %q/%d", i,
+				sp2Msgs[i].Text, sp2Msgs[i].Seq, gen1Msgs[i].Text, gen1Msgs[i].Seq)
+		}
+	}
 	if len(sp2.Events) < gen1Events {
 		t.Fatalf("审计事件应保留: %d < %d", len(sp2.Events), gen1Events)
 	}

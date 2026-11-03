@@ -69,7 +69,7 @@ func TestResultEchoesOfferFence(t *testing.T) {
 	f.sendOfferFenced(t, echoTask("t-fence-1"), 5) // 新版 hub：携租约
 	f.sendOffer(t, echoTask("t-fence-2"))          // 旧版 hub：无租约字段
 
-	if !waitFor(2*time.Second, func() bool {
+	if !waitFor(fenceWaitBudget, func() bool {
 		e1, ok1 := f.svc.cfg.Ledger.Get("t-fence-1")
 		e2, ok2 := f.svc.cfg.Ledger.Get("t-fence-2")
 		return ok1 && ok2 && e1.State == ledger.StateFinished && e2.State == ledger.StateFinished
@@ -78,7 +78,7 @@ func TestResultEchoesOfferFence(t *testing.T) {
 	}
 	// task_result 由执行器 goroutine 在 MarkFinished 之后异步发出——先等两帧
 	// 到位再做集合断言（账本 finished 可见时帧可能尚未抵达记录器）
-	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= 2 }) {
+	if !waitFor(fenceWaitBudget, func() bool { return len(f.resultFences()) >= 2 }) {
 		t.Fatalf("应各回一次 result, got %v", f.resultFences())
 	}
 	got := f.resultFences()
@@ -98,7 +98,7 @@ func TestDuplicateOfferRearmsAndResends(t *testing.T) {
 	f := newFixture(t, []protocol.ExecProfile{echoProfile()})
 
 	f.sendOfferFenced(t, echoTask("t-fence-1"), 5)
-	if !waitFor(2*time.Second, func() bool {
+	if !waitFor(fenceWaitBudget, func() bool {
 		e, ok := f.svc.cfg.Ledger.Get("t-fence-1")
 		return ok && e.State == ledger.StateFinished
 	}) {
@@ -110,7 +110,7 @@ func TestDuplicateOfferRearmsAndResends(t *testing.T) {
 
 	// hub 重派（offer 超时回退后补推）：同 task_id、新租约
 	f.sendOfferFenced(t, echoTask("t-fence-1"), 7)
-	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= 2 }) {
+	if !waitFor(fenceWaitBudget, func() bool { return len(f.resultFences()) >= 2 }) {
 		t.Fatal("重复 offer 应触发结果重发")
 	}
 	got := f.resultFences()
@@ -122,6 +122,11 @@ func TestDuplicateOfferRearmsAndResends(t *testing.T) {
 	}
 }
 
+// fenceWaitBudget 条件等待窗预算（2026-11-03 全仓并行负载采证：2s 偶发不够——
+// 任务完成+取消处理+回执重发多跳链在 28 包并行下超窗假红，单跑与隔离复跑恒绿；
+// 条件等待语义不变。与 TestHostAdvanceOnTerminal 同类治理）。
+const fenceWaitBudget = 15 * time.Second
+
 // TestCancelWriteBackReconcilesFence 取消收口（P1-2）：已终态未确认条目收到
 // 取消帧（携 hub 当前任务落库租约 cancel_fence）→ 对账取大者重臂后重发回执，
 // 回执按对账后租约回带——hub 宽校验（cancel_fence ≥ 落库租约）接受，覆盖
@@ -130,7 +135,7 @@ func TestCancelWriteBackReconcilesFence(t *testing.T) {
 	f := newFixture(t, []protocol.ExecProfile{echoProfile()})
 
 	f.sendOfferFenced(t, echoTask("t-fence-1"), 3)
-	if !waitFor(2*time.Second, func() bool {
+	if !waitFor(fenceWaitBudget, func() bool {
 		e, ok := f.svc.cfg.Ledger.Get("t-fence-1")
 		return ok && e.State == ledger.StateFinished
 	}) {
@@ -138,7 +143,7 @@ func TestCancelWriteBackReconcilesFence(t *testing.T) {
 	}
 
 	f.sendTaskCancel(t, "t-fence-1", 9) // cancel_fence=9 > 条目租约 3（重派推进后取消）
-	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= 2 }) {
+	if !waitFor(fenceWaitBudget, func() bool { return len(f.resultFences()) >= 2 }) {
 		t.Fatal("取消命中未确认条目应触发回执重发")
 	}
 	got := f.resultFences()
@@ -152,7 +157,7 @@ func TestCancelWriteBackReconcilesFence(t *testing.T) {
 	// cancel_fence ≤ 条目租约（无滞后）：不动租约，回执照发（幂等重发）
 	n := len(f.resultFences())
 	f.sendTaskCancel(t, "t-fence-1", 5)
-	if !waitFor(2*time.Second, func() bool { return len(f.resultFences()) >= n+1 }) {
+	if !waitFor(fenceWaitBudget, func() bool { return len(f.resultFences()) >= n+1 }) {
 		t.Fatal("重复取消应幂等重发回执")
 	}
 	if got := f.resultFences(); got[len(got)-1] != 9 {

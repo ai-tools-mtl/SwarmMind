@@ -13,9 +13,11 @@ import (
 	"testing"
 )
 
-// TestW08AC20ImportBackupRollbackReady 导入备份逐字节等价（回滚前置）：
-// 备份文件名（json.imported-<unix>）改名回 stateFileName 后，与导入前的原快照
-// 逐字节一致——回滚=一次改名，零数据损失。
+// TestW08AC20ImportBackupRollbackReady 导入备份逐字节等价 + 实做改名回位
+// （回滚前置，W08-02 codex 建议收窄口径）：备份文件（json.imported-<unix>）内容
+// 与导入前原快照逐字节一致，且改名回 stateFileName 后材料完整就位——回滚=把
+// 备份材料改回原名的纯文件操作，可供 SQLite 前版本（JSON 快照读取器）原样读取
+// （旧版本二进制启动不在单测范围，材料完整性为可验证的回滚前置）。
 func TestW08AC20ImportBackupRollbackReady(t *testing.T) {
 	dir := t.TempDir()
 	writeLegacySnapshot(t, dir, legacySnapshot)
@@ -42,5 +44,18 @@ func TestW08AC20ImportBackupRollbackReady(t *testing.T) {
 	}
 	if string(backup) != string(original) {
 		t.Fatal("导入备份必须与原快照逐字节等价（回滚前置——AC20）")
+	}
+	// 实做回滚动作：备份改名回原名（覆盖 SQLite 库旁的占位——回到 JSON 快照形态），
+	// 字节与原快照一致=备份材料完整可回退。
+	rollback := filepath.Join(dir, stateFileName)
+	if err := os.Rename(backups[0], rollback); err != nil {
+		t.Fatalf("回滚改名: %v", err)
+	}
+	restored, err := os.ReadFile(rollback)
+	if err != nil {
+		t.Fatalf("读回滚产物: %v", err)
+	}
+	if string(restored) != string(original) {
+		t.Fatal("改名回位后必须与原快照逐字节一致（备份材料完整）")
 	}
 }

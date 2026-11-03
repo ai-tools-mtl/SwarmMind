@@ -6,12 +6,13 @@
 # 行为（详见 docs/OPERATIONS.md「备份与恢复」）：
 #   - 停机目标：脚本对 data_dir/lock 非阻塞抢锁并全程持有至脚本退出（探测即持锁，
 #     备份期间实例无法启动，杜绝「探测说停机、复制中实例启动」的竞态）；全量拷贝，
-#     hub_state.db 连同 -wal/-shm 三件套同拷（恢复时合并回放）。
-#   - 运行中目标：db 经 sqlite3 ".backup" 取一致快照（-wal/-shm 不拷，避免过时
-#     wal 混入快照）；其余文件均为 temp+rename 原子写，照拷安全。运行中直拷路径
-#     绝不触碰 db；备份期间新出现的 db/账本会被出现性检查拦截，拒绝交付。
-#   - 运行中且 sqlite3 缺失：报错退出。绝不产出静默坏备份——运行中直接 cp
-#     hub_state.db 会得到 integrity_check=ok 的空库（活数据在未拷走的 -wal）。
+#     WAL 库（hub_state.db 与中心空间库 hub_spaces.db，W07-02 起独立单文件库）连同
+#     -wal/-shm 三件套同拷（恢复时合并回放）。
+#   - 运行中目标：在库逐一经 sqlite3 ".backup" 取一致快照（-wal/-shm 不拷，避免
+#     过时 wal 混入快照）；其余文件均为 temp+rename 原子写，照拷安全。运行中直拷
+#     路径绝不触碰任何库；备份期间新出现的库/账本会被出现性检查拦截，拒绝交付。
+#   - 运行中且 sqlite3 缺失：报错退出。绝不产出静默坏备份——运行中直接 cp 任一
+#     WAL 库会得到 integrity_check=ok 的空库（活数据在未拷走的 -wal）。
 #   - lock（单实例锁）与 *.tmp / *.tmp-*（原子写临时文件，含 local_token.tmp-* 等
 #     CreateTemp 形态）不备份；--no-home/--no-logs 跳过 node data_dir 下的大目录。
 #   - 备份目录 0700、文件 0600：创建任何产物之前先收 umask 077，复制期间即受保护；
@@ -56,9 +57,22 @@ done
 [ -n "$DATA_DIR" ] || { err "缺 --data-dir"; usage >&2; exit 2; }
 [ -d "$DATA_DIR" ] || { err "data_dir 不存在：$DATA_DIR"; exit 2; }
 DATA_DIR=$(cd "$DATA_DIR" && pwd)
-DB="$DATA_DIR/hub_state.db"
+# —— WAL 库集合（W08-02 codex 必修1）：hub 主库 + 中心空间库（W07-02 独立单文件
+# WAL 库，中心空间装配后才出现）同机制——在线快照集合、直拷排除清单、出现性守卫
+# 三处同步维护。曾漏 hub_spaces.db：运行中备份走普通 cp → 活数据在未拷走的 -wal，
+# 恢复后 no such table。node data_dir 无 WAL 库，集合天然空命中，行为不变。
+WAL_DBS="hub_state.db hub_spaces.db"
 LOCK="$DATA_DIR/lock"
 LEDGER="$DATA_DIR/ledger.json"
+
+# has_wal_db 任一 WAL 库在源目录存在（「目标有 db」的判定源——按集合而非仅主库）。
+has_wal_db() {
+  local d
+  for d in $WAL_DBS; do
+    [ -f "$DATA_DIR/$d" ] && return 0
+  done
+  return 1
+}
 
 if [ -n "$OUT" ]; then
   case "$OUT" in
@@ -129,9 +143,10 @@ if [ ! -e "$LOCK" ]; then
 fi
 
 if [ "$LOCK_ABSENT" = 1 ]; then
-  # 无法持锁：锁文件缺失且 db 存在属异常态（正常停机实例会留下锁文件），绝不判停机；
-  # 无 db（实例从未运行）才按停机直拷，实例若在备份期间首启，复制后的出现性检查拦截。
-  if [ -f "$DB" ]; then
+  # 无法持锁：锁文件缺失且任一 WAL 库存在属异常态（正常停机实例会留下锁文件），
+  # 绝不判停机；无任何库（实例从未运行）才按停机直拷，实例若在备份期间首启，
+  # 复制后的出现性检查拦截。
+  if has_wal_db; then
     RUNNING=unknown
   else
     RUNNING=stopped
@@ -193,11 +208,11 @@ while True:
   esac
 elif command -v lsof >/dev/null 2>&1; then
   # lsof 只能探测、无法代持锁：探测说「无人持有」也不可信（下一刻实例即可启动）。
-  # 有 db 时绝不据此判停机（宁可走在线快照或拒绝）；无 db 时即便实例正在首启，
+  # 有任一 WAL 库时绝不据此判停机（宁可走在线快照或拒绝）；无库时即便实例正在首启，
   # 复制后的出现性检查也会拦截。
   if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
     RUNNING=running
-  elif [ -f "$DB" ]; then
+  elif has_wal_db; then
     RUNNING=unknown
   else
     RUNNING=stopped
@@ -212,20 +227,20 @@ if [ "$RUNNING" != stopped ]; then
   if [ "$RUNNING" = unknown ]; then
     err "警告：无法确认目标是否运行中（锁状态未知），按运行中处理（宁可多拦，不产坏备份）。"
   fi
-  if [ -f "$DB" ]; then
+  if has_wal_db; then
     if command -v sqlite3 >/dev/null 2>&1; then
       ONLINE_DB=1
     else
       err "目标疑似运行中（$LOCK 被持有或状态未知）且 sqlite3 不可用，拒绝备份。"
-      err "运行中直接拷 hub_state.db 会得到 integrity_check=ok 的空库（活数据在未拷走的 -wal）。"
+      err "运行中直接拷 WAL 库（hub_state.db / hub_spaces.db 任一在）会得到 integrity_check=ok 的空库（活数据在未拷走的 -wal）。"
       err "二选一：① 安装 sqlite3 后重跑（在线一致快照）；② 停机后重跑（全量拷贝）。"
       exit 1
     fi
   fi
-  if [ -f "$DB" ]; then
-    err "提示：$DATA_DIR 疑似运行中，db 走 sqlite3 在线快照。在线备份次于停机备份，条件允许请停机后重跑。"
+  if has_wal_db; then
+    err "提示：$DATA_DIR 疑似运行中，WAL 库（hub_state.db / hub_spaces.db）逐一走 sqlite3 在线快照。在线备份次于停机备份，条件允许请停机后重跑。"
   else
-    err "提示：$DATA_DIR 疑似运行中且无 hub_state.db（node 目录，或 hub 尚未建库），清单文件照拷（均为 temp+rename 原子写）。"
+    err "提示：$DATA_DIR 疑似运行中且无 WAL 库（node 目录，或 hub 尚未建库），清单文件照拷（均为 temp+rename 原子写）。"
   fi
 fi
 
@@ -244,9 +259,9 @@ fi
 OUT_OWNED=1
 
 if [ "$ONLINE_DB" = 1 ]; then
-  MODE="在线快照（目标运行中，db 经 sqlite3 .backup 合并 wal）"
+  MODE="在线快照（目标运行中，WAL 库逐一经 sqlite3 .backup 合并 wal：hub_state.db+hub_spaces.db）"
 elif [ "$RUNNING" != stopped ]; then
-  MODE="运行中直拷（无 db，清单文件均为 temp+rename 原子写）"
+  MODE="运行中直拷（无 WAL 库，清单文件均为 temp+rename 原子写）"
 elif [ "$HELD" = 1 ]; then
   MODE="停机全量拷贝（本脚本已持 data_dir 锁，备份期间实例无法启动）"
 else
@@ -263,30 +278,36 @@ if [ "$ONLINE_DB" = 0 ] && { [ "$RUNNING" != stopped ] || [ "$HELD" = 0 ]; }; th
   GUARD=1
 fi
 
-# db 单独处理（热拷陷阱正解）；其余 data_dir 条目循环拷贝。
+# WAL 库单独处理（热拷陷阱正解；W08-02 必修1：集合含中心空间库，逐一快照）；
+# 其余 data_dir 条目循环拷贝。
 if [ "$ONLINE_DB" = 1 ]; then
-  SNAP="$OUT/hub_state.db"
-  # 快照文件名不进点命令参数：路径含撇号/空格等特殊字符时，sqlite3 点命令的
-  # 参数切分会把 '' 转义误当引号闭合（实测含撇号路径报 Usage: .backup / cannot
-  # open）。改为进入备份目录用固定名执行——快照路径不含任何特殊字符，db 路径
-  # 走 argv 不经点命令解析。
-  if ! ( cd "$OUT" && sqlite3 "$DB" ".backup hub_state.db" ); then
-    err "sqlite3 在线快照失败：$DB"
-    exit 1
-  fi
-  if [ ! -f "$SNAP" ]; then
-    err "sqlite3 在线快照未产生目标文件：$SNAP"
-    exit 1
-  fi
-  QUICK=$(sqlite3 "$SNAP" "PRAGMA quick_check;" 2>&1 || true)
-  if [ "$QUICK" != ok ]; then
-    err "快照校验异常（quick_check=${QUICK}），拒绝交付：$SNAP"
-    exit 1
-  fi
-  echo "[backup] db 快照完成且 quick_check=ok"
-  # sqlite3 对 WAL 源做 .backup 后，目标库也带 WAL 头，连接关闭会留下空 -wal/-shm：
-  # 快照必须自包含，副作用文件一律清除（空 wal 无害但会误导「要不要一起恢复」的判断）。
-  rm -f "$OUT/hub_state.db-wal" "$OUT/hub_state.db-shm"
+  # 逐库快照：只快照源目录实际存在的库（hub_spaces.db 中心空间未装配时不存在，
+  # 跳过不报错——「装配才有」不是缺件）。
+  for db in $WAL_DBS; do
+    [ -f "$DATA_DIR/$db" ] || continue
+    SNAP="$OUT/$db"
+    # 快照文件名不进点命令参数：路径含撇号/空格等特殊字符时，sqlite3 点命令的
+    # 参数切分会把 '' 转义误当引号闭合（实测含撇号路径报 Usage: .backup / cannot
+    # open）。改为进入备份目录用固定名执行——快照路径不含任何特殊字符，db 路径
+    # 走 argv 不经点命令解析。
+    if ! ( cd "$OUT" && sqlite3 "$DATA_DIR/$db" ".backup $db" ); then
+      err "sqlite3 在线快照失败：$DATA_DIR/$db"
+      exit 1
+    fi
+    if [ ! -f "$SNAP" ]; then
+      err "sqlite3 在线快照未产生目标文件：$SNAP"
+      exit 1
+    fi
+    QUICK=$(sqlite3 "$SNAP" "PRAGMA quick_check;" 2>&1 || true)
+    if [ "$QUICK" != ok ]; then
+      err "快照校验异常（quick_check=${QUICK}），拒绝交付：$SNAP"
+      exit 1
+    fi
+    echo "[backup] $db 快照完成且 quick_check=ok"
+    # sqlite3 对 WAL 源做 .backup 后，目标库也带 WAL 头，连接关闭会留下空 -wal/-shm：
+    # 快照必须自包含，副作用文件一律清除（空 wal 无害但会误导「要不要一起恢复」的判断）。
+    rm -f "$OUT/$db-wal" "$OUT/$db-shm"
+  done
 fi
 
 for entry in "$DATA_DIR"/*; do
@@ -297,19 +318,26 @@ for entry in "$DATA_DIR"/*; do
   case "$name" in
     lock|*.tmp|*.tmp-*) continue ;;
   esac
-  if [ "$ONLINE_DB" = 1 ]; then
-    # 在线快照已含 db 数据，活跃源 db 与 -wal/-shm 不再照拷。
+  # WAL 库集合成员（本体/-wal/-shm）按在线/守卫分流（集合单源，新增库只改
+  # WAL_DBS 一处）。
+  is_wal_db=0
+  for d in $WAL_DBS; do
     case "$name" in
-      hub_state.db|hub_state.db-wal|hub_state.db-shm) continue ;;
+      "$d"|"$d-wal"|"$d-shm") is_wal_db=1; break ;;
     esac
-  elif [ "$GUARD" = 1 ]; then
-    # 直拷场景绝不触碰 db：裁决时无 db、循环时出现 = 实例启动窗口竞态，
-    # 普通拷贝运行中的 db 会得到校验通过的空库，必须拦截。
-    case "$name" in
-      hub_state.db|hub_state.db-wal|hub_state.db-shm)
-        err "目标运行中或状态未知，且 hub_state.db 在备份期间出现，拒绝不安全拷贝；请停机后重跑。"
-        exit 1 ;;
-    esac
+  done
+  if [ "$is_wal_db" = 1 ]; then
+    if [ "$ONLINE_DB" = 1 ]; then
+      # 在线快照已含库数据，活跃源库与 -wal/-shm 不再照拷。
+      continue
+    fi
+    if [ "$GUARD" = 1 ]; then
+      # 直拷场景绝不触碰库：裁决时无库、循环时出现 = 实例启动窗口竞态，
+      # 普通拷贝运行中的库会得到校验通过的空库，必须拦截。
+      err "目标运行中或状态未知，且 $name 在备份期间出现，拒绝不安全拷贝；请停机后重跑。"
+      exit 1
+    fi
+    # 停机且持锁：全量拷贝（三件套同拷，恢复时合并回放）——落到底部正常 cp。
   fi
   if [ -d "$entry" ]; then
     if [ "$name" = home ] && [ "$NO_HOME" = 1 ]; then
@@ -326,16 +354,21 @@ for entry in "$DATA_DIR"/*; do
   fi
 done
 
-# 出现性复查：实例若在「裁决（无 db）」之后才初始化，db/账本会在复制窗口内出现。
-# db 已在循环内拦截；这里拦「glob 没赶上」的漏网文件——清单缺件即残缺备份，
-# 恢复后会静默丢状态，拒绝交付。
+# 出现性复查：实例若在「裁决（无库）」之后才初始化，库/账本会在复制窗口内出现。
+# 库已在循环内拦截；这里拦「glob 没赶上」的漏网文件——清单缺件即残缺备份，
+# 恢复后会静默丢状态，拒绝交付（集合成员逐一复查）。
 if [ "$GUARD" = 1 ]; then
-  for late in "$DB" "$LEDGER"; do
+  for late in $WAL_DBS; do
+    late="$DATA_DIR/$late"
     if [ -e "$late" ] && [ ! -e "$OUT/$(basename "$late")" ]; then
       err "目标在备份期间出现了 ${late}（疑实例启动窗口），未被一致捕获，拒绝交付残缺备份；请停机后重跑。"
       exit 1
     fi
   done
+  if [ -e "$LEDGER" ] && [ ! -e "$OUT/$(basename "$LEDGER")" ]; then
+    err "目标在备份期间出现了 ${LEDGER}（疑实例启动窗口），未被一致捕获，拒绝交付残缺备份；请停机后重跑。"
+    exit 1
+  fi
 fi
 
 # 配置文件（data_dir 之外，按清单单独备份），平铺放进备份目录。

@@ -478,9 +478,11 @@ const SPACE_MODES = { manual: '手动', builtin: '内置协作', external: '外�
 const SPACE_FINISH_AUTH = { human_only: '完成须主人定版', verified_write_review: '写审可自动完成' };
 const SPACE_INTENTS = { pending: '排队待投递', accepted: '执行中', converged: '已收束', cancelled: '已取消' };
 /* SPACE_AWAITING_REVIEW_HINT 诊断注记（W08-02 spaceDiag.awaiting_review 随行：
- * 在途意图中轮终不确定 needs_review、按纪律留待核对未收敛的可见化——未证实不绿，
- * 不冒充运行中；服务端 join 投影，前端不自算状态）。 */
-const SPACE_AWAITING_REVIEW_HINT = n => `其中 ${n} 个轮终不确定（needs_review），留待核对`;
+ * 在途意图中按纪律留待核对未收敛的可见化——未证实不绿，不冒充运行中；服务端
+ * join 投影，前端不自算状态。计数覆盖两类（W08-02 codex 必修4）：轮终不确定
+ * （needs_review）与执行证据缺失（任务已过保留期清理不可核验）——文案不冒认
+ * 具体轮终态，如实呈现「留待核对」待人工核对）。 */
+const SPACE_AWAITING_REVIEW_HINT = n => `其中 ${n} 个留待核对（轮终不确定或证据缺失，待人工核对）`;
 /* SPACE_ACTION_WORDS 控制动作标准词（操作区按钮与确认弹层唯一出处）。错误呈现
  * 纪律：服务端 403/409/503 人话原因如实全量展示，不遮蔽不改写——授权拒绝与状态
  * 拒绝都让操作者看到「为什么」（逐动作授权动态可用的另一半是失败原因可见）。 */

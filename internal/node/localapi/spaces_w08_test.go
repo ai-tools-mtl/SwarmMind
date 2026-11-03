@@ -111,15 +111,16 @@ func TestW0802SpaceListArchiveFilter(t *testing.T) {
 	}
 }
 
-// w08SeedLedgerTurn 直植账本轮条目（session+seq → 终态 result）——needs_review
-// 与 completed 轮的落账形态与 sessionop 恢复降级同款（AcceptOrigin+MarkFinished）。
-func w08SeedLedgerTurn(t *testing.T, f *spaceStackFixture, sid string, seq int64, res string) string {
+// w08SeedLedgerTurn 直植账本轮条目（session+seq+空间来源标记 → 终态 result）——
+// needs_review 与 completed 轮的落账形态与投递链 submitSpaceIntent 同款（Session
+// 携 Space 来源标记；AcceptOrigin+MarkFinished 同 sessionop 恢复降级落账形态）。
+func w08SeedLedgerTurn(t *testing.T, f *spaceStackFixture, spaceID, sid string, seq int64, res string) string {
 	t.Helper()
 	taskID := "t-w08diag-" + sid + "-" + ivec(seq)
 	task := protocol.Task{
 		ID: taskID, TraceID: "tr-w08diag", TargetNode: f.svcID(), TargetAgent: "coder",
 		Input:   protocol.TaskInput{Args: []string{}, Stdin: "W08 诊断夹具轮"},
-		Session: &protocol.SessionTurnRef{SessionID: sid, TurnSeq: seq, Op: "send"},
+		Session: &protocol.SessionTurnRef{SessionID: sid, TurnSeq: seq, Op: "send", Space: spaceID},
 	}
 	task.CreatedAt = protocol.NowUTC()
 	task.UpdatedAt = task.CreatedAt
@@ -249,7 +250,7 @@ func TestW0802DispatchDiagAnnotations(t *testing.T) {
 	}, collab.Subject{Class: "owner", Name: "local"}); err != nil {
 		t.Fatalf("模型层受理第二意图: %v", err)
 	}
-	w08SeedLedgerTurn(t, f, sid, nextSeq, protocol.ResultNeedsReview)
+	w08SeedLedgerTurn(t, f, spID, sid, nextSeq, protocol.ResultNeedsReview)
 	code, out = f.do("tok-local", "GET", "/api/v1/spaces/"+spID+"/dispatches/w08-d2", "")
 	if code != http.StatusOK || !strings.Contains(out, `"awaiting_review":true`) {
 		t.Fatalf("needs_review 在途意图应带 awaiting_review 注记: %d %s", code, out)
@@ -279,5 +280,75 @@ func TestW0802DispatchDiagAnnotations(t *testing.T) {
 	code, out = f.do("tok-local", "GET", "/api/v1/spaces/"+spID+"/dispatches/w08-d2", "")
 	if code != http.StatusOK || !strings.Contains(out, `"registered":false`) {
 		t.Fatalf("解绑后绑定登记态应如实 false: %d %s", code, out)
+	}
+}
+
+// TestW0802TurnSeqReuseNoCrossClaim 轮号复用反例（W08-02 codex 必修2 overlay
+// 复现形）：旧意图（pending 未投递即取消收束，TaskID 空）的轮号被新意图复用并
+// 完成——旧意图查询不得挂上新轮的 completed 答复（零跨认领）；新意图（TaskID
+// 在位）按 TaskID 精确取轮不受影响。
+func TestW0802TurnSeqReuseNoCrossClaim(t *testing.T) {
+	f := newSpaceStack(t)
+	sid := f.createMemberSession()
+	spID, ver := f.w08ManualRunningSpace(t, sid)
+
+	// 新意图 reuse-b：真实派发（受理期预留 seq N）→ 放行屏障 → 轮终 completed
+	// 收敛（TaskID 在位、账本轮条目在案）。
+	if code, out := f.do("tok-local", "POST", "/api/v1/spaces/"+spID+"/dispatches",
+		`{"member":"coder","expected_version":`+ivec(ver)+`,"request_id":"reuse-b","note":"复用占轮"}`); code != http.StatusAccepted {
+		t.Fatalf("派发 reuse-b 应 202: %d %s", code, out)
+	}
+	var seqB int64
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		if it, ok := f.st.IntentByRequest(spID, "reuse-b"); ok && it.TaskID != "" {
+			seqB = it.TurnSeq
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if seqB == 0 {
+		t.Fatal("reuse-b 未接单")
+	}
+	if err := os.WriteFile(filepath.Join(f.dir, "go.barrier"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if it, ok := f.st.IntentByRequest(spID, "reuse-b"); ok && it.Status == collab.IntentConverged {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 旧意图 reuse-a：模型层受理（同会话同号 seqB、TaskID 空=pending）→ 立即取消
+	// 收束（未投递取消形态——受理对账「无实物才取消」，本意图从未投递）。
+	curSp, _ := f.st.Space(spID)
+	if _, _, _, err := f.st.RecordDispatch(spID, collab.DispatchRequest{
+		RequestID: "reuse-a", Member: "coder", SessionID: sid, TurnSeq: seqB,
+		Term: 1, ExpectedVersion: curSp.Version,
+	}, collab.Subject{Class: "owner", Name: "local"}); err != nil {
+		t.Fatalf("受理 reuse-a: %v", err)
+	}
+	if _, err := f.st.ConvergeIntent(spID, "reuse-a", string(collab.IntentCancelled), "",
+		"复用反例夹具：未投递取消收束", collab.Subject{Name: "system", Class: collab.ClassSystem}); err != nil {
+		t.Fatalf("取消 reuse-a: %v", err)
+	}
+
+	// 反例断言：旧意图查询零新轮答复（无 turn/final_answer/status 注记——
+	// 未投递取消不认领后到轮）。
+	code, out := f.do("tok-local", "GET", "/api/v1/spaces/"+spID+"/dispatches/reuse-a", "")
+	if code != http.StatusOK {
+		t.Fatalf("reuse-a 查询应 200: %d %s", code, out)
+	}
+	for _, banned := range []string{`"turn"`, "final_answer", "task_gone", "awaiting_review"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("已取消未投递意图不得认领后到轮（含 %s）: %s", banned, out)
+		}
+	}
+	// 新意图查询不受影响：TaskID 精确取轮，completed 答复在位。
+	code, out = f.do("tok-local", "GET", "/api/v1/spaces/"+spID+"/dispatches/reuse-b", "")
+	if code != http.StatusOK || !strings.Contains(out, `"final_answer"`) {
+		t.Fatalf("reuse-b 应按 TaskID 精确取轮: %d %s", code, out)
 	}
 }
