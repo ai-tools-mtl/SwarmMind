@@ -168,8 +168,10 @@ async function __hs_run(scenario) {
       // 任意 navnum 位旧词零呈现——正则扫 #app 全区按钮形，非仅 02 位精确 HTML）。
       const navBtnRe = new RegExp('<span class="navnum">\\d+</span>(服务)</button>');
       __rc_assert(!navBtnRe.test(html), '导航按钮残留旧词「服务」（任意位次）');
-      const resBtnRe = new RegExp("<span class=\"navnum\">0?2</span>" + "资源</button>");
-      __rc_assert(resBtnRe.test(html) && html.includes('data-go="services"'), '资源项应呈现序号 02 文字「资源」且绑定路由 services');
+      // 三绑定同一按钮（codex 终审：路由属性与序号/文字分离断言时，交换路由仍
+      // PASS——必须单正则绑定同一 button 元素内 属性+02 序号+新词文字）。
+      const boundRe = new RegExp('<button [^>]*data-go="services"[^>]*><span class="navnum">02</span>资源');
+      __rc_assert(boundRe.test(html), '资源项应绑定为同一按钮：路由 services + 序号 02 + 文字「资源」（交换路由须 FAIL）');
     await __rc_nav('#/services');
     __rc_assert(S.page === 'services', '#/services 深链应存活（路由词不迁移），got ' + S.page);
     return 'PASS nav-renders-resource-entry';
