@@ -529,6 +529,16 @@ func (s *Service) SubmitSessionTurnLocal(req LocalSessionTurnRequest) (*LocalTur
 			return nil, spaceDispatchRequiredErr()
 		}
 	}
+	// 中心绑定同步核（W09-O1 统一裁决，docs/tasks/v3/W09-O1-assessment.md §4）：
+	// hubBind 登记的会话（中心空间成员线程，本机 collab 无绑定）普通轮提交侧同步
+	// 拒——与 hub 面 409 同形同码（此前 202 受理+执行口异步拒，STAGE-C 采证 O1：
+	// 错误码同规零执行，唯调用方可见形态不一致）。本探针是快路径非权威：hubBind
+	// 登记迟到窗内探不到，仍由执行口守卫（spaceTurnAllowed）拒收兜底——两层防线
+	// 语义与统一前逐字节等价，只提前拒绝时点。
+	if s.hubBind != nil && s.hubBind.Space(sessionID) != "" {
+		s.localMu.Unlock()
+		return nil, spaceDispatchRequiredErr()
+	}
 	// sessionop 受理守卫（W01-02 RFC §2/§5；与入账同锁域，杜绝「检查后入账」竞态；
 	// 拒绝即零副作用——无账本条目、高水位不推进、CLI 不执行）。未装配 sessionop
 	// 时全部短路（行为与既有逐字节一致）。
@@ -715,6 +725,11 @@ func (s *Service) submitAgentSessionTurnLocked(req AgentSessionTurnRequest, prom
 		if _, bound := s.collab.SessionOwnerSpace(sid); bound {
 			return nil, protocol.Task{}, false, spaceDispatchRequiredErr()
 		}
+	}
+	// 中心绑定同步核（W09-O1 统一裁决，主人面同款——两提交面同形同码；快路径非
+	// 权威，登记迟到窗由执行口守卫兜底，见 SubmitSessionTurnLocal 同名注记）。
+	if s.hubBind != nil && s.hubBind.Space(sid) != "" {
+		return nil, protocol.Task{}, false, spaceDispatchRequiredErr()
 	}
 	// 推导（内核已发布 / pending 登记双源）。
 	op, seq, cwd, agentName, rerr := s.agentSessionOp(sess, inKernel, sid)
