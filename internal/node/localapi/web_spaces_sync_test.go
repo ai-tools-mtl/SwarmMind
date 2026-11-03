@@ -141,9 +141,9 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 	for _, want := range []string{
 		"['spaces', '协作空间']",
 		"SPACE_HUB_OFF",
-		"function loadSpaces() {",
-		"'GET', '/api/v1/spaces'",
+		"loadResource('spaces', '/api/v1/spaces'",   // 必修1：列表经 loadAll 统一轮询链（独立 loadSpaces 退役）
 		"async function fetchSpacePage() {",
+		"spacePageReqSeq",   // 必修2：详情取数请求序号守卫
 		"/messages?since=",
 		"'POST', `/api/v1/spaces/${encodeURIComponent(id)}/control`",
 		"/candidates/${encodeURIComponent(cid)}/",

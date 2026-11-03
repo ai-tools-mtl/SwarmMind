@@ -669,8 +669,12 @@ func (s *Server) cardDetectFor(p protocol.ExecProfile) (protocol.CardDetectSumma
 	return cs, true
 }
 
-// cardLayerOf 单层投影（UTC 时刻纪律；reason 原样——call_allowed 的 reason 词表
-// 不含本机绝对路径，见 agentdetect 包内文案源）。
+// cardLayerOf 单层投影（UTC 时刻纪律；reason 原样——call_allowed 的 reason 无本机
+// 绝对路径：安全性来自本端 localapi 固定投影源（callProjectionFor/localCallState
+// 固定文案，agentdetect 包内 callAllowed 层不产文案、只承载投影），非「包内任意
+// reason 都安全」的词表断言——新增 reason 文案须复核此界（codex 审查建议2 注记
+// 更正）。installed 层 reason 同为 agentdetect 固定人话；config/execution_ready
+// 两层 fail 已由 cardSanitized*Layer 定点脱敏）。
 func cardLayerOf(lc agentdetect.LayerCheck) protocol.CardDetectLayer {
 	v := protocol.CardDetectLayer{Status: string(lc.Status), Reason: lc.Reason}
 	if !lc.CheckedAt.IsZero() {

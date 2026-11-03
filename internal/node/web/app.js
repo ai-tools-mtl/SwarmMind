@@ -1673,15 +1673,23 @@ function spaceDetailPageView() {
 function currentSpace() {
   return S.spacePage && S.spacePage.id === S.spaceId ? S.spacePage.space : null;
 }
+/* fetchSpacePage 请求序号守卫（W07-03 必修2 双端同修）：每次 fetch 递增
+ * spacePageReqSeq，应答仅当序号仍当前才落快照——5s 轮询与动作后刷新并发在途时，
+ * 晚到的旧应答（version=2→1）不得回退新快照，A→B→A 的旧 A 应答同样作废；
+ * 页面/空间 ID/会话代次一并核（同会话详情页口径）。 */
+let spacePageReqSeq = 0;
 async function fetchSpacePage() {
   const id = S.spaceId;
   if (!id || S.page !== 'spaces' || !S.authed) return;
+  const seqAtReq = ++spacePageReqSeq, epochAtReq = S.sessionEpoch;
   const [sr, mr, tr] = await Promise.all([
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id)).catch(() => null),
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/messages?since=' + (S.spacePage?.lastSeq || 0)).catch(() => null),
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/strategy').catch(() => null),
   ]);
-  if (!S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;   // 换空间/关页：旧应答作废
+  // 乱序/换空间/关页/会话失效：旧应答整体作废（消息增量不并入——下轮 fetch 按
+  // 当前 lastSeq 重取，游标只读不唤醒零副作用）。
+  if (seqAtReq !== spacePageReqSeq || S.sessionEpoch !== epochAtReq || !S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;
   if (sr && sr.code === 404) { toast('空间不存在'); location.hash = '#/spaces'; return; }
   if (!sr || sr.code !== 200 || !sr.data?.space) return;
   if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, strategy: null };

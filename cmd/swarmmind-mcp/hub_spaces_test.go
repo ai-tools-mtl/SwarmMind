@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -184,20 +185,28 @@ func loginHub(t *testing.T, url, adminToken string) string {
 }
 
 // TestSpaceToolDefsFaceConsistency 空间工具双面词典一致核查（W07-03 工作块3：
-// 「tools/list 双模式一致性 + 词典/指引互引一致」的回归锁）——
-//   - 双面九件同名同序（同一组工具，禁止第二套词典面）；
+// 「tools/list 双模式一致性 + 词典/指引互引一致」的回归锁；codex 审查建议4 收紧：
+// 双面锁预期九件**名单逐名**（非仅长度——防任意九件凑数假绿），指引引用核查
+// 扩为 **initResult 全部 swarmmind_* 引用 ⊆ hub 实际装配全集**）——
+//   - 双面九件逐名同序（同一组工具，禁止第二套词典面）；
 //   - hub 面描述：scope 注记在场、无「本机」范围词残留（范围词已面替换）、
 //     主人词形为中心管理会话口径；
 //   - node 面描述：不含 hub scope 注记（面注记不串端）。
 func TestSpaceToolDefsFaceConsistency(t *testing.T) {
+	// 预期九件名单（与 SPEC 六.六映射表 space_* 九行同序锁定）。
+	wantNames := []string{
+		"swarmmind_space_create", "swarmmind_space_list", "swarmmind_space_status",
+		"swarmmind_space_dispatch", "swarmmind_space_control", "swarmmind_space_messages",
+		"swarmmind_space_record", "swarmmind_space_records", "swarmmind_space_strategy",
+	}
 	nodeDefs := spaceToolDefs(spaceFaceNode)
 	hubDefs := hubSpaceToolDefs()
-	if len(nodeDefs) != len(hubDefs) {
-		t.Fatalf("双面工具数不一致: node=%d hub=%d", len(nodeDefs), len(hubDefs))
+	if len(nodeDefs) != len(wantNames) || len(hubDefs) != len(wantNames) {
+		t.Fatalf("双面工具数应恰九: node=%d hub=%d want=%d", len(nodeDefs), len(hubDefs), len(wantNames))
 	}
-	for i := range nodeDefs {
-		if nodeDefs[i].Name != hubDefs[i].Name {
-			t.Fatalf("双面工具名/序不一致 @%d: node=%s hub=%s", i, nodeDefs[i].Name, hubDefs[i].Name)
+	for i, want := range wantNames {
+		if nodeDefs[i].Name != want || hubDefs[i].Name != want {
+			t.Fatalf("双面工具名单/序不符 @%d: want=%s node=%s hub=%s", i, want, nodeDefs[i].Name, hubDefs[i].Name)
 		}
 		hd := hubDefs[i].Description
 		if !strings.Contains(hd, "hub 中心空间：scope 固定 hub:<id>") {
@@ -214,8 +223,9 @@ func TestSpaceToolDefsFaceConsistency(t *testing.T) {
 			t.Errorf("%s node 面描述不得使用「中心」范围词（node 面=本机）", nodeDefs[i].Name)
 		}
 	}
-	// 指引互引：hub instructions 声明会话四工具与空间九工具面（与 node 面同构的
-	// 范围语义指引）；工具名引用 ⊆ 实际装配集（禁引不存在的工具）。
+	// 指引互引（建议4 收紧）：hub instructions 声明会话四工具与空间九工具面（与
+	// node 面同构的范围语义指引）；instructions 中出现的**全部** swarmmind_* 引用
+	// 必须 ∈ hub 实际装配全集（hubBackend{}.tools()）——引用未装配工具即假指引。
 	init := (hubBackend{}).initResult()
 	inst, _ := init["instructions"].(string)
 	for _, want := range []string{"session_create/send/list/status", "space_create/list/status/dispatch/control/messages"} {
@@ -223,13 +233,13 @@ func TestSpaceToolDefsFaceConsistency(t *testing.T) {
 			t.Errorf("hub instructions 应含 %s 指引", want)
 		}
 	}
-	names := map[string]bool{}
-	for _, td := range hubDefs {
-		names[td.Name] = true
+	assembled := map[string]bool{}
+	for _, td := range (hubBackend{}).tools() {
+		assembled[td.Name] = true
 	}
-	for _, ref := range []string{"swarmmind_session_create", "swarmmind_space_create", "swarmmind_space_dispatch"} {
-		if strings.Contains(inst, ref) && !names[ref] {
-			t.Errorf("instructions 引用未装配工具 %s", ref)
+	for _, ref := range regexp.MustCompile(`swarmmind_[a-z_]+`).FindAllString(inst, -1) {
+		if !assembled[ref] {
+			t.Errorf("instructions 引用未装配工具 %s（禁假指引）", ref)
 		}
 	}
 }

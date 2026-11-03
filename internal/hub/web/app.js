@@ -826,8 +826,8 @@ const S = {
   sessDrawer: null,            // 打开的轮次执行明细抽屉（W01-05：旧会话抽屉退役为执行明细右抽屉）{id, turn, zones}
   prime: null,                 // 统筹指定 {node_id, agent_name}；null=未声明/冲突（回退名字约定）
   primeConflicts: [],          // 统筹声明冲突清单（多机同时声明时非空；客户端声明制 2026-10-28）
-  seq: { nodes: 0, tasks: 0, directory: 0, prime: 0, works: 0, sessions: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填
-  resSnap: { nodes: '', tasks: '', directory: '', prime: '', works: '', sessions: '' },   // 按资源指纹：任一资源有变才整页重绘
+  seq: { nodes: 0, tasks: 0, directory: 0, prime: 0, works: 0, sessions: 0, spaces: 0 },   // 每资源请求序号（D1）：响应返回时校验，旧响应晚到不回填（spaces=W07-03 必修1 第七资源——键必须在此初始化，++undefined=NaN 会让 seq 校验恒真丢提交）
+  resSnap: { nodes: '', tasks: '', directory: '', prime: '', works: '', sessions: '', spaces: '' },   // 按资源指纹：任一资源有变才整页重绘
   fresh: {},                   // 资源名 → {ok, at}：按资源新鲜度，顶栏小字显示最陈旧资源状态
   pollBusy: false,             // 轮询 single-flight：上轮在途跳过本轮
   f: blankFilters(),           // 任务筛选（TASK-nav-filter A2：统一构造函数，五处状态重建点共用）
@@ -969,7 +969,7 @@ async function loadResource(name, path, validate) {
     updateFreshness();
     return null;
   }
-  const value = r.code === 200 ? validate(r.data) : null;
+  const value = validate(r.data, r.code);
   if (value === null) {                     // 非 200 / 缺字段：不提交，保留旧快照并标陈旧
     if (seq !== S.seq[name]) return null;   // 旧响应的结构不合格：同样不污染新鲜度
     S.fresh[name] = { ok: false, at: S.fresh[name]?.at || 0 };
@@ -982,7 +982,7 @@ async function loadResource(name, path, validate) {
 }
 async function loadAll() {
   const taskVerAtReq = { ...S.taskVer };   // 数据版本快照（阶段 D 必须修 1/2）：任务列表提交时判定过期
-  const [nodes, tasks, directory, prime, works, sessions] = await Promise.all([
+  const [nodes, tasks, directory, prime, works, sessions, spaces] = await Promise.all([
     loadResource('nodes', '/api/v1/nodes', d => Array.isArray(d?.nodes) ? sortNodesStable(d.nodes) : null),
     loadResource('tasks', '/api/v1/tasks', d => Array.isArray(d?.tasks) ? d.tasks.slice().sort(byCreatedDesc) : null),
     loadResource('directory', '/api/v1/directory', d => Array.isArray(d?.directory) ? sortDirectoryStable(d.directory) : null),
@@ -993,6 +993,14 @@ async function loadAll() {
     }),
     loadResource('works', '/api/v1/works', d => Array.isArray(d?.works) ? d.works.slice().sort(byCreatedDesc) : null),
     loadResource('sessions', '/api/v1/sessions', d => Array.isArray(d?.sessions) ? d.sessions : null),   // T3：会话摘要（创建时间倒序由后端定序）
+    // 空间列表（W07-03 必修1：轮询链接入——他端建/归档/状态变更 ≤1 个轮询周期可见，
+    // 首载失败随轮询自恢复，与列表陈旧条文案承诺一致）。503 spaces_unavailable 是
+    // 未装配业务专态（非失败）：validate 第二参收 code，503 落专态值走成功提交
+    //（fresh 记 ok，不挂陈旧条）；200 缺字段/网络失败照 loadResource 既有纪律保留
+    // 旧快照标陈旧。
+    loadResource('spaces', '/api/v1/spaces', (d, code) => code === 503
+      ? { list: [], unavailable: true }
+      : Array.isArray(d?.spaces) ? { list: d.spaces, unavailable: false } : null),
   ]);
   let changed = false;
   const commit = (name, wrapped) => {
@@ -1018,10 +1026,16 @@ async function loadAll() {
     else if (name === 'prime') S.prime = value === PRIME_UNSET ? null : value;   // 标记还原为合法 null（primeConflicts 已在 loadResource 时随行更新）
     else if (name === 'works') S.works = value;
     else if (name === 'sessions') S.sessions = value;
+    else if (name === 'spaces') {   // W07-03 必修1：空间列表经统一提交管道（指纹门控在上方通用路径）
+      S.spaces = value.list;
+      S.spacesUnsupported = value.unavailable;
+      S.spacesError = '';
+      S.spacesLoaded = true;
+    }
     else S.directory = value;
     changed = true;
   };
-  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime); commit('works', works); commit('sessions', sessions);
+  commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime); commit('works', works); commit('sessions', sessions); commit('spaces', spaces);
   updateFreshness();
   return changed;
 }
@@ -1191,7 +1205,7 @@ function route() {
   // W07-03 P03/P04：空间独立页（列表主入口/详情页）；进页拉一次（轮询随 pollTick
   // 保持新鲜；503 未装配专态如实降级）。详情页即取（fetchSpacePage 守卫换空间/关页）。
   if (S.authed && S.page === 'spaces') {
-    loadSpaces().then(paintSpacesView).catch(() => { });
+    refreshSpacesView().catch(() => { });   // 必修1：loadAll 统一链（含 spaces 资源）进页即取
     if (S.spaceId) {
       syncSpacePageZones();   // 已有快照即绘（分区缓存随 DOM 身份对账失效重写）
       fetchSpacePage();
@@ -3507,20 +3521,13 @@ function freshSpaceForm() {
   /* rows 成员行 {name, session}；预算三计数 0=不限；reqId 稳定请求 ID（重试复用）。 */
   return { goal: '', acceptance: '', mode: 'manual', rows: [], bMsg: 0, bRound: 0, bWall: 0, stage: 'idle', message: '', ackId: '', reqId: '' };
 }
-let spaceListSeq = 0;
-/* loadSpaces 空间列表（GET /api/v1/spaces）：503 spaces_unavailable = 中心空间
- * 服务未装配专态（S.spacesUnsupported，SPACE_HUB_OFF 词典兜底）——与网络失败/
- * 结构失败三态互斥（node 同口径）。 */
-async function loadSpaces() {
-  const epochAtReq = S.loginGen, seqAtReq = ++spaceListSeq;
-  const r = await api('GET', '/api/v1/spaces').catch(() => null);
-  if (S.loginGen !== epochAtReq || seqAtReq !== spaceListSeq) return;   // 双守卫：会话失效/新请求使旧应答作废
-  S.spacesLoaded = true;
-  if (!r) { S.spacesError = '空间列表暂时读不到（网络）'; return; }
-  if (r.code === 503) { S.spacesUnsupported = true; S.spaces = []; S.spacesError = ''; return; }
-  if (r.code !== 200 || !Array.isArray(r.data?.spaces)) { S.spacesError = '空间列表加载失败'; return; }
-  S.spacesUnsupported = false; S.spacesError = '';
-  S.spaces = r.data.spaces;
+/* loadSpaces 独立加载函数已退役（W07-03 必修1）：空间列表并入 loadAll 统一轮询
+ * 链（loadResource('spaces',…) + commit 指纹门控）——他端建/归档/状态变更 ≤1 个
+ * 轮询周期可见、首载失败随轮询自恢复（与陈旧条/失败框文案承诺一致）；独立 seq
+ * 双守卫语义由 loadResource 既有纪律承担。页面动作后的即时刷新统一走
+ * refreshSpacesView()（loadAll 全资源刷新 + 空间页槽位重绘）。 */
+function refreshSpacesView() {
+  return loadAll().then(() => { if (S.page === 'spaces') paintSpacesView(); });
 }
 /* spacePaintCache 空间页槽位缓存（WeakMap 按元素实例；与会话页槽位缓存互不干扰），
  * paintSpaceZone 为唯一写入口——内容一致零 DOM 写入（稳定轮询零重绘）。 */
@@ -3535,6 +3542,9 @@ function paintSpaceZone(id, html) {
  * 实例缓存，空间页槽位与会话页槽位互不干扰）。 */
 function paintSpacesView() {
   if (S.page !== 'spaces' || S.spaceId) return;
+  /* 页头「新建空间」同为槽位（建议修1）：只在列表成功加载且装配在位后出现——
+   * 503 未装配/加载失败态不渲染创建入口（呈现承诺一致，首屏残留按钮退役）。 */
+  paintSpaceZone('space-head-zone', S.spacesUnsupported || listState('spaces') !== 'ok' ? '' : button('新建空间', 'space-new', 'primary', 'type="button"'));
   paintSpaceZone('space-chips-zone', S.spacesUnsupported ? '' : spaceChipsNode().join(''));
   paintSpaceZone('space-list-zone', spaceListZone());
   paintSpaceZone('space-foot-zone', spaceFootZone());
@@ -3566,13 +3576,13 @@ function spaceLeaseCell(l) {
 }
 function spaceListZone() {
   if (S.spacesUnsupported) return `<div class="empty"><h2>${esc(SPACE_HUB_OFF)}</h2><p class="muted">${esc(SPACE_HUB_OFF_NOTE)}</p></div>`;
-  if (!S.spacesLoaded) return listLoadingBox('协作空间');
-  if (S.spacesError && !S.spaces.length) return `<div class="empty"><h2>空间列表加载失败</h2><p class="muted">最近一次读取没有成功（中心 API 不可达或应答异常），不是没有数据。可点重试，轮询也会自动恢复。</p>${button('重试', 'space-reload')}</div>`;
+  if (listState('spaces') === 'loading') return listLoadingBox('协作空间');
+  if (listState('spaces') === 'error' && !S.spaces.length) return listErrorBox('spaces', '空间列表');
   const list = S.spaces.filter(s => S.spaceFilter === 'archived' ? s.archived : !s.archived);
-  if (!list.length) return (S.spacesError ? listStaleBar('space-reload', '空间列表') : '')
+  if (!list.length) return (listState('spaces') === 'error' ? listStaleBar('spaces', '空间列表') : '')
     + `<div class="empty"><h2>${S.spaces.length ? '没有符合筛选的空间' : SPACE_EMPTY_LIST}</h2>${S.spaces.length ? button('清除筛选', 'space-clear-filter')
       : `<p class="muted">${esc(SPACE_EMPTY_LIST_HINT)}</p><p class="muted">${esc(SPACE_NO_MEMBERS_HINT)}</p>${button('新建空间', 'space-new', 'primary', 'type="button"')}`}</div>`;
-  return (S.spacesError ? listStaleBar('space-reload', '空间列表') : '')
+  return (listState('spaces') === 'error' ? listStaleBar('spaces', '空间列表') : '')
     + `<div class="table-wrap"><table><thead><tr><th>目标</th><th>状态</th><th>策略</th><th>调度方式与负责人</th><th>阶段</th><th>等待原因</th><th>最近活动（UTC）</th><th>操作</th></tr></thead><tbody>
   ${list.map(sp => `<tr data-space="${esc(sp.id)}" tabindex="0" aria-label="查看空间 ${esc(sp.id)}">
     <td class="task-title"><strong>${esc(spaceGoalShort(sp.goal))}</strong><small class="task-sum">${spShortId(sp.id)}</small></td>
@@ -3587,10 +3597,13 @@ function spaceListZone() {
 }
 function spaceFootZone() {
   if (S.spacesUnsupported) return '中心空间服务未装配：装配后本页提供建空间、跨机成员线程与显式派发。';
+  if (listState('spaces') !== 'ok') return '空间列表尚未成功加载（轮询自动重试；也可手动重读）。';
   return `${S.spaces.length} 个空间（活跃 ${S.spaces.length - S.spaces.filter(s => s.archived).length} · 已归档 ${S.spaces.filter(s => s.archived).length}） · 时间为 UTC · 空间归档只做列表收纳，不删材料、不关原生线程。`;
 }
 function spaceListPageView() {
-  return head('协作空间', '多智能体协作空间（中心范围）：目标/验收、跨机成员线程、调度与执行收在一处；普通发言零唤醒，执行只经显式指名派发。', S.spacesUnsupported ? '' : button('新建空间', 'space-new', 'primary', 'type="button"'))
+  /* 页头动作区为槽位（建议修1）：初绘空槽，paintSpacesView 按装配/加载态点亮
+   * 「新建空间」——首屏 503 后按钮不再残留（render 只发生在进页时刻）。 */
+  return head('协作空间', '多智能体协作空间（中心范围）：目标/验收、跨机成员线程、调度与执行收在一处；普通发言零唤醒，执行只经显式指名派发。', '<span id="space-head-zone"></span>')
     + `<section class="card sess-scope">
   <div class="filters spaced" id="space-chips-zone">${S.spacesUnsupported ? '' : spaceChipsNode().join('')}</div>
   <div id="space-list-zone">${spaceListZone()}</div>
@@ -3604,17 +3617,24 @@ function spaceDetailPageView() {
 function currentSpace() {
   return S.spacePage && S.spacePage.id === S.spaceId ? S.spacePage.space : null;
 }
-/* fetchSpacePage 详情三源并取（空间视图 / 消息增量 / 策略投影）；换空间/关页守卫
- * 同会话详情页口径——旧应答作废。scope 注记（hub:<id>）随详情应答入页状态。 */
+/* fetchSpacePage 详情三源并取（空间视图 / 消息增量 / 策略投影）。请求序号守卫
+ *（W07-03 必修2）：每次 fetch 递增 spacePageReqSeq，应答仅当序号仍当前才落快照
+ *——轮询与动作后刷新并发在途时，晚到的旧应答（version=2→1）不得回退新快照，
+ * A→B→A 的旧 A 应答同样作废；页面/空间 ID/登录代次一并核（同会话详情页口径）。
+ * scope 注记（hub:<id>）随详情应答入页状态。 */
+let spacePageReqSeq = 0;
 async function fetchSpacePage() {
   const id = S.spaceId;
   if (!id || S.page !== 'spaces' || !S.authed) return;
+  const seqAtReq = ++spacePageReqSeq, genAtReq = S.loginGen;
   const [sr, mr, tr] = await Promise.all([
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id)).catch(() => null),
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/messages?since=' + (S.spacePage?.lastSeq || 0)).catch(() => null),
     api('GET', '/api/v1/spaces/' + encodeURIComponent(id) + '/strategy').catch(() => null),
   ]);
-  if (!S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;   // 换空间/关页：旧应答作废
+  // 乱序/换空间/关页/会话失效：旧应答整体作废（消息增量不并入——下轮 fetch 按
+  // 当前 lastSeq 重取，游标只读不唤醒零副作用）。
+  if (seqAtReq !== spacePageReqSeq || S.loginGen !== genAtReq || !S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;
   if (sr && sr.code === 404) { toast('空间不存在'); location.hash = '#/spaces'; return; }
   if (sr && sr.code === 503) { S.spacesUnsupported = true; location.hash = '#/spaces'; toast(SPACE_HUB_OFF); return; }
   if (!sr || sr.code !== 200 || !sr.data?.space) return;
@@ -3792,7 +3812,7 @@ function spaceActionsZone(sp) {
 }
 /* spaceActRefresh 写动作后统一刷新：列表槽位 + 详情分区（若在）。 */
 function spaceActRefresh(id) {
-  loadSpaces().then(paintSpacesView).catch(() => { });
+  refreshSpacesView().catch(() => { });
   if (S.spaceId === id && S.page === 'spaces') fetchSpacePage().catch(() => { });
 }
 /* spaceControlPost 控制动作统一提交（request_id 前端生成；verNow 取详情页最新版本，
@@ -4145,7 +4165,7 @@ async function submitSpaceNew() {
       closeSpaceModal();
       toast(r.code === 200 ? '空间已就绪（同请求 ID 幂等命中，返回原空间）' : '空间已创建');
       S.sp = freshSpaceForm();
-      loadSpaces().then(paintSpacesView).catch(() => { });
+      refreshSpacesView().catch(() => { });
       if (spId) goSpace(spId);
     } else {
       F.stage = 'failed';
@@ -5535,7 +5555,7 @@ const ACT = {
   'go-groups': () => go('groups'),
   /* ---------- 协作空间（W07-03 P03/P04 可用化：真实数据面操作入口） ---------- */
   'space-back': () => go('spaces'),
-  'space-reload': () => { toast('正在重新加载空间列表…'); loadSpaces().then(paintSpacesView).catch(() => { }); },
+  'space-reload': () => { toast('正在重新加载空间列表…'); refreshSpacesView().catch(() => { }); },
   'space-chip': b => {
     const c = b.dataset.chip || '';
     S.spaceFilter = c !== '' && S.spaceFilter === c ? '' : c;   // 选中/再点复位（与 node 空间 chips 同语义）

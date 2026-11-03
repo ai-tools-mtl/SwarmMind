@@ -21,7 +21,9 @@ import (
 // TestCardDetectSummaryStamp 检测摘要随卡盖章（单卡装配点）：卡组装配 provider 后
 // Cards() 按能力名盖章 AgentCard.Detect——缓存命中的能力带四层状态/检查时刻/逐层
 // 明细；未发现过的能力 Detect 保持 nil（hub 如实「未上报」，不冒认已检测）。
-// provider 注入对 Spaces 盖章（W07-01）零干扰（同卡两枚加法章并存）。
+// 同卡两枚加法章并存实证（codex 审查建议3）：真实调用 SetSpacesCapability("v1")
+// + SetDetectProvider 后 Spaces 与 Detect 并存；provider 撤除只摘 detect 章、
+// spaces 章（W07-01）不受影响。
 func TestCardDetectSummaryStamp(t *testing.T) {
 	dir := t.TempDir()
 	cmd := writeFakeCLI(t, dir, "fake-cli", `echo "v1"`)
@@ -34,6 +36,7 @@ func TestCardDetectSummaryStamp(t *testing.T) {
 		{Name: "miss", Kind: protocol.AgentKindCLI, Command: cmd, Workdir: workdir, TimeoutSec: 60, Exposed: true},
 	}
 	state := newState(t, t.TempDir(), profiles)
+	state.SetSpacesCapability(protocol.SpacesCapV1)   // 建议修3：spaces 章（W07-01）真实注入，与 detect 章并存断言
 	srv := New(Config{NodeID: "nodeA", Agents: state, LocalToken: "tok"})
 	srv.recordDetect(agentdetect.Report{
 		Name:             "hit",
@@ -52,6 +55,12 @@ func TestCardDetectSummaryStamp(t *testing.T) {
 	if hit.Detect == nil {
 		t.Fatal("缓存命中的能力卡应盖章检测摘要")
 	}
+	if hit.Spaces != protocol.SpacesCapV1 {
+		t.Fatalf("spaces 章应并存（W07-01 盖章不受 provider 注入干扰）: %q", hit.Spaces)
+	}
+	if byName["miss"].Spaces != protocol.SpacesCapV1 {
+		t.Fatalf("未发现过的能力卡 spaces 章应在位: %q", byName["miss"].Spaces)
+	}
 	if hit.Detect.Installed != "pass" || hit.Detect.ExecutionReady != "fail" || hit.Detect.CallAllowed != "pass" {
 		t.Fatalf("四层状态失真: %+v", hit.Detect)
 	}
@@ -64,11 +73,15 @@ func TestCardDetectSummaryStamp(t *testing.T) {
 	if byName["miss"].Detect != nil {
 		t.Fatal("未发现过的能力卡不得盖章（nil=hub 如实「未上报」）")
 	}
-	// 撤除 provider：Detect 回落 nil（装配边界可逆，standalone 无 hub 面零字段）。
+	// 撤除 provider：Detect 回落 nil（装配边界可逆），spaces 章保持（装配事实不随
+	// provider 撤除消失）。
 	state.SetDetectProvider(nil)
 	for _, c := range state.Cards() {
 		if c.Detect != nil {
 			t.Fatal("provider 撤除后卡片不得再携带 detect")
+		}
+		if c.Spaces != protocol.SpacesCapV1 {
+			t.Fatalf("provider 撤除不得影响 spaces 章: %s %q", c.Name, c.Spaces)
 		}
 	}
 }
