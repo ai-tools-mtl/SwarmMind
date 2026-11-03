@@ -3933,17 +3933,20 @@ function spaceAwaitZone(pg) {
  * note 草稿只存弹层 DOM（不进分区模板串——D22 同款纪律）；确认走
  * space-resolve-confirm 直更按钮，失败层不关（note 保留可改再试）。arg =
  * "verdict:rid"。 */
-function spaceIntentResolve(arg) {
+function spaceIntentResolve(verdict, rid) {
   const sp = currentSpace();
   if (!sp) { toast('空间信息不可得'); return; }
-  const [verdict, rid] = String(arg || '').split(':');
+  // verdict/rid 两参直传（W09-B codex 复审必修：request_id 合法含冒号——
+  // 「verdict:rid」拼接后按冒号解析会把 "dispatch:42" 截成 "dispatch"，裁决
+  // 打到错误意图上。行按钮 data-verdict/data-rid 各自带全量值，禁再经分隔符
+  // 拼接中转）。
   if (!SPACE_RESOLVE_WORDS[verdict] || !rid) return;
   const what = verdict === 'accept'
     ? '人工核验通过：该轮按完成收束（意图 converged）；串行门解锁，同空间排队中的下一棒照常推进。不改写成员侧任务实物（裁决只落空间账）。'
     : '人工否决：该轮取消收束（意图 cancelled，不重发不转投——重派请再显式派发）；串行门同样解锁。';
   openLayerPlain(`${modalHead(SPACE_RESOLVE_WORDS[verdict] + ' · 留待核对 · ' + esc(spShortId(rid)))}
   <p class="muted">${esc(what)}</p>
-  <div class="sayline spaced"><textarea id="resolve-note" rows="2" placeholder="裁决说明（可选，落意图注记与审计事件）"></textarea></div>
+  <div class="sayline spaced"><textarea id="resolve-note" rows="2" placeholder="裁决说明（可选，落意图注记；审计事件由服务端主体记收束结论）"></textarea></div>
   <div class="actions spaced">${button('确认' + SPACE_RESOLVE_WORDS[verdict], 'space-resolve-confirm', verdict === 'accept' ? 'primary' : 'danger', 'data-verdict="' + esc(verdict) + '" data-rid="' + esc(rid) + '" type="button"')}${button('再想想', 'close', 'link')}</div>`, true);
 }
 /* spaceResolveConfirm 裁决提交（POST intents/{rid}/resolve；200 收束关层刷新，
@@ -5663,7 +5666,7 @@ const ACT = {
     spaceAct(sp, b.dataset.sact || '');
   },
   'space-cand': b => spaceCandAct((b.dataset.cverb || '') + ':' + (b.dataset.cid || '')),   // 主人候选定版/否决；参数经 data-cverb/data-cid（hub act 词形约定：键名精确+参数走 data-*）
-  'space-resolve': b => spaceIntentResolve((b.dataset.verdict || '') + ':' + (b.dataset.rid || '')),   // 留待核对人工裁决（W09-B 主人管理动作；参数经 data-verdict/data-rid 同词形约定）
+  'space-resolve': b => spaceIntentResolve(b.dataset.verdict || '', b.dataset.rid || ''),   // 留待核对人工裁决（W09-B 主人管理动作；verdict/rid 两参直传——request_id 可含冒号，禁分隔符拼接中转）
   'space-resolve-confirm': b => spaceResolveConfirm(b),   // 裁决提交（note 弹层直读；失败层保留可改再试）
   'sp-row-add': () => {
     const box = spaceRowsBox();

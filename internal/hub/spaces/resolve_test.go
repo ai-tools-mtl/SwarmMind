@@ -431,3 +431,44 @@ func hasCollabCode(err error, code string) bool {
 	}
 	return false
 }
+
+// TestResolveAdmissionStatusTable 留待核对裁决准入状态表（W09-B codex 复审建议：
+// resolveAdmission 纯函数全任务态逐态机械锁定——防将来收窄成「仅拦 running」时
+// 流式测试仍全绿；submitted/offered/acknowledged/running 全部非终态一律
+// execution_in_flight，definitive 终态一律 illegal_transition，needs_review 唯一
+// 可裁决终态）。
+func TestResolveAdmissionStatusTable(t *testing.T) {
+	cases := []struct {
+		status protocol.TaskStatus
+		want   error // nil=可裁决
+	}{
+		{protocol.StatusSubmitted, collab.ErrExecutionInFlight},
+		{protocol.StatusOffered, collab.ErrExecutionInFlight},
+		{protocol.StatusAcknowledged, collab.ErrExecutionInFlight},
+		{protocol.StatusRunning, collab.ErrExecutionInFlight},
+		{protocol.StatusNeedsReview, nil},
+		{protocol.StatusCompleted, collab.ErrIllegalTransition},
+		{protocol.StatusFailed, collab.ErrIllegalTransition},
+		{protocol.StatusCancelled, collab.ErrIllegalTransition},
+	}
+	for _, tc := range cases {
+		err := resolveAdmission(protocol.Task{ID: "t-1", Status: tc.status})
+		switch tc.want {
+		case nil:
+			if err != nil {
+				t.Fatalf("%s 应可裁决（nil），得 %v", tc.status, err)
+			}
+		case collab.ErrExecutionInFlight:
+			if !isExecutionInFlight(err) {
+				t.Fatalf("%s 应 execution_in_flight: %v", tc.status, err)
+			}
+			if !containsAll(err.Error(), "cancel", "既有取消路径") {
+				t.Fatalf("%s 拒绝应指路既有取消路径: %v", tc.status, err)
+			}
+		case collab.ErrIllegalTransition:
+			if !isIllegalTransition(err) {
+				t.Fatalf("%s 应 illegal_transition: %v", tc.status, err)
+			}
+		}
+	}
+}

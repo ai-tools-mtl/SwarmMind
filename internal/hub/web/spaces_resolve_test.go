@@ -23,7 +23,7 @@ func TestConsoleSpaceResolveWiringSources(t *testing.T) {
 		`SPACE_RESOLVE_REASONS[r.reason]`, // 形态词随服务端 reason
 		`data-verdict="accept"`,           // 裁决词形传参
 		`data-verdict="reject"`,
-		`'space-resolve': b => spaceIntentResolve(`,            // 点击接线
+		`'space-resolve': b => spaceIntentResolve(b.dataset.verdict || '', b.dataset.rid || '')`, // 点击接线（W09-B codex 复审必修：verdict/rid 两参直传）
 		`'space-resolve-confirm': b => spaceResolveConfirm(b)`, // 确认提交接线
 		`/intents/${encodeURIComponent(rid)}/resolve`,          // REST 端点对齐
 		`textarea id="resolve-note"`,                           // note 弹层（草稿存弹层 DOM）
@@ -33,6 +33,20 @@ func TestConsoleSpaceResolveWiringSources(t *testing.T) {
 		if !strings.Contains(app, want) {
 			t.Fatalf("空间详情裁决接线缺源码锚: %s", want)
 		}
+	}
+	// request_id 合法含冒号（W09-B codex 复审必修反例：`dispatch:42` 经
+	// 「verdict:rid」拼接+split 会截成 `dispatch`——裁决打到错误意图）。ban 在
+	// spaceIntentResolve 函数体内的分隔符拼接/split 解析（他处 act 词形不受限——
+	// 候选定版等参数不含第三方自由 ID）。
+	resolveFn := app[strings.Index(app, "function spaceIntentResolve"):]
+	if end := strings.Index(resolveFn, "\n}"); end >= 0 {
+		resolveFn = resolveFn[:end+1]
+	}
+	if strings.Contains(resolveFn, "split(':')") {
+		t.Fatal("spaceIntentResolve 禁止 split(':') 解析（两参直传——含冒号 request_id 截断反例）")
+	}
+	if !strings.Contains(resolveFn, "function spaceIntentResolve(verdict, rid)") {
+		t.Fatal("spaceIntentResolve 应为 verdict/rid 两参直传签名")
 	}
 	// node 页零改动锚：node 端 app.js 不得出现裁决入口（hub 管理动作——SPEC 六.五
 	// 白名单差异，随批登记）。

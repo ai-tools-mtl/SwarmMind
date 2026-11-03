@@ -242,7 +242,10 @@ func TestSpaceIntentResolveFullChainAndSerialGate(t *testing.T) {
 	}
 
 	// 核心验收（REST 面机械断言）：串行门解锁——排队棒被推进接单（accepted，
-	// 任务在案——提交落库，被裁决空间的流转零滞留）。
+	// 任务在案——提交落库，被裁决空间的流转零滞留）。覆盖层次如实区分（W09-B
+	// codex 复审视角）：本 fixture 为无执行器的最小应答器（bind ack 桩），任务
+	// 停在 offered 属实——「真实执行 completed」断言由 internal/hub/spaces 服务
+	// 包全链测试承担（有执行链），REST 层锁「接单+投递成立」。
 	it2 := waitResolveIntent(t, f, spID, "d-res-rest-2", collab.IntentAccepted)
 	if it2.TaskID == "" {
 		t.Fatalf("排队棒应已接单（TaskID 在位）: %+v", it2)

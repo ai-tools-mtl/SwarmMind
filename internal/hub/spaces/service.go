@@ -1326,17 +1326,14 @@ func (s *Service) ResolveIntent(spaceID, requestID, verdict, note string, subj c
 	}
 	// 留待核对实物核验（复用既有任务事实读面，零影子状态）：证据缺失（无任务
 	// 锚/任务行已清理）或 needs_review 终态 → 可裁决；非终态 → 指路既有取消路径；
-	// definitive 终态 → 钩子/对账窗，拒绝人工改写。
-	if t, ok := s.core.GetTask(it.TaskID); it.TaskID != "" && ok {
-		switch {
-		case t.Status == protocol.StatusNeedsReview:
-			// 轮终不确定：可裁决。
-		case !t.Status.Terminal():
-			return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 关联任务 %s 仍在执行中（%s）：人工裁决拒绝（防冒认在途），请走既有取消路径 POST /api/v1/tasks/%s/cancel",
-				collab.ErrExecutionInFlight, requestID, it.TaskID, t.Status, it.TaskID)
-		default:
-			return collab.DispatchIntent{}, false, fmt.Errorf("%w: 意图 %s 关联任务 %s 已按实物落终态（%s）：收敛钩子/重启对账按实物收敛，非留待核对裁决对象",
-				collab.ErrIllegalTransition, requestID, it.TaskID, t.Status)
+	// definitive 终态 → 钩子/对账窗，拒绝人工改写。状态分类在 resolveAdmission
+	// 纯函数（全状态表机械锁定——codex 复审建议：防将来收窄成仅拦 running 时
+	// 流式测试仍全绿）。
+	if it.TaskID != "" {
+		if t, ok := s.core.GetTask(it.TaskID); ok {
+			if err := resolveAdmission(t); err != nil {
+				return collab.DispatchIntent{}, false, fmt.Errorf("%w（意图 %s，任务 %s）", err, requestID, it.TaskID)
+			}
 		}
 	}
 	fullNote := word
@@ -1352,6 +1349,27 @@ func (s *Service) ResolveIntent(spaceID, requestID, verdict, note string, subj c
 	// 与关停门；未绑定会话的候选交回全三段推进）。
 	s.kickLocked(spaceID)
 	return got, false, nil
+}
+
+// resolveAdmission 留待核对裁决的任务实物准入分类（纯函数；ResolveIntent 锁内
+// 对 GetTask 命中时调用——任务行缺失（!ok）不入此函数，证据缺失分支由调用方
+// 直接收束）。全任务状态逐态机械锁定（W09-B codex 复审建议：submitted/offered/
+// acknowledged/running 全部非终态 → execution_in_flight，防「仅拦 running」的
+// 收窄回归在流式测试下假绿）：
+//   - needs_review → nil（轮终不确定，可裁决）；
+//   - 其余非终态 → ErrExecutionInFlight（防冒认在途，指路既有取消路径）；
+//   - definitive 终态 → ErrIllegalTransition（钩子/对账窗，非人工裁决对象）。
+func resolveAdmission(t protocol.Task) error {
+	switch {
+	case t.Status == protocol.StatusNeedsReview:
+		return nil
+	case !t.Status.Terminal():
+		return fmt.Errorf("%w: 关联任务仍在执行中（%s）：人工裁决拒绝（防冒认在途），请走既有取消路径 POST /api/v1/tasks/%s/cancel",
+			collab.ErrExecutionInFlight, t.Status, t.ID)
+	default:
+		return fmt.Errorf("%w: 关联任务已按实物落终态（%s）：收敛钩子/重启对账按实物收敛，非留待核对裁决对象",
+			collab.ErrIllegalTransition, t.Status)
+	}
 }
 
 // ---------- 兜底扫查 ----------
