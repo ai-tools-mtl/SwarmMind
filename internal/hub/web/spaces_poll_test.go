@@ -68,7 +68,7 @@ func TestConsoleSpacesPollGuards(t *testing.T) {
 func TestConsoleSpacesWiringSources(t *testing.T) {
 	app := readRepo(t, "app.js")
 	for _, want := range []string{
-		`loadResource('spaces', '/api/v1/spaces'`, // 必修1：loadAll 第七资源
+		`loadResource('spaces', '/api/v1/spaces?include_archived=true'`, // 必修1：loadAll 第七资源（W08-02：显式包含归档——页签计数需全量视图）
 		`code === 503`, // 未装配业务专态走成功提交（非陈旧失败）
 		`commit('nodes', nodes); commit('tasks', tasks); commit('directory', directory); commit('prime', prime); commit('works', works); commit('sessions', sessions); commit('spaces', spaces);`,
 		`S.spacesUnsupported = value.unavailable;`, // 专态随提交管道落态

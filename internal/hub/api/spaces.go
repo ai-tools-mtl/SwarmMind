@@ -159,17 +159,34 @@ func (s *Server) handleSpaceCreate(w http.ResponseWriter, r *http.Request, subj 
 	writeJSON(w, code, map[string]any{"space": sp, "scope": spaces.Scope(sp.ID), "dup": dup})
 }
 
-// handleSpaceList GET /api/v1/spaces：全量列表（创建序；scope 注记）。
+// handleSpaceList GET /api/v1/spaces：列表（创建序；scope 注记）。归档过滤
+// （W08-02）：默认隐藏已归档空间（归档只是列表收纳——详情/记录/消息读路径不
+// 关闭仍可回查）；`?include_archived=true` 显式包含（控制台页签计数依赖全量
+// 视图，经本参数显式取全量）。应答附 `archived_hidden`（本次被过滤隐藏的归档
+// 空间数）——消费者不把「列表没有」误读成「不存在」。
 func (s *Server) handleSpaceList(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
 	}
-	spacesList := s.cfg.Spaces.Spaces()
+	includeArchived := r.URL.Query().Get("include_archived") == "true"
+	all := s.cfg.Spaces.Spaces()
+	spacesList := make([]collab.Space, 0, len(all))
+	hidden := 0
+	for _, sp := range all {
+		if sp.Archived && !includeArchived {
+			hidden++
+			continue
+		}
+		spacesList = append(spacesList, sp)
+	}
 	out := make([]map[string]any, 0, len(spacesList))
 	for _, sp := range spacesList {
 		out = append(out, map[string]any{"space": sp, "scope": spaces.Scope(sp.ID)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"spaces": spacesList, "scopes": scopeMap(spacesList), "total": len(spacesList)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"spaces": spacesList, "scopes": scopeMap(spacesList), "total": len(spacesList),
+		"archived_hidden": hidden,
+	})
 }
 
 // scopeMap 空间 ID → 中心 scope 词形（列表注记；collab.HubScope 单源构造）。
@@ -181,18 +198,48 @@ func scopeMap(list []collab.Space) map[string]string {
 	return m
 }
 
+// spaceDiag 空间诊断投影（W08-02 执行/问题诊断面，P09 数据源；与 node 面
+// internal/node/localapi spaceDiag 同形同语义——两端各自 join 本端轮终事实源）。
+// 全部为既有事实的只读 join 投影，零影子状态。
+type spaceDiag struct {
+	InFlight       int `json:"in_flight"`                 // 在途/排队意图数（= space.in_flight 同源）
+	AwaitingReview int `json:"awaiting_review,omitempty"` // 轮终不确定（unverified=needs_review 投影）、留待核对未收敛数
+}
+
+// hubSpaceDiagOf 计算中心空间诊断投影（意图 × 任务行实物 join——与 spaces 服务
+// 重启对账分类同源：accepted 意图的任务行 needs_review 终态、或任务行已过保留期
+// 清理（执行事实不可核验 turnFactMissing），都按纪律留待核对未收敛即计入）。
+func (s *Server) hubSpaceDiagOf(id string, view collab.SpaceView) spaceDiag {
+	d := spaceDiag{InFlight: view.InFlight}
+	if d.InFlight == 0 || s.cfg.Core == nil {
+		return d
+	}
+	for _, it := range s.cfg.Spaces.Intents(id) {
+		if it.Status != collab.IntentAccepted || it.TaskID == "" {
+			continue
+		}
+		t, ok := s.cfg.Core.GetTask(it.TaskID)
+		if !ok || t.Status == protocol.StatusNeedsReview {
+			d.AwaitingReview++
+		}
+	}
+	return d
+}
+
 // handleSpaceGet GET /api/v1/spaces/{id}：详情（视图含成员/负责人/预算用量/
-// 策略/在途投影；scope=hub:<id> 注记）。
+// 策略/在途投影；scope=hub:<id> 注记）。已归档空间照常可查（W08-02：归档只隐藏
+// 列表，详情读路径不关闭）；应答附 `diag` 诊断投影（在途与留待核对可见）。
 func (s *Server) handleSpaceGet(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
 	}
-	view, ok := s.cfg.Spaces.SpaceView(r.PathValue("id"))
+	id := r.PathValue("id")
+	view, ok := s.cfg.Spaces.SpaceView(id)
 	if !ok {
-		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+r.PathValue("id"))
+		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"space": view, "scope": spaces.Scope(view.ID)})
+	writeJSON(w, http.StatusOK, map[string]any{"space": view, "scope": spaces.Scope(view.ID), "diag": s.hubSpaceDiagOf(id, view)})
 }
 
 // handleSpaceControl POST /api/v1/spaces/{id}/control：控制骨架（逐动作授权表，
@@ -457,7 +504,15 @@ func (s *Server) handleSpaceDispatch(w http.ResponseWriter, r *http.Request, sub
 
 // handleSpaceDispatchGet GET /api/v1/spaces/{id}/dispatches/{request_id}：意图查询
 // （轮终投影：意图 + hub 会话轮行状态 join——pending/awaiting_node/running/
-// done/unverified/failed/cancelled + 意图状态）。
+// done/unverified/failed/cancelled + 意图状态）。W08-02 诊断注记（与 node 面
+// 同形同语义，全为既有事实投影零影子状态）：
+//   - `task_gone`：关联任务已过保留期清理（轮行 TaskGone 投影）——历史缺口如实
+//     可见，轮次注记仍在（会话轮账本不随任务清理失联）；
+//   - `awaiting_review`：accepted 意图的任务行 needs_review 终态、或任务行已过
+//     保留期清理（执行事实不可核验）——按纪律留待核对未收敛（与 spaces 服务重启
+//     对账分类同源）；
+//   - `binding`：成员会话绑定登记态（session_id + generation——中心绑定代次投影，
+//     gen>0=已登记；0=未登记/已解除）。
 func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
@@ -469,6 +524,23 @@ func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	body := map[string]any{"dispatch": it}
+	// 绑定登记态（诊断最小集：意图状态/轮终态分类/绑定登记态/重启对账注记）。
+	gen := uint64(0)
+	if it.SessionID != "" {
+		gen = s.cfg.Spaces.BoundGenOf(it.SessionID)
+	}
+	body["binding"] = map[string]any{"session_id": it.SessionID, "generation": gen}
+	// 任务事实注记（与 hubSpaceDiagOf 同源判定——accepted 意图按任务行实物）：
+	// 任务行已过保留期清理=历史缺口（task_gone）且执行事实不可核验（留待核对）；
+	// needs_review 终态=留待核对（不自动收敛重跑）。
+	if it.Status == collab.IntentAccepted && it.TaskID != "" && s.cfg.Core != nil {
+		if t, ok := s.cfg.Core.GetTask(it.TaskID); !ok {
+			body["task_gone"] = true       // 任务已过保留期清理（历史缺口注记）
+			body["awaiting_review"] = true // 执行事实不可核验=留待核对
+		} else if t.Status == protocol.StatusNeedsReview {
+			body["awaiting_review"] = true // 轮终不确定=留待核对（不自动收敛重跑）
+		}
+	}
 	if it.SessionID != "" && s.cfg.Core != nil {
 		if sv, ok := s.cfg.Core.GetSession(it.SessionID); ok {
 			for _, tv := range sv.Turns {
@@ -479,6 +551,7 @@ func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) 
 						"task_id":    tv.TaskID,
 						"state":      tv.Status,
 						"error":      tv.Error,
+						"task_gone":  tv.TaskGone, // 任务已过保留期清理（历史缺口注记）
 					}
 					break
 				}

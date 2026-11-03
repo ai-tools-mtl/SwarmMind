@@ -1459,7 +1459,7 @@ func (b nodeBackend) call(name string, args map[string]any) (map[string]any, *rp
 	case "swarmmind_space_create":
 		text, err = b.toolSpaceCreate(args)
 	case "swarmmind_space_list":
-		text, err = b.toolSpaceList()
+		text, err = b.toolSpaceList(args)
 	case "swarmmind_space_status":
 		text, err = b.toolSpaceStatus(args)
 	case "swarmmind_space_dispatch":
@@ -2701,7 +2701,7 @@ func callTool(name string, args map[string]any) (map[string]any, *rpcError) {
 	case "swarmmind_space_create":
 		text, err = toolHubSpaceCreate(args)
 	case "swarmmind_space_list":
-		text, err = toolHubSpaceList()
+		text, err = toolHubSpaceList(args)
 	case "swarmmind_space_status":
 		text, err = toolHubSpaceStatus(args)
 	case "swarmmind_space_dispatch":

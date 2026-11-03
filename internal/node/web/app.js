@@ -477,6 +477,10 @@ const SPACE_TERMINAL = new Set(['completed', 'abandoned']);
 const SPACE_MODES = { manual: '手动', builtin: '内置协作', external: '外部管家' };
 const SPACE_FINISH_AUTH = { human_only: '完成须主人定版', verified_write_review: '写审可自动完成' };
 const SPACE_INTENTS = { pending: '排队待投递', accepted: '执行中', converged: '已收束', cancelled: '已取消' };
+/* SPACE_AWAITING_REVIEW_HINT 诊断注记（W08-02 spaceDiag.awaiting_review 随行：
+ * 在途意图中轮终不确定 needs_review、按纪律留待核对未收敛的可见化——未证实不绿，
+ * 不冒充运行中；服务端 join 投影，前端不自算状态）。 */
+const SPACE_AWAITING_REVIEW_HINT = n => `其中 ${n} 个轮终不确定（needs_review），留待核对`;
 /* SPACE_ACTION_WORDS 控制动作标准词（操作区按钮与确认弹层唯一出处）。错误呈现
  * 纪律：服务端 403/409/503 人话原因如实全量展示，不遮蔽不改写——授权拒绝与状态
  * 拒绝都让操作者看到「为什么」（逐动作授权动态可用的另一半是失败原因可见）。 */
@@ -1589,7 +1593,10 @@ const spaceGoalShort = (s, n = 48) => { const t = String(s || ''); return t.leng
 let spaceListSeq = 0;
 async function loadSpaces() {
   const epochAtReq = S.sessionEpoch, seqAtReq = ++spaceListSeq;
-  const r = await api('GET', '/api/v1/spaces').catch(() => null);
+  /* W08-02 归档过滤：REST 默认隐藏已归档；页签计数与「已归档」筛选需要全量视图
+   * ——显式 include_archived=true 取全量（显式包含，消费方自律；默认口径留给
+   * API/MCP 消费方）。 */
+  const r = await api('GET', '/api/v1/spaces?include_archived=true').catch(() => null);
   if (S.sessionEpoch !== epochAtReq || seqAtReq !== spaceListSeq) return;   // 双守卫同会话口径
   S.spacesLoaded = true;
   if (!r) { S.spacesError = '空间列表暂时读不到（网络）'; return; }
@@ -1692,8 +1699,11 @@ async function fetchSpacePage() {
   if (seqAtReq !== spacePageReqSeq || S.sessionEpoch !== epochAtReq || !S.spaceId || S.spaceId !== id || S.page !== 'spaces') return;
   if (sr && sr.code === 404) { toast('空间不存在'); location.hash = '#/spaces'; return; }
   if (!sr || sr.code !== 200 || !sr.data?.space) return;
-  if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, strategy: null };
+  if (!S.spacePage || S.spacePage.id !== id) S.spacePage = { id, space: null, diag: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, strategy: null };
   S.spacePage.space = sr.data.space;
+  /* 诊断投影（W08-02 spaceDiag）：在途与留待核对计数（服务端 join 投影，零前端
+   * 自算状态——「未证实不绿」由服务端词表承担）。 */
+  S.spacePage.diag = sr.data.diag || null;
   /* 消息增量并入（since 游标只读不唤醒；滚动裁剪窗口经 pruned_before_seq 如实标注）。 */
   if (mr && mr.code === 200 && Array.isArray(mr.data.messages)) {
     const pruned = mr.data.pruned_before_seq || 0;
@@ -1753,7 +1763,7 @@ function spacePageZones(sp) {
     <tr><td>调度方式</td><td><small>${esc(SPACE_MODES[sp.mode] || sp.mode || '—')}</small></td></tr>
     <tr><td>当前执行者</td><td><small>${leader.term ? `${esc(SPACE_MODES[leader.kind] || leader.kind)} / ${esc(leader.principal || '—')} · 任期 ${leader.term}` : '待领取（未建立任期）'}</small></td></tr>
     <tr><td>租约</td><td><small>${esc(spaceLeaseCell(leader))}</small></td></tr>
-    <tr><td>在途执行</td><td><small>${(sp.in_flight || 0) ? `<b>${sp.in_flight}</b> 个在途/排队意图` : '无'}</small></td></tr>
+    <tr><td>在途执行</td><td><small>${(sp.in_flight || 0) ? `<b>${sp.in_flight}</b> 个在途/排队意图${(pg.diag?.awaiting_review || 0) > 0 ? ' · <span class="sst-unverified badge">' + esc(SPACE_AWAITING_REVIEW_HINT(pg.diag.awaiting_review)) + '</span>' : ''}` : '无'}</small></td></tr>
     <tr><td>等待原因</td><td><small>${wait ? esc(wait) : '—'}</small></td></tr>
     </tbody></table></div>
     <p class="footer-note">租约由服务端时钟裁决（本页按本机钟呈现仅供预判）；过期不能续约复活，接管由主人显式确认。刷新/退出不更换负责人。</p>`,
@@ -2429,7 +2439,7 @@ function route() {
    * 视图状态；弹层随任意路由变更关闭——草稿留 S.sp/S.spOps）。 */
   const prevSpaceId = S.spaceId;
   S.spaceId = S.page === 'spaces' && arg ? arg : '';
-  if (S.spaceId && S.spaceId !== prevSpaceId) S.spacePage = { id: S.spaceId, space: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, msgReqId: '' };
+  if (S.spaceId && S.spaceId !== prevSpaceId) S.spacePage = { id: S.spaceId, space: null, diag: null, zones: {}, msgs: [], lastSeq: 0, prunedSeq: 0, msgReqId: '' };
   if (!S.spaceId) S.spacePage = null;
   if ($('#space-modal')) closeSpaceModal();
   /* W03-04 P07：换路由即关 MCP 配置弹层与诊断抽屉（草稿/预览属页面会话，重开即
@@ -3558,7 +3568,19 @@ function servicesPage() {
    * 高频入口，不再沉底；空态/agent 服务卡居中，能力配置编辑区沉底）。 */
   return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +
     (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持（变更时刻见各能力「配置详情」的开关记录行）。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
-    cfgSection();
+    cfgSection() + backupNoteCard();
+}
+
+/* ---------- 备份与恢复说明卡（W08-02：范围说明/操作指引，P10 设置面） ----------
+ * 纯静态说明：平台不设备份 API、不记录备份状态——本卡不给「已备份」标记（不能
+ * 生成假状态），「最近可核实记录」= 用户备份目录产物本身（时间戳目录名 + 恢复
+ * 清单核对）。范围词与本机形态对齐（node=data_dir JSON 账本+清单；hub 卡同构在
+ * hub 控制台设置页，范围行分端如实）。 */
+function backupNoteCard() {
+  return `<section class="card spaced" id="sec-backup"><h2>备份与恢复</h2>
+  <p class="muted">备份是纯文件系统操作（平台不设备份 API，也<b>不记录备份状态</b>——本页不提供「已备份」标记，也不会自动备份；最近一次备份以你备份目录中的产物及其时间戳目录名为准，可按恢复清单逐项核对）。</p>
+  <p class="muted small"><b>范围</b>：本机 data_dir 全量（ledger.json 执行账本与取消墓碑、会话/空间协作账本、能力配置与凭据、local_token/prime_token、通知渠道、TLS 信任材料——产物敏感等同生产凭据，勿入公共网盘或仓库）+ node.yaml 配置文件。原生 CLI 会话历史在本机 CLI 自有目录，不在平台备份内。终态结果超保留期自动清理（terminal_retention 可配），备份不能替代导出归档。</p>
+  <p class="muted small"><b>操作</b>：<code>scripts/backup.sh --data-dir &lt;本机 data_dir&gt; --config node.yaml --out &lt;备份目录&gt;</code>（优先停机备份；目标运行中时脚本自动改走一致快照/守卫直拷，绝不产出静默坏备份）。<b>恢复</b>：先停写者 → 校验版本/哈希/数据集 → 临时目录演练核对 → 再写回生产（人工步骤清单见 docs/OPERATIONS.md「备份与恢复」）。首版无网页在线恢复接口。</p></section>`;
 }
 
 /* ---------- 能力配置编辑区（方案 3.5：yaml.Node round-trip + 热重载分类） ---------- */

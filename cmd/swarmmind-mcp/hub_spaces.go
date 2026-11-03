@@ -30,8 +30,8 @@ func toolHubSpaceCreate(args map[string]any) (string, error) {
 	return spaceToolCreate(hubSpaceAPI(), spaceFaceHub, args)
 }
 
-func toolHubSpaceList() (string, error) {
-	return spaceToolList(hubSpaceAPI(), spaceFaceHub)
+func toolHubSpaceList(args map[string]any) (string, error) {
+	return spaceToolList(hubSpaceAPI(), spaceFaceHub, args)
 }
 
 func toolHubSpaceStatus(args map[string]any) (string, error) {

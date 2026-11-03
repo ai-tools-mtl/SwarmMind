@@ -1,0 +1,55 @@
+# W08-02 backup.sh 真实演练留证 2026-11-03T03:13:42Z（drill root=/tmp/w0802-backup-drill.aYDFBY）
+# 口径：停机备份/运行中在线快照/全新目录恢复核对/node 形态目录；不承诺网页在线恢复。
+
+wal
+## 源库行数（含 wal 未合并行）
+3
+
+## 场景 A：停机备份
+[backup] 模式：停机全量拷贝（本脚本已持 data_dir 锁，备份期间实例无法启动）
+[backup] 源：/tmp/w0802-backup-drill.aYDFBY/hub-data
+[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-stopped （共 6 个文件）
+[backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
+[backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
+t-drill-001
+t-drill-002
+t-drill-003
+ok
+
+## 场景 B：运行中备份（python 代持 lock 模拟运行实例）
+backup.sh: 提示：/tmp/w0802-backup-drill.aYDFBY/hub-data 疑似运行中，db 走 sqlite3 在线快照。在线备份次于停机备份，条件允许请停机后重跑。
+[backup] 模式：在线快照（目标运行中，db 经 sqlite3 .backup 合并 wal）
+[backup] 源：/tmp/w0802-backup-drill.aYDFBY/hub-data
+[backup] db 快照完成且 quick_check=ok
+[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-online （共 4 个文件）
+[backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
+[backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
+在线快照交付文件数（交付时自包含，无 wal/shm 副作用）：
+       4
+/tmp/w0802-backup-drill.aYDFBY/backup-online/admin_token
+/tmp/w0802-backup-drill.aYDFBY/backup-online/hub.yaml
+/tmp/w0802-backup-drill.aYDFBY/backup-online/hub_state.db
+/tmp/w0802-backup-drill.aYDFBY/backup-online/ledger.json
+3
+
+## 场景 C：全新临时目录恢复核对（先停写者→拷贝→quick_check→ID/哈希）
+ok
+t-drill-001 t-drill-002 t-drill-003 
+source-dump-sha256=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
+restore-dump-sha256=1cc7f6f2fb1486e025d446004aae0c8837425352df2fe56c791ba1ced480cf2e
+哈希一致：恢复库与源库逻辑内容逐行等价
+恢复=纯手工文件操作，不拉起任何进程、不自动执行任何新轮次
+
+## 场景 D：node 形态目录（JSON 账本，无 db）停机备份
+[backup] 模式：停机全量拷贝（本脚本已持 data_dir 锁，备份期间实例无法启动）
+[backup] 源：/tmp/w0802-backup-drill.aYDFBY/node-data
+[backup] 备份完成：/tmp/w0802-backup-drill.aYDFBY/backup-node （共 5 个文件）
+[backup] 注意：产物含 admin_token、TLS 私钥、节点令牌，勿入公共网盘或仓库。
+[backup] 恢复步骤见 docs/OPERATIONS.md「备份与恢复」。
+cancels.json
+ledger.json
+node.yaml
+prime_token
+spaces.json
+
+## 结论：四场景全部真实执行通过；产物含凭据（0700/0600）；恢复步骤人工（无网页在线恢复接口）

@@ -61,6 +61,9 @@ globalThis.window = {
 };
 globalThis.location = { hash: '#/spaces', host: 'hub.test', protocol: 'https:' };
 const __sp_calls = [];   // 请求留痕 {method, path}（消息游标等请求形断言用）
+/* __sp_path 路径归一（剥 query——W08-02 起列表端点携 ?include_archived=true，
+ * 路由匹配/留痕比对按裸路径口径，query 变化不破坏既有场景）。 */
+const __sp_path = p => String(p).split('?')[0];
 globalThis.fetch = (path, opts = {}) => {
   const rec = { method: opts.method || 'GET', path: String(path), body: opts.body || null };
   __sp_calls.push(rec);
@@ -85,7 +88,7 @@ const __sp_sp = (id, goal, extra = {}) => ({
 let __sp_payloads = null;
 function __sp_spacesHook() {
   __sp_hook = rec => {
-    if (rec.method === 'GET' && rec.path === '/api/v1/spaces') {
+    if (rec.method === 'GET' && __sp_path(rec.path) === '/api/v1/spaces') {
       if (__sp_payloads === 'fail') return __sp_err(500);
       return __sp_ok({ spaces: __sp_payloads, scopes: {}, total: __sp_payloads.length });
     }
@@ -96,7 +99,7 @@ function __sp_spacesHook() {
  * 挂起等手动放行——跨登出挂起旧请求的最小构造）；其余路径即时 ok。 */
 function __sp_spacesQueueHook() {
   __sp_hook = rec => {
-    if (rec.method === 'GET' && rec.path === '/api/v1/spaces') {
+    if (rec.method === 'GET' && __sp_path(rec.path) === '/api/v1/spaces') {
       let resolve;
       const p = new Promise(r => { resolve = r; });
       __sp_waiters.push({ path: rec.path, resolve });
@@ -126,7 +129,7 @@ function __sp_detailHook() {
 function __sp_respond_path(path, nth, body) {
   const hits = [];
   for (let i = 0; i < __sp_waiters.length; i++) {
-    if (__sp_waiters[i].path === path) hits.push(i);
+    if (__sp_path(__sp_waiters[i].path) === __sp_path(path)) hits.push(i);
   }
   if (nth < 0 || nth >= hits.length) throw new Error('路径应答位越界 ' + nth + '（' + path + ' 在队=' + hits.length + '）');
   return __sp_respond_at(hits[nth], body);
@@ -198,7 +201,7 @@ async function __hs_run(scenario) {
         '/api/v1/sessions': { sessions: [{ id: 's-x' }] },
         '/api/v1/spaces': { spaces: [__sp_sp('sp-x', '假绿空间')] },
       };
-      const body = sameShape[rec.path];
+      const body = sameShape[__sp_path(rec.path)];
       if (body) return { status: 500, ok: false, json: async () => body };
       return __sp_ok({});
     };
@@ -243,7 +246,7 @@ async function __hs_run(scenario) {
     S.authed = true;
     __sp_mountSpaces(false);
     __sp_hook = rec => {
-      if (rec.method === 'GET' && rec.path === '/api/v1/spaces') return { status: 503, ok: false, json: async () => ({ error: 'spaces_unavailable', message: 'x' }) };
+      if (rec.method === 'GET' && __sp_path(rec.path) === '/api/v1/spaces') return { status: 503, ok: false, json: async () => ({ error: 'spaces_unavailable', message: 'x' }) };
       return __sp_ok({});
     };
     await pollTick();

@@ -185,13 +185,21 @@ func spaceToolCreate(api spaceAPICaller, face spaceFace, args map[string]any) (s
 }
 
 // toolSpaceList swarmmind_space_list（node 面装配点）：空间列表。
-func (b nodeBackend) toolSpaceList() (string, error) {
-	return spaceToolList(b.spaceAPI(), spaceFaceNode)
+func (b nodeBackend) toolSpaceList(args map[string]any) (string, error) {
+	return spaceToolList(b.spaceAPI(), spaceFaceNode, args)
 }
 
-// spaceToolList 空间列表共享实现（创建序）。
-func spaceToolList(api spaceAPICaller, face spaceFace) (string, error) {
-	code, data, err := api("GET", "/api/v1/spaces", nil)
+// spaceToolList 空间列表共享实现（创建序）。归档过滤（W08-02）：REST 默认隐藏
+// 已归档空间；`include_archived=true` 显式包含。默认路径应答附 archived_hidden
+// （被隐藏的归档数）——如实注记「列表没有 ≠ 不存在」，不冒充全量。
+func spaceToolList(api spaceAPICaller, face spaceFace, args map[string]any) (string, error) {
+	path := "/api/v1/spaces"
+	includeArchived := false
+	if v, ok := args["include_archived"].(bool); ok && v {
+		includeArchived = true
+		path += "?include_archived=true"
+	}
+	code, data, err := api("GET", path, nil)
 	if err != nil {
 		return "", err
 	}
@@ -199,18 +207,26 @@ func spaceToolList(api spaceAPICaller, face spaceFace) (string, error) {
 		return "", nodeAPIErr(code, data)
 	}
 	var out struct {
-		Spaces []spaceView `json:"spaces"`
+		Spaces         []spaceView `json:"spaces"`
+		ArchivedHidden int         `json:"archived_hidden"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
 	}
-	if len(out.Spaces) == 0 {
+	if len(out.Spaces) == 0 && out.ArchivedHidden == 0 {
 		return face.Where + "还没有协作空间（swarmmind_space_create 创建；一次性任务不需要空间，直接 swarmmind_submit）。", nil
 	}
 	var bl strings.Builder
-	fmt.Fprintf(&bl, "%s协作空间列表：共 %d 个（创建时刻升序）", face.Where, len(out.Spaces))
+	if includeArchived {
+		fmt.Fprintf(&bl, "%s协作空间列表（含已归档）：共 %d 个（创建时刻升序）", face.Where, len(out.Spaces))
+	} else {
+		fmt.Fprintf(&bl, "%s协作空间列表：共 %d 个（创建时刻升序；已归档默认不列出）", face.Where, len(out.Spaces))
+	}
 	for _, sp := range out.Spaces {
 		bl.WriteString("\n" + spaceStatusLine(sp))
+	}
+	if out.ArchivedHidden > 0 {
+		fmt.Fprintf(&bl, "\n另有 %d 个已归档空间未列出（include_archived=true 查看；归档只是列表收纳——详情/记录用 swarmmind_space_status 按空间 ID 照常可查）。", out.ArchivedHidden)
 	}
 	bl.WriteString("\n详情与成员/意图用 swarmmind_space_status；派发用 swarmmind_space_dispatch。")
 	return bl.String(), nil
@@ -250,6 +266,10 @@ func spaceToolStatus(api spaceAPICaller, face spaceFace, args map[string]any) (s
 	var out struct {
 		Space spaceView `json:"space"`
 		Scope string    `json:"scope,omitempty"`
+		Diag  struct {
+			InFlight       int `json:"in_flight"`
+			AwaitingReview int `json:"awaiting_review"`
+		} `json:"diag"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return "", fmt.Errorf("应答解析失败：%v", err)
@@ -292,6 +312,15 @@ func spaceToolStatus(api spaceAPICaller, face spaceFace, args map[string]any) (s
 	}
 	if sp.InFlight > 0 {
 		bl.WriteString(fmt.Sprintf("在途/排队意图 %d 条——结果落账不自动触发下一轮（结果回流靠显式派发）。\n", sp.InFlight))
+	}
+	// 归档收纳态如实（W08-02）：列表默认收纳，按 ID 查详情/记录照常可查。
+	if sp.Archived {
+		bl.WriteString("已归档（列表收纳态）：详情/记录/消息照常可查，材料与原生线程保留。\n")
+	}
+	// 诊断注记（W08-02，spaceDiag 投影随行）：轮终不确定（needs_review）的在途
+	// 意图按纪律留待核对未收敛——禁止基于未核对轮次下结论的同源提醒。
+	if out.Diag.AwaitingReview > 0 {
+		fmt.Fprintf(&bl, "诊断：%d 个在途意图的执行轮终为 needs_review（结果不确定，按纪律留待核对、不自动收敛重跑）——核对前禁止基于这些轮次下结论。\n", out.Diag.AwaitingReview)
 	}
 	return bl.String(), nil
 }
@@ -880,8 +909,10 @@ func spaceToolDefs(face spaceFace) []toolDef {
 			"budget":     toolObj(map[string]any{"max_messages": toolNum("消息条数上限（0=不限）"), "max_dispatch_rounds": toolNum("派发轮次上限（0=不限）"), "max_wall_seconds": toolNum("运行墙钟上限秒（0=不限）")}, "预算三分离定义（可选；缺省全不限）"),
 			"request_id": toolStr("稳定创建请求 ID（可选）：同键同文返回原空间、异文 409"),
 		}, "goal", "mode")},
-		{Name: "swarmmind_space_list", Description: d("列出本机协作空间：ID、目标、状态（待配置/待领取/可运行/运行/暂停/受阻/待核对/终态）、负责人与任期、在途数、暂停原因。发现可领取（待领取）或可续派的空间"), InputSchema: toolObj(map[string]any{})},
-		{Name: "swarmmind_space_status", Description: d("查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论"), InputSchema: toolObj(map[string]any{
+		{Name: "swarmmind_space_list", Description: d("列出本机协作空间：ID、目标、状态（待配置/待领取/可运行/运行/暂停/受阻/待核对/终态）、负责人与任期、在途数、暂停原因。发现可领取（待领取）或可续派的空间。已归档空间默认不列出（include_archived=true 显式包含；归档只是列表收纳，按 ID 照常可查详情）"), InputSchema: toolObj(map[string]any{
+			"include_archived": toolBool("true 时同时列出已归档空间（缺省隐藏——归档只做列表收纳，详情/记录不受影响）"),
+		})},
+		{Name: "swarmmind_space_status", Description: d("查看协作空间详情：状态机位置、负责人/任期/租约、预算三分离用量、成员绑定、在途意图数与暂停/等待原因（调度条投影）+ 诊断注记（轮终不确定留待核对的在途意图数——needs_review 不自动收敛）。派发前读档拿 expected_version；待核对态禁止基于既有轮次下结论"), InputSchema: toolObj(map[string]any{
 			"space_id": toolStr("空间 ID（swarmmind_space_list 可查）"),
 		}, "space_id")},
 		{Name: "swarmmind_space_dispatch", Description: d("向协作空间指名成员派发一轮执行（编排主体唯一执行入口；须当前驱动者形态——领取空间后持任期）。返回意图受理回执（202 异步，空间串行调度：同空间一次一棒，跨空间并行）；request_id 可选幂等（重放不重复执行不重复扣预算）。结果落账不自动触发下一轮——继续推进须再次显式派发"), InputSchema: toolObj(map[string]any{

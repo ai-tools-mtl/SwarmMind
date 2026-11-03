@@ -143,7 +143,7 @@ func TestWebSpacesDictSharedBlock(t *testing.T) {
 	for _, want := range []string{
 		"['spaces', '协作空间']",
 		"SPACE_HUB_OFF",
-		"loadResource('spaces', '/api/v1/spaces'",   // 必修1：列表经 loadAll 统一轮询链（独立 loadSpaces 退役）
+		"loadResource('spaces', '/api/v1/spaces?include_archived=true'",   // 必修1：列表经 loadAll 统一轮询链（独立 loadSpaces 退役）；W08-02 归档过滤——页签计数需全量视图，显式包含取数
 		"async function fetchSpacePage() {",
 		"spacePageReqSeq",   // 必修2：详情取数请求序号守卫（双端同构；hub 行为反例见 spaces_poll_test.go）
 		"let spacePageReqSeq = 0",

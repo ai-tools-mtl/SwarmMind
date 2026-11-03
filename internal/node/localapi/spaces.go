@@ -48,6 +48,7 @@ import (
 	"strings"
 
 	"github.com/mtl802/swarmmind/internal/collab"
+	"github.com/mtl802/swarmmind/internal/node/ledger"
 	"github.com/mtl802/swarmmind/internal/node/service"
 	"github.com/mtl802/swarmmind/internal/protocol"
 	"github.com/mtl802/swarmmind/internal/strategy"
@@ -152,27 +153,98 @@ func (s *Server) handleSpaceCreate(w http.ResponseWriter, r *http.Request, subj 
 	writeJSON(w, code, map[string]any{"space": sp, "dup": dup})
 }
 
-// handleSpaceList GET /api/v1/spaces：全量列表（创建序）。
+// handleSpaceList GET /api/v1/spaces：列表（创建序）。归档过滤（W08-02）：默认
+// 隐藏已归档空间（archived=true 不出现在列表——归档只是列表收纳，详情/记录/消息
+// 读路径不关闭仍可回查）；`?include_archived=true` 显式包含（控制台页签计数依赖
+// 全量视图，经本参数显式取全量）。应答附 `archived_hidden`（本次被过滤隐藏的
+// 归档空间数；include_archived=true 时恒 0）——消费者不把「列表没有」误读成
+// 「不存在」。
 func (s *Server) handleSpaceList(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
 	}
-	spaces := s.cfg.Collab.Spaces()
-	writeJSON(w, http.StatusOK, map[string]any{"spaces": spaces, "total": len(spaces)})
+	includeArchived := r.URL.Query().Get("include_archived") == "true"
+	all := s.cfg.Collab.Spaces()
+	spaces := make([]collab.Space, 0, len(all))
+	hidden := 0
+	for _, sp := range all {
+		if sp.Archived && !includeArchived {
+			hidden++
+			continue
+		}
+		spaces = append(spaces, sp)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"spaces": spaces, "total": len(spaces), "archived_hidden": hidden,
+	})
+}
+
+// spaceDiag 空间诊断投影（W08-02 执行/问题诊断面，P09 数据源；SPEC 六.六
+// swarmmind_space_status 同批行）：全部为既有事实的只读 join 投影，零影子状态、
+// 零新存储——「必要新增诊断字段不另建影子状态」的字面兑现。
+type spaceDiag struct {
+	// InFlight 在途/排队意图数（= space.in_flight 同源投影，冗余给出便于单一
+	// 诊断消费方只读 diag）。
+	InFlight int `json:"in_flight"`
+	// AwaitingReview 其中轮终不确定（needs_review 终态已落账、意图按纪律留待
+	// 核对未收敛）的在途意图数（W04-02 收敛分类「不确定→留待核对不重跑」的可见
+	// 化——needs_review/留待核对在诊断面如实可见，不冒充运行中）。0 省略。
+	AwaitingReview int `json:"awaiting_review,omitempty"`
+}
+
+// spaceDiagOf 计算空间诊断投影（node 面：意图 × 账本轮终 join；hub 面同形函数
+// 见 internal/hub/api/spaces.go——两端各自 join 本端轮终事实源，语义逐条同规）。
+// 轮终不确定判定：账本轮已 finished 且 Result.Status=needs_review（重启对账与
+// 活路径同款「留待核对」分类的查询侧投影）。
+func (s *Server) spaceDiagOf(id string, view collab.SpaceView) spaceDiag {
+	d := spaceDiag{InFlight: view.InFlight}
+	if d.InFlight == 0 || s.cfg.Ledger == nil {
+		return d
+	}
+	for _, it := range s.cfg.Collab.Intents(id) {
+		if !it.Status.InFlight() {
+			continue
+		}
+		e, ok := ledgerTurnOf(s.cfg.Ledger, it.SessionID, it.TurnSeq)
+		if !ok || e.State != ledger.StateFinished || e.Result == nil {
+			continue
+		}
+		if e.Result.Status == protocol.ResultNeedsReview {
+			d.AwaitingReview++
+		}
+	}
+	return d
+}
+
+// ledgerTurnOf 账本轮次查找（session+seq → 条目；agentPendingView 同款遍历口径，
+// 本地包内单点维护）。
+func ledgerTurnOf(l *ledger.Ledger, sessionID string, seq int64) (ledger.Entry, bool) {
+	if l == nil || sessionID == "" || seq <= 0 {
+		return ledger.Entry{}, false
+	}
+	for _, e := range l.View() {
+		sr := e.Task.Session
+		if sr != nil && sr.SessionID == sessionID && sr.TurnSeq == seq {
+			return e, true
+		}
+	}
+	return ledger.Entry{}, false
 }
 
 // handleSpaceGet GET /api/v1/spaces/{id}：详情（视图含成员/负责人/预算用量/
-// 策略/在途投影）。
+// 策略/在途投影）。已归档空间照常可查（W08-02：归档只隐藏列表，详情读路径不
+// 关闭）；应答附 `diag` 诊断投影（spaceDiag——在途与留待核对可见）。
 func (s *Server) handleSpaceGet(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
 	}
-	view, ok := s.cfg.Collab.SpaceView(r.PathValue("id"))
+	id := r.PathValue("id")
+	view, ok := s.cfg.Collab.SpaceView(id)
 	if !ok {
-		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+r.PathValue("id"))
+		writeErr(w, http.StatusNotFound, collab.CodeNotFound, "空间不存在: "+id)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"space": view})
+	writeJSON(w, http.StatusOK, map[string]any{"space": view, "diag": s.spaceDiagOf(id, view)})
 }
 
 // handleSpaceControl POST /api/v1/spaces/{id}/control：控制骨架（逐动作授权表，
@@ -441,27 +513,57 @@ func (s *Server) handleSpaceDispatch(w http.ResponseWriter, r *http.Request, sub
 
 // handleSpaceDispatchGet GET /api/v1/spaces/{id}/dispatches/{request_id}：意图
 // 查询（轮终投影：意图 + 账本轮状态 join——pending/accepted/收敛/取消 + 轮的
-// 排队/运行/终态）。
+// 排队/运行/终态）。W08-02 诊断注记（全为既有事实投影，零影子状态）：
+//   - `task_gone`：意图登记的执行任务已过保留期清理（账本无该任务条目）——历史
+//     缺口如实可见；意图/轮次注记仍在（任务清理 ≠ 从未执行，收敛事实与审计事件
+//     在 collab 账本不受任务保留期影响）；
+//   - `awaiting_review`：意图在途且账本轮终为 needs_review——按纪律留待核对未
+//     收敛（不自动重跑），诊断面如实可见；
+//   - `binding`：成员会话绑定登记态（session_id + registered——归属空间核对，
+//     解绑/换绑后 registered=false 如实）。
 func (s *Server) handleSpaceDispatchGet(w http.ResponseWriter, r *http.Request) {
 	if !s.spaceReady(w) {
 		return
 	}
-	it, ok := s.cfg.Collab.IntentByRequest(r.PathValue("id"), r.PathValue("request_id"))
+	spaceID := r.PathValue("id")
+	it, ok := s.cfg.Collab.IntentByRequest(spaceID, r.PathValue("request_id"))
 	if !ok {
 		writeErr(w, http.StatusNotFound, "dispatch_not_found", "意图不存在（request_id 未受理或已滚动出空间）: "+r.PathValue("request_id"))
 		return
 	}
 	body := map[string]any{"dispatch": it}
-	if it.TaskID != "" && s.cfg.Ledger != nil {
-		if e, ok := s.cfg.Ledger.Get(it.TaskID); ok {
-			turn := map[string]any{"task_id": it.TaskID, "state": e.State}
+	// 绑定登记态（诊断最小集：意图状态/轮终态分类/绑定登记态/重启对账注记）。
+	binding := map[string]any{"session_id": it.SessionID, "registered": false}
+	if owner, ok := s.cfg.Collab.SessionOwnerSpace(it.SessionID); ok && owner == spaceID {
+		binding["registered"] = true
+	}
+	body["binding"] = binding
+	// 轮终 join：账本轮事实按 session+seq 定位（与 service.findLedgerTurn 同款键
+	// ——pending 意图 TaskID 未在位（受理→投递窗/未投递）同样可查轮事实；诊断
+	// join 不依赖 TaskID 在位，W08-02）。
+	var (
+		turnFound bool
+		review    bool
+	)
+	if it.SessionID != "" && s.cfg.Ledger != nil {
+		if e, ok := ledgerTurnOf(s.cfg.Ledger, it.SessionID, it.TurnSeq); ok {
+			turnFound = true
+			turn := map[string]any{"task_id": e.Task.ID, "state": e.State}
 			if e.Result != nil {
 				turn["status"] = e.Result.Status
 				turn["error"] = e.Result.Error
 				turn["final_answer"] = e.Result.FinalAnswer
+				review = it.Status.InFlight() && e.State == ledger.StateFinished &&
+					e.Result.Status == protocol.ResultNeedsReview
 			}
 			body["turn"] = turn
 		}
+	}
+	if it.TaskID != "" && !turnFound {
+		body["task_gone"] = true // 任务已过保留期清理（历史缺口注记，W08-02）
+	}
+	if review {
+		body["awaiting_review"] = true // 在途+轮终不确定=留待核对（可见化）
 	}
 	writeJSON(w, http.StatusOK, body)
 }
