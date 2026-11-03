@@ -1,0 +1,59 @@
+{
+  "_ts": "2026-11-03T01:33:58Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/strategy",
+  "_status": 200,
+  "body": {
+    "strategy": {
+      "space_id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "has_loop": true,
+      "phase": "drafting",
+      "phase_valid": true,
+      "last_reviewed_at": "0001-01-01T00:00:00Z",
+      "candidates": [
+        {
+          "id": "cand-d208c41467b3",
+          "summary": "定版方案甲（分阶段吸收乙的扩展性设计）",
+          "proposer": "c-node/hub-a",
+          "round": 1,
+          "final_text": "FINAL: 定版方案甲（分阶段吸收乙的扩展性设计）",
+          "registered_at": "2026-11-03T01:33:49.456149Z",
+          "status": "pending",
+          "seen_count": 1
+        },
+        {
+          "id": "cand-3522a49984f3",
+          "summary": "支持方案甲但要求扩展点先落",
+          "proposer": "c-node/hub-b",
+          "round": 1,
+          "final_text": "FINAL: 支持方案甲但要求扩展点先落",
+          "registered_at": "2026-11-03T01:33:49.484376Z",
+          "status": "pending",
+          "seen_count": 1
+        }
+      ],
+      "gaps": [
+        {
+          "field": "acceptance",
+          "detail": "验收条件缺失：空间未配置 acceptance（完成判据必需）"
+        },
+        {
+          "field": "phase",
+          "detail": "阶段 drafting 尚未进入审查：不存在完成（编写/冻结中）"
+        },
+        {
+          "field": "candidate",
+          "detail": "存在未定版候选 2 条（共 2 条）：候选须清零或显式定版"
+        },
+        {
+          "field": "version",
+          "detail": "无登记版本：编写产出未固定（版本/证据/审查均无从谈起）"
+        }
+      ],
+      "stop": {
+        "should_pause": false
+      },
+      "fact_seq": 3
+    }
+  }
+}

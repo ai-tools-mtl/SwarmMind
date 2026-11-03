@@ -1,0 +1,158 @@
+{
+  "_ts": "2026-11-03T01:57:19Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51",
+  "_status": 200,
+  "body": {
+    "scope": "hub:sp-e1d7d872780c5809a4717bbb45a8ba51",
+    "space": {
+      "id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "goal": "W07-02 中心空间全链采证：讨论定版方案甲",
+      "mode": "manual",
+      "status": "running",
+      "phase": "drafting",
+      "members": [
+        {
+          "name": "c-node/hub-a",
+          "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+          "bound_at": "2026-11-03T01:31:25.013365Z"
+        },
+        {
+          "name": "c-node/hub-b",
+          "session_id": "s-723c0596dfdc7e46a3b9154f293b750c",
+          "bound_at": "2026-11-03T01:31:25.013365Z"
+        }
+      ],
+      "leader": {
+        "kind": "manual",
+        "principal": "admin",
+        "term": 1,
+        "lease_until": "0001-01-01T00:00:00Z"
+      },
+      "policy": {
+        "finish_auth": "human_only",
+        "policy_version": 1
+      },
+      "budget": {
+        "max_messages": 0,
+        "max_dispatch_rounds": 0,
+        "max_wall_seconds": 0
+      },
+      "used": {
+        "messages": 2,
+        "dispatch_rounds": 5,
+        "wall_seconds": 0,
+        "running_since": "2026-11-03T01:31:33.073901Z"
+      },
+      "version": 11,
+      "archived": false,
+      "events": [
+        {
+          "at": "2026-11-03T01:31:25.013365Z",
+          "kind": "created",
+          "actor": "owner:admin",
+          "note": "创建空间（方式 manual）"
+        },
+        {
+          "at": "2026-11-03T01:31:33.035191Z",
+          "kind": "ready",
+          "actor": "owner:admin",
+          "note": "配置就绪（可运行，等待显式启动）"
+        },
+        {
+          "at": "2026-11-03T01:31:33.073901Z",
+          "kind": "start",
+          "actor": "owner:admin",
+          "note": "显式启动（运行；派发由当前负责人执行）"
+        },
+        {
+          "at": "2026-11-03T01:31:33.074474Z",
+          "kind": "set_phase",
+          "actor": "owner:admin",
+          "note": "循环阶段 <未初始化> → drafting（经策略判定落账）"
+        },
+        {
+          "at": "2026-11-03T01:31:40.44579Z",
+          "kind": "dispatch",
+          "actor": "owner:admin",
+          "note": "指名 c-node/hub-a（意图 pending、任期 1）"
+        },
+        {
+          "at": "2026-11-03T01:31:40.44682Z",
+          "kind": "intent_accepted",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-a1 已接单（task t-9bb2910ae33d306eb243dfc46db867dd）——执行侧投递登记"
+        },
+        {
+          "at": "2026-11-03T01:31:40.892063Z",
+          "kind": "intent_converged",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-a1（converged→converged）执行事实落账（不触发下一轮）"
+        },
+        {
+          "at": "2026-11-03T01:32:03.64904Z",
+          "kind": "dispatch",
+          "actor": "owner:admin",
+          "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+        },
+        {
+          "at": "2026-11-03T01:32:03.649915Z",
+          "kind": "intent_accepted",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-b1 已接单（task t-76a9038522c8d2aa2a8251d4035539d5）——执行侧投递登记"
+        },
+        {
+          "at": "2026-11-03T01:32:03.690398Z",
+          "kind": "intent_converged",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-b1（converged→converged）执行事实落账（不触发下一轮）"
+        },
+        {
+          "at": "2026-11-03T01:32:06.78681Z",
+          "kind": "dispatch",
+          "actor": "owner:admin",
+          "note": "指名 c-node/hub-a（意图 pending、任期 1）"
+        },
+        {
+          "at": "2026-11-03T01:32:06.787532Z",
+          "kind": "intent_accepted",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-a2 已接单（task t-0e180a1ca23e230635a38030af23bc80）——执行侧投递登记"
+        },
+        {
+          "at": "2026-11-03T01:32:06.823692Z",
+          "kind": "intent_converged",
+          "actor": "system:system",
+          "note": "意图 stagec-ev2-disp-a2（converged→converged）执行事实落账（不触发下一轮）"
+        },
+        {
+          "at": "2026-11-03T01:53:22.205965Z",
+          "kind": "dispatch",
+          "actor": "owner:admin",
+          "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+        },
+        {
+          "at": "2026-11-03T01:53:22.206918Z",
+          "kind": "intent_accepted",
+          "actor": "system:system",
+          "note": "意图 stagec-ev4-disp-sleep 已接单（task t-9b924bef1f2593ab833ee38016f357e0）——执行侧投递登记"
+        },
+        {
+          "at": "2026-11-03T01:54:49.714026Z",
+          "kind": "dispatch",
+          "actor": "owner:admin",
+          "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+        },
+        {
+          "at": "2026-11-03T01:56:13.715872Z",
+          "kind": "intent_converged",
+          "actor": "system:system",
+          "note": "意图 stagec-ev4-disp-post（cancelled→cancelled）执行事实落账（不触发下一轮）"
+        }
+      ],
+      "created_at": "2026-11-03T01:31:25.013365Z",
+      "updated_at": "2026-11-03T01:31:33.074474Z",
+      "in_flight": 1
+    }
+  }
+}

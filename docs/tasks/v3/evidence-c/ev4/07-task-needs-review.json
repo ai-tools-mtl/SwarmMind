@@ -1,0 +1,47 @@
+{
+  "_ts": "2026-11-03T01:54:48Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/tasks/t-9b924bef1f2593ab833ee38016f357e0",
+  "_status": 200,
+  "body": {
+    "id": "t-9b924bef1f2593ab833ee38016f357e0",
+    "trace_id": "9e08318aa7d2d5f357652ae23fb3c8d9",
+    "target_node": "c-node",
+    "target_agent": "hub-b",
+    "input": {
+      "args": null,
+      "stdin": "恢复采证：长跑轮 SLEEP=60 ECHO-MARK:rec1"
+    },
+    "submitted_by": "admin",
+    "idem": "sturn:s-723c0596dfdc7e46a3b9154f293b750c:2",
+    "status": "needs_review",
+    "created_at": "2026-11-03T01:53:22.2066Z",
+    "updated_at": "2026-11-03T01:53:48.115621Z",
+    "expire_at": "2026-11-10T01:53:22.2066Z",
+    "result": {
+      "status": "needs_review",
+      "exit_code": -1,
+      "final_answer": "",
+      "stdout_tail": "",
+      "stderr_tail": "",
+      "artifacts": null,
+      "error": "node_restarted_midway",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "2026-11-03T01:53:48.107647Z"
+    },
+    "lease": {
+      "fence_epoch": 1,
+      "last_at": "0001-01-01T00:00:00Z"
+    },
+    "session": {
+      "session_id": "s-723c0596dfdc7e46a3b9154f293b750c",
+      "turn_seq": 2,
+      "op": "send",
+      "cwd": "/tmp/stagec-run/work",
+      "permission_mode": "workspace-write",
+      "adapter": "zcode",
+      "space": "hub:sp-e1d7d872780c5809a4717bbb45a8ba51"
+    },
+    "related_works": []
+  }
+}

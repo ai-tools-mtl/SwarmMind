@@ -1,0 +1,22 @@
+{
+  "_ts": "2026-11-03T01:30:46Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/tasks/t-96f68736513653dc672d1a8e1d924e18/cancel",
+  "_status": 202,
+  "body": {
+    "id": "t-96f68736513653dc672d1a8e1d924e18",
+    "trace_id": "eabd1e8127c514d9602bf1e752b18901",
+    "target_node": "sim-old-node",
+    "target_agent": "old-coder",
+    "input": {
+      "args": null,
+      "stdin": "普通任务采证（无空间语义）"
+    },
+    "submitted_by": "admin",
+    "idem": "stagec-ev1-plain-1",
+    "status": "cancelled",
+    "created_at": "2026-11-03T01:30:40.055143Z",
+    "updated_at": "2026-11-03T01:30:46.617378Z",
+    "expire_at": "2026-11-10T01:30:40.055143Z"
+  }
+}

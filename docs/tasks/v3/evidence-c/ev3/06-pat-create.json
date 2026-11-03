@@ -1,0 +1,14 @@
+{
+  "_ts": "2026-11-03T01:40:55Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/auth/tokens",
+  "_status": 201,
+  "body": {
+    "created_at": "2026-11-03T01:40:55.056484Z",
+    "id": "tk-f4b06ede3c494d69",
+    "name": "ev3-pat",
+    "notice": "明文仅此一次展示，请立即保存；之后只能看到前缀。",
+    "prefix": "smsw_4kluszlT",
+    "token": "smsw_***REDACTED-采证后即撤-明文不入档***"
+  }
+}

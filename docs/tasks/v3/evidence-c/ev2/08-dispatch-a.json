@@ -1,0 +1,23 @@
+{
+  "_ts": "2026-11-03T01:31:40Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/dispatches",
+  "_status": 202,
+  "body": {
+    "dispatch": {
+      "request_id": "stagec-ev2-disp-a1",
+      "space_id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "member": "c-node/hub-a",
+      "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+      "turn_seq": 1,
+      "task_id": "t-9bb2910ae33d306eb243dfc46db867dd",
+      "term": 1,
+      "version_ref": 5,
+      "status": "accepted",
+      "note": "讨论第一轮：我提议方案甲（分阶段吸收乙的扩展性设计）。ECHO-MARK:c1",
+      "created_at": "2026-11-03T01:31:40.44579Z",
+      "updated_at": "2026-11-03T01:31:40.446819Z"
+    },
+    "dup": false
+  }
+}

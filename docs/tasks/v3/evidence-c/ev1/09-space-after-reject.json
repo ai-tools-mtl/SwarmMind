@@ -1,0 +1,56 @@
+{
+  "_ts": "2026-11-03T01:29:49Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-fe65fa69372348b1eb098ec333c018e2",
+  "_status": 200,
+  "body": {
+    "scope": "hub:sp-fe65fa69372348b1eb098ec333c018e2",
+    "space": {
+      "id": "sp-fe65fa69372348b1eb098ec333c018e2",
+      "goal": "混跑采证：旧 node 成员空间操作拒绝",
+      "mode": "manual",
+      "status": "pending_config",
+      "members": [
+        {
+          "name": "sim-old-node/old-coder",
+          "session_id": "s-9cccb370b8942c206a69c1e540b83926",
+          "bound_at": "2026-11-03T01:29:12.32301Z"
+        }
+      ],
+      "leader": {
+        "kind": "manual",
+        "principal": "admin",
+        "term": 1,
+        "lease_until": "0001-01-01T00:00:00Z"
+      },
+      "policy": {
+        "finish_auth": "human_only",
+        "policy_version": 1
+      },
+      "budget": {
+        "max_messages": 0,
+        "max_dispatch_rounds": 0,
+        "max_wall_seconds": 0
+      },
+      "used": {
+        "messages": 0,
+        "dispatch_rounds": 0,
+        "wall_seconds": 0,
+        "running_since": "0001-01-01T00:00:00Z"
+      },
+      "version": 1,
+      "archived": false,
+      "events": [
+        {
+          "at": "2026-11-03T01:29:12.32301Z",
+          "kind": "created",
+          "actor": "owner:admin",
+          "note": "创建空间（方式 manual）"
+        }
+      ],
+      "created_at": "2026-11-03T01:29:12.32301Z",
+      "updated_at": "2026-11-03T01:29:12.32301Z",
+      "in_flight": 0
+    }
+  }
+}

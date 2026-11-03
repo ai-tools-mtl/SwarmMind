@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:30:40Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/tasks",
+  "_status": 202,
+  "body": {
+    "task_id": "t-96f68736513653dc672d1a8e1d924e18",
+    "trace_id": "eabd1e8127c514d9602bf1e752b18901"
+  }
+}

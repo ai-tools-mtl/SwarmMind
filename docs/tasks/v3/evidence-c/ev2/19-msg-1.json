@@ -1,0 +1,18 @@
+{
+  "_ts": "2026-11-03T01:33:39Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/messages",
+  "_status": 201,
+  "body": {
+    "dup": false,
+    "record": {
+      "space_id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "used": {
+        "messages": 1,
+        "dispatch_rounds": 3,
+        "wall_seconds": 0,
+        "running_since": "2026-11-03T01:31:33.073901Z"
+      }
+    }
+  }
+}

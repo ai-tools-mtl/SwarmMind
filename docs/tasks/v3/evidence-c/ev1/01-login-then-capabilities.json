@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:27:18Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/capabilities",
+  "_status": 401,
+  "body": {
+    "error": "unauthorized",
+    "message": "令牌无效或已撤销"
+  }
+}

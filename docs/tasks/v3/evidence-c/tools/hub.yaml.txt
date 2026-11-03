@@ -1,0 +1,10 @@
+# 阶段 C 采证实例 hub 配置（临时实例，同机回环）
+node_listen: 127.0.0.1:28877
+api_listen: 127.0.0.1:28878
+tls:
+  insecure_loopback: true
+nodes:
+  c-node: stagec-***REDACTED***
+  sim-old-node: stagec-***REDACTED***
+admin_token: stagec-***REDACTED***
+data_dir: /tmp/stagec-run/hub-data

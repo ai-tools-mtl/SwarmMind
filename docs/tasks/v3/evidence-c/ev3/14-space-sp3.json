@@ -1,0 +1,56 @@
+{
+  "_ts": "2026-11-03T01:42:48Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces",
+  "_status": 201,
+  "body": {
+    "dup": false,
+    "scope": "hub:sp-0373c2b6f49bb6eb58f3f4309370e35e",
+    "space": {
+      "id": "sp-0373c2b6f49bb6eb58f3f4309370e35e",
+      "goal": "撤声明 sweep 零外发采证",
+      "mode": "manual",
+      "status": "pending_config",
+      "members": [
+        {
+          "name": "sim-old-node/old-coder",
+          "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+          "bound_at": "2026-11-03T01:42:48.937806Z"
+        }
+      ],
+      "leader": {
+        "kind": "manual",
+        "principal": "admin",
+        "term": 1,
+        "lease_until": "0001-01-01T00:00:00Z"
+      },
+      "policy": {
+        "finish_auth": "human_only",
+        "policy_version": 1
+      },
+      "budget": {
+        "max_messages": 0,
+        "max_dispatch_rounds": 0,
+        "max_wall_seconds": 0
+      },
+      "used": {
+        "messages": 0,
+        "dispatch_rounds": 0,
+        "wall_seconds": 0,
+        "running_since": "0001-01-01T00:00:00Z"
+      },
+      "version": 1,
+      "archived": false,
+      "events": [
+        {
+          "at": "2026-11-03T01:42:48.937806Z",
+          "kind": "created",
+          "actor": "owner:admin",
+          "note": "创建空间（方式 manual）"
+        }
+      ],
+      "created_at": "2026-11-03T01:42:48.937806Z",
+      "updated_at": "2026-11-03T01:42:48.937806Z"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:35:18Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/sessions/s-1f3aa204c23ed9df158f3178ccc312ad/turns",
+  "_status": 409,
+  "body": {
+    "error": "space_dispatch_required",
+    "message": "core: 该会话已绑定协作空间，请经空间派发（space dispatch）推进，普通续轮被拒绝"
+  }
+}

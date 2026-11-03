@@ -1,0 +1,426 @@
+{
+  "_ts": "2026-11-03T02:01:29Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces",
+  "_status": 200,
+  "body": {
+    "scopes": {
+      "sp-0373c2b6f49bb6eb58f3f4309370e35e": "hub:sp-0373c2b6f49bb6eb58f3f4309370e35e",
+      "sp-101276fd08fa9eee68588f422865a184": "hub:sp-101276fd08fa9eee68588f422865a184",
+      "sp-e1d7d872780c5809a4717bbb45a8ba51": "hub:sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "sp-fe65fa69372348b1eb098ec333c018e2": "hub:sp-fe65fa69372348b1eb098ec333c018e2"
+    },
+    "spaces": [
+      {
+        "id": "sp-fe65fa69372348b1eb098ec333c018e2",
+        "goal": "混跑采证：旧 node 成员空间操作拒绝",
+        "mode": "manual",
+        "status": "running",
+        "phase": "drafting",
+        "members": [
+          {
+            "name": "sim-old-node/old-coder",
+            "session_id": "s-9cccb370b8942c206a69c1e540b83926",
+            "bound_at": "2026-11-03T01:29:12.32301Z"
+          }
+        ],
+        "leader": {
+          "kind": "manual",
+          "principal": "admin",
+          "term": 1,
+          "lease_until": "0001-01-01T00:00:00Z"
+        },
+        "policy": {
+          "finish_auth": "human_only",
+          "policy_version": 1
+        },
+        "budget": {
+          "max_messages": 0,
+          "max_dispatch_rounds": 0,
+          "max_wall_seconds": 0
+        },
+        "used": {
+          "messages": 0,
+          "dispatch_rounds": 0,
+          "wall_seconds": 0,
+          "running_since": "2026-11-03T01:29:49.124686Z"
+        },
+        "version": 4,
+        "archived": false,
+        "events": [
+          {
+            "at": "2026-11-03T01:29:12.32301Z",
+            "kind": "created",
+            "actor": "owner:admin",
+            "note": "创建空间（方式 manual）"
+          },
+          {
+            "at": "2026-11-03T01:29:49.094828Z",
+            "kind": "ready",
+            "actor": "owner:admin",
+            "note": "配置就绪（可运行，等待显式启动）"
+          },
+          {
+            "at": "2026-11-03T01:29:49.124686Z",
+            "kind": "start",
+            "actor": "owner:admin",
+            "note": "显式启动（运行；派发由当前负责人执行）"
+          },
+          {
+            "at": "2026-11-03T01:29:49.124936Z",
+            "kind": "set_phase",
+            "actor": "owner:admin",
+            "note": "循环阶段 <未初始化> → drafting（经策略判定落账）"
+          }
+        ],
+        "created_at": "2026-11-03T01:29:12.32301Z",
+        "updated_at": "2026-11-03T01:29:49.124936Z"
+      },
+      {
+        "id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+        "goal": "W07-02 中心空间全链采证：讨论定版方案甲",
+        "mode": "manual",
+        "status": "running",
+        "phase": "drafting",
+        "members": [
+          {
+            "name": "c-node/hub-a",
+            "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+            "bound_at": "2026-11-03T01:31:25.013365Z"
+          },
+          {
+            "name": "c-node/hub-b",
+            "session_id": "s-723c0596dfdc7e46a3b9154f293b750c",
+            "bound_at": "2026-11-03T01:31:25.013365Z"
+          }
+        ],
+        "leader": {
+          "kind": "manual",
+          "principal": "admin",
+          "term": 1,
+          "lease_until": "0001-01-01T00:00:00Z"
+        },
+        "policy": {
+          "finish_auth": "human_only",
+          "policy_version": 1
+        },
+        "budget": {
+          "max_messages": 0,
+          "max_dispatch_rounds": 0,
+          "max_wall_seconds": 0
+        },
+        "used": {
+          "messages": 2,
+          "dispatch_rounds": 5,
+          "wall_seconds": 0,
+          "running_since": "2026-11-03T01:31:33.073901Z"
+        },
+        "version": 11,
+        "archived": false,
+        "events": [
+          {
+            "at": "2026-11-03T01:31:25.013365Z",
+            "kind": "created",
+            "actor": "owner:admin",
+            "note": "创建空间（方式 manual）"
+          },
+          {
+            "at": "2026-11-03T01:31:33.035191Z",
+            "kind": "ready",
+            "actor": "owner:admin",
+            "note": "配置就绪（可运行，等待显式启动）"
+          },
+          {
+            "at": "2026-11-03T01:31:33.073901Z",
+            "kind": "start",
+            "actor": "owner:admin",
+            "note": "显式启动（运行；派发由当前负责人执行）"
+          },
+          {
+            "at": "2026-11-03T01:31:33.074474Z",
+            "kind": "set_phase",
+            "actor": "owner:admin",
+            "note": "循环阶段 <未初始化> → drafting（经策略判定落账）"
+          },
+          {
+            "at": "2026-11-03T01:31:40.44579Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 c-node/hub-a（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:31:40.44682Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-a1 已接单（task t-9bb2910ae33d306eb243dfc46db867dd）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:31:40.892063Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-a1（converged→converged）执行事实落账（不触发下一轮）"
+          },
+          {
+            "at": "2026-11-03T01:32:03.64904Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:32:03.649915Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-b1 已接单（task t-76a9038522c8d2aa2a8251d4035539d5）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:32:03.690398Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-b1（converged→converged）执行事实落账（不触发下一轮）"
+          },
+          {
+            "at": "2026-11-03T01:32:06.78681Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 c-node/hub-a（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:32:06.787532Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-a2 已接单（task t-0e180a1ca23e230635a38030af23bc80）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:32:06.823692Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 stagec-ev2-disp-a2（converged→converged）执行事实落账（不触发下一轮）"
+          },
+          {
+            "at": "2026-11-03T01:53:22.205965Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:53:22.206918Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 stagec-ev4-disp-sleep 已接单（task t-9b924bef1f2593ab833ee38016f357e0）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:54:49.714026Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 c-node/hub-b（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:56:13.715872Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 stagec-ev4-disp-post（cancelled→cancelled）执行事实落账（不触发下一轮）"
+          }
+        ],
+        "created_at": "2026-11-03T01:31:25.013365Z",
+        "updated_at": "2026-11-03T01:31:33.074474Z"
+      },
+      {
+        "id": "sp-0373c2b6f49bb6eb58f3f4309370e35e",
+        "goal": "撤声明 sweep 零外发采证",
+        "mode": "manual",
+        "status": "running",
+        "phase": "drafting",
+        "members": [
+          {
+            "name": "sim-old-node/old-coder",
+            "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+            "bound_at": "2026-11-03T01:42:48.937806Z"
+          }
+        ],
+        "leader": {
+          "kind": "manual",
+          "principal": "admin",
+          "term": 1,
+          "lease_until": "0001-01-01T00:00:00Z"
+        },
+        "policy": {
+          "finish_auth": "human_only",
+          "policy_version": 1
+        },
+        "budget": {
+          "max_messages": 0,
+          "max_dispatch_rounds": 0,
+          "max_wall_seconds": 0
+        },
+        "used": {
+          "messages": 0,
+          "dispatch_rounds": 2,
+          "wall_seconds": 0,
+          "running_since": "2026-11-03T01:42:49.010434Z"
+        },
+        "version": 6,
+        "archived": false,
+        "events": [
+          {
+            "at": "2026-11-03T01:42:48.937806Z",
+            "kind": "created",
+            "actor": "owner:admin",
+            "note": "创建空间（方式 manual）"
+          },
+          {
+            "at": "2026-11-03T01:42:48.980731Z",
+            "kind": "ready",
+            "actor": "owner:admin",
+            "note": "配置就绪（可运行，等待显式启动）"
+          },
+          {
+            "at": "2026-11-03T01:42:49.010434Z",
+            "kind": "start",
+            "actor": "owner:admin",
+            "note": "显式启动（运行；派发由当前负责人执行）"
+          },
+          {
+            "at": "2026-11-03T01:42:49.010909Z",
+            "kind": "set_phase",
+            "actor": "owner:admin",
+            "note": "循环阶段 <未初始化> → drafting（经策略判定落账）"
+          },
+          {
+            "at": "2026-11-03T01:44:00.744316Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 sim-old-node/old-coder（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:44:00.745865Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 ev3-sp3-disp1b 已接单（task t-48c9cec6847b0ee6056b26aeac48c706）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:44:09.599755Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 sim-old-node/old-coder（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:49:22.141416Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 ev3-sp3-disp1b（converged→converged）执行事实落账（不触发下一轮）"
+          },
+          {
+            "at": "2026-11-03T01:49:22.145724Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 ev3-sp3-disp2 已接单（task t-b49ad7001c23be83c4a04ca4af633bb1）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:49:30.157976Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 ev3-sp3-disp2（converged→converged）执行事实落账（不触发下一轮）"
+          }
+        ],
+        "created_at": "2026-11-03T01:42:48.937806Z",
+        "updated_at": "2026-11-03T01:42:49.010909Z"
+      },
+      {
+        "id": "sp-101276fd08fa9eee68588f422865a184",
+        "goal": "撤声明 sweep 零外发（干净窗）",
+        "mode": "manual",
+        "status": "running",
+        "phase": "drafting",
+        "members": [
+          {
+            "name": "sim-old-node/old-coder",
+            "session_id": "s-234ed0d611c8496abba8a11f960d1cdd",
+            "bound_at": "2026-11-03T01:51:09.307663Z"
+          }
+        ],
+        "leader": {
+          "kind": "manual",
+          "principal": "admin",
+          "term": 1,
+          "lease_until": "0001-01-01T00:00:00Z"
+        },
+        "policy": {
+          "finish_auth": "human_only",
+          "policy_version": 1
+        },
+        "budget": {
+          "max_messages": 0,
+          "max_dispatch_rounds": 0,
+          "max_wall_seconds": 0
+        },
+        "used": {
+          "messages": 0,
+          "dispatch_rounds": 2,
+          "wall_seconds": 0,
+          "running_since": "2026-11-03T01:51:09.379191Z"
+        },
+        "version": 6,
+        "archived": false,
+        "events": [
+          {
+            "at": "2026-11-03T01:51:09.307663Z",
+            "kind": "created",
+            "actor": "owner:admin",
+            "note": "创建空间（方式 manual）"
+          },
+          {
+            "at": "2026-11-03T01:51:09.350538Z",
+            "kind": "ready",
+            "actor": "owner:admin",
+            "note": "配置就绪（可运行，等待显式启动）"
+          },
+          {
+            "at": "2026-11-03T01:51:09.379191Z",
+            "kind": "start",
+            "actor": "owner:admin",
+            "note": "显式启动（运行；派发由当前负责人执行）"
+          },
+          {
+            "at": "2026-11-03T01:51:09.379714Z",
+            "kind": "set_phase",
+            "actor": "owner:admin",
+            "note": "循环阶段 <未初始化> → drafting（经策略判定落账）"
+          },
+          {
+            "at": "2026-11-03T01:51:17.767239Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 sim-old-node/old-coder（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:51:17.769054Z",
+            "kind": "intent_accepted",
+            "actor": "system:system",
+            "note": "意图 ev3-sp4-d1 已接单（task t-1224a5a371547514b018d5e627042d71）——执行侧投递登记"
+          },
+          {
+            "at": "2026-11-03T01:51:19.903603Z",
+            "kind": "dispatch",
+            "actor": "owner:admin",
+            "note": "指名 sim-old-node/old-coder（意图 pending、任期 1）"
+          },
+          {
+            "at": "2026-11-03T01:51:32.966534Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 ev3-sp4-d1（converged→converged）执行事实落账（不触发下一轮）"
+          },
+          {
+            "at": "2026-11-03T01:51:32.970965Z",
+            "kind": "intent_converged",
+            "actor": "system:system",
+            "note": "意图 ev3-sp4-d2（cancelled→cancelled）执行事实落账（不触发下一轮）"
+          }
+        ],
+        "created_at": "2026-11-03T01:51:09.307663Z",
+        "updated_at": "2026-11-03T01:51:09.379714Z"
+      }
+    ],
+    "total": 4
+  }
+}

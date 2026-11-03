@@ -1,0 +1,28 @@
+{
+  "_ts": "2026-11-03T01:35:44Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/capabilities",
+  "_status": 200,
+  "body": {
+    "features": {
+      "dispatch_suggest": true,
+      "groups": true,
+      "notify": true,
+      "sessions": true,
+      "spaces": true,
+      "tasks": true,
+      "works": true
+    },
+    "scope": "hub 全网",
+    "server": "hub",
+    "spaces": {
+      "hub": true,
+      "nodes": {
+        "c-node": true,
+        "sim-old-node": false
+      },
+      "private_history_readable": false
+    },
+    "version": "dev"
+  }
+}

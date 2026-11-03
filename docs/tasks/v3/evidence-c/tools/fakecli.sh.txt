@@ -1,0 +1,51 @@
+#!/bin/sh
+# fakecli.sh — zcode headless 协议镜像假 CLI（阶段 C 采证；STAGE-A/B 既定形态复用）。
+# 首轮签发持久原生 ID（状态文件 FAKECLI_STATE）；续轮核验 resume ID（非本脚本签发
+# → stderr "no such session" + exit 5）；回显 history:<累计轮数> 证明同线程续接；
+# prompt 内嵌 SLEEP=<sec> 长跑；BOOM=1 失败轮形态；ECHO-MARK:x 回显标记。
+STATE="${FAKECLI_STATE:-/tmp/stagec-run/fakecli-state}"
+mkdir -p "$STATE" 2>/dev/null
+
+CWD=""; MODE=""; RESUME=""; PROMPT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) CWD="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
+    --json) shift ;;
+    --resume) RESUME="$2"; shift 2 ;;
+    -p) PROMPT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+SLEEP_SEC=$(printf '%s' "$PROMPT" | sed -n 's/.*SLEEP=\([0-9][0-9]*\).*/\1/p' | head -1)
+if [ -n "$SLEEP_SEC" ]; then
+  sleep "$SLEEP_SEC"
+fi
+
+if [ -n "$RESUME" ]; then
+  F="$STATE/$RESUME.json"
+  if [ ! -f "$F" ]; then
+    echo "no such session: $RESUME" >&2
+    exit 5
+  fi
+  SID="$RESUME"
+  N=$(( $(cat "$F") + 1 ))
+  echo "$N" > "$F"
+else
+  SID="fakesess-$(date +%s)-$$-$RANDOM"
+  echo "1" > "$STATE/$SID.json"
+  N=1
+fi
+
+RESP="ack:stagec history:$N"
+if printf '%s' "$PROMPT" | grep -q 'ECHO-MARK:'; then
+  MARK=$(printf '%s' "$PROMPT" | sed -n 's/.*ECHO-MARK:\([^&"]*\).*/\1/p' | head -1)
+  RESP="$RESP mark:$MARK"
+fi
+if printf '%s' "$PROMPT" | grep -q 'BOOM=1'; then
+  echo "fake internal error" >&2
+  exit 7
+fi
+
+printf '{"sessionId":"%s","turnId":"turn-%d","response":"%s"}' "$SID" "$N" "$RESP"

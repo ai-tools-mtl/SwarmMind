@@ -1,0 +1,21 @@
+{
+  "_ts": "2026-11-03T01:44:11Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-0373c2b6f49bb6eb58f3f4309370e35e/dispatches/ev3-sp3-disp2",
+  "_status": 200,
+  "body": {
+    "dispatch": {
+      "request_id": "ev3-sp3-disp2",
+      "space_id": "sp-0373c2b6f49bb6eb58f3f4309370e35e",
+      "member": "sim-old-node/old-coder",
+      "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+      "turn_seq": 2,
+      "term": 1,
+      "version_ref": 6,
+      "status": "pending",
+      "note": "第二派发（应滞留 pending；撤声明后被出口门取消收束）",
+      "created_at": "2026-11-03T01:44:09.599755Z",
+      "updated_at": "2026-11-03T01:44:09.599755Z"
+    }
+  }
+}

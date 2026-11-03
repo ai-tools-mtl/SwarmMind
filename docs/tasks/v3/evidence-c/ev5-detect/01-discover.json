@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T02:00:25Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28879/api/v1/local/agents/discover",
+  "_status": 200,
+  "body": {
+    "note": "无候选：零扫描（本端点只探测显式给出的候选，不做磁盘/PATH 扫描）。发现≠登记：本端点零写盘、不自动开放能力；登记走「登记预览 + 能力配置保存」（既有 PUT /api/v1/local/config 链，无第二写路径）。「允许本机调用」随登记建立、本机派单不受 exposed 影响；exposed=false 只关闭 hub 下发新任务的准入，在途任务照常到终态。",
+    "results": []
+  }
+}

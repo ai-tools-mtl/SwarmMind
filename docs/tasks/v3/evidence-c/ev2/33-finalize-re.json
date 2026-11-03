@@ -1,0 +1,20 @@
+{
+  "_ts": "2026-11-03T01:59:21Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/candidates/cand-03aff9e27730/finalize",
+  "_status": 200,
+  "body": {
+    "candidate": {
+      "id": "cand-03aff9e27730",
+      "summary": "定版方案甲（重启后重建采证）",
+      "proposer": "c-node/hub-a",
+      "round": 2,
+      "final_text": "FINAL: 定版方案甲（重启后重建采证）",
+      "registered_at": "2026-11-03T01:59:21.356592Z",
+      "status": "finalized",
+      "seen_count": 1,
+      "finalized_at": "2026-11-03T01:59:21.440564Z",
+      "finalized_by": "admin"
+    }
+  }
+}

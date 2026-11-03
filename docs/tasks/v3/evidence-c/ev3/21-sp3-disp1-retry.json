@@ -1,0 +1,23 @@
+{
+  "_ts": "2026-11-03T01:44:00Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-0373c2b6f49bb6eb58f3f4309370e35e/dispatches",
+  "_status": 202,
+  "body": {
+    "dispatch": {
+      "request_id": "ev3-sp3-disp1b",
+      "space_id": "sp-0373c2b6f49bb6eb58f3f4309370e35e",
+      "member": "sim-old-node/old-coder",
+      "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+      "turn_seq": 1,
+      "task_id": "t-48c9cec6847b0ee6056b26aeac48c706",
+      "term": 1,
+      "version_ref": 5,
+      "status": "accepted",
+      "note": "第一派发重试（绑定应答修通后）",
+      "created_at": "2026-11-03T01:44:00.744316Z",
+      "updated_at": "2026-11-03T01:44:00.745865Z"
+    },
+    "dup": false
+  }
+}

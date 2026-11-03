@@ -1,0 +1,37 @@
+{
+  "_ts": "2026-11-03T01:58:39Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28879/api/v1/sessions/s-723c0596dfdc7e46a3b9154f293b750c",
+  "_status": 200,
+  "body": {
+    "session": {
+      "id": "s-723c0596dfdc7e46a3b9154f293b750c",
+      "agent_name": "hub-b",
+      "adapter": "zcode",
+      "cwd": "/tmp/stagec-run/work",
+      "native_id": "fakesess-1793669523-75833-24415",
+      "permission_mode": "workspace-write",
+      "status": "open",
+      "turn_count": 1,
+      "turns": [
+        {
+          "seq": 1,
+          "native_turn_id": "turn-1",
+          "status": "ok",
+          "work_result": "unverified",
+          "response": "ack:stagec history:1 mark:c2",
+          "exit_code": 0,
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+          },
+          "started_at": "2026-11-03T01:32:03.657032Z",
+          "finished_at": "2026-11-03T01:32:03.673588Z"
+        }
+      ],
+      "created_at": "2026-11-03T01:32:03.673603Z",
+      "updated_at": "2026-11-03T01:32:03.673604Z"
+    }
+  }
+}

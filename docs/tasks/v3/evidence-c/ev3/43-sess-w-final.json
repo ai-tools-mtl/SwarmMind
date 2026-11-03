@@ -1,0 +1,43 @@
+{
+  "_ts": "2026-11-03T01:51:53Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/sessions/s-234ed0d611c8496abba8a11f960d1cdd",
+  "_status": 200,
+  "body": {
+    "session": {
+      "id": "s-234ed0d611c8496abba8a11f960d1cdd",
+      "node_id": "sim-old-node",
+      "agent_name": "old-coder",
+      "adapter": "zcode",
+      "permission_mode": "rw",
+      "cwd": "/tmp/stagec-run/work",
+      "request_id": "ev3-sess-w",
+      "payload_hash": "d93d91a52f52873eed93cb1aea00cbcab35fd53caf1b6886376a3e2a96808c20",
+      "status": "active",
+      "created_at": "2026-11-03T01:51:09.265121Z",
+      "updated_at": "2026-11-03T01:51:32.955205Z",
+      "turns": [
+        {
+          "seq": 1,
+          "task_id": "t-1224a5a371547514b018d5e627042d71",
+          "op": "create",
+          "trace_id": "3884ae74ee2311df3f92f39b3c5282b2",
+          "prompt": "撤声明采证：第一棒（结果由 gofile 门控扣住）",
+          "prompt_hash": "05e3ac8d7ccc0b906ba119158888c63efa38745aae3aa7286d9dc63f7237fd2f",
+          "request_id": "ev3-sp4-d1",
+          "response": "fake done:stagec",
+          "native_id_ok": true,
+          "work_result": "unverified",
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+          },
+          "created_at": "2026-11-03T01:51:17.768628Z",
+          "finished_at": "2026-11-03T01:51:32.955205Z",
+          "status": "unverified"
+        }
+      ]
+    }
+  }
+}

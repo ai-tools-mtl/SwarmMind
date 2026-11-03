@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:29:21Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-fe65fa69372348b1eb098ec333c018e2/control",
+  "_status": 409,
+  "body": {
+    "error": "version_conflict",
+    "message": "空间版本不符（预期版本与现版本不一致）: 预期版本 2 ≠ 现版本 1（读档已过期，刷新后重试）"
+  }
+}

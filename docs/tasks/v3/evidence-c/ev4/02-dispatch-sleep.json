@@ -1,0 +1,23 @@
+{
+  "_ts": "2026-11-03T01:53:22Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/dispatches",
+  "_status": 202,
+  "body": {
+    "dispatch": {
+      "request_id": "stagec-ev4-disp-sleep",
+      "space_id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+      "member": "c-node/hub-b",
+      "session_id": "s-723c0596dfdc7e46a3b9154f293b750c",
+      "turn_seq": 2,
+      "task_id": "t-9b924bef1f2593ab833ee38016f357e0",
+      "term": 1,
+      "version_ref": 10,
+      "status": "accepted",
+      "note": "恢复采证：长跑轮 SLEEP=60 ECHO-MARK:rec1",
+      "created_at": "2026-11-03T01:53:22.205965Z",
+      "updated_at": "2026-11-03T01:53:22.206918Z"
+    },
+    "dup": false
+  }
+}

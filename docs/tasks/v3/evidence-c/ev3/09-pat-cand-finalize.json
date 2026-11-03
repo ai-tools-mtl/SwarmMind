@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:41:06Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/candidates/cand-d208c41467b3/finalize",
+  "_status": 403,
+  "body": {
+    "error": "forbidden",
+    "message": "该动作为主人专属（预算/策略/定版/归档/候选定版否决不开放编排面——agent 不能代调或伪造人已授权）：请由主人登录 hub 控制台执行"
+  }
+}

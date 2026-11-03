@@ -1,0 +1,119 @@
+{
+  "_ts": "2026-11-03T02:01:13Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/agents",
+  "_status": 200,
+  "body": {
+    "agents": [
+      {
+        "card": {
+          "name": "hub-a",
+          "kind": "cli",
+          "description": "中心空间成员A（fake CLI，zcode 协议镜像）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "workspace-write",
+          "protocol_ver": 1,
+          "workspace_id": "e5c5db12da519c98",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": true,
+          "session_adapter": "zcode",
+          "spaces": "v1",
+          "detect": {
+            "installed": "pass",
+            "config_recognized": "pass",
+            "execution_ready": "fail",
+            "call_allowed": "pass",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "layers": {
+              "installed": {
+                "status": "pass",
+                "checked_at": "2026-11-03T02:01:07.111156Z",
+                "reason": "版本输出仅原样留痕：未解析版本、未做版本兼容性判断（版本值不影响安装判定）"
+              },
+              "config_recognized": {
+                "status": "pass",
+                "checked_at": "2026-11-03T02:01:07.111156Z"
+              },
+              "execution_ready": {
+                "status": "fail",
+                "checked_at": "2026-11-03T02:01:07.111156Z",
+                "reason": "执行就绪未通过（安装证据/配置结构/登录态标记至少一层未过；含本机路径的逐层明细留该机器 node 控制台检测面）"
+              },
+              "call_allowed": {
+                "status": "pass",
+                "checked_at": "2026-11-03T02:01:07.111156Z",
+                "reason": "已登记本机能力：本机派单可调用（与 exposed 远端开放相互独立）"
+              }
+            },
+            "drift": {
+              "drifted": true,
+              "note": "登记面输入或路径基础事实与上次检测不一致：四层状态仍为上次检测值，需在该机器重新检测（明细见该机 node 控制台「能力配置 → 发现本机 agent」）"
+            }
+          }
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "hub-b",
+          "kind": "cli",
+          "description": "中心空间成员B（fake CLI，zcode 协议镜像）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "workspace-write",
+          "protocol_ver": 1,
+          "workspace_id": "e5c5db12da519c98",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": true,
+          "session_adapter": "zcode",
+          "spaces": "v1"
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "echo-contrast",
+          "kind": "cli",
+          "description": "无会话适配器对照",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "no-shell",
+          "protocol_ver": 1,
+          "workspace_id": "11fe14a563f7aed6",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": false,
+          "spaces": "v1"
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "old-coder",
+          "kind": "cli",
+          "description": "旧版模拟节点（无空间能力声明）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "rw",
+          "protocol_ver": 1,
+          "exposed": true,
+          "allow_args": false,
+          "stdin_to_arg": false,
+          "session_adapter": "zcode"
+        },
+        "node_id": "sim-old-node",
+        "online": false
+      }
+    ]
+  }
+}

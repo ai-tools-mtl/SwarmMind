@@ -1,0 +1,91 @@
+// e2e-stagec.mjs — 阶段 C 页面走查（独立采证；真实 Chromium；hub 127.0.0.1:28878）。
+// 纪律：首屏等启动轮询尘埃落定（#logout visible）；断言不用容器祖先 locator 形态；
+// 截图存 docs/tasks/v3/evidence-c/shots/；输出 JSON 结果到 stdout。
+import { chromium } from 'playwright';
+import fs from 'node:fs';
+
+const BASE = process.env.E2E_BASE || 'http://127.0.0.1:28878';
+const TOKEN = process.env.E2E_TOKEN || '';
+const SP_ID = process.env.E2E_SPACE_ID || '';      // P04 详情目标空间
+const OUT = process.env.E2E_SHOTS || 'shots';
+const results = [];
+const rec = (name, pass, detail) => { results.push({ name, pass, detail }); console.log(`${pass ? 'PASS' : 'FAIL'} ${name} ${detail || ''}`); };
+
+fs.mkdirSync(OUT, { recursive: true });
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+
+// 登录（token 表单）
+await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+// 未初始化密码账户：先到 setup 表单，切「用管理令牌登录（恢复通道）」
+await page.waitForSelector('#setup-form, #login-form', { timeout: 15000 });
+if (await page.locator('#login-form').count() === 0) {
+  await page.click('[data-act="switch-login"]');
+}
+await page.waitForSelector('#login-form', { timeout: 15000 });
+await page.fill('#login-form #token', TOKEN);
+await page.click('#login-form button[type="submit"]');
+await page.waitForSelector('#logout', { state: 'visible', timeout: 15000 });
+// 首屏轮询尘埃落定
+await page.waitForTimeout(3000);
+rec('login', true, 'token 登录成功 #logout visible');
+
+// P03 协作空间列表
+await page.click('[data-act="go"][data-page="spaces"]');
+await page.waitForTimeout(1500);
+const listText = await page.locator('#app').innerText();
+rec('P03-list-has-spaces', listText.includes('协作空间'), listText.includes('sp-') ? '列表含空间条目' : '列表文本=' + listText.slice(0, 200).replace(/\n/g, ' '));
+await page.screenshot({ path: `${OUT}/p03-spaces-list.png`, fullPage: true });
+
+if (SP_ID) {
+  // P04 空间详情九分区
+  await page.goto(`${BASE}/#/spaces/${SP_ID}`, { waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(2500);
+  for (const z of ['head', 'goal', 'members', 'sched', 'msgs', 'compose', 'w05', 'events', 'actions']) {
+    const n = await page.locator(`#space-detail [data-zone="${z}"]`).count();
+    const txt = n ? (await page.locator(`#space-detail [data-zone="${z}"]`).innerText().catch(() => '')) : '';
+    rec(`P04-zone-${z}`, n === 1, `count=${n} text=${txt.slice(0, 60).replace(/\n/g, ' ')}`);
+  }
+  const w05 = await page.locator('#space-detail [data-zone="w05"]').innerText().catch(() => '');
+  rec('w05-candidates', w05.includes('已定版') || w05.includes('finalized') || w05.includes('候选'), w05.slice(0, 220).replace(/\n/g, ' | '));
+  await page.screenshot({ path: `${OUT}/p04-space-detail.png`, fullPage: true });
+  const w05el = page.locator('#space-detail [data-zone="w05"]');
+  await w05el.scrollIntoViewIfNeeded().catch(() => {});
+  await page.screenshot({ path: `${OUT}/w05-strategy-zone.png`, fullPage: false });
+}
+
+// 机器页 detect 四层徽标 + 明细折叠
+await page.click('[data-act="go"][data-page="nodes"]');
+await page.waitForTimeout(2000);
+const nodesText = await page.locator('#app').innerText();
+const has4 = ['安装', '配置', '就绪', '调用'].every(k => nodesText.includes(k));
+rec('nodes-detect-badges', has4, has4 ? '四层词齐备' : '缺层');
+const det = page.locator('details summary', { hasText: '检测摘要' }).first();
+if (await det.count()) {
+  await det.click();
+  await page.waitForTimeout(400);
+  const detText = await page.locator('#app').innerText();
+  rec('nodes-detect-detail-open', detText.includes('本页为中心只读汇聚投影'), '明细展开');
+  rec('nodes-detect-no-path', !detText.includes('/tmp/stagec'), detText.includes('/tmp/stagec') ? '发现本机路径泄漏!' : '零 /tmp/stagec 路径');
+} else {
+  rec('nodes-detect-detail-open', false, '未找到检测摘要折叠');
+}
+await page.screenshot({ path: `${OUT}/p-nodes-detect.png`, fullPage: true });
+
+// P07 中心接入（设置页 tokens 内 MCP 接入六分区 #sec-mcp）
+await page.click('[data-act="go"][data-page="tokens"]');
+await page.waitForTimeout(2500);
+const polText = await page.locator('#app').innerText();
+const mcpCount = await page.locator('#sec-mcp [data-zone]').count();
+rec('P07-hub-mcp-section', mcpCount >= 6 && polText.includes('MCP'), `#sec-mcp 分区数=${mcpCount} 含外部调用机词=${polText.includes('外部调用机')}`);
+await page.screenshot({ path: `${OUT}/p07-hub-integration.png`, fullPage: true });
+
+// 全页脱敏扫描：三个页面的可见文本
+const allText = listText + nodesText + polText;
+rec('global-no-tmp-path', !allText.includes('/tmp/stagec'), allText.includes('/tmp/stagec') ? '页面可见文本含本机路径!' : '三页可见文本零 /tmp/stagec');
+
+await browser.close();
+fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(results, null, 2));
+const fails = results.filter(r => !r.pass);
+console.log(`\nSUMMARY: ${results.length - fails.length}/${results.length} PASS`);
+process.exit(0);

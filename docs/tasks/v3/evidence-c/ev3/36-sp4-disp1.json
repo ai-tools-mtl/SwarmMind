@@ -1,0 +1,23 @@
+{
+  "_ts": "2026-11-03T01:51:17Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-101276fd08fa9eee68588f422865a184/dispatches",
+  "_status": 202,
+  "body": {
+    "dispatch": {
+      "request_id": "ev3-sp4-d1",
+      "space_id": "sp-101276fd08fa9eee68588f422865a184",
+      "member": "sim-old-node/old-coder",
+      "session_id": "s-234ed0d611c8496abba8a11f960d1cdd",
+      "turn_seq": 1,
+      "task_id": "t-1224a5a371547514b018d5e627042d71",
+      "term": 1,
+      "version_ref": 5,
+      "status": "accepted",
+      "note": "撤声明采证：第一棒（结果由 gofile 门控扣住）",
+      "created_at": "2026-11-03T01:51:17.767239Z",
+      "updated_at": "2026-11-03T01:51:17.769054Z"
+    },
+    "dup": false
+  }
+}

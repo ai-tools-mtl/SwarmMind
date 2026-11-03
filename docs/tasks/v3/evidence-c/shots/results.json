@@ -1,0 +1,87 @@
+[
+  {
+    "name": "login",
+    "pass": true,
+    "detail": "token 登录成功 #logout visible"
+  },
+  {
+    "name": "P03-list-has-spaces",
+    "pass": true,
+    "detail": "列表含空间条目"
+  },
+  {
+    "name": "P04-zone-head",
+    "pass": true,
+    "detail": "count=1 text=W07-02 中心空间全链采证：讨论定版方案甲 运行中 sp-e1d7d872780c5809a4717bbb45a8b"
+  },
+  {
+    "name": "P04-zone-goal",
+    "pass": true,
+    "detail": "count=1 text=目标与验收 目标\tW07-02 中心空间全链采证：讨论定版方案甲 范围\t hub:sp-e1d7d872780c5809"
+  },
+  {
+    "name": "P04-zone-members",
+    "pass": true,
+    "detail": "count=1 text=成员与线程 成员\t职责\t工作区\t会话线程（hub 注册表）\t绑定（UTC） c-node/hub-a\t — \t — \ts"
+  },
+  {
+    "name": "P04-zone-sched",
+    "pass": true,
+    "detail": "count=1 text=调度条 调度方式\t 手动  当前执行者\t 手动 / admin · 任期 1  租约\t manual 不设租约（主人本位"
+  },
+  {
+    "name": "P04-zone-msgs",
+    "pass": true,
+    "detail": "count=1 text=讨论消息（2） c-node/hub-a · owner:admin · 2026-11-03 01:33:39 UTC"
+  },
+  {
+    "name": "P04-zone-compose",
+    "pass": true,
+    "detail": "count=1 text=发言（管理会话） 发送  普通发言零唤醒（N01）；发言归属主人（中心范围 = 管理会话）。编排主体（PAT）不能冒充主"
+  },
+  {
+    "name": "P04-zone-w05",
+    "pass": true,
+    "detail": "count=1 text=阶段 drafting  候选\t提出者\t轮次\t状态\t重申 定版方案甲（重启后重建采证）\t c-node/hub-a \t "
+  },
+  {
+    "name": "P04-zone-events",
+    "pass": true,
+    "detail": "count=1 text=执行与审计事件 时间（UTC）\t事件\t主体\t说明  2026-11-03 01:56:13 UTC \t intent_c"
+  },
+  {
+    "name": "P04-zone-actions",
+    "pass": true,
+    "detail": "count=1 text=动作 暂停 指名派发 接管 主人管理 定版（完成） 放弃（定版） 调整预算  操作按九态与逐动作授权动态可用：状态不允许"
+  },
+  {
+    "name": "w05-candidates",
+    "pass": true,
+    "detail": "阶段 drafting |  | 候选\t提出者\t轮次\t状态\t重申 | 定版方案甲（重启后重建采证）\t | c-node/hub-a | \t | 2 | \t | 已定版 | \t | 1 次 |  | 备选乙案（待否决对照）\t | c-node/hub-b | \t | 2 | \t | 已否决 | \t | 1 次 |  | FINAL 前缀发言登记为候选（登记≠交付）：定版/否决显式可见（主人专属——中心范围即管理会话，编排主体 403），交付判定归完成判据。 |  | 完成判据缺口 4 项（如实全列；缺口清零也不自动完成——完成授"
+  },
+  {
+    "name": "nodes-detect-badges",
+    "pass": true,
+    "detail": "四层词齐备"
+  },
+  {
+    "name": "nodes-detect-detail-open",
+    "pass": true,
+    "detail": "明细展开"
+  },
+  {
+    "name": "nodes-detect-no-path",
+    "pass": true,
+    "detail": "零 /tmp/stagec 路径"
+  },
+  {
+    "name": "P07-hub-mcp-section",
+    "pass": true,
+    "detail": "#sec-mcp 分区数=6 含外部调用机词=true"
+  },
+  {
+    "name": "global-no-tmp-path",
+    "pass": true,
+    "detail": "三页可见文本零 /tmp/stagec"
+  }
+]

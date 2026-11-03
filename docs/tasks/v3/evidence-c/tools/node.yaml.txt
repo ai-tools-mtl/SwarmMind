@@ -1,0 +1,51 @@
+# 阶段 C 采证实例 node 配置（临时实例，同机回环）
+node_id: c-node
+hub_url: ws://127.0.0.1:28877/ws/node
+register_token: stagec-***REDACTED***
+hub_pubkey_fp: ""
+local_listen: 127.0.0.1:28879
+local_token: stagec-***REDACTED***
+concurrency: 4
+data_dir: /tmp/stagec-run/node-data
+base_env:
+  PATH: /usr/bin:/bin
+  TMPDIR: /tmp
+  LANG: en_US.UTF-8
+agents:
+  - name: hub-a
+    kind: cli
+    command: /tmp/stagec-run/fakecli.sh
+    workdir: /tmp/stagec-run/work
+    config_home: ""
+    agent_args: []
+    timeout_sec: 120
+    allow_args: true
+    allow_env: ["FAKECLI_STATE"]
+    stdin_to_arg: true
+    description: 中心空间成员A（fake CLI，zcode 协议镜像）
+    permission_mode: workspace-write
+    session_adapter: zcode
+  - name: hub-b
+    kind: cli
+    command: /tmp/stagec-run/fakecli.sh
+    workdir: /tmp/stagec-run/work
+    config_home: ""
+    agent_args: []
+    timeout_sec: 120
+    allow_args: true
+    allow_env: ["FAKECLI_STATE"]
+    stdin_to_arg: true
+    description: 中心空间成员B（fake CLI，zcode 协议镜像）
+    permission_mode: workspace-write
+    session_adapter: zcode
+  - name: echo-contrast
+    kind: cli
+    command: /bin/echo
+    workdir: /tmp
+    config_home: ""
+    agent_args: []
+    timeout_sec: 30
+    allow_args: true
+    allow_env: []
+    description: 无会话适配器对照
+    permission_mode: no-shell

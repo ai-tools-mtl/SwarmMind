@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:42:59Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-0373c2b6f49bb6eb58f3f4309370e35e/dispatches",
+  "_status": 503,
+  "body": {
+    "error": "bind_timeout",
+    "message": "绑定登记应答超时：core: 中心空间绑定登记应答超时（node 无响应；稍后重试）"
+  }
+}

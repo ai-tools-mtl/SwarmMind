@@ -1,0 +1,29 @@
+{
+  "_ts": "2026-11-03T01:50:13Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-0373c2b6f49bb6eb58f3f4309370e35e/dispatches/ev3-sp3-disp1b",
+  "_status": 200,
+  "body": {
+    "dispatch": {
+      "request_id": "ev3-sp3-disp1b",
+      "space_id": "sp-0373c2b6f49bb6eb58f3f4309370e35e",
+      "member": "sim-old-node/old-coder",
+      "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+      "turn_seq": 1,
+      "task_id": "t-48c9cec6847b0ee6056b26aeac48c706",
+      "term": 1,
+      "version_ref": 5,
+      "status": "converged",
+      "note": "成员轮完成（执行事实落账）",
+      "created_at": "2026-11-03T01:44:00.744316Z",
+      "updated_at": "2026-11-03T01:49:22.141416Z"
+    },
+    "turn": {
+      "error": "",
+      "session_id": "s-e705c0a2f807f479b12e91c2a594df15",
+      "state": "unverified",
+      "task_id": "t-48c9cec6847b0ee6056b26aeac48c706",
+      "turn_seq": 1
+    }
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "_ts": "2026-11-03T01:31:33Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/control",
+  "_status": 200,
+  "body": {
+    "dup": false,
+    "result": {
+      "space": {
+        "id": "sp-e1d7d872780c5809a4717bbb45a8ba51",
+        "goal": "W07-02 中心空间全链采证：讨论定版方案甲",
+        "mode": "manual",
+        "status": "ready",
+        "members": [
+          {
+            "name": "c-node/hub-a",
+            "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+            "bound_at": "2026-11-03T01:31:25.013365Z"
+          },
+          {
+            "name": "c-node/hub-b",
+            "session_id": "s-723c0596dfdc7e46a3b9154f293b750c",
+            "bound_at": "2026-11-03T01:31:25.013365Z"
+          }
+        ],
+        "leader": {
+          "kind": "manual",
+          "principal": "admin",
+          "term": 1,
+          "lease_until": "0001-01-01T00:00:00Z"
+        },
+        "policy": {
+          "finish_auth": "human_only",
+          "policy_version": 1
+        },
+        "budget": {
+          "max_messages": 0,
+          "max_dispatch_rounds": 0,
+          "max_wall_seconds": 0
+        },
+        "used": {
+          "messages": 0,
+          "dispatch_rounds": 0,
+          "wall_seconds": 0,
+          "running_since": "0001-01-01T00:00:00Z"
+        },
+        "version": 2,
+        "archived": false,
+        "events": [
+          {
+            "at": "2026-11-03T01:31:25.013365Z",
+            "kind": "created",
+            "actor": "owner:admin",
+            "note": "创建空间（方式 manual）"
+          },
+          {
+            "at": "2026-11-03T01:31:33.035191Z",
+            "kind": "ready",
+            "actor": "owner:admin",
+            "note": "配置就绪（可运行，等待显式启动）"
+          }
+        ],
+        "created_at": "2026-11-03T01:31:25.013365Z",
+        "updated_at": "2026-11-03T01:31:33.035191Z",
+        "in_flight": 0
+      },
+      "action": "ready",
+      "applied": true
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "_ts": "2026-11-03T01:33:39Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/messages",
+  "_status": 200,
+  "body": {
+    "messages": [
+      {
+        "seq": 1,
+        "member": "c-node/hub-a",
+        "text": "我倾向方案甲：成本低、落地快，乙的扩展性可以分阶段吸收",
+        "by": "owner:admin",
+        "created_at": "2026-11-03T01:33:39.341027Z"
+      },
+      {
+        "seq": 2,
+        "member": "c-node/hub-b",
+        "text": "补充：方案甲需要预留扩展点，否则后期重构代价高",
+        "by": "owner:admin",
+        "created_at": "2026-11-03T01:33:39.370555Z"
+      }
+    ],
+    "pruned_before_seq": 0
+  }
+}

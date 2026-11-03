@@ -1,0 +1,80 @@
+{
+  "_ts": "2026-11-03T02:01:07Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28879/api/v1/local/agents/discover",
+  "_status": 200,
+  "body": {
+    "note": "发现≠登记：本端点零写盘、不自动开放能力；登记走「登记预览 + 能力配置保存」（既有 PUT /api/v1/local/config 链，无第二写路径）。「允许本机调用」随登记建立、本机派单不受 exposed 影响；exposed=false 只关闭 hub 下发新任务的准入，在途任务照常到终态。",
+    "results": [
+      {
+        "name": "hub-a",
+        "host": "zcode",
+        "command": "/tmp/stagec-run/fakecli.sh",
+        "config_home": "/tmp/stagec-run/node-data/home",
+        "report": {
+          "host": "zcode",
+          "name": "hub-a",
+          "installed": {
+            "status": "pass",
+            "source": "caller_command",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "version_raw": "{\"sessionId\":\"fakesess-1793671267-79116-30838\",\"turnId\":\"turn-1\",\"response\":\"ack:stagec history:1\"}",
+            "reason": "版本输出仅原样留痕：未解析版本、未做版本兼容性判断（版本值不影响安装判定）",
+            "paths": [
+              {
+                "path": "/tmp/stagec-run/fakecli.sh",
+                "kind": "command",
+                "exists": true,
+                "regular": true
+              }
+            ]
+          },
+          "config_recognized": {
+            "status": "pass",
+            "source": "known_layout:zcode",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "paths": [
+              {
+                "path": "/tmp/stagec-run/node-data/home/.zcode/cli/setting.json",
+                "kind": "config",
+                "exists": true,
+                "regular": true
+              }
+            ]
+          },
+          "execution_ready": {
+            "status": "fail",
+            "source": "derived(installed+config_recognized+login_marker)",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "reason": "未发现登录态标记：setting.json 顶层无身份键命中（V0 保守清单：auth/authToken/credentials）；结构可识别不代表登录成功，绝不声称账号/额度可用"
+          },
+          "call_allowed": {
+            "status": "pass",
+            "source": "config_registered_local",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "reason": "已登记本机能力：本机派单可调用（与 exposed 远端开放相互独立）"
+          },
+          "login_marker": {
+            "checked": true,
+            "found": false,
+            "path": "/tmp/stagec-run/node-data/home/.zcode/cli/setting.json",
+            "checked_at": "2026-11-03T02:01:07.111156Z",
+            "note": "setting.json 顶层无身份键命中（V0 保守清单：auth/authToken/credentials）"
+          }
+        },
+        "registered": true,
+        "registered_by": "name",
+        "local_call": {
+          "on": true,
+          "source": "config_registered",
+          "note": "已登记：本机派单可调用（与 exposed 相互独立——exposed=false 不影响本机）"
+        },
+        "exposed": {
+          "on": true,
+          "source": "config",
+          "note": "对中心开放：能力经注册进入 hub 全网目录（hub 下发新任务准入）"
+        }
+      }
+    ]
+  }
+}

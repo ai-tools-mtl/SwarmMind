@@ -1,0 +1,49 @@
+{
+  "_ts": "2026-11-03T01:37:05Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28879/api/v1/tasks/t-6801f4da4340a4288fe8101eb2b7a7b8",
+  "_status": 200,
+  "body": {
+    "id": "t-6801f4da4340a4288fe8101eb2b7a7b8",
+    "trace_id": "6366f78eee7353f680997a1be758736c",
+    "target_node": "c-node",
+    "target_agent": "hub-a",
+    "input": {
+      "args": null,
+      "stdin": "本机面普通续轮（绑定会话应被拒）"
+    },
+    "submitted_by": "local",
+    "idem": "lsturn:s-1f3aa204c23ed9df158f3178ccc312ad:3",
+    "status": "failed",
+    "created_at": "2026-11-03T01:35:44.637323Z",
+    "updated_at": "2026-11-03T01:35:44.65486Z",
+    "expire_at": "2026-11-10T01:35:44.637323Z",
+    "result": {
+      "status": "failed",
+      "exit_code": -1,
+      "final_answer": "",
+      "stdout_tail": "",
+      "stderr_tail": "",
+      "artifacts": null,
+      "error": "space_dispatch_required: 该会话已绑定协作空间：普通会话轮不得绕过空间调度推进成员线程，请经空间派发（space dispatch）",
+      "started_at": "0001-01-01T00:00:00Z",
+      "finished_at": "2026-11-03T01:35:44.65486Z",
+      "turn": {
+        "turn_seq": 3,
+        "native_id_ok": false,
+        "work_result": "unverified",
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "total_tokens": 0
+        }
+      }
+    },
+    "session": {
+      "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+      "turn_seq": 3,
+      "op": "send",
+      "cwd": "/tmp/stagec-run/work"
+    }
+  }
+}

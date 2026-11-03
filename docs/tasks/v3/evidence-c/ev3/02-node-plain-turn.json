@@ -1,0 +1,15 @@
+{
+  "_ts": "2026-11-03T01:35:44Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28879/api/v1/sessions/s-1f3aa204c23ed9df158f3178ccc312ad/turns",
+  "_status": 202,
+  "body": {
+    "turn": {
+      "session_id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+      "turn_seq": 3,
+      "op": "send",
+      "task_id": "t-6801f4da4340a4288fe8101eb2b7a7b8",
+      "trace_id": "6366f78eee7353f680997a1be758736c"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "_ts": "2026-11-03T01:34:04Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/records?since=0",
+  "_status": 200,
+  "body": {
+    "pruned_before_seq": 0,
+    "records": [
+      {
+        "at": "2026-11-03T01:31:33.074474Z",
+        "kind": "phase_changed",
+        "note": "循环初始化 → drafting（引导边）",
+        "seq": 1,
+        "type": "control"
+      },
+      {
+        "at": "2026-11-03T01:33:49.456152Z",
+        "kind": "candidate_registered",
+        "note": "cand-d208c41467b3 提出者 c-node/hub-a 轮 1：定版方案甲（分阶段吸收乙的扩展性设计）",
+        "seq": 2,
+        "type": "candidate"
+      },
+      {
+        "at": "2026-11-03T01:33:49.484378Z",
+        "kind": "candidate_registered",
+        "note": "cand-3522a49984f3 提出者 c-node/hub-b 轮 1：支持方案甲但要求扩展点先落",
+        "seq": 3,
+        "type": "candidate"
+      },
+      {
+        "at": "2026-11-03T01:33:59.051095Z",
+        "kind": "candidate_finalized",
+        "note": "cand-d208c41467b3 → finalized（by admin）",
+        "seq": 4,
+        "type": "candidate"
+      },
+      {
+        "at": "2026-11-03T01:33:59.080532Z",
+        "kind": "candidate_dismissed",
+        "note": "cand-3522a49984f3 → dismissed（by admin）",
+        "seq": 5,
+        "type": "candidate"
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "_ts": "2026-11-03T01:31:17Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/sessions",
+  "_status": 201,
+  "body": {
+    "session": {
+      "id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+      "node_id": "c-node",
+      "agent_name": "hub-a",
+      "adapter": "zcode",
+      "permission_mode": "workspace-write",
+      "cwd": "/tmp/stagec-run/work",
+      "request_id": "stagec-ev2-sess-a",
+      "payload_hash": "40998a5f432a6ab976c0f2455050bd40b31c706119fa70192a77f97bccf8c9b1",
+      "status": "active",
+      "created_at": "2026-11-03T01:31:17.171344Z",
+      "updated_at": "2026-11-03T01:31:17.171344Z",
+      "turns": []
+    }
+  }
+}

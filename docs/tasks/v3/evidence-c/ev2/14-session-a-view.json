@@ -1,0 +1,63 @@
+{
+  "_ts": "2026-11-03T01:32:41Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/sessions/s-1f3aa204c23ed9df158f3178ccc312ad",
+  "_status": 200,
+  "body": {
+    "session": {
+      "id": "s-1f3aa204c23ed9df158f3178ccc312ad",
+      "node_id": "c-node",
+      "agent_name": "hub-a",
+      "adapter": "zcode",
+      "permission_mode": "workspace-write",
+      "cwd": "/tmp/stagec-run/work",
+      "request_id": "stagec-ev2-sess-a",
+      "payload_hash": "40998a5f432a6ab976c0f2455050bd40b31c706119fa70192a77f97bccf8c9b1",
+      "status": "active",
+      "created_at": "2026-11-03T01:31:17.171344Z",
+      "updated_at": "2026-11-03T01:32:06.820781Z",
+      "turns": [
+        {
+          "seq": 1,
+          "task_id": "t-9bb2910ae33d306eb243dfc46db867dd",
+          "op": "create",
+          "trace_id": "0530b3692cc0ceee899593bafb1923fc",
+          "prompt": "讨论第一轮：我提议方案甲（分阶段吸收乙的扩展性设计）。ECHO-MARK:c1",
+          "prompt_hash": "2ada59646e4fd1b614aebf335126bca21549a5697e621c028a65dfdae23dba5a",
+          "request_id": "stagec-ev2-disp-a1",
+          "response": "ack:stagec history:1 mark:c1",
+          "native_id_ok": true,
+          "work_result": "unverified",
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+          },
+          "created_at": "2026-11-03T01:31:40.446456Z",
+          "finished_at": "2026-11-03T01:31:40.888219Z",
+          "status": "unverified"
+        },
+        {
+          "seq": 2,
+          "task_id": "t-0e180a1ca23e230635a38030af23bc80",
+          "op": "send",
+          "trace_id": "e11790e06909c2243d8bbee304f7d343",
+          "prompt": "第二轮：综合意见后仍主推方案甲。ECHO-MARK:c3",
+          "prompt_hash": "aa2350cf50147eab86b74fc7e5c48a98cc943f36f63a354e0ce1f380d816b74a",
+          "request_id": "stagec-ev2-disp-a2",
+          "response": "ack:stagec history:2 mark:c3",
+          "native_id_ok": true,
+          "work_result": "unverified",
+          "usage": {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+          },
+          "created_at": "2026-11-03T01:32:06.787254Z",
+          "finished_at": "2026-11-03T01:32:06.820781Z",
+          "status": "unverified"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "_ts": "2026-11-03T01:33:49Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/records",
+  "_status": 201,
+  "body": {
+    "candidate": {
+      "id": "cand-d208c41467b3",
+      "summary": "定版方案甲（分阶段吸收乙的扩展性设计）",
+      "proposer": "c-node/hub-a",
+      "round": 1,
+      "final_text": "FINAL: 定版方案甲（分阶段吸收乙的扩展性设计）",
+      "registered_at": "2026-11-03T01:33:49.456149Z",
+      "status": "pending",
+      "seen_count": 1
+    },
+    "created": true
+  }
+}

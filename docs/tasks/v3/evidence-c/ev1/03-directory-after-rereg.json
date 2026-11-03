@@ -1,0 +1,87 @@
+{
+  "_ts": "2026-11-03T01:28:47Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/agents",
+  "_status": 200,
+  "body": {
+    "agents": [
+      {
+        "card": {
+          "name": "hub-a",
+          "kind": "cli",
+          "description": "中心空间成员A（fake CLI，zcode 协议镜像）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "workspace-write",
+          "protocol_ver": 1,
+          "workspace_id": "e5c5db12da519c98",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": true,
+          "session_adapter": "zcode",
+          "spaces": "v1"
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "hub-b",
+          "kind": "cli",
+          "description": "中心空间成员B（fake CLI，zcode 协议镜像）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "workspace-write",
+          "protocol_ver": 1,
+          "workspace_id": "e5c5db12da519c98",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": true,
+          "session_adapter": "zcode",
+          "spaces": "v1"
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "echo-contrast",
+          "kind": "cli",
+          "description": "无会话适配器对照",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "no-shell",
+          "protocol_ver": 1,
+          "workspace_id": "11fe14a563f7aed6",
+          "exposed": true,
+          "allow_args": true,
+          "stdin_to_arg": false,
+          "spaces": "v1"
+        },
+        "node_id": "c-node",
+        "online": true
+      },
+      {
+        "card": {
+          "name": "old-coder",
+          "kind": "cli",
+          "description": "旧版模拟节点（无空间能力声明）",
+          "input_mode": "prompt_text",
+          "output_mode": "answer+artifacts",
+          "interactive": false,
+          "permission_mode": "rw",
+          "protocol_ver": 1,
+          "exposed": true,
+          "allow_args": false,
+          "stdin_to_arg": false,
+          "session_adapter": "zcode"
+        },
+        "node_id": "sim-old-node",
+        "online": true
+      }
+    ]
+  }
+}

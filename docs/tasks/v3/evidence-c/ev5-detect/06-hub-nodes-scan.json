@@ -1,0 +1,25 @@
+{
+  "_ts": "2026-11-03T02:01:29Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/nodes",
+  "_status": 200,
+  "body": {
+    "nodes": [
+      {
+        "node_id": "sim-old-node",
+        "online": false,
+        "epoch": 7,
+        "inflight": 0,
+        "mailbox_used": 0
+      },
+      {
+        "node_id": "c-node",
+        "online": true,
+        "epoch": 3,
+        "inflight": 0,
+        "mailbox_used": 0
+      }
+    ],
+    "terminal_retention_sec": 86400
+  }
+}

@@ -1,0 +1,33 @@
+#!/bin/sh
+# req.sh — 带时间戳留档的 curl 包装（STAGE-B 同款纪律；阶段 C hub 面=cookie 会话）。
+# 用法: req.sh <outdir> <name> <method> <url> <token-or-"-"> [json-body]
+#   token 为 "-" 时用 cookie jar（/tmp/stagec-run/hub.cookies，由 clogin.sh 建立）。
+# 产出: <outdir>/<name>.json （含 _ts/_method/_url/_status/正文）
+outdir="$1"; name="$2"; method="$3"; url="$4"; token="$5"; body="$6"
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+authargs=""
+if [ "$token" != "-" ] && [ -n "$token" ]; then
+  authargs=(-H "Authorization: Bearer $token")
+else
+  authargs=(-b /tmp/stagec-run/hub.cookies)
+fi
+if [ -n "$body" ]; then
+  resp=$(curl -sS -w '\n%{http_code}' -X "$method" "${authargs[@]}" \
+    -H 'Content-Type: application/json' -d "$body" "$url")
+else
+  resp=$(curl -sS -w '\n%{http_code}' -X "$method" "${authargs[@]}" "$url")
+fi
+code=$(printf '%s' "$resp" | tail -1)
+payload=$(printf '%s' "$resp" | sed '$d')
+mkdir -p "$outdir"
+python3 - "$outdir/$name.json" "$ts" "$method" "$url" "$code" "$payload" <<'PYEOF'
+import json, sys
+path, ts, method, url, code, payload = sys.argv[1:7]
+try:
+    body = json.loads(payload) if payload else None
+except Exception:
+    body = payload
+with open(path, "w") as f:
+    json.dump({"_ts": ts, "_method": method, "_url": url, "_status": int(code), "body": body}, f, ensure_ascii=False, indent=2)
+print(f"{ts} {method} {url} -> {code} -> {path}")
+PYEOF

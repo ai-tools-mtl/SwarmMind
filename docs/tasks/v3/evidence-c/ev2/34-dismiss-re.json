@@ -1,0 +1,18 @@
+{
+  "_ts": "2026-11-03T01:59:21Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/candidates/cand-36498d77dbb5/dismiss",
+  "_status": 200,
+  "body": {
+    "candidate": {
+      "id": "cand-36498d77dbb5",
+      "summary": "备选乙案（待否决对照）",
+      "proposer": "c-node/hub-b",
+      "round": 2,
+      "final_text": "FINAL: 备选乙案（待否决对照）",
+      "registered_at": "2026-11-03T01:59:21.385254Z",
+      "status": "dismissed",
+      "seen_count": 1
+    }
+  }
+}

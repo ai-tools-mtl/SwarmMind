@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:30:40Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-fe65fa69372348b1eb098ec333c018e2/dispatches",
+  "_status": 409,
+  "body": {
+    "error": "spaces_unsupported",
+    "message": "目标 node 未声明空间协作能力或版本不受支持：请核对双方版本（升级 node 或 hub）后重试"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "_ts": "2026-11-03T01:43:12Z",
+  "_method": "GET",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-0373c2b6f49bb6eb58f3f4309370e35e/dispatches/ev3-sp3-disp2",
+  "_status": 404,
+  "body": {
+    "error": "dispatch_not_found",
+    "message": "意图不存在（request_id 未受理或已滚动出空间）: ev3-sp3-disp2"
+  }
+}

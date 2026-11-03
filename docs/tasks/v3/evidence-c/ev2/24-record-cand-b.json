@@ -1,0 +1,19 @@
+{
+  "_ts": "2026-11-03T01:33:49Z",
+  "_method": "POST",
+  "_url": "http://127.0.0.1:28878/api/v1/spaces/sp-e1d7d872780c5809a4717bbb45a8ba51/records",
+  "_status": 201,
+  "body": {
+    "candidate": {
+      "id": "cand-3522a49984f3",
+      "summary": "支持方案甲但要求扩展点先落",
+      "proposer": "c-node/hub-b",
+      "round": 1,
+      "final_text": "FINAL: 支持方案甲但要求扩展点先落",
+      "registered_at": "2026-11-03T01:33:49.484376Z",
+      "status": "pending",
+      "seen_count": 1
+    },
+    "created": true
+  }
+}

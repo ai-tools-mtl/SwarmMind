@@ -1,0 +1,264 @@
+// oldnode 模拟 node 客户端（阶段 C 机械采证工具，非仓库资产）：
+// 经 WS 连接 hub /ws/node 端点，注册能力卡（spaces 可选声明）。
+// 采证动作面：
+//   - space_bind → space_bind_ack（代次回带，hub 放行空间轮下发）
+//   - task_offer → 延时后回 task_result completed（echo task_id/fence_epoch；
+//     Result.Turn 回带，供空间意图收敛链）——模拟「慢 CLI」
+//   - -donefile：文件出现 → card_update 撤 spaces 声明（采证3 撤声明触发器）
+// 帧形按协议 JSON 字段内联复制（internal 包不可站外导入）。epoch 不匹配会被
+// hub 丢弃（SPEC 4.4），出站帧一律带注册 ack 回传的 epoch。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/coder/websocket"
+)
+
+type envelope struct {
+	V          int             `json:"v"`
+	Type       string          `json:"type"`
+	Mid        string          `json:"mid"`
+	From       string          `json:"from"`
+	To         string          `json:"to"`
+	Payload    json.RawMessage `json:"payload"`
+	Epoch      int64           `json:"epoch,omitempty"`
+	ReplyTo    string          `json:"reply_to,omitempty"`
+	FenceEpoch int64           `json:"fence_epoch,omitempty"`
+}
+
+type agentCard struct {
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Description    string `json:"description,omitempty"`
+	InputMode      string `json:"input_mode"`
+	OutputMode     string `json:"output_mode"`
+	Interactive    bool   `json:"interactive"`
+	PermissionMode string `json:"permission_mode"`
+	ProtocolVer    int    `json:"protocol_ver"`
+	Exposed        bool   `json:"exposed"`
+	AllowArgs      bool   `json:"allow_args"`
+	StdinToArg     bool   `json:"stdin_to_arg"`
+	SessionAdapter string `json:"session_adapter,omitempty"`
+	Spaces         string `json:"spaces,omitempty"`
+}
+
+type registerPayload struct {
+	NodeID        string      `json:"node_id"`
+	RegisterToken string      `json:"register_token"`
+	Agents        []agentCard `json:"agents"`
+}
+
+type registerAckPayload struct {
+	OK     bool   `json:"ok"`
+	Epoch  int64  `json:"epoch"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type cardUpdatePayload struct {
+	Agents []agentCard `json:"agents"`
+}
+
+type taskOfferTask struct {
+	ID         string `json:"id"`
+	TargetNode string `json:"target_node"`
+	Session    *struct {
+		SessionID string `json:"session_id"`
+		TurnSeq   int64  `json:"turn_seq"`
+		Op        string `json:"op"`
+	} `json:"session"`
+}
+
+type taskResultPayload struct {
+	TaskID     string         `json:"task_id"`
+	Status     string         `json:"status"`
+	Result     map[string]any `json:"result"`
+	FenceEpoch int64          `json:"-"`
+}
+
+func newMid() string {
+	return fmt.Sprintf("mid-%d-%d", time.Now().UnixNano(), os.Getpid())
+}
+
+func emit(v map[string]any) {
+	b, _ := json.Marshal(v)
+	fmt.Println(string(b))
+}
+
+func main() {
+	url := flag.String("url", "ws://127.0.0.1:28877/ws/node", "hub ws endpoint")
+	id := flag.String("id", "sim-old-node", "node id")
+	token := flag.String("token", "", "register token")
+	agent := flag.String("agent", "old-coder", "agent name")
+	adapter := flag.String("adapter", "zcode", "session_adapter declaration")
+	desc := flag.String("desc", "旧版模拟节点（无空间能力声明）", "agent description")
+	spaces := flag.Bool("spaces", false, "注册卡携带 spaces:\"v1\"")
+	withdraw := flag.Bool("withdraw", false, "注册后 500ms 经 card_update 撤 spaces")
+	donefile := flag.String("donefile", "", "文件出现即经 card_update 撤 spaces（撤声明触发器）")
+	resultDelay := flag.Int("result-delay", 8, "task_offer 回结果延时秒（模拟慢 CLI）")
+	gofile := flag.String("gofile", "", "设置后：task 结果等待本文件出现才回（在途窗手动门控）")
+	flag.Parse()
+	if *token == "" {
+		log.Fatal("register token 必填")
+	}
+
+	base := agentCard{Name: *agent, Kind: "cli", InputMode: "prompt_text",
+		OutputMode: "answer+artifacts", PermissionMode: "rw", ProtocolVer: 1, Exposed: true,
+		Description: *desc, SessionAdapter: *adapter}
+	withSpaces := base
+	withSpaces.Spaces = "v1"
+	cards := []agentCard{base}
+	if *spaces || *withdraw {
+		cards = []agentCard{withSpaces}
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(dctx, *url, nil)
+	if err != nil {
+		log.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+	conn.SetReadLimit(2 << 20)
+
+	write := func(env envelope) error {
+		b, _ := json.Marshal(env)
+		return conn.Write(ctx, websocket.MessageText, b)
+	}
+
+	reg := envelope{V: 1, Type: "register", Mid: newMid(), From: *id, To: "hub",
+		Payload: mustJSON(registerPayload{NodeID: *id, RegisterToken: *token, Agents: cards})}
+	if err := write(reg); err != nil {
+		log.Fatalf("write register: %v", err)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		log.Fatalf("read ack: %v", err)
+	}
+	var ackEnv envelope
+	_ = json.Unmarshal(data, &ackEnv)
+	var ack registerAckPayload
+	_ = json.Unmarshal(ackEnv.Payload, &ack)
+	emit(map[string]any{"phase": "register", "ok": ack.OK, "epoch": ack.Epoch, "reason": ack.Reason})
+	if !ack.OK {
+		os.Exit(3)
+	}
+	regEpoch := ack.Epoch
+
+	if *withdraw {
+		time.Sleep(500 * time.Millisecond)
+		if err := write(envelope{V: 1, Type: "card_update", Mid: newMid(), From: *id, To: "hub",
+			Epoch: regEpoch, Payload: mustJSON(cardUpdatePayload{Agents: []agentCard{base}})}); err != nil {
+			log.Fatalf("card_update: %v", err)
+		}
+		emit(map[string]any{"phase": "card_update", "spaces_withdrawn": true})
+	}
+
+	// donefile 轮询：出现即撤声明（一次）。
+	if *donefile != "" {
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(300 * time.Millisecond):
+					if _, err := os.Stat(*donefile); err == nil {
+						if werr := write(envelope{V: 1, Type: "card_update", Mid: newMid(), From: *id, To: "hub",
+							Epoch: regEpoch, Payload: mustJSON(cardUpdatePayload{Agents: []agentCard{base}})}); werr == nil {
+							emit(map[string]any{"phase": "card_update", "spaces_withdrawn": true, "trigger": "donefile"})
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+
+	// 入站处理循环（同步应答；hub 侧 epoch 校验要求出站带当前 epoch）。
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			emit(map[string]any{"phase": "read_end", "err": fmt.Sprint(err)})
+			return
+		}
+		var inEnv envelope
+		if err := json.Unmarshal(data, &inEnv); err != nil {
+			continue
+		}
+		switch inEnv.Type {
+		case "ping":
+			_ = write(envelope{V: 1, Type: "pong", Mid: newMid(), From: *id, To: "hub",
+				ReplyTo: inEnv.Mid, Epoch: regEpoch})
+		case "space_bind":
+			var bp struct {
+				Space      string `json:"space"`
+				SessionID  string `json:"session_id"`
+				Generation uint64 `json:"generation"`
+			}
+			_ = json.Unmarshal(inEnv.Payload, &bp)
+			ackPayload := mustJSON(struct {
+				Space      string `json:"space"`
+				SessionID  string `json:"session_id"`
+				Generation uint64 `json:"generation,omitempty"`
+				Accepted   bool   `json:"accepted,omitempty"`
+				CurrentGen uint64 `json:"current_gen,omitempty"`
+			}{Space: bp.Space, SessionID: bp.SessionID, Generation: bp.Generation, Accepted: true, CurrentGen: bp.Generation})
+			_ = write(envelope{V: 1, Type: "space_bind_ack", Mid: newMid(), From: *id, To: "hub",
+				ReplyTo: inEnv.Mid, Epoch: regEpoch, Payload: ackPayload})
+			emit(map[string]any{"phase": "space_bind_ack", "session": bp.SessionID, "scope": bp.Space, "gen": bp.Generation})
+		case "task_offer", "task_submit":
+			var t taskOfferTask
+			_ = json.Unmarshal(inEnv.Payload, &t)
+			if t.ID == "" {
+				continue
+			}
+			emit(map[string]any{"phase": "task_recv", "task": t.ID, "type": inEnv.Type,
+				"session": map[string]any{"id": t.Session.SessionID, "seq": t.Session.TurnSeq}})
+			go func(taskID string, fence int64) {
+				time.Sleep(time.Duration(*resultDelay) * time.Second)
+				if *gofile != "" {
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(300 * time.Millisecond):
+							if _, err := os.Stat(*gofile); err == nil {
+								goto fire
+							}
+						}
+					}
+				}
+			fire:
+				res := taskResultPayload{TaskID: taskID, Status: "completed", Result: map[string]any{
+					"status": "completed", "exit_code": 0, "final_answer": "fake done:stagec",
+					"finished_at": time.Now().UTC().Format(time.RFC3339Nano),
+					"turn":        map[string]any{"turn_seq": 1, "native_id_ok": true, "work_result": "unverified"},
+				}}
+				b, _ := json.Marshal(res)
+				werr := write(envelope{V: 1, Type: "task_result", Mid: newMid(), From: *id, To: "hub",
+					Epoch: regEpoch, FenceEpoch: fence, Payload: b})
+				emit(map[string]any{"phase": "task_result_sent", "task": taskID, "err": fmt.Sprint(werr)})
+			}(t.ID, inEnv.FenceEpoch)
+		default:
+			// 其余帧忽略（静默，不打日志避免刷屏）。
+		}
+	}
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
