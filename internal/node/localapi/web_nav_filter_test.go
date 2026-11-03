@@ -84,9 +84,9 @@ func TestWebNavFilterStructure(t *testing.T) {
 	}
 	hubJSStr, hubCSSStr := string(hubJS), string(hubCSS)
 
-	// ---- 方案 B：导航词表（双端同概念同词、顺序定案；T3 起 hub 含「会话」导航，W04-03 起双端含「协作空间」10 项——权威锁随导航定案同步，W01-05 先例） ----
+	// ---- 方案 B：导航词表（双端同概念同词、顺序定案；T3 起 hub 含「会话」导航，W04-03 起双端含「协作空间」10 项——权威锁随导航定案同步，W01-05 先例；W08-03 起导航词迁移：node「服务」→「资源」、hub「机器」→「资源」，路由 id #/services、#/nodes 不变只改显示词） ----
 	for _, want := range []string{
-		`const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];`,
+		`const menus = [['overview', '总览'], ['nodes', '资源'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];`,
 		"head('任务',",
 		"head('派发',",
 		"下一步：查看任务 →",
@@ -95,14 +95,14 @@ func TestWebNavFilterStructure(t *testing.T) {
 			t.Errorf("hub app.js 应含 %q", want)
 		}
 	}
-	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];`) {
-		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/服务/任务/会话/协作空间/连接；W01-05 P01 会话独立主入口；W04-03 P03 协作空间独立主入口）")
+	if !strings.Contains(string(nodeJS), `const PAGES = [['overview', '总览'], ['services', '资源'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];`) {
+		t.Error("node app.js PAGES 词表应与新导航定案一致（总览/资源/任务/会话/协作空间/连接；W01-05 P01 会话独立主入口；W04-03 P03 协作空间独立主入口；W08-03 「服务」→「资源」导航词迁移，路由不变）")
 	}
 	for _, want := range []string{
-		"<h1>服务</h1>",
+		"<h1>资源</h1>",
 		"<h1>任务</h1>",
-		"去看服务",
-		"「服务 → 能力配置」",
+		"去看资源",
+		"「资源 → 能力配置」",
 		"完整清单见「任务」页。",
 		"去「任务」选一个本机服务",
 	} {
@@ -110,10 +110,11 @@ func TestWebNavFilterStructure(t *testing.T) {
 			t.Errorf("node app.js 应含 %q", want)
 		}
 	}
-	// hub 端不得保留旧页名（用户可见面；注释不带标点不误伤）
+	// hub 端不得保留旧页名（用户可见面；注释不带标点不误伤；W08-03 起「机器」为旧页名）
 	for _, ban := range []string{
 		"head('任务监管'", "head('任务派发'", "「任务监管」页", "「任务派发」页", "查看任务监管",
 		"['tasks', '任务监管']", "['control', '任务派发']",
+		"head('机器',", "['nodes', '机器']",
 	} {
 		if strings.Contains(hubJSStr, ban) {
 			t.Errorf("hub app.js 不应再含 %q（导航词表/文案迁移清单）", ban)
@@ -122,17 +123,21 @@ func TestWebNavFilterStructure(t *testing.T) {
 	for _, ban := range []string{
 		"<h1>我的服务", "<h1>派任务", "去看我的服务", "「我的服务 → 能力配置」", "「我的服务」",
 		"去「派任务」", "「派任务 · 我的任务」", "['services', '我的服务']", "['tasks', '派任务·我的任务']",
+		"['services', '服务']", "<h1>服务</h1>", "去看服务", "「服务 → 能力配置」",
 	} {
 		if strings.Contains(string(nodeJS), ban) {
-			t.Errorf("node app.js 不应再含 %q（导航词表/文案迁移清单）", ban)
+			t.Errorf("node app.js 不应再含 %q（导航词表/文案迁移清单；W08-03 「服务」→「资源」旧词形退役）", ban)
 		}
 	}
-	// Go 端返回文案（JS grep 查不到，单独锁）：prime.go 指路同改
+	// Go 端返回文案（JS grep 查不到，单独锁）：prime.go 指路同改（W08-03 随导航词迁移二次同改）
 	if strings.Contains(string(primeGo), "「我的服务 → 能力配置」") {
 		t.Error("prime.go 不应再含旧页名「我的服务 → 能力配置」")
 	}
-	if !strings.Contains(string(primeGo), "「服务 → 能力配置」") {
-		t.Error("prime.go 应含「服务 → 能力配置」（导航词迁移 Go 端同步）")
+	if strings.Contains(string(primeGo), "「服务 → 能力配置」") {
+		t.Error("prime.go 不应再含旧页名「服务 → 能力配置」（W08-03 导航词迁移：「服务」→「资源」）")
+	}
+	if !strings.Contains(string(primeGo), "「资源 → 能力配置」") {
+		t.Error("prime.go 应含「资源 → 能力配置」（导航词迁移 Go 端同步）")
 	}
 
 	// ---- 方案 B：视觉与无障碍同构（navnum/aria/workspace 行序） ----

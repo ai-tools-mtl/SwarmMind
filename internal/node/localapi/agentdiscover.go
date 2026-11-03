@@ -462,7 +462,7 @@ func (s *Server) detectSummaryFor(p protocol.ExecProfile) agentDetectSummary {
 			ConfigRecognized: string(agentdetect.StatusNotChecked),
 			ExecutionReady:   string(agentdetect.StatusNotChecked),
 			CallAllowed:      string(agentdetect.StatusNotChecked),
-			NotCheckedReason: "本进程尚未执行过本机发现（发现走「服务 → 能力配置 → 发现本机 agent」，未发现过=not_checked 如实呈现）",
+			NotCheckedReason: "本进程尚未执行过本机发现（发现走「资源 → 能力配置 → 发现本机 agent」，原「服务」，W08-03 导航词迁移；未发现过=not_checked 如实呈现）",
 		}
 	}
 	rep := ent.rep

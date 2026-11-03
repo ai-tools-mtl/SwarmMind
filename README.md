@@ -123,7 +123,7 @@ agents:
 ./swarmmind-node --config node.yaml
 ```
 
-管理台「机器」页显示在线后即可提交任务。本机控制台是 `http://127.0.0.1:8445`，登录令牌自动写入 node 的 `./data/node/local_token`。
+管理台「资源」页（原「机器」页）显示在线后即可提交任务。本机控制台是 `http://127.0.0.1:8445`，登录令牌自动写入 node 的 `./data/node/local_token`。
 
 `hub_pubkey_fp` 留空使用 TOFU：首次连接记录证书公钥指纹，后续校验。首次连接需处于可信网络；要验证首连身份，应预先填入通过可信渠道获取的指纹。配置字段详见 [hub 示例](configs/hub.example.yaml)与 [node 示例](configs/node.example.yaml)。示例文件默认是回环明文开发模式，复制时须同时核对 `tls.insecure_loopback` 与 `ws://` / `wss://`。
 

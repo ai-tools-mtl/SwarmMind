@@ -2417,7 +2417,7 @@ function gateError(title, bodyHtml) {
 }
 
 /* ---------- 路由（hash SPA） ---------- */
-const PAGES = [['overview', '总览'], ['services', '服务'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];   // W01-05 P01：会话独立主入口（由任务页区块迁出）；W04-03 P03：协作空间独立主入口
+const PAGES = [['overview', '总览'], ['services', '资源'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['wizard', '连接']];   // W01-05 P01：会话独立主入口（由任务页区块迁出）；W04-03 P03：协作空间独立主入口；W08-03 导航词迁移：「服务」→「资源」（资源域命名归位，集成者裁决最小改名口径——路由 id services/#/services 与页内子结构零变化，旧书签/外链不破坏）
 // setup 模式只开向导 + 有限本机浏览（方案 3.3：可看本机环境，不能派单）。
 const SETUP_PAGES = [['wizard', '连接向导'], ['overview', '本机环境']];
 function route() {
@@ -2604,7 +2604,7 @@ function overviewPage() {
   if (!S.agents.length) {
     return head + `<section class="card"><h2>三步让本机加入协作网</h2>
       <p class="muted">本机还没有任何 agent。推荐网页登记（也可手编 node.yaml）：</p>
-      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「服务 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
+      <div class="step"><span>1</span><div><b>登记能力</b><div class="muted">去「资源 → 能力配置」点「＋ 新增 agent」（command / workdir 绝对路径）；习惯手编的编辑 <code>node.yaml</code> 的 <code>agents:</code> 段，完整字段见 <code>configs/node.example.yaml</code>。</div></div></div>
       <div class="step"><span>2</span><div><b>应用并重启</b><div class="muted">网页保存结构性变更（新增 agent）后点「应用并重启」；手编的重启 node。重启不丢已确认的任务结果。</div></div></div>
       <div class="step"><span>3</span><div><b>钦定管家并派单</b><div class="muted">在「本机管家」区钦定一个 agent 担任智行管家，随后即可在本机派单；需要开放给其他机器调用时再打开开关。</div></div></div></section>`
       + (st?.mode === 'setup' ? primeCard() : '') + mcpAccessCard();
@@ -2729,7 +2729,7 @@ function primePickView(pa) {
   return `<small class="muted">${pa ? '当前管家将被替换：钦定/换管家不再换发共享编排凭据（prime_token），现有 MCP 连接与授权状态持续有效；如需作废旧凭据请用「轮换管家凭证」' : `钦定一个本机 agent 担任智行管家：它经 MCP（prime_token）获得本机编排权（本机管家权限）——且须主人在${linkTo('mcp-access', '「MCP 授权」区')}显式启用编排授权（新实例默认禁用，禁用期间该派单被 403 mcp_disabled 拒绝）；本机主人网页派单不依赖管家凭证。`}</small>
   ${S.agents.length ? `<label>本机 agent<select id="prime-select">${opts}</select></label>
   <div class="row spaced">${button(S.primeDecl.busy ? '钦定中…' : '钦定为智行管家', 'prime-declare', 'primary', S.primeDecl.busy ? 'disabled' : '')}${pa ? button('取消', 'prime-pick-cancel', 'link') : ''}</div>`
-    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「服务 → 能力配置」登记并重启 node。</p>${button('去看服务', 'go-services', '')}</div>`}`;
+    : `<div class="empty"><p class="muted">本机还没有可钦定的 agent：先在「资源 → 能力配置」登记并重启 node。</p>${button('去看资源', 'go-services', '')}</div>`}`;
 }
 /* 钦定完成视图：成功提示 + 凭据事实块 + MCP 配置片段。wired=true（t20261023-62a2
    自动接线）：明示已写入的影子 home 配置路径，零手贴；降级：保留手动粘贴指引。 */
@@ -3558,7 +3558,7 @@ function servicesPage() {
   const wsNote = (S.workspaceConflicts || []).length
     ? `<div class="notice spaced"><b>同工作区多声明</b>：${S.workspaceConflicts.map(c => `<code>${esc(c.workdir)}</code> ← ${c.agents.map(n => `<code>${esc(n)}</code>`).join('、')}`).join('；')}。多个声明共用同一工作区时，并发任务会在同一目录内执行、可能互相覆盖文件与产物——如需隔离请为各能力分开 workdir。（同区判定按路径规范形比较：尾分隔符与「.」段折算、区分大小写，符号链接不解析）</div>`
     : '';
-  const head = `<div class="page-head"><div><h1>服务</h1>
+  const head = `<div class="page-head"><div><h1>资源</h1>
     <p class="muted">本机 agent 即服务：是否开放给其他机器调用，由本机决定；关闭后其他机器的<b>新任务</b>不再接收，本机派单不受影响，已在执行/排队的任务照常跑到终态。</p>
     <p class="muted small">本机独立使用为完全正常的形态（发现 / 登记 / 派单 / 通知离线照常）；需要跨机协作时，${button('走「连接」页的接入向导', 'go:wizard', 'link')}，凭据人工核对。</p></div></div>` + orchBanner + wsNote;
   // 功能性修复 2（2026-10-22）：空态不再提前 return——能力配置区（新增按钮）
@@ -3566,8 +3566,9 @@ function servicesPage() {
   const empty = S.agents.length ? '' : `<section class="card"><div class="empty"><h2>还没有 agent</h2>
     <p class="muted">在下方「能力配置」点「＋ 新增 agent」或「发现本机 agent」登记本机服务（名称 / command / workdir 均填绝对路径），保存后按提示应用并重启生效；习惯手编的也可编辑 node.yaml 后点「从文件重载」。</p>
     <p class="muted small">本机独立使用为正常态；连接中心走「连接」页接入向导。</p></div></section>`;
-  /* 通知卡上移至页头后第一位（2026-10-26 notify-polish 改动四：渠道配置是服务页
-   * 高频入口，不再沉底；空态/agent 服务卡居中，能力配置编辑区沉底）。 */
+  /* 通知卡上移至页头后第一位（2026-10-26 notify-polish 改动四：渠道配置是资源页
+   *（原「服务」页，W08-03 导航词迁移）高频入口，不再沉底；空态/agent 服务卡居中，
+   * 能力配置编辑区沉底）。 */
   return head + notifyCard() + empty + S.agents.map(a => svcCard(a)).join('') +
     (S.agents.length ? `<p class="footer-note">开关变更即时持久化到 <code>data/agents-state.json</code>，重启保持（变更时刻见各能力「配置详情」的开关记录行）。完整能力编辑（含新增/删除/参数）见下方「能力配置」。</p>` : '') +
     cfgSection() + backupNoteCard();
@@ -3622,7 +3623,7 @@ function cfgSection() {
     <details><summary>兼容与历史说明（W06-04）</summary><p class="muted small">
     配置历史：本机<b>不留存</b>逐次保存的前值——「保存全部」即以当前表覆盖 node.yaml（round-trip 保留注释与未知字段），无历史文件，本页不编造历史；保存前的逐字段差异对比走「发现本机 agent → 登记预览」（实时算 old→new，零写盘）。有数据面支撑的变更记录只有开关覆盖：开放/管家声明经网页改动时记录来源与时刻（agents-state.json，重启保持），见各能力「配置详情」的开关记录行。
     </p><p class="muted small">
-    旧声明兼容：智行管家以能力卡<b>声明位</b>（orchestrator）为准；能力名含 <code>zcode-dev</code> 的旧名字约定只是零声明时的兼容回退识别——本机派单在存在声明位时声明优先、回退不生效；hub 汇聚全网声明，全网冲突态由 hub 侧回退名字识别并告警（恰一以 hub 目录为准）。页面在能力卡与派单下拉明确标注「旧名约定识别（非声明）」，不冒认「唯一管家已生效」——本机多声明并存时服务页横幅与能力卡均呈现冲突警示。配置漂移：状态文件中已删能力的旧开关记录在启动加载时自动忽略（日志留痕），不阻塞 node。
+    旧声明兼容：智行管家以能力卡<b>声明位</b>（orchestrator）为准；能力名含 <code>zcode-dev</code> 的旧名字约定只是零声明时的兼容回退识别——本机派单在存在声明位时声明优先、回退不生效；hub 汇聚全网声明，全网冲突态由 hub 侧回退名字识别并告警（恰一以 hub 目录为准）。页面在能力卡与派单下拉明确标注「旧名约定识别（非声明）」，不冒认「唯一管家已生效」——本机多声明并存时资源页横幅与能力卡均呈现冲突警示。配置漂移：状态文件中已删能力的旧开关记录在启动加载时自动忽略（日志留痕），不阻塞 node。
     </p></details>
     <details ${c.agents.length ? '' : 'open'}><summary>编辑字段说明</summary><p class="muted small">
     command / workdir / config_home 必须绝对路径；timeout_sec 正数（秒）；allow_env 仅环境变量键名或 <code>*</code> 全开；
@@ -4422,7 +4423,7 @@ function tasksPage() {
     <div class="row"><small class="muted">恢复密钥 <code>${esc(c.idem)}</code> · 结果未知时可同键重试，不会重复执行</small>
     ${c.stage === 'acked' ? button('再派一单', 'form-retry', 'primary') : button(c.stage === 'submitting' ? '提交中…' : '确认并提交', 'form-submit', 'primary', c.stage === 'submitting' ? 'disabled' : '')}</div>
     <div class="statusline">${stageView}</div>`
-      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「服务」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看服务', 'go-services', 'primary')}</div>`}
+      : `<div class="empty"><h2>本机还没有可派发的服务</h2><p class="muted">先在「资源」登记本机能力（standalone 下未开放也能本机派单）；跨机派单请经 hub 管理面/MCP 发起。</p>${button('去看资源', 'go-services', 'primary')}</div>`}
   </section>
   ${myTasksCard()}${sessMigrateCard()}`;
 }

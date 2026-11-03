@@ -1309,7 +1309,7 @@ function updateSessionLeft() {
   }
 }
 function shell(inner) {
-  const menus = [['overview', '总览'], ['nodes', '机器'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];   // W04-03：协作空间独立入口（W07-03 起对接中心空间 REST 真实数据面；未装配 503 专态如实降级）
+  const menus = [['overview', '总览'], ['nodes', '资源'], ['tasks', '任务'], ['sessions', '会话'], ['spaces', '协作空间'], ['control', '派发'], ['works', '工作单'], ['groups', '群聊'], ['policy', '策略容量'], ['tokens', '设置']];   // W04-03：协作空间独立入口（W07-03 起对接中心空间 REST 真实数据面；未装配 503 专态如实降级）；W08-03 导航词迁移：「机器」→「资源」（资源只读投影域命名归位，集成者裁决最小改名口径——路由 id nodes/#/nodes 与页内子结构零变化，旧书签/外链不破坏）
   const nr = pendingReviewCount();   // 待办口径：未核对集合（P0-1，见 pendingReviewCount 注）
   const navBump = bumpCls('navNr', nr);   // P2-01：每轮无条件求值记录（0 也记录），渲染才按 nr 条件挂 small——记录与条件渲染分离
   return `<div class="shell"><aside>
@@ -1425,7 +1425,7 @@ function stateCounts() { const c = {}; for (const t of S.tasks) c[t.status] = (c
  * ok=false=最近一轮失败（失败可重试；有旧数据则旧快照保留+顶部陈旧提示，无旧数据
  * 则失败空态+重试钮）；ok=true 且空=真空态（给下一步指引）。「无权限/未开放」为
  * 业务专态（hub 群聊 503 groupsOff 已有专态；hub 管理面登录制无权限降级面），
- * 「目标离线」在派单页禁选与机器页徽标承担——五态各自落到语义成立的页面上，
+ * 「目标离线」在派单页禁选与资源页（原「机器」页，W08-03 导航词迁移）徽标承担——五态各自落到语义成立的页面上，
  * 不造假对称。 */
 function listState(name) {
   const f = S.fresh[name];
@@ -1447,7 +1447,7 @@ function listErrorBox(res, label, polled = true) {
  * freshSig/paintListFreshness：新鲜度转移（loading→error、error→ok、陈旧条出现/
  * 消失）独立于数据指纹触发列表槽位局部更新——commit 指纹相同时整页不 render，
  * 但失败态出现/同数据恢复撤陈旧条必须落 DOM。槽位只重写列表区域本身（任务页筛选
- * 输入/高级筛选开合、总览关注区、机器页头部不受触碰，守住局部刷新契约）；内容与
+ * 输入/高级筛选开合、总览关注区、资源页头部不受触碰，守住局部刷新契约）；内容与
  * 上次写入一致不碰 DOM（稳定轮询零重绘）。豁免页（派单表单视图/群详情/设置）无
  * 这些槽位，自然跳过，切页时 render 呈现。
  * P1-03 残余 A（r2 复审）：缓存以 WeakMap 绑槽位元素实例而非按 id 记字符串——
@@ -1650,7 +1650,7 @@ async function doLogin(form) {
  * chips 在任务页已有，总览重复呈现被裁决删除）。「需要你关注」区整合 P0-4 通知
  * 明示与 H03 失败/离线逻辑：只前置仍有工作受影响的失败/离线——失败且无核对记录=
  * 「失败待查看」（不声称已处置）；离线机器有未终态任务受影响才上总览（纯离线
- * 无受影响工作的去机器页看，不在总览抢注意力）。主入口 H04：有可用执行者给
+ * 无受影响工作的去资源页看，不在总览抢注意力）。主入口 H04：有可用执行者给
  * 「派任务」，否则引导添加机器。中心端状态卡与登录剩余行维持现状（轮 1 不擅动
  * 口径）；在线机器/能力数保留一行摘要（页头副题）。 */
 function overviewPage() {
@@ -1711,7 +1711,7 @@ function recentTasksZone() {
     + (S.tasks.length ? taskTable(S.tasks.slice(0, 5)) : `<div class="empty"><h2>还没有任务记录</h2><p class="muted">任务经 hub 管理面 API 或 node 本地 API 提交后出现在这里。</p></div>`);
 }
 
-/* ---------- 机器（添加机器 / 已登记机器列表） ---------- */
+/* ---------- 资源（原「机器」：添加机器 / 已登记机器列表；W08-03 导航词迁移，路由 #/nodes 不变） ---------- */
 /* nodesListZone 机器列表五态区域（P1-03 槽位局部更新单元，与 tasksListZone 同机
  * 制）；P2-05：每机能力条目旁弱摘要计数「开放能力 ×N」——既有目录数据计算（纯
  * 前端，零 REST 变更），总数摘要仍在总览页头与中心端状态卡（不删不迁）。 */
@@ -1764,10 +1764,10 @@ function detectCardDetail(d) {
   return `<details class="spaced"><summary>检测摘要（该机上报快照${d.checked_at ? ' · ' + esc(fmtUTC(d.checked_at) || '') : ''}）</summary>
   ${drift}${d.not_checked_reason ? `<p class="muted small">${esc(d.not_checked_reason)}</p>` : ''}
   ${lay('安装', d.layers?.installed)}${lay('配置识别', d.layers?.config_recognized)}${lay('执行就绪', d.layers?.execution_ready)}${lay('本机调用', d.layers?.call_allowed)}
-  <p class="footer-note">本页为中心只读汇聚投影：发现/登记/重新检测/修复在各机器 node 控制台「服务 → 能力配置」（各机器主人本机动作，中心不远程扫描、不代写）。</p></details>`;
+  <p class="footer-note">本页为中心只读汇聚投影：发现/登记/重新检测/修复在各机器 node 控制台「资源 → 能力配置」（原「服务」，W08-03 导航词迁移；各机器主人本机动作，中心不远程扫描、不代写）。</p></details>`;
 }
 function nodesPage() {
-  return head('机器', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
+  return head('资源', '每台机器独立身份与令牌；执行权始终在本机主人手里。', button('添加机器', 'enroll', 'primary'))
     + `<section class="card"><div class="row"><h2>已登记机器</h2><small>${S.nodes.length} 台</small></div>
     <div id="nodes-list-zone">${nodesListZone()}</div>
     <p class="footer-note">智能体由各机器本地定义（node.yaml），在机器侧手动添加后自动注册到这里，中心端不集中定义能力；是否开放给其他机器调用，由各机器自己的开关决定；离线不会终止已在执行的任务。能力旁「安装/配置/就绪/调用」为该机器主人本机检测的只读上报投影（快照时刻见明细）：未发现过或未上报的能力如实不显示，检测与修复动作在各机器控制台完成——中心只汇聚展示，不发明远程扫描，也没有远程写操作。</p></section>`;

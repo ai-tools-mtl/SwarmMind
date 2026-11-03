@@ -184,7 +184,7 @@ async function nodeFlow(browser) {
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 }); // 登录终态信号（避开启动轮询重绘）
 
   // node 导航词表（TASK-nav-filter B；W01-05 起含独立「会话」入口；W04-03 起含「协作空间」：总览/服务/任务/会话/协作空间/连接）
-  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
+  const NODE_NAV = ['总览', '资源', '任务', '会话', '协作空间', '连接'];   // W08-03 导航词迁移：「服务」→「资源」（路由 #/services 不变）
   const nodeNav = (await page.locator('aside nav button').allTextContents())
     .map(s => s.replace(/^0\d/, '').trim());
   record('E-NAV3', 'node 导航词表：4 项名称与顺序', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
@@ -759,7 +759,7 @@ async function nodeSessFlow(browser) {
 
   // SN08 独立入口迁移（W01-05 P01）：导航词表 6 项含「会话」「协作空间」（W04-03）→
   // 任务页迁移卡（旧区块位置留链接）→ 前往会话页 → 七列同构列序。
-  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
+  const NODE_NAV = ['总览', '资源', '任务', '会话', '协作空间', '连接'];   // W08-03 导航词迁移：「服务」→「资源」（路由 #/services 不变）
   const nodeNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').trim());
   record('SN08a', 'node 导航词表：6 项名称与顺序（含独立「会话」「协作空间」入口）', JSON.stringify(nodeNav) === JSON.stringify(NODE_NAV), nodeNav.join('/'));
   await page.click('aside nav button[data-go="tasks"]');
@@ -1316,7 +1316,7 @@ async function nodeSpaceFlow(browser) {
   await page.waitForSelector('#logout:not([hidden])', { timeout: 15000 });
 
   // SP01 导航与列表主入口：导航词表 6 项含协作空间；列表页五态槽位在位。
-  const NODE_NAV = ['总览', '服务', '任务', '会话', '协作空间', '连接'];
+  const NODE_NAV = ['总览', '资源', '任务', '会话', '协作空间', '连接'];   // W08-03 导航词迁移：「服务」→「资源」（路由 #/services 不变）
   const nodeNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').trim());
   await page.click('aside nav button[data-go="spaces"]');
   await page.waitForSelector('#space-list-zone', { timeout: 15000 });
@@ -1513,7 +1513,7 @@ async function hubSpaceShellFlow(browser) {
   await page.waitForSelector('aside nav', { timeout: 15000 });
 
   // SPH01 导航词表 10 项（协作空间第 5 位）。
-  const HUB_NAV = ['总览', '机器', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];
+  const HUB_NAV = ['总览', '资源', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];   // W08-03 导航词迁移：「机器」→「资源」（路由 #/nodes 不变）
   const hubNav = (await page.locator('aside nav button').allTextContents()).map(s => s.replace(/^0\d/, '').replace(/\s*\(\d+\)$/, '').trim());
   record('SPH01', 'hub 导航词表：10 项含协作空间（第 5 位，与 node 同概念同词）', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));
 
@@ -1596,7 +1596,7 @@ async function main() {
   // TC-E-NAV 导航统一（TASK-nav-filter B）：aside 内定位一律用结构化选择器
   //（aside nav button[data-page=…]），词表逐项断言（:has-text("任务") 会宽泛命中，
   // codex 必须修项）；aria-current 指向当前页。
-  const HUB_NAV = ['总览', '机器', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];
+  const HUB_NAV = ['总览', '资源', '任务', '会话', '协作空间', '派发', '工作单', '群聊', '策略容量', '设置'];   // W08-03 导航词迁移：「机器」→「资源」（路由 #/nodes 不变）
   const hubNav = (await page.locator('aside nav button').allTextContents())
     .map(s => s.replace(/^0\d/, '').replace(/\s*\(\d+\)$/, '').trim());
   record('E-NAV', 'hub 导航词表：10 项名称与顺序（T3 起「会话」顺延第 4 位；W04-03 起「协作空间」第 5 位）', JSON.stringify(hubNav) === JSON.stringify(HUB_NAV), hubNav.join('/'));

@@ -189,7 +189,7 @@ func (s *Server) declareHint(reason string) string {
 		names = append(names, p.Name)
 	}
 	if len(names) == 0 {
-		return reason + "；本机尚未配置任何 agent，请先在「服务 → 能力配置」登记并重启"
+		return reason + "；本机尚未配置任何 agent，请先在「资源 → 能力配置」登记并重启" // W08-03 导航词迁移：「服务」→「资源」（路由不变）
 	}
 	return fmt.Sprintf("%s；可选 agent：%s", reason, strings.Join(names, "、"))
 }
