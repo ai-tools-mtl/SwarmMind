@@ -83,6 +83,17 @@ func main() {
 	}
 }
 
+// newStrategyEngine 策略引擎装配（W05-02/03 判定器 + W09-A 持久化接线；装配逻辑
+// 单源 strategy.NewPersistedEngine，node 侧同态同形）：循环事实（候选/版本/问题/
+// 证据/trail）变更即同步写 data_dir/strategy_loops.json（原子 0600，temp+rename+
+// fsync），启动读回逐空间 RestoreLoop——文件缺失 = 零操作（老部署/首次启动，如
+// 实空态）；损坏 / version 缺失或未知 / 任一条目校验失败 = 错误返回（run 侧拒绝
+// 启动，同 spaces.json 宁拒启口径——部分恢复会让完成判据半真半假，不带病）。
+func newStrategyEngine(dataDir string) (*strategy.Engine, error) {
+	return strategy.NewPersistedEngine(dataDir, strategy.DefaultConfig(),
+		func(format string, args ...any) { log.Printf("[hub] "+format, args...) })
+}
+
 func run(cfgPath, dataDirOverride, listenOverride string) error {
 	log.Printf("[hub] 版本 %s", version)
 	cfg, err := loadConfig(cfgPath)
@@ -225,8 +236,10 @@ func run(cfgPath, dataDirOverride, listenOverride string) error {
 	// session Task 通道 + RequireSpacesCapable 版本门 + space_bind 绑定登记）。
 	// 快照损坏/版本未知拒绝启动（空间状态是协作事实唯一真相，宁拒启不瞎门——
 	// 对齐 node spaces.json 先例）。策略引擎为纯进程内判定器（中心无 agent/管家
-	// 也可运行）；快照持久化与启动恢复接线归后续批次（node 侧同态，已登记缺口）。
-	stratEngine, err := strategy.NewEngine(strategy.DefaultConfig())
+	// 也可运行）；W09-A 起循环事实经 newStrategyEngine 同态落盘
+	// data_dir/strategy_loops.json 并启动恢复（与 node 同态同形，恢复序在本点、
+	// 任何空间操作发生前——spaces.Open 在其后）。
+	stratEngine, err := newStrategyEngine(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("初始化空间策略引擎失败: %w", err)
 	}

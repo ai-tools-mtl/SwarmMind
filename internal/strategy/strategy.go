@@ -16,8 +16,10 @@
 // 副作用纪律：StrategyHooks 三方法（EvaluateCompletion/ValidateCandidate/
 // DecidePhaseAdvance）只读 collab SpaceView + 本包循环事实做纯判定（只取读锁，
 // 不产生时间戳、不改任何状态）；循环事实写入面（Register*/Record*/Set*）是独立
-// 方法族，由 W05-02/03 装配层在消息落账/审查回执到达时调用并自行持久化。判定
-// 面绝不猜测：任何证据缺失 → 拒绝并给精确缺口清单。
+// 方法族，由 W05-02/03 装配层在消息落账/审查回执到达时调用，成功变更后经
+// Config.OnPersist 通知装配层落盘（W09-A 接线：persist.go 的 SaveLoops/
+// LoadLoops/NewPersistedEngine，node/hub 两端同态同形）。判定面绝不猜测：任何
+// 证据缺失 → 拒绝并给精确缺口清单。
 package strategy
 
 import (
@@ -45,6 +47,14 @@ type Config struct {
 	MaxUnresolvedFixRounds int
 	// Now 记录时钟（写入面时间戳；nil = time.Now().UTC——时间一律 UTC）。
 	Now func() time.Time
+	// OnPersist 循环事实变更通知（W09 收尾加固 A 持久化接线；nil = 零操作，
+	// 既有行为逐字节不变）。语义：全部会改写 loops 的公开写入方法在实际变更后
+	// 触发（单一汇聚点 notifyPersist；幂等命中零变更与读方法不触发；RestoreLoop
+	// 例外——恢复导入的输入即持久化文件本身，见其注记）。触发点恒在 e.mu 写锁
+	// 释放之后（写入方法均为「公开壳 + 锁内实现」双层，壳在实现完整返回后通知
+	// ——回调组包经 Snapshot/LoopIDs 取读锁，写锁内同步回调 = 死锁面）；回调内
+	// 不得再调用写入方法（会级联再触发）。
+	OnPersist func()
 }
 
 // DefaultConfig SwarmMind 自身规则默认配置（修复两次未解即暂停上报）。
@@ -173,6 +183,17 @@ func NewEngine(cfg Config) (*Engine, error) {
 // fixLimit 生效阈值（调用方持锁或构造后不变——cfg 只读，直接读安全）。
 func (e *Engine) fixLimit() int { return e.cfg.MaxUnresolvedFixRounds }
 
+// notifyPersist 持久化通知单一汇聚点（W09-A）：全部会改写 loops 的公开写入方法
+// 在实际变更后统一经此触发，禁止散点手滑漏接。调用方必须在 e.mu 写锁释放之后
+// 调用——回调组包经 Snapshot/LoopIDs 取读锁，写锁内同步回调 = 死锁面（写入方法
+// 均为「公开壳 + 锁内实现」双层，壳在实现完整返回后通知，结构性保证不持锁回调）。
+// nil 回调零操作。
+func (e *Engine) notifyPersist() {
+	if e.cfg.OnPersist != nil {
+		e.cfg.OnPersist()
+	}
+}
+
 // loop 取（或建）空间循环事实（调用方持写锁）。
 func (e *Engine) loop(spaceID string, create bool) *SpaceLoop {
 	if lp, ok := e.loops[spaceID]; ok {
@@ -228,10 +249,28 @@ func (e *Engine) Snapshot(spaceID string) (SpaceLoop, bool) {
 	return out, true
 }
 
+// LoopIDs 全部已载入循环的空间 ID 枚举（读锁下拷贝并排序；排序保证装配层持久化
+// 组包 SaveLoops 的文件内容确定性）。W09-A：装配层逐空间取 Snapshot 的枚举面。
+func (e *Engine) LoopIDs() []string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	ids := make([]string, 0, len(e.loops))
+	for id := range e.loops {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 // RestoreLoop 恢复单空间循环事实（终审建议4：进程重启恢复入口；Snapshot 深拷贝
 // 可逆导入）。完整性校验（损坏拒绝，宁拒恢复不带病）：空间 ID 匹配、ID 唯一且
 // 前缀合法、枚举取值合法、hash 格式合法、事件序号单调不倒挂；恢复目标空间不得
 // 已有循环事实（恢复只在空引擎/未加载空间上进行）。事实原样导入，不重盖时间戳。
+//
+// 本方法不触发 Config.OnPersist（W09-A 有意例外，非漏接）：恢复导入的输入即持
+// 久化文件本身（persist.go LoadLoops），回写一是冗余、二在启动「逐条目恢复、任
+// 一条目校验失败 → 拒绝启动」路径上会把尚未恢复的空间事实从文件截掉——宁拒启
+// 口径要求拒绝时保留原文件证据。运行期循环事实变更经写入方法族通知落盘。
 func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 	if strings.TrimSpace(spaceID) == "" {
 		return errf(ErrInvalid, "恢复目标空间 ID 必填")
@@ -389,20 +428,32 @@ func (e *Engine) RestoreLoop(spaceID string, snap SpaceLoop) error {
 	return nil
 }
 
-// SetAcceptanceDispute 验收争议登记/解除（停止条件之一；留痕）。
+// SetAcceptanceDispute 验收争议登记/解除（停止条件之一；留痕）。公开壳：锁内实
+// 现完整返回（写锁已释放）后按实际变更触发持久化通知——争议登记或既有争议解除
+// = 变更；解除时本无争议 = 零变更不通知（幂等）。
 func (e *Engine) SetAcceptanceDispute(spaceID string, disputed bool, note string) {
+	if e.setAcceptanceDispute(spaceID, disputed, note) {
+		e.notifyPersist()
+	}
+}
+
+// setAcceptanceDispute SetAcceptanceDispute 的锁内实现（返回是否实际变更 loops）。
+func (e *Engine) setAcceptanceDispute(spaceID string, disputed bool, note string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	lp := e.loop(spaceID, true)
 	if disputed {
 		lp.Dispute = &DisputeRecord{Disputed: true, Note: note, At: e.now()}
 		e.appendTrail(lp, TrailDisputeSet, note)
-	} else {
-		if lp.Dispute != nil && lp.Dispute.Disputed {
-			e.appendTrail(lp, TrailDisputeCleared, note)
-		}
-		lp.Dispute = nil
+		return true
 	}
+	if lp.Dispute != nil && lp.Dispute.Disputed {
+		e.appendTrail(lp, TrailDisputeCleared, note)
+		lp.Dispute = nil
+		return true
+	}
+	lp.Dispute = nil
+	return false
 }
 
 // ---------- 缺口清单与完成判据 ----------

@@ -12,8 +12,10 @@
 //   - 代码改变使旧 review 失效 → RegisterRevision 新版本触发失效投影 + 失效
 //     留痕（TrailReviewInvalidated；原复审记录按序保留不抹改）。
 //
-// 记录方法（Register*/Record*）是循环事实写入面，供 W05-02/03 装配层调用并自
-// 行持久化快照；StrategyHooks 三方法（strategy.go）只读这些事实做纯判定，绝无
+// 记录方法（Register*/Record*）是循环事实写入面，供 W05-02/03 装配层调用，成功
+// 变更后经 Config.OnPersist 通知装配层落盘（W09-A 接线，persist.go 单源）；写入
+// 方法均为「公开壳 + 锁内实现」双层——通知在写锁释放后由壳统一触发（写锁内同步
+// 回调 = 死锁面）。StrategyHooks 三方法（strategy.go）只读这些事实做纯判定，绝无
 // 副作用——写入面与判定面严格分离。
 //
 // 【问题重开语义定案（W05-01 终审必修1，供 RFC 引用）】审查问题以稳定 ID 归档
@@ -333,7 +335,18 @@ func revisionID(contentHash, patchHash string) string {
 // 命中既有记录原样返回（created=false，不触发失效）。新版本（hash ≠ 当前版本）
 // 登记 → 「代码改变使旧 review 失效」：对旧版本做出的复审确认自动进入失效投影
 // （IssueEffectiveState → stale），并落失效留痕事件（原复审记录保留不抹改）。
+// 公开壳：锁内实现完整返回（写锁已释放）后按实际登记（created）触发持久化通知
+// ——幂等命中零变更不通知。
 func (e *Engine) RegisterRevision(spaceID string, in RevisionInput) (Revision, bool, error) {
+	rev, created, err := e.registerRevision(spaceID, in)
+	if err == nil && created {
+		e.notifyPersist()
+	}
+	return rev, created, err
+}
+
+// registerRevision RegisterRevision 的锁内实现。
+func (e *Engine) registerRevision(spaceID string, in RevisionInput) (Revision, bool, error) {
 	if strings.TrimSpace(in.Baseline) == "" {
 		return Revision{}, false, revErrf(ErrRevisionInvalid, "基线必填")
 	}
@@ -407,8 +420,18 @@ func (e *Engine) invalidateReviews(lp *SpaceLoop, oldHash, newHash string) {
 
 // RecordEvidence 登记测试执行证据（绑定到指定版本 hash——证据绑定真实执行回执/
 // hash）。自报来源标记 Verified=true 拒绝（记录面第一道把守；判定面
-// EvidenceVerified 第二道）。
+// EvidenceVerified 第二道）。公开壳：锁内实现完整返回（写锁已释放）后按实际变更
+// 触发持久化通知——校验/锚定拒绝不通知。
 func (e *Engine) RecordEvidence(spaceID, versionHash string, layer EvidenceLayer, ev Evidence) error {
+	if err := e.recordEvidence(spaceID, versionHash, layer, ev); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// recordEvidence RecordEvidence 的锁内实现。
+func (e *Engine) recordEvidence(spaceID, versionHash string, layer EvidenceLayer, ev Evidence) error {
 	if !layer.Valid() {
 		return revErrf(ErrEvidenceInvalid, "未知证据层 %q", string(layer))
 	}
@@ -470,8 +493,18 @@ func (e *Engine) revisionByHashLocked(lp *SpaceLoop, hash string) *Revision {
 
 // RecordIssue 登记审查问题（针对指定版本）。稳定 ID：同（提出者,文件:行,标题）
 // 重报命中既有问题——未解：Occurrences/Replies 计数推进；已修（对当前版本）：
-// 重开（回归），均不改 ID。
+// 重开（回归），均不改 ID。公开壳：锁内实现完整返回（写锁已释放）后按实际变更
+// 触发持久化通知——校验/锚定拒绝不通知。
 func (e *Engine) RecordIssue(spaceID string, in IssueInput) (Issue, error) {
+	is, err := e.recordIssue(spaceID, in)
+	if err == nil {
+		e.notifyPersist()
+	}
+	return is, err
+}
+
+// recordIssue RecordIssue 的锁内实现。
+func (e *Engine) recordIssue(spaceID string, in IssueInput) (Issue, error) {
 	if strings.TrimSpace(in.Reviewer) == "" {
 		return Issue{}, revErrf(ErrIssueInvalid, "审查者必填")
 	}
@@ -545,8 +578,18 @@ func (e *Engine) RecordIssue(spaceID string, in IssueInput) (Issue, error) {
 	return cloneIssue(&issue), nil
 }
 
-// ReplyIssue 编写人回应问题（回复次数推进）。
+// ReplyIssue 编写人回应问题（回复次数推进）。公开壳：锁内实现完整返回（写锁已
+// 释放）后按实际变更触发持久化通知——问题不存在拒绝不通知。
 func (e *Engine) ReplyIssue(spaceID, issueID, note string) error {
+	if err := e.replyIssue(spaceID, issueID, note); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// replyIssue ReplyIssue 的锁内实现。
+func (e *Engine) replyIssue(spaceID, issueID, note string) error {
 	if strings.TrimSpace(note) == "" {
 		return revErrf(ErrIssueInvalid, "回应内容必填")
 	}
@@ -563,8 +606,19 @@ func (e *Engine) ReplyIssue(spaceID, issueID, note string) error {
 	return nil
 }
 
-// ClaimFix 修复声明（返工：编写线程宣告已修，挂新版本 hash；等待复审）。
+// ClaimFix 修复声明（返工：编写线程宣告已修，挂新版本 hash；等待复审）。公开壳：
+// 锁内实现完整返回（写锁已释放）后按实际变更触发持久化通知——校验/问题不存在
+// 拒绝不通知。
 func (e *Engine) ClaimFix(spaceID, issueID, versionHash string, round int64, note string) error {
+	if err := e.claimFix(spaceID, issueID, versionHash, round, note); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// claimFix ClaimFix 的锁内实现。
+func (e *Engine) claimFix(spaceID, issueID, versionHash string, round int64, note string) error {
 	if !validHash(versionHash) {
 		return revErrf(ErrFixInvalid, "修复版本须为 SHA-256 hex64")
 	}
@@ -586,7 +640,18 @@ func (e *Engine) ClaimFix(spaceID, issueID, versionHash string, round int64, not
 
 // RecordReReview 登记复审结论（针对指定版本 hash）。同时回填最近一次待复核修复
 // 声明的结论（修复次数推进的判定锚）；更新最近复审版本锚（版本匹配判定依据）。
+// 公开壳：锁内实现完整返回（写锁已释放）后按实际变更触发持久化通知——校验/锚
+// 定/问题不存在拒绝不通知。
 func (e *Engine) RecordReReview(spaceID, issueID string, in ReReviewInput) error {
+	if err := e.recordReReview(spaceID, issueID, in); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// recordReReview RecordReReview 的锁内实现。
+func (e *Engine) recordReReview(spaceID, issueID string, in ReReviewInput) error {
 	if strings.TrimSpace(in.Reviewer) == "" {
 		return revErrf(ErrReReviewInvalid, "复审者必填")
 	}
@@ -639,8 +704,19 @@ type CleanReviewRecord struct {
 
 // RecordCleanReview 登记空间级复审（空 issueID 语义的显式形态：本轮复审零发现）。
 // 最近复审锚（LastReviewedHash/At）随之推进——完成判定的版本匹配由本锚承担，
-// 与逐问题复审锚同通道。零发现不豁免其余完成输入（候选/证据/在途照查）。
+// 与逐问题复审锚同通道。零发现不豁免其余完成输入（候选/证据/在途照查）。公开壳：
+// 锁内实现完整返回（写锁已释放）后按实际变更触发持久化通知——校验/锚定拒绝不
+// 通知。
 func (e *Engine) RecordCleanReview(spaceID, reviewer, againstHash, note string) error {
+	if err := e.recordCleanReview(spaceID, reviewer, againstHash, note); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// recordCleanReview RecordCleanReview 的锁内实现。
+func (e *Engine) recordCleanReview(spaceID, reviewer, againstHash, note string) error {
 	if strings.TrimSpace(reviewer) == "" {
 		return revErrf(ErrReReviewInvalid, "复审者必填")
 	}

@@ -176,25 +176,45 @@ func (e *Engine) ValidatePhaseTransition(spaceID string, from, to Phase) error {
 // BootstrapCycle 写审循环引导判定（装配层在空间显式启动后调用；幂等）：阶段未
 // 初始化 → 引导至 drafting（留痕）并返回目标；已初始化 → 原样返回当前阶段零
 // 变更。drafting 之后全部转换走 phaseTransitions 表（引导是唯一表外边，显式方法
-// 承担、不进转换表——转换表 18 边冻结由 phase_test 全枚举锁）。
+// 承担、不进转换表——转换表 18 边冻结由 phase_test 全枚举锁）。公开壳：锁内实现
+// 完整返回（写锁已释放）后按实际引导触发持久化通知——已初始化幂等零变更不通知。
 func (e *Engine) BootstrapCycle(space collab.SpaceView) (Phase, error) {
+	phase, changed, err := e.bootstrapCycle(space)
+	if changed {
+		e.notifyPersist()
+	}
+	return phase, err
+}
+
+// bootstrapCycle BootstrapCycle 的锁内实现（返回 changed = 是否实际引导变更）。
+func (e *Engine) bootstrapCycle(space collab.SpaceView) (Phase, bool, error) {
 	if p, ok := ParsePhase(space.Phase); ok {
-		return p, nil // 已初始化：幂等零变更
+		return p, false, nil // 已初始化：幂等零变更
 	}
 	if strings.TrimSpace(space.ID) == "" {
-		return "", errf(ErrInvalid, "空间 ID 必填")
+		return "", false, errf(ErrInvalid, "空间 ID 必填")
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	lp := e.loop(space.ID, true)
 	e.appendTrail(lp, TrailPhaseChanged, "循环初始化 → drafting（引导边）")
-	return PhaseDrafting, nil
+	return PhaseDrafting, true, nil
 }
 
 // SetPhase 循环阶段变更校验与记录——原有语义不变，判定体收敛至
 // ValidatePhaseTransition（单一真相）：非法转换拒绝；暂停恢复恒须回到暂停前记录
-// 的阶段。校验通过后留痕并维护 PausedFrom（paused 记、离开清）。
+// 的阶段。校验通过后留痕并维护 PausedFrom（paused 记、离开清）。公开壳：锁内实
+// 现完整返回（写锁已释放）后按实际变更触发持久化通知——校验拒绝不通知。
 func (e *Engine) SetPhase(spaceID string, from, to Phase) error {
+	if err := e.setPhase(spaceID, from, to); err != nil {
+		return err
+	}
+	e.notifyPersist()
+	return nil
+}
+
+// setPhase SetPhase 的锁内实现。
+func (e *Engine) setPhase(spaceID string, from, to Phase) error {
 	if err := e.ValidatePhaseTransition(spaceID, from, to); err != nil {
 		return err
 	}

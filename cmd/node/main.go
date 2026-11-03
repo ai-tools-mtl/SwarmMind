@@ -136,6 +136,17 @@ func mergeStopChan(parent context.Context, ch <-chan struct{}) context.Context {
 	return ctx
 }
 
+// newStrategyEngine 策略引擎装配（W05-02/03 判定器 + W09-A 持久化接线；装配逻辑
+// 单源 strategy.NewPersistedEngine，hub 侧同态同形）：循环事实（候选/版本/问题/
+// 证据/trail）变更即同步写 data_dir/strategy_loops.json（原子 0600，temp+rename+
+// fsync），启动读回逐空间 RestoreLoop——文件缺失 = 零操作（老部署/首次启动，如
+// 实空态）；损坏 / version 缺失或未知 / 任一条目校验失败 = 错误返回（run 侧拒绝
+// 启动，同 spaces.json 宁拒启口径——部分恢复会让完成判据半真半假，不带病）。
+func newStrategyEngine(dataDir string) (*strategy.Engine, error) {
+	return strategy.NewPersistedEngine(dataDir, strategy.DefaultConfig(),
+		func(format string, args ...any) { log.Printf("[node] "+format, args...) })
+}
+
 func run(cfgPath, dataDirOverride string) error {
 	// 形态三态判定（方案 3.1，返工 #2）：读失败分「不存在」与「损坏」两种——
 	// 只有前者进 setup，损坏（含 yaml 解析失败）一律报错退出。
@@ -303,14 +314,15 @@ func run(cfgPath, dataDirOverride string) error {
 		return fmt.Errorf("装配会话操作服务失败: %w", err)
 	}
 
-	// 策略引擎装配（W05-02/03）：写审循环/有限讨论策略判定器——collab.
-	// StrategyHooks 三方法（完成判据/候选校验/阶段推进判定）自此真实接线（W04-01
-	// 交接面兑现）。spaces 完成/阶段推进走真实判据；W04-01 起 hooks 未装配的拒绝
-	// 路径（finish_policy_unavailable）降为引擎构造失败的备路径（构造只校验配置
-	// 阈值，默认配置恒成功）。循环事实（候选/版本/问题/证据）存引擎内存，进程重
-	// 启经 Engine.RestoreLoop 恢复（快照持久化与启动恢复接线归 W04-03，见 W05 交
-	// 接面）；重启后循环事实缺席时完成判据如实拒绝（缺口清单指路），宁拒不猜。
-	stratEngine, err := strategy.NewEngine(strategy.DefaultConfig())
+	// 策略引擎装配（W05-02/03 判定器 + W09-A 持久化接线，见 newStrategyEngine）：
+	// 写审循环/有限讨论策略判定器——collab.StrategyHooks 三方法（完成判据/候选校
+	// 验/阶段推进判定）真实接线（W04-01 交接面兑现）。循环事实（候选/版本/问题/
+	// 证据/trail）随变更同步落盘 data_dir/strategy_loops.json，重启后经 LoadLoops
+	// 逐空间 RestoreLoop 导入（恢复序在引擎创建后、任何空间操作发生前——collab.
+	// Open 在本点之后）；文件损坏/条目校验失败拒绝启动（宁拒启不瞎门）。未恢复引
+	// 擎（直构实例/恢复缺失）完成判据如实拒绝（缺口清单指路），宁拒不猜——引擎级
+	// 对照锚见 strategy 包 restore/discussion 测试。
+	stratEngine, err := newStrategyEngine(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("初始化空间策略引擎失败: %w", err)
 	}

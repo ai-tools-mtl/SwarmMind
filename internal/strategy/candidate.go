@@ -155,8 +155,19 @@ func candidateID(spaceID, proposer, content string) string {
 // RegisterCandidate 登记候选（FINAL: 前缀发言 → 候选索引；独立存储，消息裁剪
 // 不丢）。同（提出者,原文）重复发言去重：SeenCount 计数、不重复登记（ID 稳定）。
 // created=false 表示命中既有候选（去重）。成员资格由调用方先经 ValidateCandidate
-// 校验（非法候选拒绝，不静默登记）。
+// 校验（非法候选拒绝，不静默登记）。公开壳：锁内实现完整返回（写锁已释放）后
+// 按实际变更触发持久化通知——新建与去重重申（SeenCount++ + 留痕）都是变更，
+// 校验拒绝不通知。
 func (e *Engine) RegisterCandidate(spaceID string, in CandidateInput) (Candidate, bool, error) {
+	cand, created, err := e.registerCandidate(spaceID, in)
+	if err == nil {
+		e.notifyPersist()
+	}
+	return cand, created, err
+}
+
+// registerCandidate RegisterCandidate 的锁内实现。
+func (e *Engine) registerCandidate(spaceID string, in CandidateInput) (Candidate, bool, error) {
 	if strings.TrimSpace(in.Proposer) == "" {
 		return Candidate{}, false, ErrCandidateNoProposer
 	}
@@ -199,19 +210,31 @@ func (e *Engine) RegisterCandidate(spaceID string, in CandidateInput) (Candidate
 }
 
 // FinalizeCandidate 候选定版（主人/finalize 显式动作；定版 ≠ 完成交付）。pending
-// 或 dismissed → finalized；已 finalized 幂等命中原样返回。
+// 或 dismissed → finalized；已 finalized 幂等命中原样返回。公开壳：锁内实现完整
+// 返回（写锁已释放）后按实际状态迁移触发持久化通知——幂等命中零变更不通知。
 func (e *Engine) FinalizeCandidate(spaceID, candidateID, by string) (Candidate, error) {
-	return e.transitionCandidate(spaceID, candidateID, CandidateFinalized, by)
+	cand, changed, err := e.transitionCandidate(spaceID, candidateID, CandidateFinalized, by)
+	if changed {
+		e.notifyPersist()
+	}
+	return cand, err
 }
 
-// DismissCandidate 候选否决（显式淘汰，留痕；不静默删除）。
+// DismissCandidate 候选否决（显式淘汰，留痕；不静默删除）。公开壳通知语义同
+// FinalizeCandidate。
 func (e *Engine) DismissCandidate(spaceID, candidateID, by string) (Candidate, error) {
-	return e.transitionCandidate(spaceID, candidateID, CandidateDismissed, by)
+	cand, changed, err := e.transitionCandidate(spaceID, candidateID, CandidateDismissed, by)
+	if changed {
+		e.notifyPersist()
+	}
+	return cand, err
 }
 
-func (e *Engine) transitionCandidate(spaceID, id string, to CandidateStatus, by string) (Candidate, error) {
+// transitionCandidate 候选状态迁移锁内实现（Finalize/Dismiss 共用；返回 changed
+// = 是否实际发生状态迁移——幂等命中/候选不存在为 false，公开壳据此决定通知）。
+func (e *Engine) transitionCandidate(spaceID, id string, to CandidateStatus, by string) (Candidate, bool, error) {
 	if !to.Valid() || to == CandidatePending {
-		return Candidate{}, fmt.Errorf("%w: 非法候选目标态 %q", ErrInvalid, string(to))
+		return Candidate{}, false, fmt.Errorf("%w: 非法候选目标态 %q", ErrInvalid, string(to))
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -219,7 +242,7 @@ func (e *Engine) transitionCandidate(spaceID, id string, to CandidateStatus, by 
 	for i := range lp.Candidates {
 		if lp.Candidates[i].ID == id {
 			if lp.Candidates[i].Status == to {
-				return cloneCandidate(lp.Candidates[i]), nil // 幂等命中
+				return cloneCandidate(lp.Candidates[i]), false, nil // 幂等命中
 			}
 			now := e.now()
 			lp.Candidates[i].Status = to
@@ -235,10 +258,10 @@ func (e *Engine) transitionCandidate(spaceID, id string, to CandidateStatus, by 
 				kind = TrailCandidateDismissed
 			}
 			e.appendTrail(lp, kind, fmt.Sprintf("%s → %s（by %s）", id, string(to), by))
-			return cloneCandidate(lp.Candidates[i]), nil
+			return cloneCandidate(lp.Candidates[i]), true, nil
 		}
 	}
-	return Candidate{}, ErrCandidateNotFound
+	return Candidate{}, false, ErrCandidateNotFound
 }
 
 // PendingCandidates 待定版候选（定版/否决的不再返回；多条并存按登记序）。
